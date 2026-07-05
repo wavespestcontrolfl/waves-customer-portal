@@ -36,6 +36,15 @@ const ghDefault = require('../content-astro/github-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { callAnthropic } = require('../llm/call');
+// Same deterministic pre-PR content gates the publisher runs (astro-publisher
+// publishAstro) — re-run on a remediated file so an LLM fix can't slip a bad
+// frontmatter / hardcoded price / disallowed claim / competitor issue past the
+// preview build and merge on a Codex-clean review.
+const fm = require('../content-astro/frontmatter');
+const { assertValidBlogFrontmatter } = require('../content-astro/schema-validator');
+const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+const contentGuardrails = require('./content-guardrails');
+const comparisonTableGate = require('./comparison-table-gate');
 
 const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS || '3', 10) || 3);
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -148,10 +157,49 @@ async function generateFix(markdown, findings, deps = {}) {
     system: FIX_SYSTEM,
     text: buildFixUserMessage(markdown, findings),
     jsonMode: false,
-    maxTokens: 8000,
+    maxTokens: 16000,
   });
   if (!res || !res.ok || !res.text) return null;
+  // Fail closed on a truncated completion — committing a cut-off article would
+  // pass the preview build and could merge.
+  if (res.response && res.response.stop_reason === 'max_tokens') return null;
   return stripCodeFence(res.text);
+}
+
+/**
+ * Re-run the publisher's deterministic pre-PR content gates on a remediated
+ * file before committing it. Mirrors astro-publisher.publishAstro's sequence
+ * (frontmatter schema + content guardrails + comparison/named-competitor).
+ * Returns { ok } or { ok:false, reason }. Sync — the gate modules are sync.
+ */
+function validateFixedBlogFile(markdown) {
+  let parsed;
+  try { parsed = fm.parse(markdown); } catch (e) { return { ok: false, reason: `unparseable: ${e.message}` }; }
+  const data = parsed && parsed.data;
+  const body = String((parsed && parsed.content) || '').trim();
+  if (!data || Object.keys(data).length === 0) return { ok: false, reason: 'missing frontmatter' };
+
+  try { assertValidBlogFrontmatter(data); } catch (e) { return { ok: false, reason: `frontmatter: ${e.message}` }; }
+
+  const domains = (Array.isArray(data.domains) && data.domains.length > 0) ? data.domains : SPOKE_SITE_KEYS;
+  const guardrails = contentGuardrails.evaluate(
+    { body, frontmatter: data },
+    { domains, service: [data.category, data.tag], primaryKeyword: data.primary_keyword || null },
+  );
+  if (!guardrails.pass) {
+    const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    if (blocking.length) return { ok: false, reason: `guardrails ${blocking.map((f) => f.code).join(',')}` };
+  }
+
+  let namedCompetitorEnabled = false;
+  try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
+  const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
+  if (!comparison.pass) {
+    const blocking = (comparison.findings || []).filter((f) =>
+      (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'COMPARISON_UNCLASSIFIED_OPTION');
+    if (blocking.length) return { ok: false, reason: `comparison ${blocking.map((f) => f.code).join(',')}` };
+  }
+  return { ok: true };
 }
 
 // ── PR-keyed remediation state ────────────────────────────────────────────
@@ -236,12 +284,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark);
 
   const fixed = await generateFix(file.content, findings, deps);
-  if (!fixed) return { skipped: true, reason: 'no LLM available' };
+  if (!fixed) return { skipped: true, reason: 'no valid LLM fix (empty or truncated)' };
   if (fixed.trim() === String(file.content).trim()) {
     return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark);
   }
 
+  // Re-run the publisher's content-safety gates on the fix before committing —
+  // a fix that fails them is worse than the original finding, so park it.
+  const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
+  const gate = validate(fixed);
+  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark);
+
   const round = (state.rounds || 0) + 1;
+  // Mark 'remediating' BEFORE the push so a later save/comment failure can't
+  // strand the fix — the recovery branch keys off status='remediating'.
+  await saveState(db, prNumber, { branch, status: 'remediating' });
+
   const commit = await gh.putFile({
     path: targetPath,
     content: fixed,
@@ -253,14 +311,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
-  // Persist state BEFORE the comment so a createIssueComment failure can't
-  // strand the PR — the next tick's recovery branch re-requests the review.
-  await saveState(db, prNumber, {
-    branch,
-    rounds: round,
-    status: 'remediating',
-    last_findings: JSON.stringify(findings),
-  });
+  await saveState(db, prNumber, { rounds: round, last_findings: JSON.stringify(findings) });
   await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
 
   logger.info(`[codex-remediation] round ${round} pushed for PR #${prNumber}: ${findings.length} finding(s) → ${shortSha(newHead)}`);
@@ -313,6 +364,7 @@ module.exports = {
   buildReviewRequestBody,
   buildFixUserMessage,
   reviewRequestedForHead,
+  validateFixedBlogFile,
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,

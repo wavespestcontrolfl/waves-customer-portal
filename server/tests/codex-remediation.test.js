@@ -64,6 +64,7 @@ function makeGh(over = {}) {
 }
 
 const makeCall = (text) => async () => ({ ok: true, text });
+const PASS = () => ({ ok: true });
 
 const CTX = { prNumber: 5, branch: 'content/blog-x', slug: 'pest-control/roaches' };
 
@@ -111,7 +112,7 @@ describe('runRemediationForPr', () => {
   test('fresh findings under limit → push fix, persist state, re-request review', async () => {
     const db = makeDb();
     const gh = makeGh();
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED BODY') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED BODY'), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
     expect(r.round).toBe(1);
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.md');
@@ -124,7 +125,7 @@ describe('runRemediationForPr', () => {
   test('.mdx finding path is edited (not the slug .md fallback)', async () => {
     const db = makeDb();
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.mdx');
   });
@@ -132,7 +133,7 @@ describe('runRemediationForPr', () => {
   test('no findings, never remediated → wait', async () => {
     const db = makeDb();
     const gh = makeGh({ reviewComments: [] });
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.skipped).toBe(true);
     expect(gh._calls.putFile).toHaveLength(0);
   });
@@ -140,7 +141,7 @@ describe('runRemediationForPr', () => {
   test('no findings while remediating + review request missing → re-requests (recovery)', async () => {
     const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
     const gh = makeGh({ reviewComments: [], issueComments: [] });
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.reason).toMatch(/recovered/);
     expect(gh._calls.comments).toHaveLength(1);
   });
@@ -148,7 +149,7 @@ describe('runRemediationForPr', () => {
   test('no findings while remediating + review already requested → wait, no comment', async () => {
     const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
     const gh = makeGh({ reviewComments: [], issueComments: [{ body: `@codex review \`${HEAD}\`` }] });
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.reason).toMatch(/awaiting/);
     expect(gh._calls.comments).toHaveLength(0);
   });
@@ -157,7 +158,7 @@ describe('runRemediationForPr', () => {
     const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'remediating' }] });
     const gh = makeGh();
     let parked = false;
-    const r = await runRemediationForPr({ ...CTX, onPark: async () => { parked = true; } }, { db, gh, callAnthropic: makeCall('FIXED') });
+    const r = await runRemediationForPr({ ...CTX, onPark: async () => { parked = true; } }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r.parked).toBe(true);
     expect(parked).toBe(true);
     expect(gh._calls.putFile).toHaveLength(0);
@@ -167,27 +168,27 @@ describe('runRemediationForPr', () => {
   test('fix produces no change → park', async () => {
     const db = makeDb();
     const gh = makeGh({ fileContent: 'ORIGINAL BODY' });
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('ORIGINAL BODY') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('ORIGINAL BODY'), validateFixedBlogFile: PASS });
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/no change/);
   });
 
   test('already parked → skip', async () => {
     const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked' }] });
-    const r = await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('X') });
+    const r = await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
   });
 
   test('closed PR → skip', async () => {
     const gh = makeGh({ gh: { getPr: async () => ({ state: 'closed' }) } });
-    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall('X') });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.skipped).toBe(true);
   });
 
   test('state is persisted BEFORE the review comment (comment failure cannot strand)', async () => {
     const db = makeDb();
     const gh = makeGh({ commentThrows: true });
-    await expect(runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED') })).rejects.toThrow();
+    await expect(runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS })).rejects.toThrow();
     // putFile happened and the round was recorded even though the comment threw.
     expect(gh._calls.putFile).toHaveLength(1);
     expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
@@ -202,7 +203,7 @@ describe('lane entry points', () => {
   test('disabled → skip without touching GitHub', async () => {
     delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
     const gh = makeGh();
-    const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'b', slug: 'x' }, { db: makeDb(), gh, callAnthropic: makeCall('X') });
+    const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'b', slug: 'x' }, { db: makeDb(), gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r).toEqual({ skipped: true, reason: 'disabled' });
     expect(gh._calls.putFile).toHaveLength(0);
   });
@@ -214,7 +215,7 @@ describe('lane entry points', () => {
       blog_posts: [{ id: 1, publish_status: 'publishing' }],
     });
     const gh = makeGh();
-    const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches' }, { db, gh, callAnthropic: makeCall('FIXED') });
+    const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches' }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r.parked).toBe(true);
     expect(db._tables.blog_posts[0].publish_status).toBe('pending_review');
   });
@@ -226,9 +227,40 @@ describe('lane entry points', () => {
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     // getPr returns the same open PR
     gh.getPr = async () => pr;
-    const r = await maybeRemediateAutonomousPr(pr, { db, gh, callAnthropic: makeCall('FIXED') });
+    const r = await maybeRemediateAutonomousPr(pr, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.mdx');
     expect(gh._calls.putFile[0].branch).toBe('content/autonomous-x');
+  });
+});
+
+describe('content-gate + truncation + marker safety', () => {
+  test('fix that fails the content gates -> park (not committed)', async () => {
+    const db = makeDb();
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: () => ({ ok: false, reason: 'guardrails HARDCODED_PRICE' }) });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/content gates/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('truncated LLM output (stop_reason max_tokens) -> no commit', async () => {
+    const db = makeDb();
+    const gh = makeGh();
+    const truncated = async () => ({ ok: true, text: 'partial...', response: { stop_reason: 'max_tokens' } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: truncated, validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('status marked remediating BEFORE the push (survives a putFile failure)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ gh: { putFile: async () => { throw new Error('gh 500'); } } });
+    await expect(runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS })).rejects.toThrow();
+    expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
+  });
+
+  test('validateFixedBlogFile rejects a non-blog file', () => {
+    expect(rem.validateFixedBlogFile('just some text, no frontmatter').ok).toBe(false);
   });
 });
