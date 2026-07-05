@@ -31,6 +31,9 @@ jest.mock('../services/messaging/validators/suppression', () => ({
 jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
 }));
+jest.mock('../services/estimate-lead-linkage', () => ({
+  leadIdForEstimate: jest.fn(async () => null),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -38,6 +41,7 @@ const { customerConvertedSince } = require('../services/estimate-conversion-guar
 const { createTrackedShortLink } = require('../services/short-url');
 const { loadSuppressionState } = require('../services/messaging/validators/suppression');
 const { readCachedLineType } = require('../services/messaging/validators/line-type');
+const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { _internals } = require('../services/click-followup');
 
 const inserts = [];
@@ -97,6 +101,7 @@ function makeEstimate(overrides = {}) {
 
 function makeClick(overrides = {}) {
   return {
+    click_id: 'click-1',
     clicked_at: new Date(NOW.getTime() - 6 * H),
     short_code_id: 'sc-1',
     kind: 'estimate',
@@ -133,6 +138,7 @@ beforeEach(() => {
   });
   loadSuppressionState.mockImplementation(async (input, contactState) => contactState);
   readCachedLineType.mockResolvedValue({ state: 'miss' });
+  leadIdForEstimate.mockResolvedValue(null);
 });
 
 describe('runQueue — draft creation', () => {
@@ -149,6 +155,7 @@ describe('runQueue — draft creation', () => {
     const claim = inserts.find((i) => i.table === 'click_followup_actions');
     expect(claim.payload).toMatchObject({
       short_code_id: 'sc-1',
+      short_code_click_id: 'click-1',
       customer_id: 'cust-1',
       entity_type: 'estimates',
       entity_id: 'est-1',
@@ -215,7 +222,7 @@ describe('runQueue — draft creation', () => {
     enqueue('short_code_clicks as scc', {
       rows: [
         makeClick(),
-        makeClick({ short_code_id: 'sc-2', clicked_at: new Date(NOW.getTime() - 20 * H) }),
+        makeClick({ click_id: 'click-2', short_code_id: 'sc-2', clicked_at: new Date(NOW.getTime() - 20 * H) }),
       ],
     });
     enqueue('estimates', { first: makeEstimate() });
@@ -225,6 +232,54 @@ describe('runQueue — draft creation', () => {
 
     expect(counts.candidates).toBe(1);
     expect(inserts.filter((i) => i.table === 'message_drafts')).toHaveLength(1);
+  });
+
+  test('anonymous click (no customer/lead on the code) resolves the lead from the estimate', async () => {
+    leadIdForEstimate.mockResolvedValue('lead-9');
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ customer_id: null, lead_id: null })] });
+    enqueue('estimates', { first: makeEstimate({ customer_id: null }) }); // loaded once (cached) for grouping + processing
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.drafted).toBe(1);
+    expect(leadIdForEstimate).toHaveBeenCalled();
+    const claim = inserts.find((i) => i.table === 'click_followup_actions');
+    expect(claim.payload).toMatchObject({ lead_id: 'lead-9', customer_id: null, status: 'pending' });
+    // The fresh mint carries the resolved lead too.
+    expect(createTrackedShortLink).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ leadId: 'lead-9' }));
+    expect(JSON.parse(inserts.find((i) => i.table === 'message_drafts').payload.flags).lead_id).toBe('lead-9');
+  });
+
+  test('contactless clicks dedupe by last-10 phone, never entity_id — two estimates, one person, one draft', async () => {
+    enqueue('short_code_clicks as scc', {
+      rows: [
+        makeClick({ customer_id: null, lead_id: null, entity_id: 'est-1' }),
+        makeClick({
+          click_id: 'click-2', short_code_id: 'sc-2', customer_id: null, lead_id: null,
+          entity_id: 'est-2', clicked_at: new Date(NOW.getTime() - 12 * H),
+        }),
+      ],
+    });
+    // Grouping loads BOTH estimates (different entity_ids) — same phone.
+    enqueue('estimates', { first: makeEstimate({ id: 'est-1', customer_id: null }) });
+    enqueue('estimates', { first: makeEstimate({ id: 'est-2', customer_id: null }) });
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.candidates).toBe(1); // phone key collapsed them
+    expect(inserts.filter((i) => i.table === 'message_drafts')).toHaveLength(1);
+  });
+
+  test('re-click eligibility: the candidate anti-join is per CLICK, not per code', () => {
+    // The mocked builder never executes whereNotExists callbacks, so pin the
+    // query shape at the source: exclusion keys on short_code_click_id (a
+    // terminal action for an OLD click never shadows a NEW click), not on
+    // the code-level short_code_id.
+    const src = require('fs').readFileSync(require.resolve('../services/click-followup'), 'utf8');
+    expect(src).toContain('cfa.short_code_click_id = scc.id');
+    expect(src).not.toContain('cfa.short_code_id = sc.id');
   });
 });
 
@@ -423,15 +478,34 @@ describe('cadenceStageDueSoon', () => {
 });
 
 describe('expireStaleActions', () => {
-  test('flips stale open actions to expired so the contact slot frees up', async () => {
-    enqueue('click_followup_actions', { update: 3 });
+  test('flips stale open actions to expired AND retires their linked pending drafts', async () => {
+    enqueue('click_followup_actions', {
+      rows: [
+        { id: 'act-1', draft_id: 'draft-1' },
+        { id: 'act-2', draft_id: null }, // pending claim that never drafted
+      ],
+    });
+    enqueue('click_followup_actions', { update: 2 });
+    enqueue('message_drafts', { update: 1 });
 
     const n = await _internals.expireStaleActions(NOW);
 
-    expect(n).toBe(3);
+    expect(n).toBe(2);
     expect(updates).toEqual([
       { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'expired' }) },
+      // Linked draft leaves the sendable pool: rejected + flags.expired merge.
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected' }) },
     ]);
+    expect(String(db.raw.mock.calls.map((c) => c[0]).join('\n'))).toContain('"expired": true');
+  });
+
+  test('no stale actions → no writes at all', async () => {
+    enqueue('click_followup_actions', { rows: [] });
+
+    const n = await _internals.expireStaleActions(NOW);
+
+    expect(n).toBe(0);
+    expect(updates).toEqual([]);
   });
 });
 

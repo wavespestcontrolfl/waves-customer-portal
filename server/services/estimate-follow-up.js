@@ -18,6 +18,7 @@ const EmailTemplateLibrary = require("./email-template-library");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
+const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
@@ -342,6 +343,7 @@ async function checkDepositAbandoned(now = new Date()) {
         entityType: "estimates",
         entityId: est.id,
         customerId: est.customer_id,
+        leadId: await leadIdForEstimate(est),
         channel: "sms",
         purpose: "estimate_followup_deposit",
       });
@@ -444,6 +446,7 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            leadId: await leadIdForEstimate(est),
             channel: "sms",
             purpose: "estimate_followup_unviewed",
           });
@@ -534,6 +537,7 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            leadId: await leadIdForEstimate(est),
             channel: "sms",
             purpose: "estimate_followup_viewed",
           });
@@ -625,6 +629,7 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            leadId: await leadIdForEstimate(est),
             channel: "sms",
             purpose: "estimate_followup_final",
           });
@@ -716,6 +721,7 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            leadId: await leadIdForEstimate(est),
             channel: "sms",
             purpose: "estimate_followup_expiring",
           });

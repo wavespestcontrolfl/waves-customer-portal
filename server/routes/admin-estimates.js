@@ -6,6 +6,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const {
@@ -574,6 +575,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const viewUrl = await shortenOrPassthrough(longUrl, {
     kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+    leadId: await leadIdForEstimate(estimate),
     // One link serves both channels on sendMethod='both' — tag the primary.
     channel: sendMethod === 'email' ? 'email' : 'sms', purpose: 'estimate_send',
   });
@@ -1529,6 +1531,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
       kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      leadId: await leadIdForEstimate(estimate),
       channel: 'sms', purpose: 'estimate_followup_manual',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
@@ -1655,6 +1658,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
     const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
       kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      leadId: await leadIdForEstimate(estimate),
       channel: 'sms', purpose: 'estimate_booking_link',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
@@ -1761,6 +1765,7 @@ router.post('/:id/extend', async (req, res, next) => {
       const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
       const viewUrl = await shortenOrPassthrough(longUrl, {
         kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+        leadId: await leadIdForEstimate(estimate),
         channel: 'sms', purpose: 'estimate_extended',
       });
       const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {

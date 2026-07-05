@@ -35,7 +35,10 @@
  *
  * The click_followup_actions row is the atomic claim (partial unique indexes:
  * one open action per customer / per lead) AND the audit trail — see
- * migration 20260705000120.
+ * migration 20260705000120. Actions are keyed per CLICK
+ * (short_code_click_id): a fresh re-click after a terminal outcome
+ * re-qualifies; contacts are deduped by customer → lead (resolved via
+ * estimate-lead-linkage for lead-only estimates) → last-10 phone.
  *
  * Gated behind GATE_CLICK_FOLLOWUP (fails CLOSED everywhere): off → the cron
  * only shadow-logs candidate counts, writing nothing, so volume can be judged
@@ -48,6 +51,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { createTrackedShortLink } = require('./short-url');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
+const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { readCachedLineType } = require('./messaging/validators/line-type');
 
@@ -211,27 +215,52 @@ function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
 
 // Sweep stale open actions → 'expired' so the one-open-action-per-contact
 // partial unique guard frees the slot (a drafted nudge the owner sat on for
-// two weeks shouldn't block future clicks forever).
+// two weeks shouldn't block future clicks forever). The linked draft is
+// retired WITH the action — a two-week-old "saw you were taking another
+// look" nudge is stale copy, and leaving it status='pending' would keep it
+// sendable in /admin/drafts after its action expired. 'rejected' is the
+// existing terminal review status (message_drafts vocabulary: pending /
+// approved / revised / rejected / sent / shadow / suggested / auto_sent);
+// flags.expired=true marks it as swept rather than owner-declined. Scoped to
+// status='pending' so an approved/sent draft's record is never rewritten.
 async function expireStaleActions(now = new Date()) {
   const cutoff = new Date(now.getTime() - ACTION_TTL_DAYS * 86400000);
   try {
-    const n = await db('click_followup_actions')
+    const stale = await db('click_followup_actions')
       .whereIn('status', ['pending', 'drafted'])
       .where('created_at', '<', cutoff)
+      .select('id', 'draft_id');
+    if (!stale.length) return 0;
+
+    await db('click_followup_actions')
+      .whereIn('id', stale.map((r) => r.id))
       .update({ status: 'expired', updated_at: db.fn.now() });
-    if (n > 0) logger.info(`[click-followup] expired ${n} stale open action(s)`);
-    return n;
+
+    const draftIds = stale.map((r) => r.draft_id).filter(Boolean);
+    if (draftIds.length) {
+      await db('message_drafts')
+        .whereIn('id', draftIds)
+        .where({ status: 'pending' })
+        .update({
+          status: 'rejected',
+          flags: db.raw(`COALESCE(flags, '{}'::jsonb) || '{"expired": true}'::jsonb`),
+        });
+    }
+    logger.info(`[click-followup] expired ${stale.length} stale open action(s) (retired ${draftIds.length} linked draft(s))`);
+    return stale.length;
   } catch (e) {
     logger.warn(`[click-followup] stale-action sweep failed: ${e.message}`);
     return 0;
   }
 }
 
-// Terminal outcome writer (dismissed / converted) — the row doubles as the
-// "never rescan this code" marker for the candidate query's whereNotExists.
+// Terminal outcome writer (dismissed / converted) — the row marks THIS click
+// as handled for the candidate query's per-click whereNotExists; a fresh
+// re-click later mints a new short_code_clicks row and re-qualifies.
 async function recordOutcome(candidate, status, extra = {}) {
   await db('click_followup_actions').insert({
     short_code_id: candidate.short_code_id,
+    short_code_click_id: candidate.click_id || null,
     customer_id: candidate.customer_id || null,
     lead_id: candidate.lead_id || null,
     entity_type: candidate.entity_type || null,
@@ -261,8 +290,11 @@ async function runQueue(now = new Date()) {
   const nowMs = now.getTime();
   const counts = { candidates: 0, drafted: 0, converted: 0, dismissed: 0, skipped: 0 };
 
-  // Human clicks in the window, estimate-linked, not yet acted on. Newest
-  // first so in-run contact dedupe keeps the freshest click per person.
+  // Human clicks in the window, estimate-linked, not yet acted on. The
+  // anti-join is per CLICK (short_code_click_id), not per code — a fresh
+  // re-click after a terminal action (dismissed/converted/expired) must
+  // re-qualify; the per-contact open-action uniques remain the claim.
+  // Newest first so in-run contact dedupe keeps the freshest click.
   const clicks = await db('short_code_clicks as scc')
     .join('short_codes as sc', 'scc.short_code_id', 'sc.id')
     .where('scc.is_bot', false)
@@ -274,10 +306,11 @@ async function runQueue(now = new Date()) {
     .whereNotExists(function () {
       this.select(db.raw('1'))
         .from('click_followup_actions as cfa')
-        .whereRaw('cfa.short_code_id = sc.id');
+        .whereRaw('cfa.short_code_click_id = scc.id');
     })
     .orderBy('scc.clicked_at', 'desc')
     .select(
+      'scc.id as click_id',
       'scc.clicked_at',
       'sc.id as short_code_id',
       'sc.kind',
@@ -289,13 +322,41 @@ async function runQueue(now = new Date()) {
 
   if (!clicks.length) return counts;
 
-  // One candidate per contact per run (newest click wins).
+  // Estimates are read during BOTH grouping (contact resolution) and
+  // processing — cache per run so each estimate loads once.
+  const estCache = new Map();
+  const loadEstimate = async (id) => {
+    if (!estCache.has(id)) estCache.set(id, await db('estimates').where({ id }).first());
+    return estCache.get(id);
+  };
+
+  // One candidate per CONTACT per run (newest click wins). Contact key
+  // resolution, in order: customer_id → lead_id on the code → lead resolved
+  // from the estimate (leads.estimate_id FK / estimate_data.lead_id mirror —
+  // most pre-conversion mints only carried customerId, which is null) →
+  // normalized last-10 phone. NEVER entity_id: one person with two open
+  // estimates would key as two contacts and get duplicate drafts.
   const seen = new Set();
   const candidates = [];
   for (const c of clicks) {
-    const key = c.customer_id ? `c:${c.customer_id}`
-      : c.lead_id ? `l:${c.lead_id}`
-      : `e:${c.entity_id}`;
+    let key = null;
+    if (c.customer_id) {
+      key = `c:${c.customer_id}`;
+    } else if (c.lead_id) {
+      key = `l:${c.lead_id}`;
+    } else {
+      const est = await loadEstimate(c.entity_id);
+      const resolvedLeadId = est ? await leadIdForEstimate(est) : null;
+      if (resolvedLeadId) {
+        c.lead_id = resolvedLeadId; // carried onto the action row + fresh mint
+        key = `l:${resolvedLeadId}`;
+      } else {
+        const ten = last10(est && est.customer_phone);
+        // No phone → the candidate dead-ends at the phone check anyway;
+        // key per click so it can't shadow a real contact.
+        key = ten ? `p:${ten}` : `x:${c.click_id}`;
+      }
+    }
     if (seen.has(key)) continue;
     seen.add(key);
     candidates.push(c);
@@ -310,7 +371,7 @@ async function runQueue(now = new Date()) {
   for (const c of candidates) {
     let claimedId = null;
     try {
-      const est = await db('estimates').where({ id: c.entity_id }).first();
+      const est = await loadEstimate(c.entity_id);
       if (!est) {
         await recordOutcome(c, 'dismissed');
         counts.dismissed++;
@@ -385,6 +446,7 @@ async function runQueue(now = new Date()) {
         const inserted = await db('click_followup_actions')
           .insert({
             short_code_id: c.short_code_id,
+            short_code_click_id: c.click_id || null,
             customer_id: contact.customerId,
             lead_id: c.lead_id || null,
             entity_type: c.entity_type,

@@ -2,6 +2,8 @@
  * Shape tests for the click-tracking migrations:
  *   20260705000110 — short_codes linkage columns + short_code_clicks
  *   20260705000120 — click_followup_actions (queue + partial unique claims)
+ *   20260705010010 — message_drafts insert-guard exemption for the
+ *                    click-followup owner-review queue
  *
  * Fake-knex recorder in the style of the other migration shape tests — pins
  * column names/types, FK targets + on-delete behavior, the status CHECK, the
@@ -10,6 +12,7 @@
 
 const partA = require('../models/migrations/20260705000110_short_codes_click_tracking');
 const partB = require('../models/migrations/20260705000120_click_followup_actions');
+const guardExempt = require('../models/migrations/20260705010010_message_drafts_guard_exempt_click_followup');
 
 function tableRecorder(record) {
   const col = (type) => (name, ...args) => {
@@ -128,6 +131,11 @@ describe('20260705000120 click_followup_actions', () => {
     expect(byName(create, 'short_code_id')).toMatchObject({
       type: 'uuid', notNullable: true, references: 'id', inTable: 'short_codes',
     });
+    // Per-CLICK anchor for the cron's candidate anti-join: a terminal action
+    // for an old click must not shadow a fresh re-click of the same code.
+    expect(byName(create, 'short_code_click_id')).toMatchObject({
+      type: 'uuid', references: 'id', inTable: 'short_code_clicks', onDelete: 'SET NULL',
+    });
     expect(byName(create, 'customer_id')).toMatchObject({ references: 'id', inTable: 'customers', onDelete: 'SET NULL' });
     expect(byName(create, 'lead_id')).toMatchObject({ references: 'id', inTable: 'leads', onDelete: 'SET NULL' });
     expect(byName(create, 'entity_type')).toMatchObject({ type: 'string' });
@@ -156,5 +164,34 @@ describe('20260705000120 click_followup_actions', () => {
     await partB.up(knex);
     expect(knex.schema.createTable).not.toHaveBeenCalled();
     expect(knex.state.raw).toEqual([]);
+  });
+});
+
+describe('20260705010010 message_drafts guard exemption', () => {
+  test('up: pending click_followup inserts pass the trigger with the legacy flag OFF', async () => {
+    const knex = fakeKnex();
+    await guardExempt.up(knex);
+
+    const sql = knex.state.raw.join('\n');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION public.block_message_drafts_when_disabled()');
+    // House-voice shadow exemption retained verbatim.
+    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
+    // New owner-review allowlist: pending + click_followup skips the legacy
+    // kill-switch check entirely (insert succeeds with the flag off).
+    expect(sql).toContain("NEW.status = 'pending' and NEW.intent = any (ARRAY['click_followup']::text[])");
+    // Three-valued-logic guard: a NULL intent must NOT satisfy the allowlist.
+    expect(sql).toMatch(/not coalesce\(\s*NEW\.status = 'pending'/);
+    // Legacy path still enforced.
+    expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
+  });
+
+  test('down: restores the house-voice-only guard (no click_followup exemption)', async () => {
+    const knex = fakeKnex();
+    await guardExempt.down(knex);
+
+    const sql = knex.state.raw.join('\n');
+    expect(sql).toContain("NEW.drafter is distinct from 'house_voice' or NEW.status is distinct from 'shadow'");
+    expect(sql).not.toContain('click_followup');
+    expect(sql).toContain("raise exception 'legacy_ai_drafts_disabled'");
   });
 });

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { customerConvertedSince } = require('../services/estimate-conversion-guard');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -81,6 +82,46 @@ async function releaseDraftClaim(draftId, fields = {}) {
   }).catch(() => {});
 }
 
+// Click-followup drafts (services/click-followup.js) nudge a prospect toward
+// booking, and conversion can land while the draft sits pending — re-run the
+// conversion guard at approval time so a "pick your first visit" text never
+// goes to someone who already booked/paid. Narrowly scoped to
+// intent='click_followup'; every other intent is untouched.
+//
+// Returns null (send may proceed), { transient: true } (guard couldn't verify
+// — caller releases the claim so a later approval re-checks), or
+// { blocked: true } after retiring the draft (status='rejected',
+// flags.reason='converted_before_send') and flipping the linked
+// click_followup_actions row to 'converted'.
+async function blockClickFollowupIfConverted(draft) {
+  if (draft.intent !== 'click_followup') return null;
+  const flags = parseFlags(draft.flags);
+  let est = null;
+  if (flags.estimate_id) {
+    est = await db('estimates').where({ id: flags.estimate_id }).first().catch(() => null);
+  }
+  // Fallback shape keeps customerConvertedSince's semantics (customer_id +
+  // created_at anchor) when the estimate row is gone.
+  const conv = await customerConvertedSince(
+    est || { id: draft.id, customer_id: draft.customer_id, created_at: draft.created_at },
+  );
+  if (!conv.converted) return null;
+  if (conv.reason === 'guard-error') {
+    // Transient lookup failure — the guard fails closed. Don't retire the
+    // draft on an unverified signal; block THIS send and let a retry re-check.
+    return { transient: true };
+  }
+  await db('message_drafts').where({ id: draft.id }).update({
+    status: 'rejected',
+    flags: JSON.stringify({ ...flags, reason: 'converted_before_send' }),
+  });
+  await db('click_followup_actions')
+    .where({ draft_id: draft.id })
+    .update({ status: 'converted', converted_at: new Date(), updated_at: db.fn.now() })
+    .catch(() => {});
+  return { blocked: true };
+}
+
 // GET /api/admin/drafts — pending drafts
 router.get('/', async (req, res, next) => {
   try {
@@ -140,6 +181,16 @@ router.put('/:id/approve', async (req, res, next) => {
       const existing = await db('message_drafts').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Draft not found' });
       return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
+
+    // Pre-send conversion recheck (click-followup drafts only).
+    const conversionBlock = await blockClickFollowupIfConverted(draft);
+    if (conversionBlock) {
+      if (conversionBlock.transient) {
+        await releaseDraftClaim(draft.id);
+        return res.status(503).json({ error: 'Conversion check unavailable - draft left pending, try again' });
+      }
+      return res.status(409).json({ error: 'Contact already converted - draft retired, no send needed' });
     }
 
     const recipient = await resolveDraftRecipient(draft);
@@ -215,6 +266,16 @@ router.put('/:id/revise', async (req, res, next) => {
       const existing = await db('message_drafts').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Draft not found' });
       return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
+
+    // Pre-send conversion recheck (click-followup drafts only).
+    const conversionBlock = await blockClickFollowupIfConverted(draft);
+    if (conversionBlock) {
+      if (conversionBlock.transient) {
+        await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+        return res.status(503).json({ error: 'Conversion check unavailable - draft left pending, try again' });
+      }
+      return res.status(409).json({ error: 'Contact already converted - draft retired, no send needed' });
     }
 
     const recipient = await resolveDraftRecipient(draft);
