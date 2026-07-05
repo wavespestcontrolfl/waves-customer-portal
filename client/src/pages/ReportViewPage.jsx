@@ -1667,14 +1667,23 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
       <div className="service-report-hero-copy">
         <div className="section-eyebrow">Service report</div>
         <h1 className="sr-title">Hey {firstName}, {headline}</h1>
-        {(data.serviceAddress || data.customerEmail || data.customerPhone) && (
-          <div className="service-meta-address">
-            {[data.serviceAddress, data.customerEmail, formatCustomerPhone(data.customerPhone)]
-              .map((part) => String(part || '').trim())
-              .filter(Boolean)
-              .join(' \u00B7 ')}
-          </div>
-        )}
+        {(() => {
+          // Mirrors the estimate header's contact block: each of name / email /
+          // phone / address on its own eyebrow-styled line.
+          const contactLines = [
+            data.customerName,
+            data.customerEmail,
+            formatCustomerPhone(data.customerPhone),
+            data.serviceAddress,
+          ].map((line) => String(line || '').trim()).filter(Boolean);
+          return contactLines.length ? (
+            <div className="service-meta-contact">
+              {contactLines.map((line) => (
+                <div key={line} className="service-meta-address">{line}</div>
+              ))}
+            </div>
+          ) : null;
+        })()}
       </div>
       <div className="service-status-card">
         <div className="service-status-main">
@@ -1750,6 +1759,29 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
         <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
         <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
+    </section>
+  );
+}
+
+// "Your Visit, in Motion" — the tech-approved recap clip embedded in the
+// report (owner ask 2026-07-05; previously reachable only from the SMS
+// /recap/:token link). The server only attaches `recap` on live views when an
+// approved clip exists, so this self-gates everywhere else (pdf/static/
+// sms_preview and visits without a recap).
+function RecapVideoCard({ recap, token }) {
+  if (!recap?.ready || !token) return null;
+  return (
+    <section data-glass="card" className="sr-section recap-video-section" id="visit-recap">
+      <div className="section-eyebrow">Your visit, in motion</div>
+      <h2>Watch today&apos;s service</h2>
+      <p className="map-context-copy">A short recap your technician recorded during the visit.</p>
+      <video
+        src={`${API_BASE}/reports/${token}/recap/video`}
+        controls
+        preload="metadata"
+        playsInline
+        style={{ width: '100%', maxWidth: 420, borderRadius: 14, background: '#000', display: 'block', margin: '12px auto 0' }}
+      />
     </section>
   );
 }
@@ -4743,6 +4775,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
+        .service-meta-contact {
+          margin-top: 16px;
+          display: grid;
+          gap: 4px;
+        }
+        .service-meta-contact .service-meta-address {
+          margin-top: 0;
+        }
         .service-meta-address {
           margin-top: 16px;
           color: var(--muted);
@@ -7260,6 +7300,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard typedReport={data.typedReport} />
+
+        <RecapVideoCard recap={data.recap} token={token} />
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 

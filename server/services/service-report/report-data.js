@@ -2548,15 +2548,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   // Next upcoming appointment for this customer (owner ask 2026-07-05: every
-  // report shows the next visit, like the estimate documents). Same
-  // scheduled_services allow-list the V2 next-visit lookups use, minus the
-  // service-line filter — the customer's next appointment of ANY line counts.
-  // The visit this report covers is excluded by id so a same-day report never
-  // shows its own just-completed slot. Best-effort: never blocks the report.
+  // report shows the next visit, like the estimate documents) — and it must be
+  // the next visit OF THIS REPORT'S SERVICE LINE (owner 2026-07-05: a pest
+  // report shows the next pest visit, a lawn report the next lawn visit), so
+  // candidates are classified with the same detectServiceLine the report
+  // itself uses. The visit this report covers is excluded by id so a same-day
+  // report never shows its own just-completed slot. Best-effort: never blocks
+  // the report.
   let nextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const nextApptRow = await knex('scheduled_services')
+    const upcomingRows = await knex('scheduled_services')
       .where('customer_id', service.customer_id)
       .andWhere('scheduled_date', '>=', reportTodayIso)
       .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
@@ -2565,8 +2567,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       })
       .orderBy('scheduled_date', 'asc')
       .orderBy('window_start', 'asc')
-      .first('id', 'service_type', 'scheduled_date', 'window_start')
-      .catch(() => null);
+      .limit(20)
+      .catch(() => []);
+    const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
+      .find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
     if (nextApptRow && nextApptRow.scheduled_date) {
       const rawDate = nextApptRow.scheduled_date;
       nextAppointment = {

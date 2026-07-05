@@ -1046,7 +1046,21 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer }));
+      const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer });
+      // "Your Visit, in Motion" — surface the tech-approved recap inside the
+      // report (owner ask 2026-07-05; previously SMS-only via /recap/:token).
+      // Live views only: the player streams /reports/:token/recap/video, which
+      // is meaningless in pdf/static renders. Best-effort — never blocks.
+      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly) {
+        try {
+          const { getRecap } = require('../services/service-report/recap-pipeline');
+          const recap = await getRecap(service.scheduled_service_id);
+          if (recap && recap.status === 'approved' && recap.s3_key) {
+            v1Data.recap = { ready: true, durationMs: recap.duration_ms || null };
+          }
+        } catch { /* best-effort */ }
+      }
+      return res.json(v1Data);
     }
 
     res.json({
