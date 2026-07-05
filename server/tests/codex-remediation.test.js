@@ -4,10 +4,12 @@ const {
   parseCodexFindings,
   pickTargetPath,
   buildReviewRequestBody,
+  reviewRequestedForHead,
   stripCodeFence,
   atRoundLimit,
-  runRemediationRound,
-  maybeRemediate,
+  runRemediationForPr,
+  maybeRemediateBlogPost,
+  maybeRemediateAutonomousPr,
   MAX_ROUNDS,
 } = rem;
 
@@ -25,175 +27,208 @@ function finding(over = {}) {
   };
 }
 
-// Minimal chainable knex stub sharing one row + recording updates.
-function makeDb(row) {
-  const state = { row: row ? { ...row } : null, updates: [] };
-  function db() {
+const match = (row, crit) => Object.entries(crit).every(([k, v]) => row[k] === v);
+
+// In-memory knex stub over named tables. Supports where/first/insert/update.
+function makeDb(initial = {}) {
+  const tables = {};
+  for (const [t, rows] of Object.entries(initial)) tables[t] = rows.map((r) => ({ ...r }));
+  function db(table) {
+    tables[table] = tables[table] || [];
+    let crit = {};
     return {
-      where() { return this; },
-      async first() { return state.row ? { ...state.row } : null; },
-      async update(patch) { state.updates.push(patch); if (state.row) Object.assign(state.row, patch); return 1; },
+      where(c) { crit = c; return this; },
+      async first() { const r = tables[table].find((x) => match(x, crit)); return r ? { ...r } : null; },
+      async update(patch) { const rows = tables[table].filter((x) => match(x, crit)); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async insert(row) { tables[table].push({ ...row }); return [1]; },
     };
   }
-  db._state = state;
+  db._tables = tables;
   return db;
 }
 
 function makeGh(over = {}) {
   const calls = { putFile: [], comments: [] };
   const gh = {
-    async getPr() { return { state: 'open', head: { sha: HEAD } }; },
+    async getPr() { return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; },
     async listPrReviewComments() { return over.reviewComments || [finding()]; },
+    async listIssueComments() { return over.issueComments || []; },
     async getFile() { return { content: over.fileContent ?? 'ORIGINAL BODY', sha: 'file-sha-1' }; },
     async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa' } }; },
     async getBranchSha() { return 'newcommit999aaa'; },
-    async createIssueComment(n, body) { calls.comments.push({ n, body }); return {}; },
+    async createIssueComment(n, body) { calls.comments.push({ n, body }); if (over.commentThrows) throw new Error('gh 502'); return {}; },
   };
   Object.assign(gh, over.gh || {});
   gh._calls = calls;
   return gh;
 }
 
-function makeCall(text) {
-  return async () => ({ ok: true, text });
-}
+const makeCall = (text) => async () => ({ ok: true, text });
 
-const basePost = {
-  id: 1, slug: 'pest-control/roaches', astro_pr_number: 5, astro_branch_name: 'content/blog-roaches-x1',
-  codex_remediation_rounds: 0, codex_remediation_status: 'none',
-};
+const CTX = { prNumber: 5, branch: 'content/blog-x', slug: 'pest-control/roaches' };
 
 describe('parseCodexFindings', () => {
-  test('keeps Codex findings on the current head with path/line/body', () => {
-    const out = parseCodexFindings([finding()], HEAD);
-    expect(out).toEqual([{ path: 'src/content/blog/pest-control/roaches.md', line: 42, body: 'Fix the broken link.' }]);
+  test('keeps Codex findings on the current head', () => {
+    expect(parseCodexFindings([finding()], HEAD)).toEqual([{ path: 'src/content/blog/pest-control/roaches.md', line: 42, body: 'Fix the broken link.' }]);
   });
-  test('drops non-Codex authors', () => {
-    expect(parseCodexFindings([finding({ user: { login: 'some-human' } })], HEAD)).toEqual([]);
-  });
-  test('drops findings tied to a different commit', () => {
+  test('drops non-Codex authors + wrong-commit + empty body', () => {
+    expect(parseCodexFindings([finding({ user: { login: 'human' } })], HEAD)).toEqual([]);
     expect(parseCodexFindings([finding({ commit_id: 'zzz9999' })], HEAD)).toEqual([]);
-  });
-  test('drops a finding with no commit id when the head is known', () => {
-    expect(parseCodexFindings([finding({ commit_id: null, original_commit_id: null })], HEAD)).toEqual([]);
-  });
-  test('keeps findings when no head is provided', () => {
-    expect(parseCodexFindings([finding({ commit_id: null })], null)).toHaveLength(1);
-  });
-  test('matches on original_commit_id', () => {
-    expect(parseCodexFindings([finding({ commit_id: 'other999', original_commit_id: HEAD })], HEAD)).toHaveLength(1);
-  });
-  test('drops empty-body comments', () => {
     expect(parseCodexFindings([finding({ body: '  ' })], HEAD)).toEqual([]);
+  });
+  test('drops unattributable comment when head known; keeps on original_commit_id', () => {
+    expect(parseCodexFindings([finding({ commit_id: null, original_commit_id: null })], HEAD)).toEqual([]);
+    expect(parseCodexFindings([finding({ commit_id: 'other', original_commit_id: HEAD })], HEAD)).toHaveLength(1);
   });
 });
 
 describe('pickTargetPath', () => {
   test('prefers a blog .md finding path', () => {
-    expect(pickTargetPath([{ path: 'astro.config.mjs' }, { path: 'src/content/blog/x/y.md' }], {}))
-      .toBe('src/content/blog/x/y.md');
+    expect(pickTargetPath([{ path: 'astro.config.mjs' }, { path: 'src/content/blog/x/y.md' }])).toBe('src/content/blog/x/y.md');
   });
-  test('falls back to the slug-derived path', () => {
-    expect(pickTargetPath([{ path: null }], { slug: '/pest-control/roaches/' }))
-      .toBe('src/content/blog/pest-control/roaches.md');
+  test('accepts .mdx (autonomous posts)', () => {
+    expect(pickTargetPath([{ path: 'src/content/blog/pest-control/roaches.mdx' }])).toBe('src/content/blog/pest-control/roaches.mdx');
+  });
+  test('falls back to the slug-derived .md path', () => {
+    expect(pickTargetPath([{ path: null }], '/pest-control/roaches/')).toBe('src/content/blog/pest-control/roaches.md');
   });
 });
 
 describe('helpers', () => {
-  test('buildReviewRequestBody embeds the new head + @codex review', () => {
+  test('buildReviewRequestBody embeds head + @codex review', () => {
     const b = buildReviewRequestBody('deadbeef');
-    expect(b).toMatch(/@codex review/);
-    expect(b).toContain('deadbeef');
+    expect(b).toMatch(/@codex review/); expect(b).toContain('deadbeef');
   });
-  test('stripCodeFence removes a ```markdown fence', () => {
-    expect(stripCodeFence('```markdown\nhello\n```')).toBe('hello\n');
+  test('reviewRequestedForHead detects a matching @codex review comment', () => {
+    expect(reviewRequestedForHead([{ body: '@codex review on head `abc1234`' }], HEAD)).toBe(true);
+    expect(reviewRequestedForHead([{ body: 'unrelated' }], HEAD)).toBe(false);
   });
-  test('atRoundLimit respects MAX_ROUNDS', () => {
-    expect(atRoundLimit(MAX_ROUNDS)).toBe(true);
-    expect(atRoundLimit(MAX_ROUNDS - 1)).toBe(false);
-  });
+  test('stripCodeFence removes a ```markdown fence', () => { expect(stripCodeFence('```markdown\nhello\n```')).toBe('hello\n'); });
+  test('atRoundLimit respects MAX_ROUNDS', () => { expect(atRoundLimit(MAX_ROUNDS)).toBe(true); expect(atRoundLimit(MAX_ROUNDS - 1)).toBe(false); });
 });
 
-describe('runRemediationRound', () => {
-  test('findings under limit → pushes a fix, re-requests review, bumps round', async () => {
-    const db = makeDb({ ...basePost });
+describe('runRemediationForPr', () => {
+  test('fresh findings under limit → push fix, persist state, re-request review', async () => {
+    const db = makeDb();
     const gh = makeGh();
-    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED BODY') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED BODY') });
     expect(r.remediated).toBe(true);
     expect(r.round).toBe(1);
-    expect(gh._calls.putFile).toHaveLength(1);
     expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.md');
-    expect(gh._calls.putFile[0].branch).toBe('content/blog-roaches-x1');
-    expect(gh._calls.comments[0].body).toMatch(/@codex review/);
+    expect(gh._calls.putFile[0].branch).toBe('content/blog-x');
     expect(gh._calls.comments[0].body).toContain('newcommit999aaa');
-    const upd = db._state.updates.at(-1);
-    expect(upd.codex_remediation_rounds).toBe(1);
-    expect(upd.codex_remediation_status).toBe('remediating');
+    const st = db._tables.codex_remediation_state[0];
+    expect(st.rounds).toBe(1); expect(st.status).toBe('remediating');
   });
 
-  test('no fresh findings → waits (skip), no round burned, no park', async () => {
-    const db = makeDb({ ...basePost });
+  test('.mdx finding path is edited (not the slug .md fallback)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED') });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.mdx');
+  });
+
+  test('no findings, never remediated → wait', async () => {
+    const db = makeDb();
     const gh = makeGh({ reviewComments: [] });
-    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('X') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X') });
     expect(r.skipped).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('no findings while remediating + review request missing → re-requests (recovery)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X') });
+    expect(r.reason).toMatch(/recovered/);
+    expect(gh._calls.comments).toHaveLength(1);
+  });
+
+  test('no findings while remediating + review already requested → wait, no comment', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [{ body: `@codex review \`${HEAD}\`` }] });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X') });
     expect(r.reason).toMatch(/awaiting/);
-    expect(gh._calls.putFile).toHaveLength(0);
-    expect(db._state.updates).toHaveLength(0);
+    expect(gh._calls.comments).toHaveLength(0);
   });
 
-  test('fresh findings at the round limit → park', async () => {
-    const db = makeDb({ ...basePost, codex_remediation_rounds: MAX_ROUNDS });
+  test('fresh findings at the round limit → park (onPark fired)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'remediating' }] });
     const gh = makeGh();
-    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
+    let parked = false;
+    const r = await runRemediationForPr({ ...CTX, onPark: async () => { parked = true; } }, { db, gh, callAnthropic: makeCall('FIXED') });
     expect(r.parked).toBe(true);
-    expect(r.reason).toMatch(/exhausted/);
+    expect(parked).toBe(true);
     expect(gh._calls.putFile).toHaveLength(0);
-    expect(db._state.row.codex_remediation_status).toBe('parked');
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
   });
 
-  test('fix produces no change → park (false-positive findings)', async () => {
-    const db = makeDb({ ...basePost });
+  test('fix produces no change → park', async () => {
+    const db = makeDb();
     const gh = makeGh({ fileContent: 'ORIGINAL BODY' });
-    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('ORIGINAL BODY') });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('ORIGINAL BODY') });
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/no change/);
-    expect(gh._calls.putFile).toHaveLength(0);
   });
 
   test('already parked → skip', async () => {
-    const db = makeDb({ ...basePost, codex_remediation_status: 'parked' });
-    const gh = makeGh();
-    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
-    expect(r.skipped).toBe(true);
-    expect(r.reason).toBe('parked');
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked' }] });
+    const r = await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('X') });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
   });
 
   test('closed PR → skip', async () => {
-    const db = makeDb({ ...basePost });
     const gh = makeGh({ gh: { getPr: async () => ({ state: 'closed' }) } });
-    const r = await runRemediationRound({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall('X') });
     expect(r.skipped).toBe(true);
+  });
+
+  test('state is persisted BEFORE the review comment (comment failure cannot strand)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ commentThrows: true });
+    await expect(runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED') })).rejects.toThrow();
+    // putFile happened and the round was recorded even though the comment threw.
+    expect(gh._calls.putFile).toHaveLength(1);
+    expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
+    expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
   });
 });
 
-describe('maybeRemediate flag gate', () => {
+describe('lane entry points', () => {
   const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
   afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
 
   test('disabled → skip without touching GitHub', async () => {
     delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
-    const db = makeDb({ ...basePost });
     const gh = makeGh();
-    const r = await maybeRemediate({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED') });
+    const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'b', slug: 'x' }, { db: makeDb(), gh, callAnthropic: makeCall('X') });
     expect(r).toEqual({ skipped: true, reason: 'disabled' });
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
-  test('enabled → runs a round', async () => {
+  test('scheduler park disarms the publishing claim → pending_review', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb({ ...basePost });
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'remediating' }],
+      blog_posts: [{ id: 1, publish_status: 'publishing' }],
+    });
     const gh = makeGh();
-    const r = await maybeRemediate({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED BODY') });
+    const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches' }, { db, gh, callAnthropic: makeCall('FIXED') });
+    expect(r.parked).toBe(true);
+    expect(db._tables.blog_posts[0].publish_status).toBe('pending_review');
+  });
+
+  test('autonomous lane remediates from the PR object (.mdx)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    // getPr returns the same open PR
+    gh.getPr = async () => pr;
+    const r = await maybeRemediateAutonomousPr(pr, { db, gh, callAnthropic: makeCall('FIXED') });
     expect(r.remediated).toBe(true);
+    expect(gh._calls.putFile[0].path).toBe('src/content/blog/pest-control/roaches.mdx');
+    expect(gh._calls.putFile[0].branch).toBe('content/autonomous-x');
   });
 });

@@ -598,6 +598,20 @@ async function maybeAutoMerge(run, pr) {
     await publisher.assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
   } catch (err) {
     if (err?.code === 'CODEX_REVIEW_REQUIRED') {
+      // Codex left findings → try to auto-fix them on the PR branch so the
+      // post can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
+      // is on; never merges (that still needs a genuine Codex-clean signal).
+      try {
+        const { maybeRemediateAutonomousPr } = require('./codex-remediation');
+        const rem = await maybeRemediateAutonomousPr(pr);
+        if (rem?.remediated) {
+          logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
+        } else if (rem?.parked) {
+          logger.warn(`[autonomous-pr-poller] codex remediation parked run ${run.id} PR #${pr.number}: ${rem.reason}`);
+        }
+      } catch (remErr) {
+        logger.warn(`[autonomous-pr-poller] codex remediation error for PR #${pr.number}: ${remErr.message}`);
+      }
       return { pending: true, reason: `codex_review_pending: ${err.message}` };
     }
     throw err; // lookup outage etc. — transient, retry next tick

@@ -248,8 +248,8 @@ async function pollPost(post, { allowMerge = true } = {}) {
           // is on; never merges (that still needs a genuine Codex-clean signal).
           if (mergeErr.code === 'CODEX_REVIEW_REQUIRED') {
             try {
-              const { maybeRemediate } = require('../content/codex-remediation');
-              const rem = await maybeRemediate(post);
+              const { maybeRemediateBlogPost } = require('../content/codex-remediation');
+              const rem = await maybeRemediateBlogPost(post);
               if (rem?.remediated) {
                 logger.info(`[pages-poll] codex remediation round ${rem.round} pushed for ${post.slug || post.id} (${rem.findings} finding(s))`);
               } else if (rem?.parked) {

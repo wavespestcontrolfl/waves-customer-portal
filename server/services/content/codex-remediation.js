@@ -4,22 +4,31 @@
  *
  * The publisher refuses to merge a blog PR until Codex reports "no major
  * issues" (astro-publisher.assertCodexReviewClear throws CODEX_REVIEW_REQUIRED).
- * When Codex leaves findings, the PR would otherwise sit open forever with
- * nothing to fix it. This service, invoked from the poller when a merge is
- * blocked, reads the inline findings for the current PR head, patches the
- * markdown on the SAME branch via a direct Claude call, and re-requests
- * "@codex review" for the new head — so the poller merges once Codex clears it.
+ * When Codex leaves findings the PR sits open with nothing to fix it. This
+ * service — invoked from BOTH publish-lane pollers when a merge is blocked —
+ * reads the inline findings for the current PR head, patches the markdown on the
+ * SAME branch via a direct Claude call, and re-requests "@codex review" for the
+ * new head, so the poller merges once Codex clears it.
+ *
+ * Two lanes, one loop:
+ *   - scheduler blog posts  → pages-poll (a blog_posts row)     → maybeRemediateBlogPost
+ *   - autonomous publishes  → autonomous-pr-poller (a run, NO   → maybeRemediateAutonomousPr
+ *                             blog_posts row)
+ * Round/attempt state is keyed by PR number (codex_remediation_state) so one
+ * store serves both lanes.
  *
  * Safety:
  *   - Gated behind AUTONOMOUS_CODEX_REMEDIATION (default OFF).
  *   - It only ever pushes to an existing draft PR branch and re-requests review;
  *     it NEVER merges (merge still requires a genuine Codex-clean signal).
- *   - Bounded by CODEX_REMEDIATION_MAX_ROUNDS (default 3). After that many
- *     unsuccessful fix rounds — or if a fix produces no change (usually a
- *     false-positive finding) — the post is parked for human review.
- *   - A round is only "spent" when Codex has actually left fresh findings for
- *     the current head. If Codex hasn't re-reviewed the latest push yet, this
- *     no-ops (waits) rather than burning a round or parking prematurely.
+ *   - Bounded by CODEX_REMEDIATION_MAX_ROUNDS (default 3). After that — or if a
+ *     fix produces no change (usually a false-positive finding) — the PR is
+ *     parked (status='parked'; scheduler lane also disarms its publishing claim
+ *     so the row leaves the auto-merge loop for human review).
+ *   - A round is only spent when Codex has left fresh findings for the current
+ *     head. If Codex hasn't re-reviewed the latest push yet it no-ops (and
+ *     re-posts the "@codex review" request if a prior post failed), so it never
+ *     double-fires or strands a PR on a transient GitHub error.
  */
 
 const dbDefault = require('../../models/db');
@@ -52,9 +61,7 @@ function atRoundLimit(rounds) {
 /**
  * Actionable inline Codex findings for the given head, from the PR's review
  * comments (GET /pulls/{n}/comments). Only comments Codex authored and provably
- * tied to the current head (commit_id or original_commit_id) are kept; each is
- * {path, line, body}. A comment we cannot tie to the head is skipped so a stale
- * finding never causes a round to be spent against the wrong commit.
+ * tied to the current head (commit_id or original_commit_id) are kept.
  */
 function parseCodexFindings(reviewComments = [], headSha = null) {
   const head = shortSha(headSha);
@@ -75,16 +82,17 @@ function parseCodexFindings(reviewComments = [], headSha = null) {
 }
 
 /**
- * The blog markdown file the findings target. Prefer a finding whose path is a
- * .md under the blog content dir; fall back to the post's slug-derived path.
+ * The blog markdown file the findings target. Autonomous posts are `.mdx`,
+ * hand-authored ones `.md` — accept both. Prefer a finding whose path is a blog
+ * file; fall back to a slug-derived `.md` path (scheduler lane only).
  */
-function pickTargetPath(findings = [], post = {}) {
+function pickTargetPath(findings = [], slug = null) {
   const fromFinding = findings
     .map((f) => f.path)
-    .find((p) => typeof p === 'string' && p.startsWith(ASTRO_BLOG_DIR) && p.endsWith('.md'));
+    .find((p) => typeof p === 'string' && p.startsWith(ASTRO_BLOG_DIR) && (p.endsWith('.md') || p.endsWith('.mdx')));
   if (fromFinding) return fromFinding;
-  const slug = String(post.slug || '').replace(/^\/+|\/+$/g, '');
-  return slug ? `${ASTRO_BLOG_DIR}/${slug}.md` : null;
+  const s = String(slug || '').replace(/^\/+|\/+$/g, '');
+  return s ? `${ASTRO_BLOG_DIR}/${s}.md` : null;
 }
 
 function buildReviewRequestBody(newHeadSha) {
@@ -129,13 +137,11 @@ function stripCodeFence(text) {
   let t = String(text || '').trim();
   const fence = t.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/);
   if (fence) t = fence[1];
-  // Strip our own sentinels if the model echoed them.
   t = t.replace(/^<<<FILE\n/, '').replace(/\nFILE\s*$/, '');
   return t.trim() + '\n';
 }
 
 async function generateFix(markdown, findings, deps = {}) {
-  // Route through the shared cross-provider helper (never throws; { ok, text }).
   const call = deps.callAnthropic || callAnthropic;
   const res = await call({
     model: MODELS.FLAGSHIP,
@@ -148,101 +154,165 @@ async function generateFix(markdown, findings, deps = {}) {
   return stripCodeFence(res.text);
 }
 
-async function park(db, post, reason) {
-  await db('blog_posts').where({ id: post.id }).update({
-    codex_remediation_status: 'parked',
-    astro_publish_error: `codex remediation parked: ${reason}`.slice(0, 1000),
-    updated_at: new Date(),
+// ── PR-keyed remediation state ────────────────────────────────────────────
+
+async function getState(db, prNumber) {
+  const row = await db('codex_remediation_state').where({ pr_number: prNumber }).first();
+  return row || { pr_number: prNumber, rounds: 0, status: 'active' };
+}
+
+async function saveState(db, prNumber, patch) {
+  const existing = await db('codex_remediation_state').where({ pr_number: prNumber }).first();
+  if (existing) {
+    await db('codex_remediation_state').where({ pr_number: prNumber }).update({ ...patch, updated_at: new Date() });
+  } else {
+    await db('codex_remediation_state').insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() });
+  }
+}
+
+function reviewRequestedForHead(issueComments = [], headSha = null) {
+  const h = shortSha(headSha);
+  return (Array.isArray(issueComments) ? issueComments : []).some((c) => {
+    const body = String(c && c.body || '');
+    return /@codex\s+review/i.test(body) && (!h || body.includes(h));
   });
-  logger.warn(`[codex-remediation] parked post ${post.id} (${post.slug || ''}): ${reason}`);
+}
+
+async function park(db, prNumber, reason, onPark) {
+  await saveState(db, prNumber, { status: 'parked' });
+  if (typeof onPark === 'function') {
+    try { await onPark(reason); } catch (e) { logger.warn(`[codex-remediation] onPark failed for PR #${prNumber}: ${e.message}`); }
+  }
+  logger.warn(`[codex-remediation] parked PR #${prNumber}: ${reason}`);
   return { parked: true, reason };
 }
 
 /**
- * Run one remediation round for a post whose PR merge was blocked by Codex.
- * Deps { db, gh, anthropic } are injectable for testing.
+ * Run one remediation round for a PR whose merge was blocked by Codex.
+ * ctx: { prNumber, branch, slug?, onPark? }. onPark is a lane-specific
+ * lifecycle hook run when the PR is parked. deps { db, gh, callAnthropic }
+ * are injectable for testing.
  */
-async function runRemediationRound(inputPost, deps = {}) {
+async function runRemediationForPr(ctx = {}, deps = {}) {
   const db = deps.db || dbDefault;
   const gh = deps.gh || ghDefault;
+  const { prNumber, branch, slug = null, onPark = null } = ctx;
+  if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
-  // Re-fetch fresh so remediation state (rounds/status) is authoritative even
-  // if the caller's row was selected without those columns.
-  const post = await db('blog_posts').where({ id: inputPost.id }).first();
-  if (!post) return { skipped: true, reason: 'post gone' };
-  if (post.codex_remediation_status === 'parked') return { skipped: true, reason: 'parked' };
-  if (!post.astro_pr_number || !post.astro_branch_name) return { skipped: true, reason: 'missing PR/branch' };
+  const state = await getState(db, prNumber);
+  if (state.status === 'parked') return { skipped: true, reason: 'parked' };
 
-  const pr = await gh.getPr(post.astro_pr_number);
+  const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
 
-  const reviewComments = await gh.listPrReviewComments(post.astro_pr_number);
+  const reviewComments = await gh.listPrReviewComments(prNumber);
   const findings = parseCodexFindings(reviewComments, headSha);
 
-  // No fresh findings for the current head → Codex either hasn't re-reviewed
-  // the latest push yet, or hit usage limits. Wait; don't burn a round or park.
-  if (findings.length === 0) return { skipped: true, reason: 'awaiting codex re-review (no fresh inline findings)' };
-
-  // Codex left fresh findings. If we've already spent our rounds, this is the
-  // final rejection → park for a human.
-  if (atRoundLimit(post.codex_remediation_rounds)) {
-    return park(db, post, `exhausted ${MAX_ROUNDS} remediation rounds`);
+  if (findings.length === 0) {
+    // No fresh findings for this head. If we've already pushed a fix, make sure
+    // the re-review request actually landed (recovers from a failed
+    // createIssueComment on a prior tick); then wait.
+    if (state.status === 'remediating') {
+      const issueComments = await gh.listIssueComments(prNumber);
+      if (!reviewRequestedForHead(issueComments, headSha)) {
+        await gh.createIssueComment(prNumber, buildReviewRequestBody(headSha));
+        return { skipped: true, reason: 're-requested codex review (recovered)' };
+      }
+      return { skipped: true, reason: 'awaiting codex re-review' };
+    }
+    return { skipped: true, reason: 'awaiting codex review (no inline findings)' };
   }
 
-  const targetPath = pickTargetPath(findings, post);
-  if (!targetPath) return park(db, post, 'could not resolve target markdown file');
+  // Fresh findings on the current head.
+  if (atRoundLimit(state.rounds)) {
+    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark);
+  }
 
-  const file = await gh.getFile(targetPath, post.astro_branch_name);
-  if (!file || !file.content) return park(db, post, `file not found on branch: ${targetPath}`);
+  const targetPath = pickTargetPath(findings, slug);
+  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark);
+
+  const file = await gh.getFile(targetPath, branch);
+  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark);
 
   const fixed = await generateFix(file.content, findings, deps);
   if (!fixed) return { skipped: true, reason: 'no LLM available' };
   if (fixed.trim() === String(file.content).trim()) {
-    return park(db, post, 'remediation produced no change (likely false-positive findings)');
+    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark);
   }
 
+  const round = (state.rounds || 0) + 1;
   const commit = await gh.putFile({
     path: targetPath,
     content: fixed,
-    message: `fix(blog): address Codex review findings (round ${(post.codex_remediation_rounds || 0) + 1})`,
-    branch: post.astro_branch_name,
+    message: `fix(blog): address Codex review findings (round ${round})`,
+    branch,
     sha: file.sha,
   });
   const newHead = (commit && commit.commit && commit.commit.sha)
     || (commit && commit.content && commit.content.sha)
-    || (await gh.getBranchSha(post.astro_branch_name));
+    || (await gh.getBranchSha(branch));
 
-  await gh.createIssueComment(post.astro_pr_number, buildReviewRequestBody(newHead));
-
-  const round = (post.codex_remediation_rounds || 0) + 1;
-  await db('blog_posts').where({ id: post.id }).update({
-    codex_remediation_rounds: round,
-    codex_remediation_status: 'remediating',
-    codex_last_findings: JSON.stringify(findings),
-    astro_commit_sha: newHead,
-    updated_at: new Date(),
+  // Persist state BEFORE the comment so a createIssueComment failure can't
+  // strand the PR — the next tick's recovery branch re-requests the review.
+  await saveState(db, prNumber, {
+    branch,
+    rounds: round,
+    status: 'remediating',
+    last_findings: JSON.stringify(findings),
   });
+  await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
 
-  logger.info(`[codex-remediation] round ${round} pushed for post ${post.id} (${post.slug || ''}): ${findings.length} finding(s) → ${shortSha(newHead)}`);
+  logger.info(`[codex-remediation] round ${round} pushed for PR #${prNumber}: ${findings.length} finding(s) → ${shortSha(newHead)}`);
   return { remediated: true, round, findings: findings.length, newHead };
 }
 
-/**
- * Poller entry point. One call handles the enable gate + a single round.
- */
-async function maybeRemediate(post, deps = {}) {
+// ── Lane entry points ─────────────────────────────────────────────────────
+
+/** Scheduler lane (pages-poll): a blog_posts row. */
+async function maybeRemediateBlogPost(post, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
-  return runRemediationRound(post, deps);
+  const db = deps.db || dbDefault;
+  return runRemediationForPr({
+    prNumber: post.astro_pr_number,
+    branch: post.astro_branch_name,
+    slug: post.slug,
+    onPark: async (reason) => {
+      // Disarm the scheduler's publishing claim (guarded on it) so the
+      // stale-publishing sweep moves the row to human review instead of it
+      // sitting in the auto-merge loop for the full stale window.
+      await db('blog_posts').where({ id: post.id, publish_status: 'publishing' }).update({
+        publish_status: 'pending_review',
+        astro_publish_error: `codex remediation parked: ${reason}`.slice(0, 1000),
+        updated_at: new Date(),
+      });
+    },
+  }, deps);
+}
+
+/** Autonomous lane (autonomous-pr-poller): a run with a live PR, no blog_posts row. */
+async function maybeRemediateAutonomousPr(pr, deps = {}) {
+  if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
+  return runRemediationForPr({
+    prNumber: pr && pr.number,
+    branch: pr && pr.head && pr.head.ref,
+    // path comes from the findings themselves (the autonomous run has no slug
+    // column and posts are .mdx); onPark left null — the run stays parked at
+    // completed_pending_review and status='parked' stops re-remediation.
+    slug: null,
+    onPark: null,
+  }, deps);
 }
 
 module.exports = {
-  maybeRemediate,
-  runRemediationRound,
+  maybeRemediateBlogPost,
+  maybeRemediateAutonomousPr,
+  runRemediationForPr,
   parseCodexFindings,
   pickTargetPath,
   buildReviewRequestBody,
   buildFixUserMessage,
+  reviewRequestedForHead,
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
