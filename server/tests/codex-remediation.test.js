@@ -519,6 +519,52 @@ describe('validateAutonomousRunGates', () => {
     expect(r.reason).toMatch(/opportunity row unavailable/);
   });
 
+  // r8: claims-ledger gate re-runs on the rewritten body for facts-gated runs.
+  describe('facts-gated claims-ledger re-validation', () => {
+    const FACTS_RUN = {
+      ...RUN,
+      facts_sufficiency: JSON.stringify({ applicable: true, sufficient: true, city_id: 'sarasota', service_id: 'pest', county: 'Sarasota' }),
+    };
+
+    test('validator failure -> fail with P0/P1 codes; inputs mirror the runner call', async () => {
+      const deps = goodDeps();
+      let seen = null;
+      deps.claimsLedgerValidator = {
+        validate: async (draft, ctx, opts) => {
+          seen = { body: draft.body, ctx, opts };
+          return { pass: false, findings: [{ severity: 'P0', code: 'CLAIM_UNSUPPORTED_BY_FACT' }] };
+        },
+      };
+      const r = await rem.validateAutonomousRunGates(MD, FACTS_RUN, deps);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/claims-ledger/);
+      expect(r.reason).toMatch(/CLAIM_UNSUPPORTED_BY_FACT/);
+      expect(seen.body).toBe('Fixed body text'); // the REWRITTEN body, not the stored one
+      expect(seen.ctx).toEqual({ city: 'sarasota', service: 'pest', county: 'Sarasota' });
+      expect(seen.opts).toEqual({ options: { missingLedgerSeverity: 'P1' } });
+    });
+
+    test('validator pass -> continues to the remaining gates (ok)', async () => {
+      const deps = goodDeps();
+      deps.claimsLedgerValidator = { validate: async () => ({ pass: true, findings: [] }) };
+      expect((await rem.validateAutonomousRunGates(MD, FACTS_RUN, deps)).ok).toBe(true);
+    });
+
+    test('validator throwing or unavailable -> fail closed', async () => {
+      const d1 = goodDeps();
+      d1.claimsLedgerValidator = { validate: async () => { throw new Error('facts db down'); } };
+      expect((await rem.validateAutonomousRunGates(MD, FACTS_RUN, d1)).reason).toMatch(/facts db down/);
+      const d2 = goodDeps();
+      d2.claimsLedgerValidator = {}; // no validate fn
+      expect((await rem.validateAutonomousRunGates(MD, FACTS_RUN, d2)).reason).toMatch(/validator unavailable/);
+    });
+
+    test('non-facts-gated run skips the gate (no validator needed)', async () => {
+      const deps = goodDeps(); // RUN has no facts_sufficiency; no validator injected
+      expect((await rem.validateAutonomousRunGates(MD, RUN, deps)).ok).toBe(true);
+    });
+  });
+
   // r7: the SEO P1 canary limit applies to remediated bodies too — the gate
   // can pass with P1s (dropped CTA / service link) the runner would refuse.
   test('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS caps P1s on the rewritten body', async () => {

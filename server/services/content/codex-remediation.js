@@ -354,6 +354,40 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
 
+    // 0a. Claims-ledger validation for facts-gated runs (runner step 3b): the
+    //     run's claims_ledger_result was rendered against the ORIGINAL body,
+    //     and a rewrite can introduce an unledgered local claim or a
+    //     facts-bank-disallowed phrase that the stale result never saw. Same
+    //     trigger, inputs, and fail-closed posture as the runner — facts were
+    //     sufficient, so a MISSING ledger is a P1, and an unavailable or
+    //     throwing validator parks rather than skipping the hallucinated-fact
+    //     P0s. The stored ledger rides draft_payload, so validating the
+    //     body-swapped draft checks the REWRITTEN claims against it.
+    const factsCtx = parseJsonMaybe(run.facts_sufficiency);
+    if (factsCtx && factsCtx.applicable && factsCtx.sufficient) {
+      let claimsValidator = deps.claimsLedgerValidator;
+      if (!claimsValidator) {
+        try { claimsValidator = require('./claims-ledger-validator'); } catch (_) { claimsValidator = null; }
+      }
+      if (!claimsValidator || typeof claimsValidator.validate !== 'function') {
+        return { ok: false, reason: 'claims-ledger validator unavailable for a facts-gated run' };
+      }
+      let claimsResult;
+      try {
+        claimsResult = await claimsValidator.validate(draft, {
+          city: factsCtx.city_id,
+          service: factsCtx.service_id,
+          county: factsCtx.county,
+        }, { options: { missingLedgerSeverity: 'P1' } });
+      } catch (err) {
+        return { ok: false, reason: `claims-ledger validation threw: ${err.message}` };
+      }
+      if (!claimsResult || claimsResult.pass !== true) {
+        const codes = (((claimsResult && claimsResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => `${f.severity} ${f.code}`);
+        return { ok: false, reason: `claims-ledger: ${codes.join('; ') || 'no result'}` };
+      }
+    }
+
     // 0. Content-policy gates with the RUN's context. validateFixedBlogFile
     //    already ran them with frontmatter-derived context, but the runner's
     //    context is stricter and lives off the opportunity + brief: FAQ-blocked
