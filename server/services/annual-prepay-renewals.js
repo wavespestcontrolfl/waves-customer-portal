@@ -9,6 +9,9 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 const COVERED_STATUSES = [...ACTIVE_STATUSES, 'renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
+// Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
+// granularity: 3 days out and the day before the first visit).
+const PAYMENT_REMINDER_DAYS = [3, 1];
 const DEFAULT_ALERT_DAYS = 30;
 const LAST_SERVICE_GRACE_DAYS = 14;
 const LAST_SERVICE_TERM_END_LOOKBACK_DAYS = 120;
@@ -1531,6 +1534,240 @@ async function checkAndSend({ today = etDateString() } = {}) {
   return { sent };
 }
 
+// ── Pre-visit payment reminders for UNPAID accept-time prepay terms ─────────
+//
+// A prepay-annual accept mints the full-year invoice and a payment_pending
+// term, but nothing visit-anchored nudged the customer before the first visit:
+// the estimate follow-up cadence stops at accept, and the invoice follow-up
+// sequence (d3/d7/d14/d30) is SEND-anchored, so a short accept-to-visit gap
+// can ride into service week untouched. These reminders anchor on term_start
+// (3 days / 1 day before, matching the daily 10 AM renewal cron's day
+// granularity) and set the expectation that an unpaid prepay simply bills the
+// visit per-application. Same durable sent/claim column pattern as the
+// renewal notices above.
+
+function paymentReminderColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === 3) return 'payment_reminder_3d_sent_at';
+  if (n === 1) return 'payment_reminder_1d_sent_at';
+  return null;
+}
+
+function paymentReminderClaimColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === 3) return 'payment_reminder_3d_claimed_at';
+  if (n === 1) return 'payment_reminder_1d_claimed_at';
+  return null;
+}
+
+// The invoice follow-up engine (send-anchored dunning) and this visit-anchored
+// reminder both text the same pay link, and both crons fire at 10 AM ET — so
+// suppress a pre-visit reminder when that invoice's sequence either touched
+// the customer in the last ~20h or is DUE to touch them today (deterministic
+// regardless of which cron runs first in the shared hour). The 20h window
+// (not 24h) keeps yesterday's 10 AM dunning from suppressing today's 10 AM
+// reminder on the boundary.
+const PAYMENT_REMINDER_DUNNING_SUPPRESS_MS = 20 * 60 * 60 * 1000;
+async function invoiceDunningActiveToday(invoiceId, now = new Date()) {
+  try {
+    const row = await db('invoice_followup_sequences')
+      .where({ invoice_id: invoiceId })
+      .first('status', 'last_touch_at', 'next_touch_at');
+    if (!row || row.status !== 'active') return false;
+    if (row.last_touch_at && (now - new Date(row.last_touch_at)) < PAYMENT_REMINDER_DUNNING_SUPPRESS_MS) return true;
+    if (row.next_touch_at) {
+      const endOfTodayEt = parseETDateTime(`${etDateString()} 23:59:59`);
+      if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
+    }
+    return false;
+  } catch (err) {
+    // Fail open (send the reminder): a read miss must not silence the only
+    // visit-anchored nudge; worst case the customer gets dunning + reminder.
+    logger.warn(`[annual-prepay] dunning suppression check failed for invoice ${invoiceId}: ${err.message}`);
+    return false;
+  }
+}
+
+async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
+  if (!(await annualPrepayTableExists())) return { sent: false, reason: 'table_missing' };
+  const sentCol = paymentReminderColumnForDaysOut(daysOut);
+  const claimCol = paymentReminderClaimColumnForDaysOut(daysOut);
+  if (!sentCol || !claimCol) return { sent: false, reason: 'unsupported_days_out' };
+  const cols = await annualPrepayColumns();
+  if (!cols[sentCol] || !cols[claimCol]) return { sent: false, reason: 'columns_missing' };
+
+  // The status/sent checks on this row are advisory (the caller's candidate
+  // read may be moments old) — the conditional claim UPDATE below re-checks
+  // both atomically, and the fresh invoice read below catches a payment the
+  // webhook hasn't flipped onto the term yet.
+  const term = typeof termOrId === 'object' && termOrId?.id
+    ? termOrId
+    : await db('annual_prepay_terms').where({ id: termOrId }).first();
+  if (!term) return { sent: false, reason: 'term_not_found' };
+  if (term.status !== PAYMENT_PENDING_STATUS) return { sent: false, reason: 'not_payment_pending' };
+  if (term[sentCol]) return { sent: false, reason: 'already_sent' };
+  if (!term.prepay_invoice_id) return { sent: false, reason: 'no_invoice' };
+
+  const invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
+  if (!invoice) return { sent: false, reason: 'invoice_missing' };
+  const invoiceStatus = String(invoice.status || '').toLowerCase();
+  if (invoiceStatus === 'paid' || INVOICE_CANCELLED_STATUSES.has(invoiceStatus)) {
+    return { sent: false, reason: 'invoice_settled_or_cancelled' };
+  }
+  // Never text the homeowner a pay link for a payer-billed invoice — the
+  // pay link + AR route to the payer (mirrors InvoiceService.sendViaSMS).
+  if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
+
+  if (await invoiceDunningActiveToday(invoice.id)) {
+    return { sent: false, reason: 'dunning_active_today' };
+  }
+
+  const now = new Date();
+  const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
+  const [claimedTerm] = await db('annual_prepay_terms')
+    .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
+    .whereNull(sentCol)
+    .where(function paymentClaimAvailable() {
+      this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
+    })
+    .update({ [claimCol]: now, updated_at: now })
+    .returning('*');
+  if (!claimedTerm) return { sent: false, reason: 'already_claimed' };
+
+  const releaseClaim = async () => {
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull(sentCol)
+      .update({ [claimCol]: null, updated_at: new Date() })
+      .catch((err) => logger.warn(`[annual-prepay] payment reminder claim release failed for term ${claimedTerm.id}: ${err.message}`));
+  };
+
+  try {
+    const customer = await db('customers').where({ id: claimedTerm.customer_id }).first();
+    if (!customer) {
+      await releaseClaim();
+      return { sent: false, reason: 'customer_not_found' };
+    }
+    if (!customer.phone) {
+      // The invoice email already carries the pay link (sent at accept, plus
+      // the follow-up sequence's email legs) — with no phone there is no SMS
+      // nudge to add. Mark sent so the daily cron doesn't re-claim forever.
+      await db('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .whereNull(sentCol)
+        .update({ [sentCol]: new Date(), [claimCol]: null, updated_at: new Date() });
+      return { sent: false, reason: 'no_phone' };
+    }
+
+    const { publicPortalUrl } = require('../utils/portal-url');
+    const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+    const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: 'invoice',
+      entityType: 'invoices',
+      entityId: invoice.id,
+      customerId: customer.id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+    const invoiceTotal = Number(invoice.total);
+    const amountText = Number.isFinite(invoiceTotal) && invoiceTotal > 0
+      ? ` for $${invoiceTotal.toFixed(2)}`
+      : '';
+
+    const body = await renderSmsTemplate(
+      'annual_prepay_payment_reminder',
+      {
+        first_name: customer.first_name || 'there',
+        amount_text: amountText,
+        first_visit_date: formatDateLabel(claimedTerm.term_start),
+        pay_link: payUrl,
+      },
+      { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
+    );
+    if (!body) {
+      logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
+      await releaseClaim();
+      return { sent: false, reason: 'missing_sms_template' };
+    }
+
+    const smsResult = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: customer.id,
+      invoiceId: invoice.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'annual_prepay_payment_reminder',
+      metadata: {
+        original_message_type: 'annual_prepay_payment_reminder',
+        annual_prepay_term_id: claimedTerm.id,
+        days_out: daysOut,
+        ...(opts.metadata || {}),
+      },
+    });
+    if (!smsResult.sent) {
+      logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      await releaseClaim();
+      return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
+    }
+
+    const sentAt = new Date();
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull(sentCol)
+      .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
+
+    await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: 'sms_outbound',
+      channel: 'sms',
+      subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
+      body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start)`,
+    }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+
+    return { sent: true, termId: claimedTerm.id };
+  } catch (err) {
+    await releaseClaim();
+    throw err;
+  }
+}
+
+async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
+  if (!(await annualPrepayTableExists())) return { sent: 0 };
+  // Flip any paid-but-pending terms first so they never remind.
+  await activatePaidPendingTerms();
+  let sent = 0;
+
+  for (const daysOut of PAYMENT_REMINDER_DAYS) {
+    const sentCol = paymentReminderColumnForDaysOut(daysOut);
+    const claimCol = paymentReminderClaimColumnForDaysOut(daysOut);
+    const cols = await annualPrepayColumns();
+    if (!cols[sentCol] || !cols[claimCol]) continue; // migration not run yet
+    const target = addDaysYmd(today, daysOut);
+    const terms = await db('annual_prepay_terms')
+      .where({ status: PAYMENT_PENDING_STATUS })
+      .whereNotNull('prepay_invoice_id')
+      .whereNull(sentCol)
+      .where(function paymentClaimAvailable() {
+        this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
+      })
+      .where('term_start', target)
+      .select('*');
+
+    for (const term of terms) {
+      try {
+        const result = await sendPaymentPendingReminder(term, daysOut);
+        if (result.sent) sent++;
+      } catch (err) {
+        logger.error(`[annual-prepay] payment reminder failed for term ${term.id}: ${err.message}`);
+      }
+    }
+  }
+
+  return { sent };
+}
+
 async function hasAnnualPrepayRenewal(customerId, termEnd) {
   if (!(await annualPrepayTableExists())) return false;
   const row = await db('annual_prepay_terms')
@@ -1590,6 +1827,8 @@ module.exports = {
   getOpenRenewalAlerts,
   sendCustomerTermNotice,
   checkAndSend,
+  sendPaymentPendingReminder,
+  checkAndSendPaymentReminders,
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
   clearPrepaidStampsForTerm,
@@ -1604,6 +1843,9 @@ module.exports = {
     daysUntil,
     noticeColumnForDaysOut,
     noticeClaimColumnForDaysOut,
+    paymentReminderColumnForDaysOut,
+    paymentReminderClaimColumnForDaysOut,
+    invoiceDunningActiveToday,
     shouldAlertTerm,
     isLastServiceNearTermEnd,
     invoiceTermStatus,
