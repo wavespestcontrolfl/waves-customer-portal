@@ -10124,7 +10124,7 @@ function serviceCategoryForOneTimeItem(item = {}) {
   return null;
 }
 
-function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
   const categories = new Set();
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   recurring.forEach((svc) => {
@@ -10137,6 +10137,30 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     const category = serviceCategoryForOneTimeItem(item);
     if (category) categories.add(category);
   });
+
+  return categories;
+}
+
+// Optional service-category scope for the glass release: CSV env, e.g.
+// GATE_ESTIMATE_GLASS_CATEGORIES=pest_control,lawn_care. Unset/empty = all
+// categories. An estimate qualifies only when EVERY category on it is in
+// scope, so a pest+lawn bundle releases but pest+mosquito stays on the old
+// page until mosquito's pack ships.
+const GLASS_RELEASE_CATEGORIES = (process.env.GATE_ESTIMATE_GLASS_CATEGORIES || '')
+  .split(',').map((c) => c.trim()).filter(Boolean);
+
+function glassCategoryEligible(estData, recurringServices, oneTimeItems, derivedCategory) {
+  if (!GLASS_RELEASE_CATEGORIES.length) return true;
+  const allowed = new Set(GLASS_RELEASE_CATEGORIES);
+  const categories = collectServiceCategories(recurringServices, oneTimeItems);
+  // Engine-inputs-only estimates collect nothing — fall back to the derived
+  // single category ('bundle' never reaches here from that path).
+  const effective = categories.size ? [...categories] : [derivedCategory].filter(Boolean);
+  return effective.length > 0 && effective.every((c) => allowed.has(c));
+}
+
+function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+  const categories = collectServiceCategories(recurringServices, oneTimeItems);
 
   if (categories.size > 1) return 'bundle';
   if (categories.size === 1) return Array.from(categories)[0];
@@ -12657,8 +12681,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // Glass release flag: when on, the React view renders the liquid-glass
       // experience without needing ?glass=1. Absent (not false) while the
-      // gate is off so pre-release responses stay byte-identical.
-      ...(featureGates.isEnabled('estimateGlassTheme') ? { glassDefault: true } : {}),
+      // gate is off so pre-release responses stay byte-identical. The
+      // optional category scope releases service-by-service (owner call
+      // 2026-07-05: pest + lawn first; other categories keep the old page
+      // until their glass copy packs are approved).
+      ...(featureGates.isEnabled('estimateGlassTheme')
+        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, pricingBundle?.oneTimeBreakdown?.items || [], serviceCategory)
+        ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,
