@@ -822,6 +822,20 @@ async function blogHeroSocialImageUrl(link) {
   }
 }
 
+// Facebook alone never justifies AI image generation or a brand-card render
+// (FB link posts preview og:image on their own), but a blog HERO is the
+// post's actual image at the cost of one fetch+rehost — a Facebook-only
+// deployment (Instagram/GBP disabled or unconfigured) should still attach it
+// as a photo rather than silently downgrading to a text/link post. Sync env
+// check mirroring publishToAll's fbReady predicate.
+function facebookWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo }) {
+  return !!noAiImage && !hasVideo && BLOG_HERO_SOURCES.has(source)
+    && requestedPlatforms.has('facebook')
+    && SOCIAL_FLAGS.facebookEnabled
+    && !!process.env.FACEBOOK_ACCESS_TOKEN
+    && !!process.env.FACEBOOK_PAGE_ID;
+}
+
 // Render a deterministic brand card (SVG -> JPEG) and host it on S3/CDN, so
 // autonomous posts (incl. blog shares) carry the on-brand card instead of a
 // generic AI image. Returns null on any failure (no S3/CDN, render error) so
@@ -1351,6 +1365,7 @@ const SocialMediaService = {
     // on a dry run, when one already exists, or when hosting is unconfigured.
     let metaWantsImage = false;
     let gbpWantsImage = false;
+    let fbWantsHero = false;
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
@@ -1368,13 +1383,19 @@ const SocialMediaService = {
       // nobody consumes (GBP's 4:3 want below is independent: it never takes
       // the video, so it may still render its card).
       metaWantsImage = instagramCanConsume && !hasVideo; // FB/IG consume the 1:1 image
+      // Facebook alone never justifies AI generation or a card render (its
+      // link posts preview og:image on their own), but a blog HERO is the
+      // post's actual image at the cost of a fetch+rehost — so a Facebook-only
+      // deployment still attaches it instead of silently dropping the photo
+      // the old direct-imageUrl callers provided (Codex round 2).
+      fbWantsHero = facebookWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo });
       if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
         gbpWantsImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
       }
     }
-    if (metaWantsImage || gbpWantsImage) {
+    if (metaWantsImage || gbpWantsImage || fbWantsHero) {
       if (noAiImage) {
         // Autonomous callers (RSS cron blog shares, studio campaigns, scheduled
         // blog/newsletter shares) NEVER use the AI image generator — it produces
@@ -1385,7 +1406,7 @@ const SocialMediaService = {
         // the logo/CTA). Text-only if a card can't be rendered.
         const heroUrl = BLOG_HERO_SOURCES.has(source) ? await blogHeroSocialImageUrl(link) : null;
         if (heroUrl) {
-          if (metaWantsImage) generatedImageUrl = heroUrl;
+          if (metaWantsImage || fbWantsHero) generatedImageUrl = heroUrl;
           if (gbpWantsImage && !resolvedGbpImageUrl) resolvedGbpImageUrl = heroUrl;
         } else {
           const eyebrow = source === 'newsletter' ? 'Waves newsletter' : 'From the Waves blog';
@@ -1780,3 +1801,4 @@ module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
 module.exports.isImageHostingConfigured = isImageHostingConfigured;
 module.exports.blogHeroSocialImageUrl = blogHeroSocialImageUrl;
 module.exports.BLOG_HERO_SOURCES = BLOG_HERO_SOURCES;
+module.exports.facebookWantsBlogHero = facebookWantsBlogHero;

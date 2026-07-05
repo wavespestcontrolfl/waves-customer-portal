@@ -107,6 +107,41 @@ describe('blogHeroSocialImageUrl', () => {
     expect(social.BLOG_HERO_SOURCES.has('manual')).toBe(false);
   });
 
+  describe('facebookWantsBlogHero (Codex round 2: FB-only deployments keep the photo attachment)', () => {
+    const base = {
+      requestedPlatforms: new Set(['facebook']),
+      source: 'autonomous_blog',
+      noAiImage: true,
+      hasVideo: false,
+    };
+    beforeEach(() => {
+      process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
+      process.env.FACEBOOK_ACCESS_TOKEN = 'tok';
+      process.env.FACEBOOK_PAGE_ID = 'page';
+    });
+    afterEach(() => {
+      delete process.env.SOCIAL_FACEBOOK_ENABLED;
+      delete process.env.FACEBOOK_ACCESS_TOKEN;
+      delete process.env.FACEBOOK_PAGE_ID;
+    });
+
+    test('true for a Facebook-only blog share (no Instagram/GBP needed)', () => {
+      expect(social.facebookWantsBlogHero(base)).toBe(true);
+    });
+
+    test('false for every non-hero condition: non-blog source, video, AI path, FB not requested/enabled, missing creds', () => {
+      expect(social.facebookWantsBlogHero({ ...base, source: 'newsletter' })).toBe(false);
+      expect(social.facebookWantsBlogHero({ ...base, hasVideo: true })).toBe(false);
+      expect(social.facebookWantsBlogHero({ ...base, noAiImage: false })).toBe(false);
+      expect(social.facebookWantsBlogHero({ ...base, requestedPlatforms: new Set(['gbp']) })).toBe(false);
+      process.env.SOCIAL_FACEBOOK_ENABLED = 'false';
+      expect(social.facebookWantsBlogHero(base)).toBe(false);
+      process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
+      delete process.env.FACEBOOK_PAGE_ID;
+      expect(social.facebookWantsBlogHero(base)).toBe(false);
+    });
+  });
+
   test('scheduler blog share passes NO imageUrl — a raw .webp hero would bypass the hero branch and fail Instagram (Codex round 1)', () => {
     // publishToAll seeds generatedImageUrl from a caller-passed imageUrl, and
     // the hero branch only runs when generatedImageUrl is empty — so the
