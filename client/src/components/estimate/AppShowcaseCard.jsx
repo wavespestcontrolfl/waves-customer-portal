@@ -118,6 +118,48 @@ export default function AppShowcaseCard({ onBookToday = null }) {
           : 'Live GPS, visit reports, and alerts you control — the Waves app keeps you in the loop from booking to done.'}
       </p>
 
+      {glass ? (
+        <div className="gc-app-visual">
+          <div className="gc-av-left">
+            <div className="gc-av-glow" aria-hidden="true" />
+            <img
+              className="gc-av-phone"
+              src="/images/app/app-tracking.webp"
+              width="760"
+              height="1647"
+              loading="lazy"
+              alt="Waves app live technician tracking"
+              style={{ height: 'auto' }}
+            />
+          </div>
+          <div className="gc-av-right">
+            <div style={{ fontSize: '1.3rem', fontWeight: 600, letterSpacing: '-0.02em', color: '#04395E' }}>
+              It&rsquo;s all in the Waves app
+            </div>
+            <p style={{ fontSize: 14, color: W.textBody, margin: '6px 0 0', lineHeight: 1.5 }}>
+              {GLASS_COPY.appHouseholdLine}
+            </p>
+            <div className="gc-av-chips">
+              {APP_FEATURES.map(([, label]) => (
+                <span key={label} className="gc-av-chip">{label}</span>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
+              {(APP_STORE_URL || !PLAY_STORE_URL) ? (
+                <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
+              ) : null}
+              {(PLAY_STORE_URL || !APP_STORE_URL) ? (
+                <StoreBadge url={PLAY_STORE_URL} label="Get Waves on Google Play"><GooglePlayBadge /></StoreBadge>
+              ) : null}
+              {!anyStoreLive ? (
+                <span style={{ flexBasis: '100%', marginTop: -2, fontSize: 12, fontWeight: 600, color: W.blueDark, letterSpacing: '0.02em' }}>
+                  Coming soon to iPhone &amp; Android
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : (
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 16, margin: '4px 0 18px' }}>
         {APP_SHOTS.map((shot) => (
           <figure key={shot.src} style={{ margin: 0, display: 'flex', flexDirection: 'column' }}>
@@ -141,7 +183,9 @@ export default function AppShowcaseCard({ onBookToday = null }) {
           </figure>
         ))}
       </div>
+      )}
 
+      {glass ? null : (
       <div style={{ marginTop: 16, padding: 16, borderRadius: 12, background: W.blueLight, border: '1px solid #CDEBFA' }}>
         <div style={{ marginBottom: 12 }}>
           <strong style={{ display: 'block', fontSize: 15, color: W.blueDeeper }}>It&rsquo;s all in the Waves app</strong>
@@ -182,6 +226,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
           ) : null}
         </div>
       </div>
+      )}
 
       {onBookToday ? (
         <div style={{ display: 'flex', justifyContent: 'center', marginTop: 18 }}>

@@ -43,6 +43,87 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('SlotPicker (glass stale-selection sweep)', () => {
+  const setGlass = (on) => window.history.replaceState(null, '', on ? '/?glass=1' : '/');
+
+  it('preserves a selected slot while the availability fetch is still pending', async () => {
+    setGlass(true);
+    const pending = deferred();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pending.promise));
+    const onSelect = vi.fn();
+    const onSelectMeta = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="kept-slot"
+          onSelect={onSelect}
+          onSelectMeta={onSelectMeta}
+          refreshSignal={0}
+        />,
+      );
+      // Loading: the sweep must treat the empty list as "unknown", not
+      // "gone" — a review-cancel remount preserves selectedSlotId on
+      // purpose and the payment choices hang off it.
+      expect(onSelect).not.toHaveBeenCalled();
+      pending.resolve(jsonResponse({ primary: [slot('kept-slot', '2099-06-01')], expander: [] }));
+      await screen.findByText(/Arrival window:/);
+      expect(onSelect).not.toHaveBeenCalledWith(null);
+    } finally {
+      setGlass(false);
+    }
+  });
+
+  it('keeps a held selection missing from the refetched list while its window is bookable', async () => {
+    setGlass(true);
+    // The customer's own review-cancel hold occupies the slot server-side,
+    // so the refetched list does NOT include it — the fallback meta from
+    // the page is what keeps the retry path alive.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ primary: [slot('other-slot', '2099-06-01')], expander: [] }),
+    ));
+    const onSelect = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="held-slot"
+          selectedSlotFallbackMeta={{ slotId: 'held-slot', date: '2099-06-01', windowStart: '10:00', dow: 'Mon', time: '10:00 AM' }}
+          onSelect={onSelect}
+          refreshSignal={0}
+        />,
+      );
+      await screen.findByText(/Arrival window:/);
+      expect(onSelect).not.toHaveBeenCalledWith(null);
+      // The tech chip stays up for the held selection.
+      expect(screen.getByText(/Your technician/)).toBeInTheDocument();
+    } finally {
+      setGlass(false);
+    }
+  });
+
+  it('clears the selection once loaded slots no longer include it', async () => {
+    setGlass(true);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ primary: [slot('other-slot', '2099-06-01')], expander: [] }),
+    ));
+    const onSelect = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="gone-slot"
+          onSelect={onSelect}
+          refreshSignal={0}
+        />,
+      );
+      await waitFor(() => expect(onSelect).toHaveBeenCalledWith(null));
+    } finally {
+      setGlass(false);
+    }
+  });
+});
+
 describe('SlotPicker', () => {
   it('renders the date finder inside the booking card, above the slot list', async () => {
     const fetchMock = vi

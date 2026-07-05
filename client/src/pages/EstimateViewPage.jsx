@@ -53,6 +53,12 @@ import {
   GLASS_COPY,
   GLASS_DAY_LINES,
 } from '../lib/estimate-glass-copy';
+import {
+  GlassProofStrip,
+  GlassSectionCta,
+  GlassStickyBookBar,
+  useFeaturedReviews,
+} from '../components/estimate/glass/GlassEstimateExtras';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 
@@ -100,8 +106,13 @@ function scrollToBookingSection() {
 
 // Primary booking CTA — same navy treatment as the add-service button;
 // jumps the customer straight to the scheduling section.
-function GetServiceTodayCta({ showGuaranteeMicro = false }) {
+function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null }) {
   const glass = glassCopyActive();
+  // Slot-aware label (PR C): once a slot is picked the CTA names it, so the
+  // action reads as confirming THAT visit rather than restarting the flow.
+  const label = glass
+    ? (slotMeta ? `Approve — ${slotMeta.dow} ${slotMeta.time}` : GLASS_COPY.ctaMain)
+    : 'Get service today!';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
@@ -118,9 +129,14 @@ function GetServiceTodayCta({ showGuaranteeMicro = false }) {
           fontSize: 15,
           fontWeight: 800,
           cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
         }}
       >
-        {glass ? GLASS_COPY.ctaMain : 'Get service today!'}
+        {label}
+        {glass && slotMeta ? <Icon name="check" size={16} strokeWidth={2.6} /> : null}
       </button>
       {/* Recurring-plan terms only (unlimited callbacks, 90-day guarantee) —
           the one-time branch renders this CTA too and has different terms,
@@ -540,7 +556,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null }) {
   if (!intelligence) return null;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
@@ -751,6 +767,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           ))}
         </div>
       ) : null}
+
+      {lockInCta}
     </section>
   );
 }
@@ -2249,6 +2267,7 @@ export function ServiceSection({
   showGetServiceCta = false,
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
+  ctaSlotMeta = null,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -2316,7 +2335,7 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro /> : null}
+        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro slotMeta={ctaSlotMeta} /> : null}
       </div>
 
       {afterPrice}
@@ -2357,6 +2376,12 @@ export default function EstimateViewPage() {
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // Slot metadata for the glass slot-aware CTAs/tech chip ("Approve — Tue
+  // 9:00 AM") — SlotPicker reports it alongside the id; cleared with it.
+  const [selectedSlotMeta, setSelectedSlotMeta] = useState(null);
+  // Curated Google-review pool for the glass hero proof strip (PR C) —
+  // fetch only under the dark launch.
+  const featuredReviews = useFeaturedReviews(glassCopyActive(), 12);
   // serviceMode: 'recurring' | 'one_time'. Most estimates default to
   // recurring; structurally one-time estimates are forced to one_time after
   // the data endpoint loads.
@@ -2584,6 +2609,7 @@ export default function EstimateViewPage() {
         setCtaPhase('reservation_expired');
         setReservation(null);
         setSelectedSlotId(null);
+        setSelectedSlotMeta(null);
         setPaymentPreference(null);
         setSlotsRefreshSignal((v) => v + 1);
       }
@@ -2700,6 +2726,7 @@ export default function EstimateViewPage() {
         const message = body.error || 'Unable to reserve this slot.';
         setPaymentPreference(null);
         setSelectedSlotId(null);
+        setSelectedSlotMeta(null);
         if (/slot no longer available/i.test(message)) {
           setCtaPhase('slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
@@ -2757,6 +2784,7 @@ export default function EstimateViewPage() {
       }, {}),
     }));
     setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
     setPaymentPreference(null);
     setReservation(null);
     setAcceptResult(null);
@@ -2808,6 +2836,7 @@ export default function EstimateViewPage() {
             setCtaPhase('configure');
             setReservation(null);
             setSelectedSlotId(null);
+            setSelectedSlotMeta(null);
             setPaymentPreference(null);
             await loadEstimate();
             return;
@@ -2817,6 +2846,7 @@ export default function EstimateViewPage() {
           setSlotsRefreshSignal((v) => v + 1);
           setReservation(null);
           setSelectedSlotId(null);
+          setSelectedSlotMeta(null);
           setPaymentPreference(null);
           return;
         }
@@ -3039,6 +3069,29 @@ export default function EstimateViewPage() {
   const isLockedMirrorSection = (section) => (
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
+  // Live price for the glass sticky book bar — it must quote exactly what
+  // the cards quote. Bundles: combinedFrequency.monthly IS the monthly
+  // total CombinedRecurringPriceCard renders as /mo — no cadence multiply.
+  // Single service: the cadence price PriceCard renders.
+  const stickyBarPrice = (() => {
+    const HIDDEN = { label: null, period: null };
+    if (services.length > 1) {
+      const monthly = combinedFrequency?.monthly;
+      if (combinedFrequency?.quoteRequired === true || monthly == null) return HIDDEN;
+      // Narrow low-confidence commercial estimates price as a $low–$high
+      // RANGE on the cards; a fixed bar quoting one exact number would
+      // contradict them mid-booking, so it stays hidden for ranged pricing.
+      if (Number(combinedFrequency?.lowConfidenceRangePct) > 0) return HIDDEN;
+      return { label: fmtMoney(Math.round(Number(monthly) * 100) / 100), period: '/mo' };
+    }
+    const src = currentFrequency;
+    if (!src || src.quoteRequired === true || src.monthly == null) return HIDDEN;
+    if (Number(src.lowConfidenceRangePct) > 0) return HIDDEN;
+    const billingKey = src.billingFrequencyKey || src.key;
+    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
+    const period = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
+    return { label: fmtMoney(Math.round(Number(src.monthly) * intervalMonths * 100) / 100), period };
+  })();
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
@@ -3097,6 +3150,7 @@ export default function EstimateViewPage() {
                 section={section}
                 servicesLength={services.length}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
+                ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
@@ -3133,7 +3187,7 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
@@ -3158,7 +3212,7 @@ export default function EstimateViewPage() {
           oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
           breakdown={pricing.oneTimeBreakdown}
         />
-        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta /> : null}
+        {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
         <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
@@ -3393,6 +3447,7 @@ export default function EstimateViewPage() {
                 setServiceMode(m);
                 // Reset selection state that doesn't apply in the other mode
                 setSelectedSlotId(null);
+                setSelectedSlotMeta(null);
                 setPaymentPreference(null);
                 setReservation(null);
                 setAcceptResult(null);
@@ -3403,14 +3458,20 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
+          {/* Glass (PR C): proof before price — continuous five-star ticker. */}
+          {glassContent ? <GlassProofStrip reviews={featuredReviews} /> : null}
+
           <div id={PRICE_SECTION_ID}>
             {renderQuoteDetailCards()}
           </div>
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
               server-rendered estimate's order: price → Waves AI → booking) so
-              the customer sees the price first. */}
-          {aiPanelBlock}
+              the customer sees the price first. Glass reorders per the
+              approved section positioning (schedule directly after price;
+              why-price-custom, reviews, app, Ask, and the lawn upsell follow
+              below) — only the membership card keeps this spot. */}
+          {glassContent ? <MembershipCard membership={estimate.membership} /> : aiPanelBlock}
 
           <div id={BOOKING_SECTION_ID}>
             {canShowSlotPicker ? (
@@ -3419,6 +3480,9 @@ export default function EstimateViewPage() {
                 askToken={estimate.askToken}
                 selectedSlotId={selectedSlotId}
                 onSelect={setSelectedSlotId}
+                onSelectMeta={setSelectedSlotMeta}
+                selectedSlotFallbackMeta={selectedSlotMeta}
+                licenseNumber={estimate.licenseNumber}
                 refreshSignal={slotsRefreshSignal}
                 serviceMode={serviceMode}
                 selectedFrequency={selectedFrequency}
@@ -3485,15 +3549,65 @@ export default function EstimateViewPage() {
               <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.red }}>{WAVES_PHONE_DISPLAY}</a>.
             </div>
           ) : null}
+
+          {/* Glass-ordered tail (approved section positioning): why-price-
+              custom with its lock-in CTA, reviews with the join CTA, the app
+              section, Ask, then the lawn upsell — replaces both the
+              aiPanelBlock spot above and the shared tail below. */}
+          {glassContent ? (
+            <>
+              <WaveGuardIntelligenceCard
+                intelligence={intelligenceDisplay}
+                address={estimate.address}
+                copy={copy}
+                showYourWork={data.showYourWork || null}
+                lockInCta={canShowSlotPicker
+                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} />
+                  : null}
+              />
+              <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
+              <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
+              <EstimateAskBar
+                token={token}
+                askToken={estimate.askToken}
+                selectedFrequency={selectedFrequency}
+                serviceMode={serviceMode}
+                chips={askChips}
+              />
+              <EstimateAddServiceRequestCard
+                offer={addServiceOffer}
+                requestState={addServiceRequestState}
+                onRequest={handleAddServiceRequest}
+              />
+            </>
+          ) : null}
         </>
       )}
 
       {/* During slot review the booking section isn't rendered, so the app
-          card's "Book today!" would scroll nowhere — drop it for that phase. */}
-      <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
-      <CustomerReviews />
+          card's "Book today!" would scroll nowhere — drop it for that phase.
+          The glass configure branch renders app + reviews in its own ordered
+          tail above, so only the contact hatch + guarantee remain here. */}
+      {glassContent && !(ctaPhase === 'review' && reservation) ? null : (
+        <>
+          <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
+          <CustomerReviews />
+        </>
+      )}
       <QuestionsEscapeHatch estimateSlug={estimate.slug} />
       <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+
+      {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
+          slot-aware approve. Configure phase only — during slot review it
+          would cover the confirm/cancel buttons. */}
+      {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
+        <GlassStickyBookBar
+          priceLabel={stickyBarPrice.label}
+          periodLabel={stickyBarPrice.period}
+          slotMeta={selectedSlotMeta}
+          onApprove={scrollToBookingSection}
+        />
+      ) : null}
     </Page>
   );
 }
