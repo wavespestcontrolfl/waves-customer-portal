@@ -54,14 +54,21 @@ describe('glassPestInclusions', () => {
   it('states the real visit count in the perimeter bullet', () => {
     expect(glassPestInclusions(6)[1]).toMatch(/^Protected 6× a year/);
     expect(glassPestInclusions(0)[1]).toMatch(/^Protected 4× a year/);
-    expect(glassPestInclusions(undefined)).toHaveLength(7);
+  });
+
+  it('advertises the $99 setup waiver only when the estimate carries a waivable fee', () => {
+    expect(glassPestInclusions(4)).toHaveLength(6);
+    const withSetup = glassPestInclusions(4, true);
+    expect(withSetup).toHaveLength(7);
+    expect(withSetup[6]).toMatch(/^\$99 setup disappears/);
   });
 });
 
 describe('glassSchedQualifier', () => {
-  it('maps the first slot date to today / tomorrow / this week', () => {
+  it('maps the first slot date to today / tomorrow / this week on the ET calendar', () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-05T09:00:00'));
+    // 15:00Z = 11:00 ET → the ET date is 2026-07-05 whatever the machine TZ.
+    vi.setSystemTime(new Date('2026-07-05T15:00:00Z'));
     expect(glassSchedQualifier('2026-07-05')).toBe('today');
     expect(glassSchedQualifier('2026-07-06')).toBe('tomorrow');
     expect(glassSchedQualifier('2026-07-10')).toBe('this week');
@@ -79,6 +86,13 @@ describe('glassRewriteSlotSummary', () => {
       'No route near you that day yet, but here are 4 open times for Tuesday, July 8.',
       'sometime Tuesday',
     )).toBe('4 open times for Tuesday, July 8 — pick what works:');
+  });
+
+  it('rewrites the singular one-slot form too', () => {
+    expect(glassRewriteSlotSummary(
+      'No route near you that day yet, but here is 1 open time for Monday, July 7.',
+      'monday',
+    )).toBe('1 open time for Monday, July 7 — pick what works:');
   });
 
   it('folds in the customer’s daypart qualifier when they used one', () => {

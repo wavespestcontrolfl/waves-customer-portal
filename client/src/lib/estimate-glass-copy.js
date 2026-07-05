@@ -11,6 +11,7 @@
  * pack applies only to pest_control — other categories keep the standard
  * copy until their packs are approved (planned follow-up, not PR B).
  */
+import { etDateString } from './timezone';
 
 export function glassCopyActive() {
   try {
@@ -37,8 +38,14 @@ export const GLASS_COPY = {
   textButton: 'Text us — fast answers',
   setupWaivedNote: 'Pay the year up front and we waive it — instantly.',
   lawnOfferTitle: 'Add Lawn Care — save on both services',
+  // The Silver/10% mechanics are only true when lawn would be the SECOND
+  // service; a pest + mosquito/tree/termite plan is already past Silver, so
+  // multi-service estimates get the tier-agnostic body instead of a wrong
+  // percentage claim.
   lawnOfferBody: 'Bundling bumps you up to WaveGuard Silver: 10% off your pest control AND your lawn care, on every visit.',
+  lawnOfferBodyMulti: 'Bundling lawn care bumps your whole plan to the next WaveGuard tier — a bigger discount on every service, every visit.',
   lawnOfferButton: 'Add Lawn Care — unlock 10% off',
+  lawnOfferButtonMulti: 'Add Lawn Care — unlock the next tier',
 };
 
 // Footer city line — GBP profiles (g.page short links from
@@ -72,19 +79,25 @@ export function glassEstimateCopyFor(serviceCategory) {
 }
 
 // ── Technical offer stack (pest) ────────────────────────────────────────────
-// Seven bullets replacing the three-line pest inclusion list. The perimeter
-// bullet states the real visit count when the plan carries one.
-export function glassPestInclusions(visitsPerYear) {
+// The bullets replacing the three-line pest inclusion list. The perimeter
+// bullet states the real visit count when the plan carries one; the setup
+// bullet renders only when the estimate actually carries a waivable setup
+// fee (existing-customer pest estimates have neither the fee nor the
+// annual-prepay option, so advertising the waiver there would be false).
+export function glassPestInclusions(visitsPerYear, includeSetupBullet = false) {
   const visits = Number(visitsPerYear) > 0 ? Number(visitsPerYear) : 4;
-  return [
+  const bullets = [
     'Premium non-repellent + repellent solutions, matched to the target pest',
     `Protected ${visits}× a year — full perimeter, entry points, eaves & harborage zones, every visit`,
     'Interior treatment included — no awkward upsell, no surprise charge',
     'If pests come back, so do we — unlimited free callbacks, 100% guaranteed',
     '90-day money-back guarantee — if you don’t love it, you don’t pay',
     'No long-term contract — stay because it works, not because you’re trapped',
-    '$99 setup disappears with annual billing — waived instantly',
   ];
+  if (includeSetupBullet) {
+    bullets.push('$99 setup disappears with annual billing — waived instantly');
+  }
+  return bullets;
 }
 
 // ── Per-day value line ──────────────────────────────────────────────────────
@@ -112,12 +125,15 @@ export function glassTierDisplay(tierLabel) {
 // "Lock in your spot — openings as soon as {today|tomorrow|this week}" from
 // the REAL first open slot (plan directive: dynamic, never a static claim).
 // Returns null when there are no slots to make the claim from.
+// Slot dates are ET wall-clock (lib/timezone.js: scheduling is ET, never
+// browser-local), so "today" is measured against the ET calendar — a
+// customer browsing from another timezone still sees the right label.
 export function glassSchedQualifier(firstSlotYmd) {
   if (!firstSlotYmd) return null;
-  const slot = new Date(`${firstSlotYmd}T12:00:00`);
-  if (Number.isNaN(slot.getTime())) return null;
-  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const days = Math.round((startOfDay(slot) - startOfDay(new Date())) / 86400000);
+  const slotUtc = Date.parse(`${firstSlotYmd}T12:00:00Z`);
+  const todayUtc = Date.parse(`${etDateString()}T12:00:00Z`);
+  if (Number.isNaN(slotUtc) || Number.isNaN(todayUtc)) return null;
+  const days = Math.round((slotUtc - todayUtc) / 86400000);
   if (days <= 0) return 'today';
   if (days === 1) return 'tomorrow';
   if (days <= 7) return 'this week';
@@ -135,10 +151,14 @@ export function glassSchedTitle(qualifier) {
 // customer's own search phrasing is folded in when present.
 export function glassRewriteSlotSummary(summary, query = '') {
   const text = String(summary || '');
-  const m = text.match(/^No route near you that day yet, but here are (\d+) open times for ([A-Za-z]+),? (.+?)\.?$/);
+  // The server uses singular grammar for one result ("here is 1 open time"),
+  // so match both forms — a one-slot day is the case that most needs the
+  // positive framing.
+  const m = text.match(/^No route near you that day yet, but here (?:are|is) (\d+) open times? for ([A-Za-z]+),? (.+?)\.?$/);
   if (!m) return summary;
+  const times = `open time${m[1] === '1' ? '' : 's'}`;
   const qualifier = String(query).match(/\b(morning|afternoon|evening|weekend)\b/i);
   return qualifier
-    ? `${m[1]} open times for ${m[2]} ${qualifier[1].toLowerCase()} (${m[3]}) — pick what works:`
-    : `${m[1]} open times for ${m[2]}, ${m[3]} — pick what works:`;
+    ? `${m[1]} ${times} for ${m[2]} ${qualifier[1].toLowerCase()} (${m[3]}) — pick what works:`
+    : `${m[1]} ${times} for ${m[2]}, ${m[3]} — pick what works:`;
 }

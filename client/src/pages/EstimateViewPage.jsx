@@ -100,7 +100,7 @@ function scrollToBookingSection() {
 
 // Primary booking CTA — same navy treatment as the add-service button;
 // jumps the customer straight to the scheduling section.
-function GetServiceTodayCta() {
+function GetServiceTodayCta({ showGuaranteeMicro = false }) {
   const glass = glassCopyActive();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
@@ -122,7 +122,10 @@ function GetServiceTodayCta() {
       >
         {glass ? GLASS_COPY.ctaMain : 'Get service today!'}
       </button>
-      {glass ? (
+      {/* Recurring-plan terms only (unlimited callbacks, 90-day guarantee) —
+          the one-time branch renders this CTA too and has different terms,
+          so the microcopy is opt-in per call site. */}
+      {glass && showGuaranteeMicro ? (
         <div style={{ marginTop: 10, fontSize: 12.5, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {GLASS_COPY.ctaMicro}
         </div>
@@ -337,16 +340,19 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
   }
 
   if (currentKeys.has('pest_control') && !currentKeys.has('lawn_care')) {
-    // Glass copy names the actual mechanics (Silver = 10% off both services)
-    // instead of the abstract "next pricing tier".
+    // Glass copy names the actual mechanics instead of the abstract "next
+    // pricing tier" — but the Silver/10% claim is only true when lawn would
+    // be the SECOND service; a multi-service pest plan is already past
+    // Silver, so it gets the tier-agnostic body.
     if (glassCopyActive()) {
+      const lawnWouldBeSecondService = currentKeys.size === 1;
       return {
         serviceKey: 'lawn_care',
         label: 'Lawn Care',
         icon: 'leaf',
         title: GLASS_COPY.lawnOfferTitle,
-        body: GLASS_COPY.lawnOfferBody,
-        buttonLabel: GLASS_COPY.lawnOfferButton,
+        body: lawnWouldBeSecondService ? GLASS_COPY.lawnOfferBody : GLASS_COPY.lawnOfferBodyMulti,
+        buttonLabel: lawnWouldBeSecondService ? GLASS_COPY.lawnOfferButton : GLASS_COPY.lawnOfferButtonMulti,
       };
     }
     return {
@@ -2242,6 +2248,7 @@ export function ServiceSection({
   afterPrice = null,
   showGetServiceCta = false,
   showAddOns: showAddOnsProp = true,
+  glassSetupBulletEligible = false,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -2299,6 +2306,7 @@ export function ServiceSection({
             frequency={current}
             waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
             wording={priceWording}
+            glassSetupBullet={glassSetupBulletEligible}
             // Bundles keep showSavings on for the struck-through pre-discount
             // anchor next to the member price; the in-card "You save" line
             // stays bundle-suppressed via the null waveGuardTier above, so the
@@ -2308,7 +2316,7 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showGetServiceCta ? <GetServiceTodayCta /> : null}
+        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro /> : null}
       </div>
 
       {afterPrice}
@@ -3088,6 +3096,7 @@ export default function EstimateViewPage() {
                 key={section.key}
                 section={section}
                 servicesLength={services.length}
+                glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 selectedFrequencyKey={selected[section.key]}
                 selectedAddOns={selectedAddOns[section.key] || new Set()}
                 onFrequencyChange={handleFrequencyChange}
@@ -3138,7 +3147,7 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0

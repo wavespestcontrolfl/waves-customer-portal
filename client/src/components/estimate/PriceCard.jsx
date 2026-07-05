@@ -143,7 +143,7 @@ export function priceCardSavingsInfo(frequency = {}) {
   return savings > 0 ? { savings, periodLabel } : null;
 }
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true }) {
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
   if (!frequency) return null;
 
   // Glass copy pack (?glass=1, PR B): tier display + save-line + pest
@@ -370,7 +370,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
               </div>
               <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
                 {(glass && serviceKey(row) === 'pest_control'
-                  ? glassPestInclusions(row.visitsPerYear)
+                  ? glassPestInclusions(row.visitsPerYear, glassSetupBullet)
                   : serviceInclusions(row)).map((item) => (
                   <li key={item} style={{ position: 'relative', paddingLeft: 18, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
                     <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
