@@ -159,6 +159,10 @@ async function guardClickFollowupSend(draft) {
     : null;
   const verdict = await evaluateClickFollowupGate({
     estimate,
+    // Which link kind the click landed on decides the 'accepted' semantics
+    // (booking-kind clicks on accepted estimates stay live — see the gate).
+    // Missing on pre-kind drafts → default to the stricter 'estimate' rules.
+    kind: flags.kind || 'estimate',
     customerId: draft.customer_id || (estimate && estimate.customer_id) || null,
     leadId: flags.lead_id || null,
     phone: flags.toPhone || null,

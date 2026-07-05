@@ -79,6 +79,7 @@ function draftRow(overrides = {}) {
     draft_response: 'Hi Dana, saw you were taking another look at your Waves quote - anything I can answer?',
     flags: JSON.stringify({
       click_followup: true,
+      kind: 'estimate',
       toPhone: '+19415550101',
       estimate_id: 'est-1',
       lead_id: 'lead-1',
@@ -133,6 +134,7 @@ describe('approve — gate inputs and pass-through', () => {
 
     expect(evaluateClickFollowupGate).toHaveBeenCalledWith(expect.objectContaining({
       estimate: EST_ROW,
+      kind: 'estimate', // from flags — booking-kind drafts keep their accepted-estimate semantics at approval too
       customerId: 'cust-1',
       leadId: 'lead-1',
       phone: '+19415550101',

@@ -66,6 +66,7 @@ function makeBuilder(table, cfg = {}) {
   b.del = jest.fn(() => { b._mode = 'del'; deletes.push({ table }); return b; });
   b.then = (resolve, reject) => {
     if (b._mode === 'insert' && cfg.insertError) return Promise.reject(cfg.insertError).then(resolve, reject);
+    if (b._mode === 'update' && cfg.updateError) return Promise.reject(cfg.updateError).then(resolve, reject);
     const value = b._mode === 'insert' ? (cfg.insert ?? [{ id: 'row-1' }])
       : b._mode === 'update' ? (cfg.update ?? 1)
         : b._mode === 'del' ? (cfg.del ?? 1)
@@ -114,6 +115,7 @@ function makeClick(overrides = {}) {
     entity_id: 'est-1',
     customer_id: 'cust-1',
     lead_id: null,
+    target_url: null,
     ...overrides,
   };
 }
@@ -540,6 +542,50 @@ describe('runQueue — gate + suppression', () => {
     expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
   });
 
+  test('accepted BOOKING-kind click (send-booking-link) still drafts and keeps the /book target', async () => {
+    const BOOK_URL = 'https://portal.wavespestcontrol.com/book?service=pest_control&source=admin-manual-booking-resend';
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ kind: 'booking', target_url: BOOK_URL })] });
+    // send-booking-link explicitly serves accepted one-time estimates.
+    enqueue('estimates', { first: makeEstimate({ status: 'accepted' }) });
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.drafted).toBe(1);
+    // The fresh tracked link targets the ORIGINAL /book URL, not /estimate —
+    // the operator deliberately sent this contact straight to scheduling.
+    expect(createTrackedShortLink).toHaveBeenCalledWith(
+      BOOK_URL,
+      expect.objectContaining({ kind: 'booking', purpose: 'click_followup', channel: 'sms' }),
+    );
+    const draft = inserts.find((i) => i.table === 'message_drafts');
+    expect(draft.payload.draft_response).toContain('https://portal.wavespestcontrol.com/l/newc0');
+    expect(JSON.parse(draft.payload.flags).kind).toBe('booking');
+  });
+
+  test('accepted booking-kind click CONVERTS when phone evidence says they booked', async () => {
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ kind: 'booking', target_url: 'https://portal.wavespestcontrol.com/book?service=pest_control' })] });
+    enqueue('estimates', { first: makeEstimate({ status: 'accepted' }) });
+    enqueue('customers', { first: { id: 'new-cust' } }); // phone-matched customer created after the click
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // converted outcome row
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.converted).toBe(1);
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
+  test('accepted ESTIMATE-kind click stays dismissed (cadence never nudges accepted quotes)', async () => {
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ kind: 'estimate' })] });
+    enqueue('estimates', { first: makeEstimate({ status: 'accepted' }) });
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // dismissed outcome row
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.dismissed).toBe(1);
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
   test('unconverted lead-only estimate still drafts (lead check passes through)', async () => {
     enqueue('short_code_clicks as scc', { rows: [makeClick({ customer_id: null, lead_id: 'lead-1' })] });
     enqueue('estimates', { first: makeEstimate({ customer_id: null }) });
@@ -602,7 +648,7 @@ describe('cadenceStageDueSoon', () => {
 });
 
 describe('expireStaleActions', () => {
-  test('flips stale open actions to expired AND retires their linked pending drafts', async () => {
+  test('flips stale open actions to expired AND retires their linked pending drafts, in ONE transaction', async () => {
     enqueue('click_followup_actions', {
       rows: [
         { id: 'act-1', draft_id: 'draft-1' },
@@ -615,6 +661,9 @@ describe('expireStaleActions', () => {
     const n = await _internals.expireStaleActions(NOW);
 
     expect(n).toBe(2);
+    // Both writes ride the same transaction — a crash between them can't
+    // free the contact slot while the stale draft stays sendable.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(updates).toEqual([
       { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'expired' }) },
       // Linked draft leaves the sendable pool: rejected + flags.expired merge.
@@ -623,12 +672,26 @@ describe('expireStaleActions', () => {
     expect(String(db.raw.mock.calls.map((c) => c[0]).join('\n'))).toContain('"expired": true');
   });
 
+  test('draft-retirement failure aborts the transaction — sweep reports nothing expired', async () => {
+    enqueue('click_followup_actions', { rows: [{ id: 'act-1', draft_id: 'draft-1' }] });
+    enqueue('click_followup_actions', { update: 1 });               // action → expired (rolls back)
+    enqueue('message_drafts', { updateError: new Error('db down') }); // draft retirement fails
+
+    const n = await _internals.expireStaleActions(NOW);
+
+    // The transaction rejects → rollback → the sweep reports failure instead
+    // of a half-applied expiry; the next tick retries both writes together.
+    expect(n).toBe(0);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
   test('no stale actions → no writes at all', async () => {
     enqueue('click_followup_actions', { rows: [] });
 
     const n = await _internals.expireStaleActions(NOW);
 
     expect(n).toBe(0);
+    expect(db.transaction).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
   });
 });
@@ -664,6 +727,16 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: null })).code).toBe('estimate_terminal');
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ status: 'declined' }) })).code).toBe('estimate_terminal');
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: makeEstimate({ archived_at: new Date() }) })).code).toBe('estimate_terminal');
+  });
+
+  test("kind-aware 'accepted': booking clicks stay live, estimate clicks are terminal", async () => {
+    const accepted = makeEstimate({ status: 'accepted' });
+    expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: accepted, kind: 'estimate' })).code)
+      .toBe('estimate_terminal');
+    // Booking-kind + accepted proceeds to the conversion checks and, with no
+    // booking evidence, comes out ok (draftable).
+    expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: accepted, kind: 'booking' })).ok)
+      .toBe(true);
   });
 
   test('converted: customer-guard evidence', async () => {

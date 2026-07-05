@@ -284,6 +284,9 @@ async function phoneConvertedSince(phone, sinceTs) {
  *
  * @param {Object} input
  * @param {Object|null} input.estimate  fresh estimates row (or null/missing)
+ * @param {string} [input.kind]         short-link kind the click landed on
+ *                                      ('estimate' | 'booking'); defaults to
+ *                                      the stricter 'estimate' semantics
  * @param {string|null} input.customerId resolved contact customer id
  * @param {string|null} input.leadId     resolved contact lead id
  * @param {string|null} input.phone      contact phone (any format)
@@ -292,9 +295,22 @@ async function phoneConvertedSince(phone, sinceTs) {
  *                                       created_at)
  * @param {Date} [input.now]
  */
-async function evaluateClickFollowupGate({ estimate, customerId, leadId, phone, sinceTs, now = new Date() }) {
-  // 1. The estimate must still be an open offer.
-  if (!estimate || estimate.archived_at || TERMINAL_STATUSES.has(estimate.status)) {
+async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, phone, sinceTs, now = new Date() }) {
+  // 1. The estimate must still be an open offer — with one deliberate,
+  //    kind-dependent exception for 'accepted':
+  //    - ESTIMATE-kind clicks: 'accepted' is terminal, matching the cadence
+  //      (estimate-follow-up.js TERMINAL_STATUSES skips accepted — the
+  //      post-accept flow owns that customer, and "take another look at
+  //      your quote" makes no sense for an already-accepted quote).
+  //    - BOOKING-kind clicks: 'accepted' stays LIVE. The admin
+  //      send-booking-link route explicitly serves sent/viewed/ACCEPTED
+  //      one-time estimates — accepted-but-not-yet-booked is exactly the
+  //      state this lane chases — and the conversion checks below
+  //      (customer / lead / phone evidence) decide whether they booked.
+  const acceptedBookingClick = kind === 'booking'
+    && !!estimate && estimate.status === 'accepted';
+  if (!estimate || estimate.archived_at
+      || (TERMINAL_STATUSES.has(estimate.status) && !acceptedBookingClick)) {
     return { ok: false, code: 'estimate_terminal' };
   }
 

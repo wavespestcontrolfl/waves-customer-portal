@@ -104,20 +104,26 @@ async function expireStaleActions(now = new Date()) {
       .select('id', 'draft_id');
     if (!stale.length) return 0;
 
-    await db('click_followup_actions')
-      .whereIn('id', stale.map((r) => r.id))
-      .update({ status: 'expired', updated_at: db.fn.now() });
-
+    // Action expiration + draft retirement commit or roll back TOGETHER —
+    // same atomicity rule as the draft-insert + action-link pair in
+    // runQueue. Expiring first in its own statement would free the contact
+    // slot while a crash left the stale draft pending/sendable, letting a
+    // later click queue a SECOND draft for the same contact.
     const draftIds = stale.map((r) => r.draft_id).filter(Boolean);
-    if (draftIds.length) {
-      await db('message_drafts')
-        .whereIn('id', draftIds)
-        .where({ status: 'pending' })
-        .update({
-          status: 'rejected',
-          flags: db.raw(`COALESCE(flags, '{}'::jsonb) || '{"expired": true}'::jsonb`),
-        });
-    }
+    await db.transaction(async (trx) => {
+      await trx('click_followup_actions')
+        .whereIn('id', stale.map((r) => r.id))
+        .update({ status: 'expired', updated_at: db.fn.now() });
+      if (draftIds.length) {
+        await trx('message_drafts')
+          .whereIn('id', draftIds)
+          .where({ status: 'pending' })
+          .update({
+            status: 'rejected',
+            flags: db.raw(`COALESCE(flags, '{}'::jsonb) || '{"expired": true}'::jsonb`),
+          });
+      }
+    });
     logger.info(`[click-followup] expired ${stale.length} stale open action(s) (retired ${draftIds.length} linked draft(s))`);
     return stale.length;
   } catch (e) {
@@ -193,6 +199,7 @@ async function runQueue(now = new Date()) {
       'scc.clicked_at',
       'sc.id as short_code_id',
       'sc.kind',
+      'sc.target_url',
       'sc.entity_type',
       'sc.entity_id',
       'sc.customer_id',
@@ -273,6 +280,7 @@ async function runQueue(now = new Date()) {
       //     until it ages out of the 72h window)
       const verdict = await evaluateClickFollowupGate({
         estimate: est,
+        kind: c.kind,
         customerId: contact.customerId,
         leadId: c.lead_id || null,
         phone,
@@ -339,11 +347,19 @@ async function runQueue(now = new Date()) {
 
       // Fresh tracked link for the draft body — a click on THIS link is
       // attributable to the click-followup nudge, not the original send.
-      // Graceful long-URL fallback is safe here (no bearer token, and the
-      // owner sees the body before anything sends).
-      const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+      // BOOKING-kind clicks keep their booking target: the operator
+      // deliberately sent this contact to /book (admin send-booking-link),
+      // and the copy says "pick your first visit" — rebuilding an /estimate
+      // URL would break the direct scheduling path. Those /book URLs carry
+      // only service + source params (no bearer token — see
+      // admin-estimates send-booking-link), so the graceful long-URL
+      // fallback stays safe for both kinds.
+      const isBookingClick = c.kind === 'booking' && !!c.target_url;
+      const longUrl = isBookingClick
+        ? c.target_url
+        : `https://portal.wavespestcontrol.com/estimate/${est.token}`;
       const { code, shortUrl } = await createTrackedShortLink(longUrl, {
-        kind: 'estimate',
+        kind: isBookingClick ? 'booking' : 'estimate',
         entityType: 'estimates',
         entityId: est.id,
         customerId: contact.customerId,
@@ -373,6 +389,7 @@ async function runQueue(now = new Date()) {
             context_summary: `Clicked their ${c.kind} link ~${ageHours}h ago but hasn't booked. Auto-queued click-followup nudge for estimate ${est.id} — review and approve to send.`,
             flags: JSON.stringify({
               click_followup: true,
+              kind: c.kind,
               toPhone: normalizeE164(phone),
               short_code_id: c.short_code_id,
               estimate_id: est.id,
