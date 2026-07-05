@@ -153,7 +153,10 @@ describe('20260705000120 click_followup_actions', () => {
     await partB.up(knex);
 
     const sql = knex.state.raw.join('\n');
-    expect(sql).toContain("CHECK (status IN ('pending','drafted','dismissed','converted','expired'))");
+    // 'sent' (owner approved, nudge went out) is a terminal outcome status —
+    // allowed by the CHECK, but deliberately OUTSIDE the open-claim partial
+    // uniques below so a sent nudge never blocks a future re-click.
+    expect(sql).toContain("CHECK (status IN ('pending','drafted','sent','dismissed','converted','expired'))");
     // Partial: only OPEN rows contend — terminal rows never block future actions.
     expect(sql).toContain('CREATE UNIQUE INDEX click_followup_actions_open_customer_uniq');
     expect(sql).toContain("WHERE customer_id IS NOT NULL AND status IN ('pending','drafted')");

@@ -178,6 +178,38 @@ function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
   };
 }
 
+// One tracked short code PER CHANNEL LEG for the dual-channel stages.
+// sendDualChannel can send either leg alone — the SMS template can be
+// missing/disabled, the SMS can be policy-blocked at send time, or the
+// estimate may only carry one contact handle — and the click-followup
+// candidate scan (services/click-followup.js) admits sc.channel='sms' links
+// only. Reusing a single sms-tagged code in the email payload would let a
+// click on an EMAIL-only follow-up masquerade as an SMS click and queue a
+// proactive SMS nudge. Minting per leg keeps every click attributable to
+// the channel that actually carried it: a leg that never goes out just
+// leaves an undelivered (hence unclickable) code behind, which is harmless.
+// A leg the estimate can't receive at all (no phone / no email) skips the
+// mint and falls back to the long URL — the same graceful degradation
+// shortenOrPassthrough already guarantees on shortener failure.
+async function mintStageLinks(est, purpose) {
+  const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+  const base = {
+    kind: "estimate",
+    entityType: "estimates",
+    entityId: est.id,
+    customerId: est.customer_id,
+    leadId: await leadIdForEstimate(est),
+    purpose,
+  };
+  const smsUrl = est.customer_phone
+    ? await shortenOrPassthrough(longUrl, { ...base, channel: "sms" })
+    : longUrl;
+  const emailUrl = est.customer_email
+    ? await shortenOrPassthrough(longUrl, { ...base, channel: "email" })
+    : longUrl;
+  return { smsUrl, emailUrl };
+}
+
 // Shared sender — fires SMS if phone exists, email if email exists. Returns
 // true if at least one channel attempted (callers use this to decide whether
 // to keep the stage claim or release it).
@@ -440,19 +472,10 @@ const EstimateFollowUp = {
           }
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-            leadId: await leadIdForEstimate(est),
-            channel: "sms",
-            purpose: "estimate_followup_unviewed",
-          });
+          const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_unviewed");
           const smsBody = await renderTemplate("estimate_followup_unviewed", {
             first_name: firstName,
-            estimate_url: url,
+            estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
@@ -468,7 +491,7 @@ const EstimateFollowUp = {
             email: {
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
-              payload: estimateEmailPayload(est, firstName, url),
+              payload: estimateEmailPayload(est, firstName, emailUrl),
             },
           });
           if (ok) {
@@ -531,19 +554,10 @@ const EstimateFollowUp = {
           }
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-            leadId: await leadIdForEstimate(est),
-            channel: "sms",
-            purpose: "estimate_followup_viewed",
-          });
+          const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_viewed");
           const smsBody = await renderTemplate("estimate_followup_viewed", {
             first_name: firstName,
-            estimate_url: url,
+            estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
@@ -559,7 +573,7 @@ const EstimateFollowUp = {
             email: {
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
-              payload: estimateEmailPayload(est, firstName, url),
+              payload: estimateEmailPayload(est, firstName, emailUrl),
             },
           });
           if (ok) {
@@ -623,19 +637,10 @@ const EstimateFollowUp = {
           }
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-            leadId: await leadIdForEstimate(est),
-            channel: "sms",
-            purpose: "estimate_followup_final",
-          });
+          const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_final");
           const smsBody = await renderTemplate("estimate_followup_final", {
             first_name: firstName,
-            estimate_url: url,
+            estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
@@ -651,7 +656,7 @@ const EstimateFollowUp = {
             email: {
               templateKey: "estimate.followup_final",
               stage: "final",
-              payload: estimateEmailPayload(est, firstName, url),
+              payload: estimateEmailPayload(est, firstName, emailUrl),
             },
           });
           if (ok) {
@@ -715,16 +720,7 @@ const EstimateFollowUp = {
           }
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, {
-            kind: "estimate",
-            entityType: "estimates",
-            entityId: est.id,
-            customerId: est.customer_id,
-            leadId: await leadIdForEstimate(est),
-            channel: "sms",
-            purpose: "estimate_followup_expiring",
-          });
+          const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_expiring");
           const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
             month: "long",
             day: "numeric",
@@ -733,7 +729,7 @@ const EstimateFollowUp = {
           });
           const smsBody = await renderTemplate("estimate_followup_expiring", {
             first_name: firstName,
-            estimate_url: url,
+            estimate_url: smsUrl,
             expires_at: expDate,
           }, {
             workflow: "estimate_follow_up",
@@ -751,7 +747,7 @@ const EstimateFollowUp = {
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
               payload: {
-                ...estimateEmailPayload(est, firstName, url),
+                ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
               },
             },
@@ -805,4 +801,5 @@ module.exports._private = {
   checkDepositAbandoned,
   safetyGate,
   claimStage,
+  mintStageLinks,
 };

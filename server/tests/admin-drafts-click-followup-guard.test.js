@@ -15,6 +15,15 @@
  *     'estimate_followup' + transactional consentBasis for lead-only), never
  *     the conversational anonymous-lead carve-out;
  *   other intents → gate never invoked, conversational shape untouched.
+ *
+ * Round 6 adds:
+ *   estimate lookup ERROR → transient 503 (draft pending, claim released,
+ *     gate never consulted) — a failed read must not masquerade as a missing
+ *     estimate and permanently retire the draft; only a read that SUCCEEDS
+ *     with no row reaches the gate as estimate:null (→ terminal);
+ *   send SUCCESS → the linked action leaves the open set ('sent', same
+ *     transaction as the draft finalization) so a later click by the same
+ *     contact re-qualifies instead of waiting out the 14-day sweep.
  */
 
 jest.mock('../models/db', () => {
@@ -23,6 +32,11 @@ jest.mock('../models/db', () => {
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
   return mockDb;
 });
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => { req.technicianId = 'tech-1'; next(); },
   requireTechOrAdmin: (req, res, next) => next(),
@@ -57,6 +71,7 @@ function makeBuilder(table, cfg = {}) {
   b.update = jest.fn((payload) => { b._mode = 'update'; updates.push({ table, payload }); return b; });
   b.returning = jest.fn(() => b);
   b.then = (resolve, reject) => {
+    if (cfg.error) return Promise.reject(cfg.error).then(resolve, reject);
     const value = b._mode === 'update' ? (cfg.update ?? 1)
       : b._mode === 'first' ? cfg.first
         : (cfg.rows ?? []);
@@ -255,6 +270,129 @@ describe('approve — verdict mapping (shared-gate parity)', () => {
     });
 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual(expect.arrayContaining([
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'pending' }) },
+    ]));
+  });
+});
+
+// Round 6: a FAILED estimate read is transient — it must ride the existing
+// guard_error UX (503, claim released, draft pending) instead of reaching
+// the gate as estimate:null, which reads as estimate_terminal and would
+// PERMANENTLY retire the draft + dismiss its action over a DB blip. Only a
+// read that SUCCEEDS and finds no row is a truly missing estimate.
+describe('approve — estimate lookup errors are transient, missing rows are terminal', () => {
+  test('estimate read THROWS → 503, draft left pending (claim released), gate never consulted, NO send, nothing retired', async () => {
+    enqueue('message_drafts', { update: [draftRow()] });            // claim
+    enqueue('estimates', { error: new Error('connection reset') }); // transient DB failure
+    enqueue('message_drafts', { update: 1 });                       // releaseDraftClaim
+
+    await withServer(async (base) => {
+      const res = await approve(base);
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.error).toContain('pending'); // clear retry hint
+    });
+
+    expect(evaluateClickFollowupGate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual(expect.arrayContaining([
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'pending' }) },
+    ]));
+    expect(updates.find((u) => u.payload && u.payload.status === 'rejected')).toBeUndefined();
+    expect(updates.find((u) => u.table === 'click_followup_actions')).toBeUndefined();
+  });
+
+  test('estimate read succeeds but finds NO row → gate sees estimate:null (terminal path, not a retry loop)', async () => {
+    evaluateClickFollowupGate.mockResolvedValue({ ok: false, code: 'estimate_terminal' });
+    enqueue('message_drafts', { update: [draftRow()] });            // claim
+    enqueue('estimates', { first: undefined });                     // clean read, row gone
+    enqueue('message_drafts', { update: 1 });                       // retire
+    enqueue('click_followup_actions', { update: 1 });               // action → dismissed
+
+    await withServer(async (base) => {
+      expect((await approve(base)).status).toBe(409);
+    });
+
+    expect(evaluateClickFollowupGate).toHaveBeenCalledWith(
+      expect.objectContaining({ estimate: null }),
+    );
+    const retire = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'rejected');
+    expect(retire).toBeDefined();
+    expect(JSON.parse(retire.payload.flags)).toMatchObject({ reason: 'estimate_closed_before_send' });
+  });
+});
+
+// Round 6: when the send SUCCEEDS the linked action must leave the open set
+// too — the reject path already goes terminal ('dismissed'); the success
+// path goes 'sent' (terminal for hasOpenAction + the partial uniques, so a
+// later click by the same contact re-qualifies immediately, yet still
+// distinguishable from dismissed in outcome telemetry) atomically with the
+// draft finalization.
+describe('approve/revise success — linked action released to sent in the finalization transaction', () => {
+  test('approve success → draft stamped AND action → sent in ONE transaction, scoped to open statuses on the linked draft', async () => {
+    enqueue('message_drafts', { update: [draftRow()] });            // claim
+    enqueue('estimates', { first: EST_ROW });                       // gate estimate load
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } }); // recipient
+    enqueue('message_drafts', { update: 1 });                       // final stamp (in trx)
+    enqueue('click_followup_actions', { update: 1 });               // action → sent (in trx)
+
+    await withServer(async (base) => {
+      expect((await approve(base)).status).toBe(200);
+    });
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Same atomicity rule as reject / the queue's draft+link pair / the sweep.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updates).toEqual(expect.arrayContaining([
+      { table: 'message_drafts', payload: expect.objectContaining({ sent_at: expect.any(Date) }) },
+      { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'sent' }) },
+    ]));
+
+    const idx = db.mock.calls.findIndex((c) => c[0] === 'click_followup_actions');
+    const actionBuilder = db.mock.results[idx].value;
+    // Keyed on the linked draft (non-click intents have no action row —
+    // harmless no-op) and scoped to OPEN statuses so a gate-retired outcome
+    // (converted/dismissed) is never overwritten.
+    expect(actionBuilder.where).toHaveBeenCalledWith({ draft_id: 'draft-1' });
+    expect(actionBuilder.whereIn).toHaveBeenCalledWith('status', ['pending', 'drafted']);
+  });
+
+  test('revise success → action → sent in the same transaction as the sent stamp', async () => {
+    enqueue('message_drafts', { update: [draftRow({ status: 'revised' })] }); // claim
+    enqueue('estimates', { first: EST_ROW });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    enqueue('message_drafts', { update: 1 });                       // sent stamp (in trx)
+    enqueue('click_followup_actions', { update: 1 });               // action → sent (in trx)
+
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updates).toEqual(expect.arrayContaining([
+      { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'sent' }) },
+    ]));
+  });
+
+  test('blocked send (not sent) NEVER releases the action — claim released, action untouched', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, reason: 'opted_out' });
+    enqueue('message_drafts', { update: [draftRow()] });            // claim
+    enqueue('estimates', { first: EST_ROW });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    enqueue('message_drafts', { update: 1 });                       // releaseDraftClaim
+
+    await withServer(async (base) => {
+      expect((await approve(base)).status).toBe(422);
+    });
+
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.table === 'click_followup_actions')).toBeUndefined();
     expect(updates).toEqual(expect.arrayContaining([
       { table: 'message_drafts', payload: expect.objectContaining({ status: 'pending' }) },
     ]));

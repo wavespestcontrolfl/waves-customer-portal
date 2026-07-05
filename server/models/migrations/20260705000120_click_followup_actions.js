@@ -18,6 +18,11 @@
  *   pending   — claimed by the cron, draft not written yet (transient)
  *   drafted   — a message_drafts row (status='pending', intent='click_followup')
  *               awaits owner approval in /admin/drafts; draft_id points at it
+ *   sent      — the owner approved/revised the linked draft and the nudge
+ *               went out (admin-drafts success path). Terminal for the
+ *               open-claim guards — review is complete, so a later click by
+ *               the same contact re-qualifies — but distinguishable from
+ *               dismissed in outcome telemetry
  *   dismissed — cron decided never to act on this click (terminal estimate,
  *               suppressed recipient, cadence nudge already imminent, ...)
  *   converted — the contact converted (paid invoice / live booking / customer
@@ -66,7 +71,7 @@ exports.up = async function up(knex) {
   await knex.raw(
     `ALTER TABLE click_followup_actions
        ADD CONSTRAINT click_followup_actions_status_check
-       CHECK (status IN ('pending','drafted','dismissed','converted','expired'))`
+       CHECK (status IN ('pending','drafted','sent','dismissed','converted','expired'))`
   );
 
   // One OPEN action per contact at a time. Partial (pending|drafted only) so

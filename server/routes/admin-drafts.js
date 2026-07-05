@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -154,9 +155,21 @@ const GATE_HOLD_MESSAGES = {
 async function guardClickFollowupSend(draft) {
   if (draft.intent !== 'click_followup') return null;
   const flags = parseFlags(draft.flags);
-  const estimate = flags.estimate_id
-    ? await db('estimates').where({ id: flags.estimate_id }).first().catch(() => null)
-    : null;
+  let estimate = null;
+  if (flags.estimate_id) {
+    try {
+      estimate = (await db('estimates').where({ id: flags.estimate_id }).first()) || null;
+    } catch (err) {
+      // A transient estimate-read failure must not masquerade as a MISSING
+      // estimate: the gate would answer estimate_terminal and this route
+      // would PERMANENTLY retire a perfectly sendable draft. Same
+      // fail-closed contract as the gate's guard_error verdict — 503, claim
+      // released, draft stays pending for a retry. Only a read that
+      // SUCCEEDS and finds no row is truly terminal.
+      logger.warn(`[admin-drafts] click-followup estimate lookup failed - holding draft ${draft.id}: ${err.message}`);
+      return { transient: true };
+    }
+  }
   const verdict = await evaluateClickFollowupGate({
     estimate,
     // Which link kind the click landed on decides the 'accepted' semantics
@@ -307,10 +320,27 @@ router.put('/:id/approve', async (req, res, next) => {
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
-    await db('message_drafts').where({ id: draft.id }).update({
-      final_response: draft.draft_response,
-      sent_at: new Date(),
-      response_time_seconds: responseTime,
+    // Draft finalization + linked click-followup action release commit or
+    // roll back TOGETHER (same atomicity rule as the reject path, the
+    // queue's draft-insert + action-link pair, and the stale sweep). The
+    // send SUCCEEDED, so the action's open claim ('drafted' — held open by
+    // hasOpenAction and the partial unique indexes) must end here: 'sent'
+    // is terminal for claim purposes, so a later click from the same
+    // customer/lead/phone re-qualifies immediately instead of waiting out
+    // the 14-day sweep, while staying distinguishable from 'dismissed' in
+    // outcome telemetry. Scoped to open statuses so a more specific outcome
+    // is never overwritten; non-click intents have no linked action row and
+    // the update is a no-op.
+    await db.transaction(async (trx) => {
+      await trx('message_drafts').where({ id: draft.id }).update({
+        final_response: draft.draft_response,
+        sent_at: new Date(),
+        response_time_seconds: responseTime,
+      });
+      await trx('click_followup_actions')
+        .where({ draft_id: draft.id })
+        .whereIn('status', ['pending', 'drafted'])
+        .update({ status: 'sent', updated_at: db.fn.now() });
     });
 
     res.json({ success: true, responseTimeSeconds: responseTime });
@@ -399,9 +429,18 @@ router.put('/:id/revise', async (req, res, next) => {
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
-    await db('message_drafts').where({ id: draft.id }).update({
-      sent_at: new Date(),
-      response_time_seconds: responseTime,
+    // Same atomic finalization + click-followup action release as the
+    // approve route — the revised send went out, so the open claim moves to
+    // the terminal 'sent' status in the SAME transaction.
+    await db.transaction(async (trx) => {
+      await trx('message_drafts').where({ id: draft.id }).update({
+        sent_at: new Date(),
+        response_time_seconds: responseTime,
+      });
+      await trx('click_followup_actions')
+        .where({ draft_id: draft.id })
+        .whereIn('status', ['pending', 'drafted'])
+        .update({ status: 'sent', updated_at: db.fn.now() });
     });
 
     res.json({ success: true, responseTimeSeconds: responseTime });
