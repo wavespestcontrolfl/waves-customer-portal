@@ -1,5 +1,7 @@
 import React, { Component } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { GrowthBookProvider } from '@growthbook/growthbook-react';
+import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import Icon from './components/Icon';
@@ -270,6 +272,9 @@ function ProtectedRoute({ children }) {
 
 export default function App() {
   return (
+    // growthbook is null without VITE_GROWTHBOOK_CLIENT_KEY — the provider
+    // then just renders children and every feature hook returns its fallback.
+    <GrowthBookProvider growthbook={growthbook || undefined}>
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PublicFunnelTracking />
@@ -391,5 +396,6 @@ export default function App() {
         </BiometricGate>
       </BrowserRouter>
     </AuthProvider>
+    </GrowthBookProvider>
   );
 }

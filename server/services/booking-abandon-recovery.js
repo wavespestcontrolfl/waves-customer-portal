@@ -23,6 +23,7 @@ const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const Experiments = require('./experimentation/growthbook');
 
 // Touch windows (hours from captured_at). The cron runs every 30 min, so the
 // SMS fires ~1–1.5h after abandon. Max-age caps how stale a lead we'll chase.
@@ -136,6 +137,32 @@ async function renderSms(vars) {
   }
   logger.warn('[booking-recovery] booking_abandonment_recovery SMS template missing/disabled');
   return null;
+}
+
+// Measured-rollout holdback (GrowthBook `booking-abandon-recovery`, Phase 2 of
+// the experimentation initiative). Intent-to-treat: decided at candidacy, per
+// PERSON (phone last-10 — the same key the send-dedup uses), before quiet-hours
+// / reply-pause filters so both arms are measured from the same point. A
+// held-back person gets NEITHER touch: both stage flags are claimed so the
+// intent never re-surfaces. Fails open to "send" (today's behavior) on any
+// miss — gate off, no phone, GrowthBook unreachable, feature absent.
+async function heldBackByExperiment(intent) {
+  try {
+    const assignment = await Experiments.assignBookingRecoveryExperiment(last10(intent.phone), intent.id);
+    if (!(assignment.inExperiment && assignment.value === false)) return false;
+    // followup_sms_sent_at intentionally NOT stamped — nothing was sent, and
+    // that timestamp only exists to pace the email touch after a real SMS.
+    await db('booking_intents').where({ id: intent.id }).update({
+      followup_sms_sent: true,
+      followup_email_sent: true,
+      updated_at: db.fn.now(),
+    });
+    logger.info(`[booking-recovery] intent ${intent.id} held back (experiment control) — no touches`);
+    return true;
+  } catch (e) {
+    logger.warn(`[booking-recovery] holdback check failed for intent ${intent.id} — sending as usual: ${e.message}`);
+    return false;
+  }
 }
 
 // Atomic stage claim — flips false/NULL → true, returns true only if THIS caller
@@ -260,6 +287,7 @@ async function runSmsStage(now, sentPhones) {
   for (const intent of candidates) {
     const ten = last10(intent.phone);
     if (ten && sentPhones.has(ten)) continue; // one touch per phone per run
+    if (await heldBackByExperiment(intent)) continue;
     let claimed = false;
     try {
       if (isQuietHours(now)) continue;
@@ -362,6 +390,10 @@ async function runEmailStage(now, sentPhones) {
     if (ten && sentPhones.has(ten)) continue;
     const emailKey = String(intent.email || '').trim().toLowerCase();
     if (emailKey && sentPhones.has(`email:${emailKey}`)) continue;
+    // Email-stage holdback check too: an intent can reach this stage without
+    // ever passing through the SMS loop (e.g. SMS window already aged out at
+    // gate-flip time), and sticky replay keeps the arm consistent either way.
+    if (await heldBackByExperiment(intent)) continue;
     let claimed = false;
     try {
       if (await customerEmailDisabled(intent.customer_id)) {

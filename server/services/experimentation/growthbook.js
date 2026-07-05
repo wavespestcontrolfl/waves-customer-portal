@@ -42,6 +42,13 @@ const FETCH_TIMEOUT_MS = 2500;
 const ESTIMATE_VIEW_EXPERIMENT = 'estimate-view';
 const ESTIMATE_VIEW_FEATURE = 'estimate-view-v2';
 
+// Booking-abandon recovery measured rollout (Phase 2). BOOLEAN feature:
+// true  = run the recovery touches (SMS + email — today's behavior),
+// false = hold this person back from BOTH touches so GrowthBook can measure
+//         whether the recovery program actually causes bookings.
+const BOOKING_RECOVERY_EXPERIMENT = 'booking-abandon-recovery';
+const BOOKING_RECOVERY_FEATURE = 'booking-abandon-recovery';
+
 let cachedFeatures = null;
 let cachedAt = 0;
 let refreshing = null;
@@ -213,6 +220,51 @@ async function assignEstimateViewExperiment(estimate) {
   });
 }
 
+/**
+ * Booking-abandon recovery holdback (Phase 2). Unit = the abandoner's phone
+ * (last 10 digits) — person-level, matching how the recovery cron dedups
+ * sibling intents — so one person is consistently in one arm across intents
+ * AND across the SMS + email touches (sticky replay). `value===false` → hold
+ * back both touches; anything else (miss, gate off, feature absent) defaults
+ * TRUE = send, i.e. today's behavior.
+ */
+async function assignBookingRecoveryExperiment(phoneLast10, intentId) {
+  const ten = String(phoneLast10 || '');
+  if (ten.length < 10) {
+    // No usable person key (missing/short phone) — stay outside the experiment
+    // and keep current behavior.
+    return { inExperiment: false, value: true, variationId: null, variationKey: null };
+  }
+  return assignExperiment({
+    experimentKey: BOOKING_RECOVERY_EXPERIMENT,
+    featureKey: BOOKING_RECOVERY_FEATURE,
+    attributes: { id: ten },
+    unitId: ten,
+    unitType: 'phone',
+    metadata: { intentId: intentId || null },
+    defaultValue: true,
+  });
+}
+
+/**
+ * True when `key` is the tracking key of an experiment rule in the CACHED
+ * feature payload. Used by the public client-exposure endpoint to accept only
+ * experiments that actually exist — unknown keys (or a cold cache, which
+ * schedules a refresh) are rejected, so the endpoint can't be used to write
+ * arbitrary rows.
+ */
+function isKnownTrackingKey(key) {
+  const features = getFeaturesNonBlocking();
+  if (!features) return false;
+  for (const feature of Object.values(features)) {
+    for (const rule of (feature && feature.rules) || []) {
+      // Experiment rules carry `variations` + a tracking `key`.
+      if (rule && Array.isArray(rule.variations) && rule.key === key) return true;
+    }
+  }
+  return false;
+}
+
 // Best-effort cache warm at boot so the first eligible view can participate
 // rather than fail open to control.
 if (experimentsEnabled()) scheduleRefresh();
@@ -220,8 +272,12 @@ if (experimentsEnabled()) scheduleRefresh();
 module.exports = {
   assignExperiment,
   assignEstimateViewExperiment,
+  assignBookingRecoveryExperiment,
+  isKnownTrackingKey,
   logExposure,
   experimentsEnabled,
   ESTIMATE_VIEW_EXPERIMENT,
   ESTIMATE_VIEW_FEATURE,
+  BOOKING_RECOVERY_EXPERIMENT,
+  BOOKING_RECOVERY_FEATURE,
 };
