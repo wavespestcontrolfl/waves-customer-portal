@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
+const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const logger = require('../services/logger');
 
 // Format/length validation for manual lead creation. Permissive by design — it
@@ -862,6 +863,13 @@ router.put('/:id', async (req, res, next) => {
       responseLead = await db('leads').where('id', req.params.id).first();
     }
 
+    // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
+    // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
+    // status with no funnel meaning no-ops inside the bridge.
+    if (updates.status && updates.status !== existingLead.status) {
+      await bridgeLeadFunnelStage(req.params.id, updates.status);
+    }
+
     await db('lead_activities').insert({
       lead_id: req.params.id,
       activity_type: 'updated',
@@ -1037,6 +1045,8 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // Update status to 'contacted' if currently 'new'
     if (lead.status === 'new') {
       await db('leads').where('id', req.params.id).update({ status: 'contacted', updated_at: new Date() });
+      // Funnel-row mirror (monotonic, best-effort).
+      await bridgeLeadFunnelStage(req.params.id, 'contacted');
     }
 
     const updated = await db('leads').where('id', req.params.id).first();
@@ -1258,6 +1268,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     });
 
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
+
+    // Funnel-row mirror for the in-transaction 'won' conversion above.
+    // Post-commit deliberately: the bridge must never abort the booking
+    // transaction, and it is monotonic + idempotent on its own.
+    await bridgeLeadFunnelStage(req.params.id, 'won');
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, customerId, appointmentId: appt.id, createdCustomer: needsCustomer });

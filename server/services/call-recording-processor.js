@@ -519,6 +519,12 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
         await linkLeadEstimatesToCustomer({ database: inner, lead: convertedLead, customerId });
       }
+      // Funnel-row mirror for the direct 'won' write above (won → 'booked').
+      // Same containment rationale as linkLeadEstimatesToCustomer: the bridge
+      // swallows SQL errors, so it runs INSIDE the savepoint where an aborted
+      // subtransaction dooms only the conversion, never the booking commit.
+      const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+      await bridgeLeadFunnelStage(leadId, 'won', inner);
       logger.info(`[call-proc] Lead ${leadId} converted to won (appointment_booked) for ${callSid}`);
       return true;
     });

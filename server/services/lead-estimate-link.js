@@ -3,6 +3,7 @@ const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
+const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
 
@@ -316,6 +317,11 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted'])
       .update({ status: 'estimate_sent', updated_at: new Date() });
+    // Mirror the transition onto the lead's ad_service_attribution funnel row.
+    // Fired regardless of whether THIS call won the status race — the bridge is
+    // monotonic in SQL, so it converges without ever downgrading (and it also
+    // catches up a row left at 'lead' by a send that predated the bridge).
+    await bridgeLeadFunnelStage(lead.id, 'estimate_sent', database);
     await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
     await database('lead_activities').insert({
       lead_id: lead.id,
@@ -339,6 +345,8 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted', 'estimate_sent'])
       .update({ status: 'estimate_viewed', updated_at: new Date() });
+    // Funnel-row mirror (monotonic — see the send path).
+    await bridgeLeadFunnelStage(lead.id, 'estimate_viewed', database);
     await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_viewed',
@@ -765,6 +773,15 @@ async function convertLeadFromEvent({
 // only surfaces in attribution + LTV:CAC reporting. An existing lead is left
 // untouched: a web lead already captured its own click ids, and stamping this
 // booking's click id onto a call/manual-origin lead would mis-channel it.
+//
+// NON-PAID bookings (no deterministic click id) mint NOTHING — the paid-click +
+// new-customer minting policy is unchanged — but they now DO get an
+// ad_service_attribution funnel row (is_paid=false, lead_source classified by
+// the same determineLeadSource semantics the lead webhook uses), so organic /
+// referral / GBP self-bookings stop being invisible to channel attribution.
+// The organic row carries no lead (lead_id NULL) and is deduped per BOOKING via
+// the unique self_booked_appointment_id (migration 20260705000201) — the
+// lead_id unique index can't dedupe NULLs.
 // Best-effort + idempotent — never throws into the (already-committed) booking.
 // ---------------------------------------------------------------------------
 
@@ -796,16 +813,70 @@ function clickIdColumnsFromAttribution(attribution) {
   return out;
 }
 
+// Organic (non-paid) self-booking → funnel row only, no lead. Classified with
+// the shared determineLeadSource (landing URL wins, referrer as fallback URL —
+// the webhook's exact url = landingUrl || pageUrl precedence). is_paid=false
+// always: this branch is only reachable WITHOUT a deterministic paid click id,
+// and a bare UTM is not paid evidence (mirrors attributionHasPaidClickId).
+// Requires the booking id — without it there is no per-booking dedupe key, so
+// it fails closed rather than risking duplicate funnel rows.
+async function recordOrganicSelfBookingAttribution({
+  customerId,
+  attribution,
+  serviceInterest,
+  selfBookedAppointmentId,
+  database,
+}) {
+  if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
+
+  const attr = (attribution && typeof attribution === 'object') ? attribution : {};
+  const utm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
+  const { determineLeadSource } = require('./lead-source-classify');
+  const classified = determineLeadSource(
+    attr.referrer || '', attr.landing_url || '',
+    utm.source || '', utm.medium || '', utm.campaign || '', utm.content || '',
+    attr.fbclid || '', attr.fbc || '', attr.gclid || '', attr.wbraid || '', attr.gbraid || '',
+  );
+
+  const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+  // _fbp is kept as an auxiliary CAPI match key (the webhook stores it on
+  // organic rows too); it is never a paid signal.
+  const fbp = (typeof attr.fbp === 'string' && attr.fbp.trim())
+    ? attr.fbp.trim().slice(0, LEAD_CLICK_ID_MAX.fbp) : null;
+  await database('ad_service_attribution').insert({
+    customer_id: customerId,
+    self_booked_appointment_id: selfBookedAppointmentId,
+    service_line: inferServiceLine(serviceInterest),
+    specific_service: inferSpecificService(serviceInterest),
+    service_bucket: inferServiceBucket(serviceInterest),
+    lead_date: etDateString(),
+    lead_source: classified.source,
+    lead_source_detail: classified.detail || null,
+    fbp,
+    utm_campaign: utm.campaign || null,
+    utm_term: utm.term || null,
+    funnel_stage: 'lead',
+    is_paid: false,
+  }).onConflict('self_booked_appointment_id').ignore();
+
+  return { attributed: true, organic: true, leadSource: classified.source };
+}
+
 async function attributeSelfBooking({
   customerId,
   attribution,
   serviceInterest = null,
   customerCreated = false,
+  selfBookedAppointmentId = null,
   database = db,
 }) {
   try {
-    if (!customerId || !attributionHasPaidClickId(attribution)) {
-      return { attributed: false, reason: 'no_paid_click_id' };
+    if (!customerId) return { attributed: false, reason: 'no_customer_id' };
+    if (!attributionHasPaidClickId(attribution)) {
+      // No deterministic paid click → organic funnel row, never a minted lead.
+      return await recordOrganicSelfBookingAttribution({
+        customerId, attribution, serviceInterest, selfBookedAppointmentId, database,
+      });
     }
     const clickIds = clickIdColumnsFromAttribution(attribution);
     if (!Object.keys(clickIds).length) return { attributed: false, reason: 'no_click_ids' };
@@ -869,6 +940,9 @@ async function attributeSelfBooking({
         await database('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: minted.id,
+          // Booking lineage + the same per-booking dedupe key the organic rows
+          // use (unique; NULL for pre-column rows and non-booking writers).
+          self_booked_appointment_id: selfBookedAppointmentId || null,
           service_line: inferServiceLine(serviceInterest),
           specific_service: inferSpecificService(serviceInterest),
           service_bucket: inferServiceBucket(serviceInterest),

@@ -5,10 +5,16 @@ jest.mock('../services/lead-source-resolver', () => ({
   MAIN_SITE_NAME: 'Main Site (wavespestcontrol.com)',
   SPOKE_DOMAIN_TO_SOURCE_NAME: {},
 }));
+// The bridge's own SQL monotonicity is unit-tested in lead-funnel-bridge.test.js;
+// here we only assert the transitions CALL it with the right stage + db handle.
+jest.mock('../services/lead-funnel-bridge', () => ({
+  bridgeLeadFunnelStage: jest.fn(async () => ({ updated: 1 })),
+}));
 
 const db = require('../models/db');
 const leadAttribution = require('../services/lead-attribution');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const {
   attachLeadToEstimate,
   markLinkedLeadEstimateAccepted,
@@ -801,7 +807,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     });
 
     const result = await attributeSelfBooking({
-      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', customerCreated: true, database,
+      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', customerCreated: true, selfBookedAppointmentId: 'sba-paid', database,
     });
 
     expect(result).toMatchObject({ attributed: true, minted: true, leadId: 'minted-1' });
@@ -835,6 +841,8 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       lead_source: 'facebook',
       fbclid: 'fb-click-123',
       funnel_stage: 'lead',
+      // booking lineage + the shared per-booking dedupe key
+      self_booked_appointment_id: 'sba-paid',
     });
   });
 
@@ -885,18 +893,29 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(ppc.row.gclid).toHaveLength(200);
   });
 
-  test('does NOT mint when the touch carries no deterministic click id (a bare _fbp cookie is not a click)', async () => {
+  test('does NOT mint when the touch carries no deterministic click id (a bare _fbp cookie is not a click) — organic funnel row instead', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 
     const result = await attributeSelfBooking({
       customerId: 'c1',
       attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
       customerCreated: true,
+      selfBookedAppointmentId: 'sba-1',
       database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'no_paid_click_id' });
-    expect(database._inserted).toEqual([]);
+    expect(result).toMatchObject({ attributed: true, organic: true });
+    // No lead is EVER minted without a paid click id — only a funnel row.
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row).toBeTruthy();
+    expect(row.row).toMatchObject({
+      customer_id: 'c1',
+      self_booked_appointment_id: 'sba-1',
+      is_paid: false,
+      funnel_stage: 'lead',
+      fbp: 'fb.1.x.ambient', // aux CAPI match key only — never a paid signal
+    });
   });
 
   test('does NOT mint on a non-ad UTM + ambient _fbp (newsletter/organic must not become a paid won lead)', async () => {
@@ -906,10 +925,70 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       customerId: 'c1',
       attribution: { utm: { source: 'newsletter', medium: 'email', campaign: 'june' }, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
       customerCreated: true,
+      selfBookedAppointmentId: 'sba-2',
       database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'no_paid_click_id' });
+    expect(result).toMatchObject({ attributed: true, organic: true });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    // determineLeadSource fallback: unknown UTM source keys the bucket.
+    expect(row.row).toMatchObject({
+      lead_source: 'newsletter',
+      utm_campaign: 'june',
+      is_paid: false,
+    });
+  });
+
+  test('organic booking with a GBP UTM classifies via the shared determineLeadSource (google_business)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: { source: 'gbp', medium: 'organic', campaign: 'gbp', term: null, content: 'unknown-profile' },
+        gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        referrer: 'https://www.google.com/', landing_url: 'https://wavespestcontrol.com/book',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-3',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'google_business' });
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row.lead_source).toBe('google_business');
+    expect(row.row.is_paid).toBe(false);
+  });
+
+  test('organic REPEAT-customer booking still records a funnel row (per-booking capture, still no lead)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null, landing_url: 'https://wavespestcontrol.com/book' },
+      customerCreated: false, // resolved existing customer
+      selfBookedAppointmentId: 'sba-4',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ self_booked_appointment_id: 'sba-4', is_paid: false });
+  });
+
+  test('organic booking WITHOUT a booking id fails closed (no per-booking dedupe key → no row)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null },
+      customerCreated: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'no_booking_id' });
     expect(database._inserted).toEqual([]);
   });
 
@@ -1137,6 +1216,8 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       { id: 'L1', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
+    // Funnel-row mirror fires with the caller's database handle.
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('L1', 'estimate_sent', database);
   });
 
   test('standalone estimate: rescues a single contact-matched open lead — links it then flips to estimate_sent', async () => {
@@ -1214,6 +1295,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       { id: 'L-view', whereIn: ['new', 'contacted', 'estimate_sent'], patch: expect.objectContaining({ status: 'estimate_viewed' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('L-view', 'estimate_viewed', database);
   });
 
   test('rescue stamp loses to a DIFFERENT estimate (0 rows) → does not advance or log for this estimate', async () => {
