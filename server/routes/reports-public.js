@@ -8,7 +8,6 @@ const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
-const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
@@ -215,6 +214,11 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // every other caller stays a customer view.
   const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer });
   if (service?.report_template_version !== 'service_report_v1') return data;
+
+  // nextAppointment is LIVE-VIEW ONLY: cached PDFs / static renders are
+  // content-key-insensitive snapshots, and a reschedule after render would
+  // leave a stale appointment time fossilized in the downloadable document.
+  if (mode !== 'live') delete data.nextAppointment;
 
   // buildPestPressureCustomerView returns null only when Pest Pressure
   // is hidden from the customer (feature disabled, showOnCustomerReport
@@ -769,17 +773,17 @@ router.post('/:token/ask', async (req, res, next) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const [data, nextAppointment] = await Promise.all([
-      buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' }),
-      db('scheduled_services')
-        .where({ customer_id: service.customer_id })
-        .where('scheduled_date', '>=', etDateString())
-        .whereNotIn('status', ['cancelled', 'completed', 'complete'])
-        .orderBy('scheduled_date')
-        .orderBy('window_start')
-        .first('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'status')
-        .catch(() => null),
-    ]);
+    const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' });
+    // The Q&A answer and the report hero must never disagree about the next
+    // visit — reuse the builder's service-line-matched nextAppointment (the
+    // old standalone query here was any-line and included stale rows).
+    const nextAppointment = data.nextAppointment
+      ? {
+        service_type: data.nextAppointment.serviceType,
+        scheduled_date: data.nextAppointment.scheduledDate,
+        window_start: data.nextAppointment.windowStart,
+      }
+      : null;
 
     const productContext = await loadReportAssistantProductContext(data).catch(() => ({ byApplicationId: {}, byProductName: {} }));
     const answer = answerServiceReportQuestion({

@@ -2558,16 +2558,23 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let nextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // NO 'rescheduled': those are phantom placeholders holding the OLD
+    // date/window until the office rebooks (see report-followup-appointment.js
+    // — publishing one presents a stale time as if it were still real).
+    // The service-line match happens in JS (detectServiceLine's rules are
+    // regex-heavy and live in one place), so the candidate window must be
+    // wide enough that nearer OTHER-line visits can't crowd out the next
+    // same-line row — 200 covers ~4 years of weekly visits.
     const upcomingRows = await knex('scheduled_services')
       .where('customer_id', service.customer_id)
       .andWhere('scheduled_date', '>=', reportTodayIso)
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .whereIn('status', ['pending', 'confirmed'])
       .modify((qb) => {
         if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
       })
       .orderBy('scheduled_date', 'asc')
       .orderBy('window_start', 'asc')
-      .limit(20)
+      .limit(200)
       .catch(() => []);
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
       .find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
@@ -2608,8 +2615,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // estimate, the report token is a shareable bearer link the customer owns —
     // these are the reader's own contact details, same exposure model as the
     // address that already prints here.
-    customerEmail: service.email || null,
-    customerPhone: service.phone || null,
+    // Callers alias the customer join differently (the public routes select
+    // email/phone; email delivery selects customer_email/customer_phone) —
+    // read both so every render path carries the contact block.
+    customerEmail: service.email || service.customer_email || null,
+    customerPhone: service.phone || service.customer_phone || null,
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while

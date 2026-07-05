@@ -87,6 +87,9 @@ test('payload surfaces the next same-line appointment without window_end', async
       // earlier than the pest row, but a different service line — a pest
       // report must skip it (owner 2026-07-05: next visit of THIS line)
       { id: 'scheduled-lawn', customer_id: 'customer-1', scheduled_date: farFuture, status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00' },
+      // 'rescheduled' phantom placeholder holding the OLD date/window until
+      // the office rebooks — must never publish as the next appointment
+      { id: 'scheduled-phantom', customer_id: 'customer-1', scheduled_date: farFuture, status: 'rescheduled', service_type: 'Quarterly Pest Control Service', window_start: '07:00:00' },
       { id: 'scheduled-next', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '09:00:00', window_end: '13:00:00' },
     ],
   });

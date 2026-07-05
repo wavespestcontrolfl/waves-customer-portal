@@ -17,3 +17,6 @@ tmp-beehiiv-reconcile-*.json
 
 # Calibration script output — may contain redacted-but-still-sensitive snippets.
 reports/
+
+# Local live-edit stubs (real payloads) must never ship — served verbatim from the public web root
+client/public/__stub/
