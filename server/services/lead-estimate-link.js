@@ -313,15 +313,18 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
     // a concurrent first-view may already have advanced the lead to estimate_viewed,
     // and this predicate prevents a stale 'new' read from downgrading it back to
     // estimate_sent. The status whitelist also subsumes the closed-status guard.
-    await database('leads')
+    const advanced = await database('leads')
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted'])
       .update({ status: 'estimate_sent', updated_at: new Date() });
-    // Mirror the transition onto the lead's ad_service_attribution funnel row.
-    // Fired regardless of whether THIS call won the status race — the bridge is
-    // monotonic in SQL, so it converges without ever downgrading (and it also
-    // catches up a row left at 'lead' by a send that predated the bridge).
-    await bridgeLeadFunnelStage(lead.id, 'estimate_sent', database);
+    // Mirror the transition onto the lead's ad_service_attribution funnel row —
+    // but ONLY when the status update actually applied. A replayed send event
+    // on a lead that is already won/lost updates 0 rows, and bridging anyway
+    // would advance a closed deal's funnel row to an intermediate estimate
+    // stage it should never re-enter (the won/lost transition already stamped
+    // its terminal stage). The bridge's monotonic rank guards downgrades; this
+    // guards phantom advances.
+    if (advanced) await bridgeLeadFunnelStage(lead.id, 'estimate_sent', database);
     await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
     await database('lead_activities').insert({
       lead_id: lead.id,
@@ -341,12 +344,14 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
     if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
     // Conditional in SQL on the current status (estimate_viewed is the terminal of
     // these three, so this is monotonic and races can't move the lead backward).
-    await database('leads')
+    const advanced = await database('leads')
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted', 'estimate_sent'])
       .update({ status: 'estimate_viewed', updated_at: new Date() });
-    // Funnel-row mirror (monotonic — see the send path).
-    await bridgeLeadFunnelStage(lead.id, 'estimate_viewed', database);
+    // Funnel-row mirror, gated on the status actually transitioning — a
+    // replayed view on a won/lost lead must not advance its funnel row
+    // (see the send path).
+    if (advanced) await bridgeLeadFunnelStage(lead.id, 'estimate_viewed', database);
     await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_viewed',
@@ -813,11 +818,29 @@ function clickIdColumnsFromAttribution(attribution) {
   return out;
 }
 
+// Hostname for the same normalized comparison lead-source-resolver uses; null
+// on garbage so a bad URL can never satisfy a host check.
+function attributionHost(url) {
+  if (!url) return null;
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
+}
+
 // Organic (non-paid) self-booking → funnel row only, no lead. Classified with
-// the shared determineLeadSource (landing URL wins, referrer as fallback URL —
-// the webhook's exact url = landingUrl || pageUrl precedence). is_paid=false
-// always: this branch is only reachable WITHOUT a deterministic paid click id,
-// and a bare UTM is not paid evidence (mirrors attributionHasPaidClickId).
+// the shared determineLeadSource. is_paid=false always: this branch is only
+// reachable WITHOUT a deterministic paid click id, and a bare UTM is not paid
+// evidence (mirrors attributionHasPaidClickId).
+//
+// Embedded-iframe correction (booking context ONLY — lead-webhook semantics
+// are untouched): PublicBookingPage captures landing_url = the PORTAL's own
+// /book iframe URL while the real spoke/hub page arrives as document.referrer,
+// so classifying the landing would file every embedded booking under the
+// portal's host. The portal's own surface is attribution-neutral: when the
+// landing host IS the portal (utils/portal-url), classify the referrer instead
+// — kept only when it carries a real signal (not the generic 'website'
+// fallback), so a google.com/opaque referrer never downgrades the landing
+// classification. UTM/click-id branches short-circuit inside
+// determineLeadSource before any URL handling, so they are unaffected.
+//
 // Requires the booking id — without it there is no per-booking dedupe key, so
 // it fails closed rather than risking duplicate funnel rows.
 async function recordOrganicSelfBookingAttribution({
@@ -832,11 +855,21 @@ async function recordOrganicSelfBookingAttribution({
   const attr = (attribution && typeof attribution === 'object') ? attribution : {};
   const utm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
   const { determineLeadSource } = require('./lead-source-classify');
-  const classified = determineLeadSource(
-    attr.referrer || '', attr.landing_url || '',
+  const classify = (url) => determineLeadSource(
+    '', url || '',
     utm.source || '', utm.medium || '', utm.campaign || '', utm.content || '',
     attr.fbclid || '', attr.fbc || '', attr.gclid || '', attr.wbraid || '', attr.gbraid || '',
   );
+
+  let classified = classify(attr.landing_url || attr.referrer);
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const portalHost = attributionHost(publicPortalUrl());
+  const landingHost = attributionHost(attr.landing_url);
+  const referrerHost = attributionHost(attr.referrer);
+  if (portalHost && landingHost === portalHost && referrerHost && referrerHost !== portalHost) {
+    const viaReferrer = classify(attr.referrer);
+    if (viaReferrer.source !== 'website') classified = viaReferrer;
+  }
 
   const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
   // _fbp is kept as an auxiliary CAPI match key (the webhook stores it on
@@ -855,7 +888,12 @@ async function recordOrganicSelfBookingAttribution({
     fbp,
     utm_campaign: utm.campaign || null,
     utm_term: utm.term || null,
-    funnel_stage: 'lead',
+    // The booking is already COMMITTED when this runs, so the row is born at
+    // the stage that actually occurred — 'booked', not 'lead' (buildLeadFunnel
+    // counts booked/completed only; a 'lead' row would underreport organic
+    // self-book conversions until the revenue sync). 'completed' stays the
+    // sync's to write ('booked' is in its ADVANCEABLE_STAGES).
+    funnel_stage: 'booked',
     is_paid: false,
   }).onConflict('self_booked_appointment_id').ignore();
 
@@ -957,7 +995,12 @@ async function attributeSelfBooking({
           fbp: clickIds.fbp || null,
           utm_campaign: utm.campaign || null,
           utm_term: utm.term || null,
-          funnel_stage: 'lead',
+          // Born at 'booked': the booking is committed and the minted lead is
+          // CREATED at status 'won' (a direct insert, so no status transition
+          // ever fires the lead-funnel-bridge for it). A 'lead' row here would
+          // sit at the bottom rung forever and underreport paid self-book
+          // conversions. 'completed' stays the revenue sync's to write.
+          funnel_stage: 'booked',
         }).onConflict('lead_id').ignore();
       } catch (attrErr) {
         logger.warn(`[self-booking-attribution] PPC funnel row failed (non-blocking): ${attrErr.message}`);

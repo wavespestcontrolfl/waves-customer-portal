@@ -123,6 +123,17 @@ describe('lead-estimate-link organic self-booking row wiring', () => {
     expect(src).toMatch(/\.onConflict\('self_booked_appointment_id'\)\.ignore\(\)/);
   });
 
+  test('BOTH self-booking funnel rows are born at booked — the booking is committed, and a born-won lead never fires the bridge', () => {
+    expect((src.match(/funnel_stage: 'booked'/g) || []).length).toBe(2);
+    // neither self-booking insert initializes at the bottom rung anymore
+    expect(src).not.toMatch(/funnel_stage: 'lead'/);
+  });
+
+  test('embedded-iframe bookings defer a portal landing_url to the referrer (portal-url helper, booking scope only)', () => {
+    expect(src).toMatch(/require\('\.\.\/utils\/portal-url'\)/);
+    expect(src).toMatch(/landingHost === portalHost && referrerHost && referrerHost !== portalHost/);
+  });
+
   test('lead-webhook still owns the same classifier (extraction, not a fork)', () => {
     const webhook = read('../routes/lead-webhook.js');
     expect(webhook).toMatch(/require\('\.\.\/services\/lead-source-classify'\)/);
@@ -141,10 +152,10 @@ describe('lead-funnel-bridge call sites', () => {
     expect(src).toMatch(/bridgeLeadFunnelStage\(leadId, 'lost'\)/);
   });
 
-  test('estimate sent/viewed transitions bridge with the caller database handle', () => {
+  test('estimate sent/viewed transitions bridge with the caller database handle, GATED on the status update applying (replay guard)', () => {
     const src = read('../services/lead-estimate-link.js');
-    expect(src).toMatch(/bridgeLeadFunnelStage\(lead\.id, 'estimate_sent', database\)/);
-    expect(src).toMatch(/bridgeLeadFunnelStage\(lead\.id, 'estimate_viewed', database\)/);
+    expect(src).toMatch(/if \(advanced\) await bridgeLeadFunnelStage\(lead\.id, 'estimate_sent', database\)/);
+    expect(src).toMatch(/if \(advanced\) await bridgeLeadFunnelStage\(lead\.id, 'estimate_viewed', database\)/);
   });
 
   test('admin manual transitions bridge (PUT status edit, send-sms contacted, schedule-appointment won)', () => {

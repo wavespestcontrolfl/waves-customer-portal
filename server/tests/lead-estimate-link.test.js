@@ -840,7 +840,9 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       customer_id: 'c1',
       lead_source: 'facebook',
       fbclid: 'fb-click-123',
-      funnel_stage: 'lead',
+      // Born at booked: the booking is committed and the won lead is a direct
+      // insert (no transition ever fires the bridge for it).
+      funnel_stage: 'booked',
       // booking lineage + the shared per-booking dedupe key
       self_booked_appointment_id: 'sba-paid',
     });
@@ -913,7 +915,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       customer_id: 'c1',
       self_booked_appointment_id: 'sba-1',
       is_paid: false,
-      funnel_stage: 'lead',
+      funnel_stage: 'booked', // the booking already committed when this runs
       fbp: 'fb.1.x.ambient', // aux CAPI match key only — never a paid signal
     });
   });
@@ -976,6 +978,50 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
     const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
     expect(row.row).toMatchObject({ self_booked_appointment_id: 'sba-4', is_paid: false });
+  });
+
+  test('embedded iframe booking: portal landing_url defers to the spoke-page referrer (domain_website, not the portal host)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        // PublicBookingPage inside a spoke iframe: landing = the portal's own
+        // /book URL; the real page the customer was on arrives as referrer.
+        landing_url: 'https://portal.wavespestcontrol.com/book?service=lawn_care',
+        referrer: 'https://www.parrishfllawncare.com/lawn-care-parrish/',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-iframe',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'domain_website' });
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row.lead_source).toBe('domain_website');
+    expect(row.row.lead_source_detail).toBe('parrishfllawncare.com');
+    expect(row.row.funnel_stage).toBe('booked');
+  });
+
+  test('portal landing with a signal-less referrer (google.com) keeps the landing classification — never downgrades to the generic bucket', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        landing_url: 'https://portal.wavespestcontrol.com/book',
+        referrer: 'https://www.google.com/',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-google-ref',
+      database,
+    });
+
+    // google.com classifies to the generic 'website' fallback, so the landing's
+    // waves_website classification (portal host ⊂ wavespestcontrol.com) wins.
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'waves_website' });
   });
 
   test('organic booking WITHOUT a booking id fails closed (no per-booking dedupe key → no row)', async () => {
@@ -1163,7 +1209,9 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
             whereIn: (col, vals) => ({
               update: async (patch) => {
                 updates.push({ id: clause.id, whereIn: vals, patch });
-                return 1;
+                // statusRows=0 simulates a replayed event on a lead whose
+                // status is already outside the whitelist (won/lost/…).
+                return opts.statusRows == null ? 1 : opts.statusRows;
               },
             }),
             update: async (patch) => {
@@ -1205,6 +1253,10 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   // The open-status guard the rescue stamp applies (CLOSED_LEAD_STATUSES order).
   const CLOSED = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 
+  // The bridge call log must not leak across tests (the replay cases assert
+  // not.toHaveBeenCalled).
+  beforeEach(() => { bridgeLeadFunnelStage.mockClear(); });
+
   test('FK-linked send is unchanged — flips status, no contact-match link activity', async () => {
     const database = makeEventDb({
       linked: [{ id: 'L1', status: 'new', estimate_id: 'e-1' }],
@@ -1218,6 +1270,35 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(types(database)).toEqual(['estimate_sent']);
     // Funnel-row mirror fires with the caller's database handle.
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('L1', 'estimate_sent', database);
+  });
+
+  test('replayed send on a closed lead (status update touches 0 rows) does NOT bridge the funnel row', async () => {
+    const database = makeEventDb({
+      // FK-linked lead whose stale loaded status passes the loop, but the
+      // guarded UPDATE finds it already won/lost → 0 rows.
+      linked: [{ id: 'L-won', status: 'new', estimate_id: 'e-replay' }],
+      statusRows: 0,
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-replay', sendMethod: 'sms', database });
+
+    // The status update was attempted (and applied nothing)…
+    expect(database._updates).toEqual([
+      { id: 'L-won', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
+    // …so the funnel row must NOT be advanced for a deal that never transitioned.
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
+  test('replayed view on a closed lead does NOT bridge the funnel row', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-lost', status: 'new', estimate_id: 'e-replay-2' }],
+      statusRows: 0,
+    });
+
+    await markLinkedLeadEstimateViewed({ estimateId: 'e-replay-2', database });
+
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('standalone estimate: rescues a single contact-matched open lead — links it then flips to estimate_sent', async () => {
