@@ -1135,6 +1135,7 @@ const EstimateConverter = {
     const billingCadence = inferredFrequencyKey
       ? resolveBillingCadence({
           monthlyRate,
+          annualRate: parseFloat(estimate.annual_total || 0),
           frequencyKey: inferredFrequencyKey,
           estimateData,
           fallbackFrequencyKey: inferredFrequencyKey,
