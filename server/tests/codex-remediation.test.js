@@ -212,7 +212,7 @@ describe('lane entry points', () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb({
       codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'remediating' }],
-      blog_posts: [{ id: 1, publish_status: 'publishing' }],
+      blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k' }],
     });
     const gh = makeGh();
     const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches' }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
@@ -260,7 +260,53 @@ describe('content-gate + truncation + marker safety', () => {
     expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
   });
 
-  test('validateFixedBlogFile rejects a non-blog file', () => {
-    expect(rem.validateFixedBlogFile('just some text, no frontmatter').ok).toBe(false);
+  test('validateFixedBlogFile rejects a non-blog file', async () => {
+    expect((await rem.validateFixedBlogFile('just some text, no frontmatter')).ok).toBe(false);
+  });
+});
+
+describe('round-4 hardening', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  test('maybeRemediateBlogPost re-fetches the row (PR number + topic) from db', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    let captured = null;
+    const db = makeDb({ blog_posts: [{ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'Roof Rats', city: 'Sarasota', keyword: 'roof rats' }] });
+    const gh = makeGh();
+    const capturingValidate = (md, opts) => { captured = opts; return { ok: true }; };
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: capturingValidate });
+    expect(r.remediated).toBe(true);
+    expect(captured.service).toEqual(['pest-control', 'Rodents']);
+    expect(captured.factContext.title).toBe('Roof Rats');
+  });
+
+  test('immutableFrontmatterChanged detects slug/canonical/domains edits', () => {
+    const orig = '---\nslug: /a/\ncanonical: https://x/a/\ndomains:\n  - hub\n---\nbody';
+    expect(rem.immutableFrontmatterChanged(orig, orig)).toBe(false);
+    expect(rem.immutableFrontmatterChanged(orig, orig.replace('/a/', '/b/'))).toBe(true);
+  });
+
+  test('fix that changes routing frontmatter -> park', async () => {
+    const db = makeDb();
+    const orig = '---\nslug: /pest-control/x/\n---\nbody';
+    const changed = '---\nslug: /pest-control/y/\n---\nbody';
+    const gh = makeGh({ fileContent: orig });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall(changed), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/immutable routing/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('null LLM fix retries under the limit and parks at it', async () => {
+    const nullCall = async () => ({ ok: false, reason: 'no_key' });
+    const db1 = makeDb();
+    const r1 = await runRemediationForPr(CTX, { db: db1, gh: makeGh(), callAnthropic: nullCall, validateFixedBlogFile: PASS });
+    expect(r1.skipped).toBe(true); expect(r1.reason).toMatch(/will retry/);
+    expect(db1._tables.codex_remediation_state[0].rounds).toBe(1);
+
+    const db2 = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS - 1, status: 'remediating' }] });
+    const r2 = await runRemediationForPr(CTX, { db: db2, gh: makeGh(), callAnthropic: nullCall, validateFixedBlogFile: PASS });
+    expect(r2.parked).toBe(true); expect(r2.reason).toMatch(/max attempts/);
   });
 });

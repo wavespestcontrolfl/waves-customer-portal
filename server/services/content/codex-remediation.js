@@ -45,6 +45,7 @@ const { assertValidBlogFrontmatter } = require('../content-astro/schema-validato
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 const contentGuardrails = require('./content-guardrails');
 const comparisonTableGate = require('./comparison-table-gate');
+const factCheckGate = require('./fact-check-gate');
 
 const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS || '3', 10) || 3);
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -167,12 +168,17 @@ async function generateFix(markdown, findings, deps = {}) {
 }
 
 /**
- * Re-run the publisher's deterministic pre-PR content gates on a remediated
- * file before committing it. Mirrors astro-publisher.publishAstro's sequence
- * (frontmatter schema + content guardrails + comparison/named-competitor).
- * Returns { ok } or { ok:false, reason }. Sync — the gate modules are sync.
+ * Re-run the publisher's pre-PR content gates on a remediated file before
+ * committing. Mirrors astro-publisher (frontmatter schema + content guardrails
+ * + comparison/named-competitor + fact-check). Async — fact-check is an LLM
+ * call. Returns { ok } or { ok:false, reason }.
+ *
+ * opts.service     — original topic [category, tag] from the caller. Blog
+ *   frontmatter omits `tag`, so the scheduler lane passes the real topic (like
+ *   astro-publisher ~787) so FAQ-blocked-service etc. fire on Rodents/Bed Bugs.
+ * opts.factContext — { title, city, keyword, tag } for the fact-check gate.
  */
-function validateFixedBlogFile(markdown) {
+async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   let parsed;
   try { parsed = fm.parse(markdown); } catch (e) { return { ok: false, reason: `unparseable: ${e.message}` }; }
   const data = parsed && parsed.data;
@@ -182,9 +188,10 @@ function validateFixedBlogFile(markdown) {
   try { assertValidBlogFrontmatter(data); } catch (e) { return { ok: false, reason: `frontmatter: ${e.message}` }; }
 
   const domains = (Array.isArray(data.domains) && data.domains.length > 0) ? data.domains : SPOKE_SITE_KEYS;
+  const service = (Array.isArray(opts.service) && opts.service.some(Boolean)) ? opts.service : [data.category, data.tag];
   const guardrails = contentGuardrails.evaluate(
     { body, frontmatter: data },
-    { domains, service: [data.category, data.tag], primaryKeyword: data.primary_keyword || null },
+    { domains, service, primaryKeyword: data.primary_keyword || null },
   );
   if (!guardrails.pass) {
     const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -199,7 +206,38 @@ function validateFixedBlogFile(markdown) {
       (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'COMPARISON_UNCLASSIFIED_OPTION');
     if (blocking.length) return { ok: false, reason: `comparison ${blocking.map((f) => f.code).join(',')}` };
   }
+
+  // Fact-check (LLM) — same P0-blocking policy as astro-publisher.assertFactCheckClear.
+  const fc = opts.factContext || {};
+  const evaluate = deps.factCheckEvaluate || factCheckGate.evaluate;
+  const factResult = await evaluate({
+    title: fc.title || data.title || '',
+    body,
+    city: fc.city || (Array.isArray(data.service_areas_tag) ? data.service_areas_tag[0] : '') || '',
+    keyword: fc.keyword || data.primary_keyword || '',
+    tag: fc.tag || data.tag || data.category || '',
+  });
+  if (factResult && !factResult.pass) {
+    const p0 = (factResult.findings || []).filter((f) => f.severity === 'P0');
+    if (p0.length) return { ok: false, reason: `factcheck ${p0.map((f) => f.message).slice(0, 2).join('; ')}` };
+  }
   return { ok: true };
+}
+
+/**
+ * Immutable routing frontmatter (slug/canonical/domains) must survive a fix —
+ * a changed slug/canonical/domains would mark a DIFFERENT Astro route published
+ * than the portal recorded. Returns true if the fix altered any of them.
+ */
+function immutableFrontmatterChanged(originalMd, fixedMd) {
+  let a; let b;
+  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { return true; }
+  const norm = (v) => JSON.stringify(v ?? null);
+  if (norm(a.slug) !== norm(b.slug)) return true;
+  if (norm(a.canonical) !== norm(b.canonical)) return true;
+  const da = [...(a.domains || [])].sort();
+  const dbb = [...(b.domains || [])].sort();
+  return norm(da) !== norm(dbb);
 }
 
 // ── PR-keyed remediation state ────────────────────────────────────────────
@@ -244,7 +282,7 @@ async function park(db, prNumber, reason, onPark) {
 async function runRemediationForPr(ctx = {}, deps = {}) {
   const db = deps.db || dbDefault;
   const gh = deps.gh || ghDefault;
-  const { prNumber, branch, slug = null, onPark = null } = ctx;
+  const { prNumber, branch, slug = null, service = null, factContext = null, onPark = null } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
   const state = await getState(db, prNumber);
@@ -284,15 +322,28 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark);
 
   const fixed = await generateFix(file.content, findings, deps);
-  if (!fixed) return { skipped: true, reason: 'no valid LLM fix (empty or truncated)' };
+  if (!fixed) {
+    // Bound the failure: an unavailable / repeatedly-truncating LLM would
+    // otherwise re-invoke every tick forever. Count the attempt and park at the
+    // round limit so the PR reaches human review instead of looping.
+    const attempt = (state.rounds || 0) + 1;
+    await saveState(db, prNumber, { branch, rounds: attempt });
+    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark);
+    return { skipped: true, reason: 'no valid LLM fix (will retry)' };
+  }
   if (fixed.trim() === String(file.content).trim()) {
     return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark);
+  }
+  // Immutable routing frontmatter (slug/canonical/domains) must survive a fix —
+  // a changed route would mark a different URL published than the portal recorded.
+  if (immutableFrontmatterChanged(file.content, fixed)) {
+    return park(db, prNumber, 'fix changed immutable routing frontmatter (slug/canonical/domains)', onPark);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
-  const gate = validate(fixed);
+  const gate = await validate(fixed, { service, factContext }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark);
 
   const round = (state.rounds || 0) + 1;
@@ -324,15 +375,24 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 async function maybeRemediateBlogPost(post, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
   const db = deps.db || dbDefault;
+  // Re-fetch the full row — pollPending's SELECT omits astro_pr_number and the
+  // topic/fact-check fields (category/tag/title/city/keyword) that remediation
+  // and the content gates need.
+  const row = await db('blog_posts').where({ id: post.id }).first();
+  if (!row) return { skipped: true, reason: 'post gone' };
   return runRemediationForPr({
-    prNumber: post.astro_pr_number,
-    branch: post.astro_branch_name,
-    slug: post.slug,
+    prNumber: row.astro_pr_number,
+    branch: row.astro_branch_name,
+    slug: row.slug,
+    // Frontmatter `category` is often only the broad Astro value; pass the real
+    // topic like the publisher does so FAQ-blocked-service etc. fire.
+    service: [row.category, row.tag],
+    factContext: { title: row.title, city: row.city, keyword: row.keyword, tag: row.tag },
     onPark: async (reason) => {
       // Disarm the scheduler's publishing claim (guarded on it) so the
       // stale-publishing sweep moves the row to human review instead of it
       // sitting in the auto-merge loop for the full stale window.
-      await db('blog_posts').where({ id: post.id, publish_status: 'publishing' }).update({
+      await db('blog_posts').where({ id: row.id, publish_status: 'publishing' }).update({
         publish_status: 'pending_review',
         astro_publish_error: `codex remediation parked: ${reason}`.slice(0, 1000),
         updated_at: new Date(),
@@ -365,6 +425,7 @@ module.exports = {
   buildFixUserMessage,
   reviewRequestedForHead,
   validateFixedBlogFile,
+  immutableFrontmatterChanged,
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
