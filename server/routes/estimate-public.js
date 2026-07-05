@@ -34,6 +34,7 @@ const {
   computeDepositAmount,
 } = require('../services/estimate-deposits');
 const CardHolds = require('../services/estimate-card-holds');
+const Experiments = require('../services/experimentation/growthbook');
 const {
   cleanupEstimatePricingCache,
   clearEstimatePricingCache,
@@ -6355,7 +6356,7 @@ async function handleEstimateView(req, res, next) {
     // renders the React "link isn't valid" screen (strictly less exposure
     // than the SSR draft page below).
     const adminPreviewRequested = req.query.adminPreview === '1';
-    const shouldUseReactEstimateView = (estimate.use_v2_view === true
+    let shouldUseReactEstimateView = (estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
@@ -6366,6 +6367,30 @@ async function handleEstimateView(req, res, next) {
       // default flip otherwise only takes effect once the estimate is
       // actually published.
       && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
+
+    // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
+    // v2-by-default population is eligible: published, not an admin preview, not
+    // forced to React by invoice mode / card-hold, and a real customer view
+    // (staff + bots are excluded from both assignment AND exposure). Among those,
+    // GrowthBook may hold a control back to the legacy server-HTML renderer so we
+    // can measure v2's lift on acceptance/deposit/booking. Fails OPEN — a miss
+    // (gate off, no client key, feature absent, not-in-experiment, or any error)
+    // leaves the default v2 decision untouched. Forced-React and explicitly-v1
+    // (use_v2_view=false) estimates are never reassigned. See
+    // services/experimentation/growthbook.js.
+    if (featureGates.isEnabled('growthbookExperiments')
+      && estimate.use_v2_view === true
+      && !effectiveInvoiceMode
+      && !cardHoldForcesReactView
+      && !adminPreviewRequested
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      && shouldCountView(req, clientIp(req), estimate)) {
+      const assignment = Experiments.assignEstimateViewExperiment(estimate);
+      if (assignment.inExperiment && typeof assignment.value === 'boolean') {
+        shouldUseReactEstimateView = assignment.value;
+      }
+    }
+
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }

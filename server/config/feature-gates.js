@@ -310,6 +310,20 @@ const gates = {
   // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
 
+  // GrowthBook experimentation — master gate for A/B experiment assignment on
+  // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
+  // eligible requests consult GrowthBook (server SDK; LOCAL eval against a
+  // cached feature payload — no network in the request path) to assign a
+  // variation and log one exposure row to experiment_exposures. When OFF,
+  // NOTHING calls GrowthBook and every code path is byte-identical to
+  // pre-experiment behavior. It changes which page a real customer sees (e.g.
+  // the estimate view v1/v2 holdback), so like the customer-facing gates it
+  // FAILS CLOSED — explicit opt-in in EVERY environment. Requires
+  // GROWTHBOOK_CLIENT_KEY (an sdk-… SDK Connection key — NOT the secret_admin_…
+  // management key) and GROWTHBOOK_API_HOST; with the gate ON but the key
+  // missing/unreachable, assignment fails OPEN to control (current behavior).
+  growthbookExperiments: process.env.GATE_GROWTHBOOK === 'true',
+
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
   // trigger has been verified with run history and idempotency checks.
