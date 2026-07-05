@@ -11,6 +11,7 @@ const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
+const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2605,6 +2606,29 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   } catch { /* best-effort */ }
 
+  // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
+  // completion recap through the same grounded-narrative pattern the lawn
+  // report uses, folding in the Pest Pressure trend, the visit's findings,
+  // and the next appointment computed above. Recurring pest line only —
+  // typed specialty reports (cockroach cleanout etc.) keep the plain recap,
+  // matching the Pest Pressure gate. Best-effort: never blocks the report.
+  let visitSummary = structured.customerRecap || '';
+  if (
+    serviceLine === 'pest'
+    && !typedSnapshot
+    && visitSummary
+    && process.env.PEST_VISIT_SUMMARY_NARRATIVE === 'true'
+  ) {
+    visitSummary = await applyVisitSummaryNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: serviceDisplayName(service),
+      areasServiced: areaLabels,
+      pestPressure,
+      findings,
+      nextAppointment,
+    }).catch(() => structured.customerRecap || '');
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -2658,7 +2682,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       exitedAt: completionTime,
       onSiteMinutes: onSiteMin,
     },
-    summary: structured.customerRecap || '',
+    summary: visitSummary,
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {
