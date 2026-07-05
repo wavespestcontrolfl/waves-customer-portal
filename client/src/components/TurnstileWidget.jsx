@@ -20,6 +20,9 @@ export default function TurnstileWidget({ onToken, className }) {
       if (cancelled || !turnstile || !containerRef.current || widgetIdRef.current) return;
       widgetIdRef.current = turnstile.render(containerRef.current, {
         sitekey: TURNSTILE_SITE_KEY,
+        // Force the white widget: the 'auto' default follows the visitor's OS
+        // dark mode and renders a black box on the light quote form.
+        theme: 'light',
         callback: (token) => onTokenRef.current(token),
         'expired-callback': () => onTokenRef.current(''),
         'error-callback': () => onTokenRef.current(''),
