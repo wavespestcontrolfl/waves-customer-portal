@@ -181,3 +181,81 @@ test('validateZoneShapesBody accepts clear tombstones but rejects clear+shape', 
   expect(validateZoneShapesBody([{ areaLabel: 'Perimeter', clear: true }])).toBeNull();
   expect(validateZoneShapesBody([{ areaLabel: 'Perimeter', clear: true, shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.05 } }])).toMatch(/one or the other/);
 });
+
+// --- zoneShapeCoverageGaps (desk-backfill PUT completeness gate) ---
+
+const { zoneShapeCoverageGaps } = require('../services/property-zones');
+
+const ROWS = [
+  { label: 'Perimeter', geometry_image: '{"type":"rect","x":0.1,"y":0.1,"w":0.4,"h":0.2}' },
+  { label: 'Yard', geometry_image: null },
+  { label: 'Entry points', geometry_image: null },
+];
+const SHAPE = { type: 'circle', cx: 0.5, cy: 0.5, r: 0.06 };
+
+test('coverage gaps: payload completing every unmarked zone passes', () => {
+  expect(zoneShapeCoverageGaps(ROWS, [
+    { areaLabel: 'Yard', shape: SHAPE },
+    { areaLabel: 'Entry points', shape: SHAPE },
+  ])).toBeNull();
+});
+
+test('coverage gaps: partial save is rejected with the unmarked labels', () => {
+  expect(zoneShapeCoverageGaps(ROWS, [{ areaLabel: 'Yard', shape: SHAPE }]))
+    .toEqual(['Entry points']);
+  // a single mark onto an all-unmarked property is partial too
+  expect(zoneShapeCoverageGaps(ROWS.map((z) => ({ ...z, geometry_image: null })), [{ areaLabel: 'Yard', shape: SHAPE }]).sort())
+    .toEqual(['Entry points', 'Perimeter']);
+});
+
+test('coverage gaps: clearing the only marked zone lands all-unmarked (fine); clearing one of several does not', () => {
+  expect(zoneShapeCoverageGaps(ROWS, [{ areaLabel: 'Perimeter', clear: true }])).toBeNull();
+  const allMarked = ROWS.map((z) => ({ ...z, geometry_image: '{"type":"circle","cx":0.5,"cy":0.5,"r":0.06}' }));
+  expect(zoneShapeCoverageGaps(allMarked, [{ areaLabel: 'Yard', clear: true }])).toEqual(['Yard']);
+});
+
+test('coverage gaps: new labels count as marked; unknown-label clears and status chips are ignored', () => {
+  expect(zoneShapeCoverageGaps(ROWS, [
+    { areaLabel: 'Yard', shape: SHAPE },
+    { areaLabel: 'Entry points', shape: SHAPE },
+    { areaLabel: 'Fence line', shape: SHAPE }, // new row → ends marked
+    { areaLabel: 'Shed', clear: true }, // no row → no-op
+    { areaLabel: 'No issues found', shape: SHAPE }, // status chip → never a zone
+  ])).toBeNull();
+});
+
+test('coverage gaps: scoped to the service line the way reports scope zones', () => {
+  const mixed = [
+    { label: 'Perimeter', geometry_image: null, service_lines: ['pest'] },
+    { label: 'Front lawn', geometry_image: null, service_lines: ['lawn'] },
+    { label: 'Yard', geometry_image: null, service_lines: [] }, // untagged → every line
+  ];
+  // pest save covering the pest zone AND the untagged zone passes even
+  // though the lawn-only zone stays unmarked (it never co-renders on pest)
+  expect(zoneShapeCoverageGaps(mixed, [
+    { areaLabel: 'Perimeter', shape: SHAPE },
+    { areaLabel: 'Yard', shape: SHAPE },
+  ], { serviceLine: 'pest' })).toBeNull();
+  // ...but the untagged zone always counts — skipping it is still partial
+  expect(zoneShapeCoverageGaps(mixed, [{ areaLabel: 'Perimeter', shape: SHAPE }], { serviceLine: 'pest' }))
+    .toEqual(['Yard']);
+  // no serviceLine → conservative all-rows check
+  expect(zoneShapeCoverageGaps(mixed, [
+    { areaLabel: 'Perimeter', shape: SHAPE },
+    { areaLabel: 'Yard', shape: SHAPE },
+  ])).toEqual(['Front lawn']);
+});
+
+test('coverage gaps: clear + redraw for one label simulates the write order (shapes then clears)', () => {
+  // upsertZonesForCompletion applies all shapes FIRST and all clears AFTER,
+  // so a clear+shape pair ends unmarked regardless of entry order — the
+  // simulator must agree (the route additionally 400s duplicates outright)
+  const rows = [
+    { label: 'Perimeter', geometry_image: '{"type":"circle","cx":0.5,"cy":0.5,"r":0.06}', service_lines: [] },
+    { label: 'Yard', geometry_image: '{"type":"circle","cx":0.4,"cy":0.4,"r":0.06}', service_lines: [] },
+  ];
+  expect(zoneShapeCoverageGaps(rows, [
+    { areaLabel: 'Yard', clear: true },
+    { areaLabel: 'Yard', shape: SHAPE }, // later shape does NOT win
+  ])).toEqual(['Yard']);
+});

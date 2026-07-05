@@ -13,6 +13,7 @@ const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
+const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-drift');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
@@ -22,7 +23,7 @@ const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('.
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -1098,12 +1099,81 @@ router.get('/:serviceId/completion-profile', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dispatch/:serviceId/property-map — satellite basemap + the
-// customer's existing zones for the completion flow's zone-marking step. The
-// image params (center / zoom / 640x340) are built through the SAME provider
-// call the customer report uses, so what the tech draws on is pixel-identical
-// to what the report renders. The Google image URL is returned for LIVE
-// display only — never proxied or stored (provider ToS).
+// Satellite basemap + the customer's existing zones for the zone-marking
+// surfaces (completion-flow capture step and the office desk-backfill flow).
+// The image params (center / zoom / 640x340) are built through the SAME
+// provider call the customer report uses, so what gets drawn on is
+// pixel-identical to what the report renders. The Google image URL is
+// returned for LIVE display only — never proxied or stored (provider ToS).
+async function buildPropertyMapPayload(customerId, lat, lng) {
+  const { getBasemapProvider, isSatelliteTreatmentMapEnabled } = require('../services/maps/basemap-provider');
+  if (!isSatelliteTreatmentMapEnabled()) {
+    return { available: false, reason: 'disabled' };
+  }
+  const provider = getBasemapProvider();
+  if (!provider?.capabilities?.canDisplayLive) {
+    return { available: false, reason: 'provider_unavailable' };
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { available: false, reason: 'missing_coordinates' };
+  }
+
+  const geometryRow = await db('property_geometries')
+    .where({ customer_id: customerId })
+    .orderBy('version', 'desc')
+    .first()
+    .catch(() => null);
+  const zoom = Number(geometryRow?.zoom) || 20;
+  const center = { lat, lng };
+  const liveConfig = await provider.getLiveMapConfig({
+    center,
+    zoom,
+    width: 640,
+    height: 340,
+    mapType: 'satellite',
+  });
+  if (!liveConfig?.imageUrl) {
+    return { available: false, reason: 'provider_config_unavailable' };
+  }
+
+  const zones = await db('property_zones')
+    .where({ customer_id: customerId, is_active: true })
+    .orderBy('letter')
+    .catch(() => []);
+  // Re-anchor stored marks against the image being served: a re-geocoded
+  // customer shifts the image center under the shapes, and preloading them
+  // unshifted would have the tech "confirm" marks on the wrong ground.
+  // Untrusted marks come back with geometryImage null so the tech redraws.
+  const resolvedZones = resolveZoneRowsImageDrift(zones, {
+    center: liveConfig.center || center,
+    zoom,
+    width: liveConfig.width || 640,
+    height: liveConfig.height || 340,
+  });
+
+  return {
+    available: true,
+    image: {
+      url: liveConfig.imageUrl,
+      width: liveConfig.width || 640,
+      height: liveConfig.height || 340,
+      center: liveConfig.center || center,
+      zoom,
+      attributionText: liveConfig.attributionText || '',
+    },
+    zones: resolvedZones.map((zone) => ({
+      id: zone.id,
+      letter: zone.letter,
+      label: zone.label,
+      category: zone.category,
+      serviceLines: Array.isArray(zone.service_lines) ? zone.service_lines : [],
+      geometryImage: zone.geometry_image || null,
+    })),
+  };
+}
+
+// GET /api/admin/dispatch/:serviceId/property-map — the completion flow's
+// zone-marking step (service-scoped: the tech is standing on a job).
 router.get('/:serviceId/property-map', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services as ss')
@@ -1112,63 +1182,109 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
       .select('ss.id', 'ss.customer_id', 'c.latitude', 'c.longitude')
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
+    return res.json(await buildPropertyMapPayload(svc.customer_id, Number(svc.latitude), Number(svc.longitude)));
+  } catch (err) { next(err); }
+});
 
-    const { getBasemapProvider, isSatelliteTreatmentMapEnabled } = require('../services/maps/basemap-provider');
-    if (!isSatelliteTreatmentMapEnabled()) {
-      return res.json({ available: false, reason: 'disabled' });
+// GET /api/admin/dispatch/customers/:customerId/property-map — same payload,
+// customer-scoped, for the office desk-backfill flow (Customer 360 / job
+// sheet), where there is no in-flight completion to hang a serviceId on.
+router.get('/customers/:customerId/property-map', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers')
+      .where({ id: req.params.customerId })
+      .select('id', 'latitude', 'longitude')
+      .first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    return res.json(await buildPropertyMapPayload(customer.id, Number(customer.latitude), Number(customer.longitude)));
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/dispatch/customers/:customerId/property-zones — office desk
+// backfill: apply satellite marks outside a completion (re-mark a drifted
+// property, or backfill shapes onto zones created before the capture UI
+// existed). Reuses the completion upsert so there is exactly one write path
+// for zone shapes; unlike the completion's post-commit fail-soft sync, this
+// IS the primary action, so it runs in its own transaction and fails loudly.
+router.put('/customers/:customerId/property-zones', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.customerId }).select('id').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const zoneShapes = req.body?.zoneShapes;
+    if (!Array.isArray(zoneShapes) || !zoneShapes.length) {
+      return res.status(400).json({ error: 'zoneShapes must be a non-empty array', code: 'zone_shapes_invalid' });
     }
-    const provider = getBasemapProvider();
-    if (!provider?.capabilities?.canDisplayLive) {
-      return res.json({ available: false, reason: 'provider_unavailable' });
+    const zoneShapesError = PropertyZones.validateZoneShapesBody(zoneShapes);
+    if (zoneShapesError) {
+      return res.status(400).json({ error: zoneShapesError, code: 'zone_shapes_invalid' });
     }
-    const lat = Number(svc.latitude);
-    const lng = Number(svc.longitude);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      return res.json({ available: false, reason: 'missing_coordinates' });
+    const serviceLine = typeof req.body?.serviceLine === 'string'
+      ? req.body.serviceLine.trim().toLowerCase() || null
+      : null;
+    if (serviceLine && !SERVICE_LINE_IDS.includes(serviceLine)) {
+      return res.status(400).json({
+        error: `serviceLine must be one of: ${SERVICE_LINE_IDS.join(', ')}`,
+        code: 'service_line_invalid',
+      });
     }
 
-    const geometryRow = await db('property_geometries')
-      .where({ customer_id: svc.customer_id })
-      .orderBy('version', 'desc')
-      .first()
-      .catch(() => null);
-    const zoom = Number(geometryRow?.zoom) || 20;
-    const center = { lat, lng };
-    const liveConfig = await provider.getLiveMapConfig({
-      center,
-      zoom,
-      width: 640,
-      height: 340,
-      mapType: 'satellite',
-    });
-    if (!liveConfig?.imageUrl) {
-      return res.json({ available: false, reason: 'provider_config_unavailable' });
+    // One entry per label: a clear + redraw pair for the same label would
+    // end UNMARKED in the write path (upsert applies all shapes, THEN all
+    // clears) — reject the ambiguity instead of guessing what was meant.
+    const seenLabels = new Set();
+    for (const entry of zoneShapes) {
+      const key = PropertyZones.normalizeZoneLabel(entry?.areaLabel);
+      if (!key) continue;
+      if (seenLabels.has(key)) {
+        return res.status(400).json({
+          error: `zoneShapes has more than one entry for "${String(entry.areaLabel).trim()}" — send one final state per zone`,
+          code: 'zone_shapes_duplicate',
+        });
+      }
+      seenLabels.add(key);
     }
 
-    const zones = await db('property_zones')
-      .where({ customer_id: svc.customer_id, is_active: true })
-      .orderBy('letter')
-      .catch(() => []);
+    const existingZones = await db('property_zones')
+      .where({ customer_id: customer.id, is_active: true })
+      .select('label', 'geometry_image', 'service_lines');
 
-    return res.json({
-      available: true,
-      image: {
-        url: liveConfig.imageUrl,
-        width: liveConfig.width || 640,
-        height: liveConfig.height || 340,
-        center: liveConfig.center || center,
-        zoom,
-        attributionText: liveConfig.attributionText || '',
-      },
-      zones: zones.map((zone) => ({
-        id: zone.id,
-        letter: zone.letter,
-        label: zone.label,
-        category: zone.category,
-        serviceLines: Array.isArray(zone.service_lines) ? zone.service_lines : [],
-        geometryImage: zone.geometry_image || null,
-      })),
-    });
+    // A shape for a label with no existing row CREATES that row — without a
+    // scoped service line it lands with service_lines: [], which matches
+    // EVERY report line (a pest-only mark would leak onto lawn/tree reports).
+    const knownKeys = new Set(existingZones.map((zone) => PropertyZones.normalizeZoneLabel(zone.label)));
+    const createsRows = zoneShapes.some((entry) => entry?.clear !== true
+      && !knownKeys.has(PropertyZones.normalizeZoneLabel(entry?.areaLabel)));
+    if (createsRows && !serviceLine) {
+      return res.status(400).json({
+        error: 'serviceLine is required when the payload introduces a new zone label',
+        code: 'service_line_required',
+      });
+    }
+
+    // Partial saves are rejected: the report's satellite overlay goes
+    // image-only once ANY zone carries a mark and drops the rest, so a save
+    // that leaves some zones unmarked while others end marked would silently
+    // omit treated zones from the customer's coverage map. All-marked or
+    // all-cleared are both acceptable end states. Scoped to the selected
+    // service line the way reports scope zones — an unmarked lawn-only row
+    // never co-renders on a pest overlay, so it must not block a pest save.
+    const gaps = PropertyZones.zoneShapeCoverageGaps(existingZones, zoneShapes, { serviceLine });
+    if (gaps) {
+      return res.status(400).json({
+        error: `every zone needs a mark (or an explicit clear) before saving — missing: ${gaps.join(', ')}`,
+        code: 'zone_shapes_incomplete',
+        missing: gaps,
+      });
+    }
+
+    const summary = await db.transaction((trx) => PropertyZones.upsertZonesForCompletion(trx, {
+      customerId: customer.id,
+      serviceLine,
+      areaLabels: [],
+      zoneShapes,
+    }));
+    return res.json({ ok: true, summary });
   } catch (err) { next(err); }
 });
 

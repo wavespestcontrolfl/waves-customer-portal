@@ -293,9 +293,65 @@ function validateZoneShapesBody(zoneShapes) {
   return null;
 }
 
+// Mirrors report-data's zoneSupportsServiceLine: a zone with no line tags
+// participates in EVERY report line; a tagged zone only in its own lines.
+function zoneMatchesServiceLine(zone, serviceLine) {
+  const lines = parseServiceLines(zone?.service_lines);
+  if (!lines.length || !serviceLine) return true;
+  return lines.includes(String(serviceLine).trim().toLowerCase());
+}
+
+// End-state coverage check for STANDALONE saves (the desk-backfill PUT).
+// Simulates applying zoneShapes to the customer's active rows and returns the
+// labels of zones that would end UNMARKED while at least one other zone ends
+// marked — the partial state the report must never see: the satellite overlay
+// goes image-only once any zone carries geometry_image and drops the rest, so
+// a partial save silently omits treated zones from the coverage map. All
+// marked or all unmarked are both fine; anything in between is 400 material.
+//
+// options.serviceLine scopes the simulation the way reports scope zones
+// (zoneSupportsServiceLine): a lawn-only row never co-renders on a pest
+// overlay, so a pest-complete save must not be blocked by an unmarked
+// lawn-only zone. Untagged rows participate in every line and always count.
+//
+// Entries apply in the SAME order as upsertZonesForCompletion — all shapes,
+// THEN all clears — so a clear + redraw pair for one label simulates to the
+// write path's real outcome (unmarked), never to entry order.
+// (The completion flow doesn't need this — its client gate posts shapes only
+// when every selected area is marked.)
+function zoneShapeCoverageGaps(existingZones = [], zoneShapes = [], { serviceLine = null } = {}) {
+  const endMarked = new Map();
+  for (const zone of Array.isArray(existingZones) ? existingZones : []) {
+    const key = normalizeZoneLabel(zone.label);
+    if (!key) continue;
+    if (!zoneMatchesServiceLine(zone, serviceLine)) continue;
+    endMarked.set(key, { label: zone.label, marked: Boolean(zone.geometry_image) });
+  }
+  const entries = (Array.isArray(zoneShapes) ? zoneShapes : [])
+    .filter((entry) => {
+      const key = normalizeZoneLabel(entry?.areaLabel);
+      return key && !NON_SPATIAL_CHIP_KEYS.has(key);
+    });
+  for (const entry of entries) {
+    if (entry?.clear === true) continue;
+    const key = normalizeZoneLabel(entry.areaLabel);
+    endMarked.set(key, { label: String(entry.areaLabel).trim(), marked: true });
+  }
+  for (const entry of entries) {
+    if (entry?.clear !== true) continue;
+    const existing = endMarked.get(normalizeZoneLabel(entry.areaLabel));
+    if (existing) existing.marked = false; // unknown-label clear = no-op, not a new row
+  }
+  const rows = [...endMarked.values()];
+  const marked = rows.filter((row) => row.marked);
+  if (!marked.length || marked.length === rows.length) return null;
+  return rows.filter((row) => !row.marked).map((row) => row.label);
+}
+
 module.exports = {
   upsertZonesForCompletion,
   validateZoneShapesBody,
+  zoneShapeCoverageGaps,
   sanitizeZoneShape,
   categoryForLabel,
   normalizeZoneLabel,
