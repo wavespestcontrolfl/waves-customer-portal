@@ -487,14 +487,28 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       }
     }
     const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
-    // Mirror accept's annual-prepay availability gate BEFORE collecting money:
-    // a prepay-annual accept is rejected for an ineligible service mix (and
-    // the frozen-snapshot existing-customer case), so a stale/crafted client
-    // requesting prepay must not pay a deposit for an acceptance shape the
-    // server will 400. Live existing plan customers never reach the mint —
-    // the deposit policy 409-exempts them below.
-    if (req.body?.paymentMethodPreference === 'prepay_annual' && !annualPrepayEligibleForEstimateData(estData)) {
-      return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+    // Mirror ALL of accept's annual-prepay preconditions BEFORE collecting
+    // money — a stale/crafted client requesting prepay must never pay a
+    // deposit for an acceptance shape /accept rejects up front:
+    //   1. one-time + prepay (billing choices are recurring-only),
+    //   2. invoice-mode estimates (accept 400s annualPrepaySelected there),
+    //   3. ineligible service mix / frozen-snapshot existing customer.
+    // Error copy matches the accept handler verbatim. Live existing plan
+    // customers never reach the mint — the deposit policy 409-exempts them
+    // below. The prepay slot requirement is deliberately NOT mirrored: like
+    // any recurring deposit, a pre-slot mint credits forward once the
+    // customer books and accepts (deposits are fungible across recurring
+    // modes).
+    if (req.body?.paymentMethodPreference === 'prepay_annual') {
+      if (oneTime) {
+        return res.status(400).json({ error: 'prepay_annual is not available for one-time visits — pick pay_at_visit instead' });
+      }
+      if (resolveEstimateInvoiceMode(estimate, estData)) {
+        return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
+      }
+      if (!annualPrepayEligibleForEstimateData(estData)) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
     }
     // Mirror accept's invoice-mode customer gate BEFORE collecting money:
     // accept rejects an invoice-mode estimate (admin flag OR derived

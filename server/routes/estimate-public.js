@@ -5895,11 +5895,16 @@ ${shellQuestionsBar()}
   function showDepositOverlay(intent) {
     return new Promise(function (resolve) {
       closeDepositOverlay();
+      // Prepay-annual deposits credit the annual invoice minted at accept,
+      // not a later first-visit invoice — keep the modal copy honest.
+      const depositCreditTarget = bookingState.pickedPref === 'prepay_annual'
+        ? 'your annual prepay invoice'
+        : 'your first invoice';
       const overlay = document.createElement('div');
       overlay.id = 'deposit-overlay';
       overlay.innerHTML = '<div class="deposit-card">'
         + '<h3 style="margin:0 0 6px">Reserve your appointment</h3>'
-        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to your first invoice.'
+        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to ' + depositCreditTarget + '.'
         + (Number(intent.receivedTotal) > 0 ? ' (' + fmt(intent.receivedTotal) + ' already received.)' : '')
         + '</p>'
         + '<div id="deposit-payment-element"></div>'

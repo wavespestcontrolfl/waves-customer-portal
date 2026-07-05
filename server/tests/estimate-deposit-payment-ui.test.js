@@ -68,7 +68,10 @@ describe('server-rendered estimate page deposit injection', () => {
     expect(html).toContain('deposit-payment-element');
     expect(html).toContain('js.stripe.com/v3/');
     // Customer-visible copy stays flat-amount (no percentage language).
-    expect(html).toContain('deposit holds your spot. It is applied to your first invoice.');
+    // Overlay copy is preference-aware: prepay-annual deposits credit the
+    // annual invoice, everything else the first invoice.
+    expect(html).toContain("deposit holds your spot. It is applied to ' + depositCreditTarget + '.");
+    expect(html).toContain("? 'your annual prepay invoice'");
     expect(html).not.toMatch(/25%|percent/i);
     // Review-area note element exists for the due-today line.
     expect(html).toContain('id="deposit-due-note"');

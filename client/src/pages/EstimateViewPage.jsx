@@ -1637,7 +1637,7 @@ function ExistingAppointmentCard({ appointment }) {
 // `intent` is the POST /deposit-intent response: clientSecret, amount,
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
 // card-only server-side, so the Payment Element renders card fields only.
-function DepositModal({ intent, onSuccess, onCancel }) {
+function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -1716,7 +1716,7 @@ function DepositModal({ intent, onSuccess, onCancel }) {
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
-          A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to your first invoice.
+          A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to {creditTarget}.
           {Number(intent.receivedTotal) > 0 ? ` (${fmtMoney(intent.receivedTotal)} already received.)` : ''}
         </div>
         <div ref={mountRef} />
@@ -3422,6 +3422,7 @@ export default function EstimateViewPage() {
               intent={depositIntent}
               onSuccess={handleDepositSuccess}
               onCancel={handleDepositCancel}
+              creditTarget={paymentPreference === 'prepay_annual' ? 'your annual prepay invoice' : 'your first invoice'}
             />
           ) : null}
           {cardHoldIntent ? (
