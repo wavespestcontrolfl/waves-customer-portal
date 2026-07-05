@@ -3246,8 +3246,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY MONDAY 10AM — Seasonal reactivation campaign
+  // WEEKLY MONDAY 10AM — Seasonal reactivation campaign (drafts V1)
   // =========================================================================
+  // NEVER sends. Writes message_drafts status='pending' rows for owner
+  // approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log candidate
+  // counts only. Sending happens exclusively through the drafts approve route.
   cron.schedule('0 10 * * 1', async () => {
     logger.info('Running: seasonal reactivation campaign');
     try {
@@ -3255,11 +3258,33 @@ function initScheduledJobs() {
         const seasonalReactivation = require('./workflows/seasonal-reactivation');
         if (seasonalReactivation.run) {
           const result = await seasonalReactivation.run();
-          logger.info(`Seasonal reactivation done: ${result.sent} sent (month ${result.month}, type: ${result.hookType})`);
+          logger.info(`Seasonal reactivation done: ${result.candidates} candidate(s), ${result.drafted} draft(s), gate ${result.gate} (month ${result.month}, type: ${result.hookType})`);
         }
       });
     } catch (err) {
       logger.error(`Seasonal reactivation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 9:30AM — Existing-customer upsell campaign drafts (V1)
+  // =========================================================================
+  // NEVER sends. Reads upsell_opportunities status='identified', applies the
+  // guards (live customer, prefs, unified 30d cross-lane cooldown, prepay
+  // notice suppression) and writes message_drafts status='pending' rows for
+  // owner approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log
+  // candidate counts only. Sending happens exclusively through the drafts
+  // approve route.
+  cron.schedule('30 9 * * *', async () => {
+    logger.info('Running: upsell campaign draft generator');
+    try {
+      await runExclusive('campaign-drafts-upsell', async () => {
+        const campaignDrafts = require('./campaign-drafts');
+        const result = await campaignDrafts.generateUpsellDrafts();
+        logger.info(`Upsell campaign drafts done: ${result.candidates} candidate(s), ${result.drafted} draft(s), gate ${result.gate}`);
+      });
+    } catch (err) {
+      logger.error(`Upsell campaign draft generator failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

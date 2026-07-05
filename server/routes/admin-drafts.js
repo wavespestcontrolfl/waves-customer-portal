@@ -81,17 +81,78 @@ async function releaseDraftClaim(draftId, fields = {}) {
   }).catch(() => {});
 }
 
+// Purposes whose policy row requires marketing-grade consent
+// (policy.js requireConsent: 'marketing').
+const MARKETING_GRADE_PURPOSES = new Set(['marketing', 'retention']);
+
+/**
+ * Audience/purpose/consent fields for a draft send.
+ *
+ * Null-purpose drafts (the inbound-reply lane) keep the legacy behavior
+ * exactly: audience 'lead', purpose 'conversational', no consentBasis.
+ *
+ * Campaign drafts carry a non-null `purpose` — pass it through so the send
+ * runs under the REAL policy row instead of bypassing consent as
+ * 'conversational'. Marketing-grade purposes get the same stored-preference
+ * consent basis the existing campaign senders assert (seasonal-reactivation /
+ * upsell-trigger / retention agent: 'customer_marketing_preferences'); the
+ * consent validator still enforces sms_enabled + seasonal_tips prefs,
+ * customerId presence, and identity trust — this helper only stops the
+ * bypass, it does not manufacture consent.
+ */
+function draftSendPolicyFields(draft, recipient) {
+  if (!draft.purpose) {
+    return { audience: 'lead', purpose: 'conversational' };
+  }
+  const fields = {
+    audience: recipient.customerId ? 'customer' : 'lead',
+    purpose: draft.purpose,
+  };
+  if (MARKETING_GRADE_PURPOSES.has(draft.purpose)) {
+    fields.consentBasis = {
+      status: 'opted_in',
+      source: 'customer_marketing_preferences',
+      capturedAt: new Date(draft.created_at || Date.now()).toISOString(),
+    };
+  }
+  return fields;
+}
+
+/**
+ * 422 body for a blocked/failed send. Surfaces the block code and — for
+ * retryable holds like QUIET_HOURS_HOLD — the nextAllowedAt timestamp, so the
+ * operator sees "held until 8am" instead of an opaque failure. The draft has
+ * already been released back to pending, so it can simply be approved again
+ * after the window opens.
+ */
+function blockedSendResponse(res, smsResult) {
+  return res.status(422).json({
+    error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
+    code: smsResult.code,
+    held: smsResult.code === 'QUIET_HOURS_HOLD' ? true : undefined,
+    nextAllowedAt: smsResult.nextAllowedAt,
+  });
+}
+
 // GET /api/admin/drafts — pending drafts
+// Optional ?campaign_type= filter: 'reactivation' | 'upsell' scopes to that
+// campaign; 'none' scopes to legacy non-campaign drafts (inbound-reply lane).
 router.get('/', async (req, res, next) => {
   try {
-    const { status = 'pending' } = req.query;
-    const drafts = await db('message_drafts')
+    const { status = 'pending', campaign_type: campaignType } = req.query;
+    let query = db('message_drafts')
       .where(status === 'all' ? {} : { status })
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage')
       .orderBy('message_drafts.created_at', 'desc')
       .limit(50);
+    if (campaignType === 'none') {
+      query = query.whereNull('message_drafts.campaign_type');
+    } else if (campaignType) {
+      query = query.where('message_drafts.campaign_type', campaignType);
+    }
+    const drafts = await query;
 
     res.json({
       drafts: drafts.map(d => {
@@ -110,6 +171,9 @@ router.get('/', async (req, res, next) => {
           intent: d.intent, intentConfidence: d.intent_confidence,
           contextSummary: d.context_summary,
           flags,
+          campaignType: d.campaign_type || null,
+          purpose: d.purpose || null,
+          sourceRef: d.source_ref || null,
           status: d.status, responseTimeSeconds: d.response_time_seconds,
           createdAt: d.created_at, approvedAt: d.approved_at, sentAt: d.sent_at,
         };
@@ -157,14 +221,15 @@ router.put('/:id/approve', async (req, res, next) => {
         to: toPhone,
         body: draft.draft_response,
         channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
+        ...draftSendPolicyFields(draft, recipient),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
         metadata: {
           original_message_type: 'ai_approved',
           draft_id: draft.id,
+          campaign_type: draft.campaign_type || undefined,
+          source_ref: draft.source_ref || undefined,
           adminUserId: req.technicianId,
           fromNumber,
         },
@@ -175,7 +240,7 @@ router.put('/:id/approve', async (req, res, next) => {
     }
     if (!smsResult.sent) {
       await releaseDraftClaim(draft.id);
-      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+      return blockedSendResponse(res, smsResult);
     }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
@@ -232,14 +297,15 @@ router.put('/:id/revise', async (req, res, next) => {
         to: toPhone,
         body: revisedResponse,
         channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
+        ...draftSendPolicyFields(draft, recipient),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
         metadata: {
           original_message_type: 'ai_revised',
           draft_id: draft.id,
+          campaign_type: draft.campaign_type || undefined,
+          source_ref: draft.source_ref || undefined,
           adminUserId: req.technicianId,
           fromNumber,
         },
@@ -250,7 +316,7 @@ router.put('/:id/revise', async (req, res, next) => {
     }
     if (!smsResult.sent) {
       await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
-      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+      return blockedSendResponse(res, smsResult);
     }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
@@ -335,6 +401,9 @@ router.get('/:id', async (req, res, next) => {
       intentConfidence: d.intent_confidence,
       contextSummary: d.context_summary,
       flags,
+      campaignType: d.campaign_type || null,
+      purpose: d.purpose || null,
+      sourceRef: d.source_ref || null,
       status: d.status,
       responseTimeSeconds: d.response_time_seconds,
       createdAt: d.created_at,
@@ -343,5 +412,8 @@ router.get('/:id', async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
+
+// Exposed for tests
+router._internals = { draftSendPolicyFields, blockedSendResponse };
 
 module.exports = router;
