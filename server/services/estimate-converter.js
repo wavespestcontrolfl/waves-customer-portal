@@ -1557,6 +1557,11 @@ const EstimateConverter = {
               ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
               : {}),
           });
+          // Assign the id BEFORE consuming the credit: an allocation-mismatch
+          // throw below must leave draftInvoiceId set so the outer cleanup can
+          // void the just-created invoice on a no-caller-transaction run
+          // (accept-path runs ride the caller trx and roll back wholesale).
+          draftInvoiceId = inv?.id || null;
           const appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
           if (inv?.id && appliedPrepayDepositCredit > 0) {
             const allocated = await consumeDepositCredit({
@@ -1569,7 +1574,6 @@ const EstimateConverter = {
               throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
             }
           }
-          draftInvoiceId = inv?.id || null;
           // Quote the amount actually invoiced/charged (tax-inclusive, net of
           // the deposit credit) so the customer/admin messaging matches what
           // the pay link collects. For residential (untaxed, no deposit)

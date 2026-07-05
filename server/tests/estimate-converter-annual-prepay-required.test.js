@@ -173,7 +173,7 @@ describe('estimate converter annual prepay orchestration', () => {
       pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
       consumeDepositCredit: jest.fn().mockResolvedValue(20),
     };
-    const { EstimateConverter } = setup(
+    const { EstimateConverter, invoiceService } = setup(
       [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
       undefined,
       { deposits, invoiceCreateResult: { id: 'invoice-1', total: 578, applied_deposit_credit: 49 } },
@@ -181,6 +181,9 @@ describe('estimate converter annual prepay orchestration', () => {
 
     await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
       .rejects.toThrow('deposit allocation mismatch');
+    // draftInvoiceId is assigned BEFORE the consume, so the no-caller-trx
+    // cleanup voids the just-created invoice instead of orphaning it.
+    expect(invoiceService.voidInvoice).toHaveBeenCalledWith('invoice-1');
   });
 
   test('single quarterly service with explicit visitsPerYear: coverage count comes from the line', async () => {
