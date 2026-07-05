@@ -37,7 +37,12 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
-import EstimateGlassTheme from '../components/estimate/glass/EstimateGlassTheme';
+import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
+
+// Payment Element renders inside Stripe's iframe, so the glass theme can't
+// restyle it via CSS — when the theme is mounted the modals pass brand-tuned
+// appearance variables instead. Visual-only, follows the ?glass=1 gate.
+const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -1592,7 +1597,9 @@ function DepositModal({ intent, onSuccess, onCancel }) {
       const stripe = StripeCtor(intent.publishableKey);
       const elements = stripe.elements({
         clientSecret: intent.clientSecret,
-        appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
+        appearance: glassAppearanceActive()
+          ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
+          : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
       });
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
@@ -1707,7 +1714,9 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
       const stripe = StripeCtor(intent.publishableKey);
       const elements = stripe.elements({
         clientSecret: intent.clientSecret,
-        appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
+        appearance: glassAppearanceActive()
+          ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
+          : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
       });
       const paymentElement = elements.create('payment');
       paymentElement.mount(mountRef.current);
@@ -2767,6 +2776,12 @@ export default function EstimateViewPage() {
       setAcceptResult(body);
       setCtaPhase('success');
       setReservation(null);
+      // Booking-confirmed celebration — visual-only and isolated: the accept
+      // has already succeeded, so an animation failure (e.g. a WebView
+      // without Element.animate) must never surface as a booking error.
+      try {
+        fireGlassConfetti(window.innerWidth / 2, window.innerHeight * 0.35);
+      } catch { /* visual only */ }
     } catch (err) {
       setError(err.message);
       setCtaPhase('review');

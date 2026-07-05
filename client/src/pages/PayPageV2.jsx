@@ -77,6 +77,7 @@
 // - Dispute webhook (dispute.created): must flag the customer for
 //   the operator to review before any further charges fire.
 import { COLORS, FONTS } from '../theme-brand';
+import { useGlassProGate } from '../components/estimate/glass/EstimateGlassTheme';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -1209,6 +1210,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
 // ── Main /pay/:token V2 page ───────────────────────────────────────
 export default function PayPageV2() {
+  // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
+  useGlassProGate();
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
