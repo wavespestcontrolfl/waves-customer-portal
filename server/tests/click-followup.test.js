@@ -34,6 +34,10 @@ jest.mock('../services/messaging/validators/line-type', () => ({
 jest.mock('../services/estimate-lead-linkage', () => ({
   leadIdForEstimate: jest.fn(async () => null),
 }));
+// Only the window constant is consumed — never the deposit machinery.
+jest.mock('../services/estimate-deposits', () => ({
+  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -52,7 +56,7 @@ function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
     'join', 'where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw',
-    'whereNotExists', 'andWhere', 'orWhere', 'orWhereRaw', 'orderBy', 'select', 'groupBy',
+    'whereNotExists', 'andWhere', 'orWhere', 'orWhereRaw', 'orderBy', 'select', 'groupBy', 'max',
   ]) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
   b.insert = jest.fn((payload) => { b._mode = 'insert'; inserts.push({ table, payload }); return b; });
@@ -131,6 +135,10 @@ beforeEach(() => {
   deletes.length = 0;
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  // Transaction proxy: route trx(table) through the same table queues so the
+  // draft-insert + action-link pair records like any other call; a rejection
+  // inside the callback propagates as the transaction failing (rollback).
+  db.transaction = jest.fn(async (cb) => cb(db));
   isEnabled.mockReturnValue(true);
   customerConvertedSince.mockResolvedValue({ converted: false });
   createTrackedShortLink.mockResolvedValue({
@@ -157,6 +165,7 @@ describe('runQueue — draft creation', () => {
       short_code_id: 'sc-1',
       short_code_click_id: 'click-1',
       customer_id: 'cust-1',
+      contact_phone: '9415550101', // persisted phone dedupe key (last-10)
       entity_type: 'estimates',
       entity_id: 'est-1',
       status: 'pending',
@@ -425,6 +434,101 @@ describe('runQueue — gate + suppression', () => {
 
     expect(counts.skipped).toBe(1);
     expect(inserts).toEqual([]);
+  });
+
+  test('phone-only dedupe persists across ticks: open action for the same phone on ANOTHER estimate → skip', async () => {
+    // Contactless click on est-2; a prior tick left an open action for the
+    // same phone (found via the contact_phone key in hasOpenAction).
+    enqueue('short_code_clicks as scc', {
+      rows: [makeClick({ customer_id: null, lead_id: null, entity_id: 'est-2' })],
+    });
+    enqueue('estimates', { first: makeEstimate({ id: 'est-2', customer_id: null }) });
+    enqueue('sms_log', { first: null });
+    enqueue('messages', { first: null });
+    enqueue('click_followup_actions', { first: { id: 'act-open-same-phone' } });
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.skipped).toBe(1);
+    expect(inserts).toEqual([]);
+    // The pre-check was given the phone key to match on.
+    const openCheck = db.mock.results
+      .map((r, i) => ({ table: db.mock.calls[i][0], builder: r.value }))
+      .find((x) => x.table === 'click_followup_actions');
+    expect(openCheck).toBeDefined();
+  });
+
+  test('deposit-abandonment stage due (gate on, pending deposit 2-72h old) → dismissed, never stacked', async () => {
+    enqueue('short_code_clicks as scc', { rows: [makeClick()] });
+    enqueue('estimates', {
+      first: makeEstimate({ status: 'viewed', followup_deposit_abandoned_sent: false }),
+    });
+    enqueue('estimate_deposits', {
+      first: { latest_pending_at: new Date(NOW.getTime() - 5 * H) }, // inside the 2-72h window
+    });
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // dismissed outcome row
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.dismissed).toBe(1);
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+    expect(inserts.find((i) => i.table === 'click_followup_actions').payload).toMatchObject({ status: 'dismissed' });
+  });
+
+  test('deposit stage gate OFF → no deposit lookup can suppress (stage only shadow-logs)', async () => {
+    // clickFollowup gate on, deposit gate off.
+    isEnabled.mockImplementation((key) => key === 'clickFollowup');
+    enqueue('short_code_clicks as scc', { rows: [makeClick()] });
+    enqueue('estimates', {
+      first: makeEstimate({ status: 'viewed', followup_deposit_abandoned_sent: false }),
+    });
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.drafted).toBe(1);
+  });
+
+  test('lead-only estimate whose lead is WON → marked converted, no draft', async () => {
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ customer_id: null, lead_id: 'lead-1' })] });
+    enqueue('estimates', { first: makeEstimate({ customer_id: null }) });
+    enqueue('leads', { first: { id: 'lead-1', status: 'won', customer_id: null, converted_at: null } });
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // converted outcome row
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.converted).toBe(1);
+    expect(inserts.find((i) => i.table === 'click_followup_actions').payload).toMatchObject({ status: 'converted' });
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
+  test('lead-only estimate with a LINKED customer runs the conversion guard against that customer', async () => {
+    customerConvertedSince
+      .mockResolvedValueOnce({ converted: false })                          // estimate-level (no customer_id)
+      .mockResolvedValueOnce({ converted: true, reason: 'paid-invoice' });  // lead's linked customer
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ customer_id: null, lead_id: 'lead-1' })] });
+    enqueue('estimates', { first: makeEstimate({ customer_id: null }) });
+    enqueue('leads', { first: { id: 'lead-1', status: 'quoted', customer_id: 'cust-9', converted_at: null } });
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] });
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.converted).toBe(1);
+    expect(customerConvertedSince).toHaveBeenLastCalledWith(
+      expect.objectContaining({ customer_id: 'cust-9' }),
+    );
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
+  test('unconverted lead-only estimate still drafts (lead check passes through)', async () => {
+    enqueue('short_code_clicks as scc', { rows: [makeClick({ customer_id: null, lead_id: 'lead-1' })] });
+    enqueue('estimates', { first: makeEstimate({ customer_id: null }) });
+    enqueue('leads', { first: { id: 'lead-1', status: 'quoted', customer_id: null, converted_at: null } });
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.drafted).toBe(1);
   });
 
   test('draft insert failure releases the pending claim so the next tick retries', async () => {

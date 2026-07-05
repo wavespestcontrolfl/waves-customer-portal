@@ -82,6 +82,34 @@ async function releaseDraftClaim(draftId, fields = {}) {
   }).catch(() => {});
 }
 
+// Send-policy mapping for owner-approved drafts. The route's default shape
+// (audience 'lead', purpose 'conversational', no consentBasis) exists for
+// the legacy inbound-reply queue — the messaging policy's anonymous-lead
+// conversational carve-out is safe there because the contact texted us
+// first. Click-followup drafts are PROACTIVE estimate nudges, so they must
+// ride the same policy rails as every other estimate follow-up SMS: purpose
+// 'estimate_followup' (transactional consent + quiet hours enforced by the
+// messaging validators), estimateId threaded, and the same consentBasis
+// shape estimate-follow-up.js passes for lead-only contacts. Narrowly
+// scoped on intent — PR #2357 is generalizing purpose passthrough in this
+// route; whichever merges second reconciles with the other.
+function sendPolicyForDraft(draft, recipient) {
+  if (draft.intent === 'click_followup') {
+    const flags = parseFlags(draft.flags);
+    return {
+      audience: recipient.customerId ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      estimateId: flags.estimate_id || undefined,
+      consentBasis: recipient.customerId ? undefined : {
+        status: 'transactional_allowed',
+        source: 'click_followup_draft',
+        capturedAt: draft.created_at || new Date().toISOString(),
+      },
+    };
+  }
+  return { audience: 'lead', purpose: 'conversational' };
+}
+
 // Click-followup drafts (services/click-followup.js) nudge a prospect toward
 // booking, and conversion can land while the draft sits pending — re-run the
 // conversion guard at approval time so a "pick your first visit" text never
@@ -202,14 +230,17 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
 
+    const sendPolicy = sendPolicyForDraft(draft, recipient);
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
         to: toPhone,
         body: draft.draft_response,
         channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
+        audience: sendPolicy.audience,
+        purpose: sendPolicy.purpose,
+        estimateId: sendPolicy.estimateId,
+        consentBasis: sendPolicy.consentBasis,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -287,14 +318,17 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
 
+    const sendPolicy = sendPolicyForDraft(draft, recipient);
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
         to: toPhone,
         body: revisedResponse,
         channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
+        audience: sendPolicy.audience,
+        purpose: sendPolicy.purpose,
+        estimateId: sendPolicy.estimateId,
+        consentBasis: sendPolicy.consentBasis,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',

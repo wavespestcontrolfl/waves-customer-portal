@@ -42,6 +42,12 @@ exports.up = async function up(knex) {
       .references('id').inTable('short_code_clicks').onDelete('SET NULL');
     t.uuid('customer_id').references('id').inTable('customers').onDelete('SET NULL');
     t.uuid('lead_id').references('id').inTable('leads').onDelete('SET NULL');
+    // Normalized last-10 digits of the contact's phone — the dedupe key of
+    // last resort for contactless estimates (no customer, no resolvable
+    // lead). Persisted so the one-open-action guard holds ACROSS cron ticks,
+    // not just within a run: the same phone clicking a DIFFERENT estimate
+    // tomorrow must not mint a second open draft.
+    t.string('contact_phone', 20);
     // Loose back-pointer to the row the clicked link resolved to (mirrors
     // short_codes.entity_type/entity_id — 'estimates' for this lane).
     t.string('entity_type', 64);
@@ -74,6 +80,13 @@ exports.up = async function up(knex) {
     `CREATE UNIQUE INDEX click_followup_actions_open_lead_uniq
        ON click_followup_actions (lead_id)
        WHERE lead_id IS NOT NULL AND status IN ('pending','drafted')`
+  );
+  // One open action per PHONE too — same reachable human regardless of which
+  // customer/lead/estimate row the click resolved through.
+  await knex.raw(
+    `CREATE UNIQUE INDEX click_followup_actions_open_phone_uniq
+       ON click_followup_actions (contact_phone)
+       WHERE contact_phone IS NOT NULL AND status IN ('pending','drafted')`
   );
 };
 

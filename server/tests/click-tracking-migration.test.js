@@ -138,6 +138,8 @@ describe('20260705000120 click_followup_actions', () => {
     });
     expect(byName(create, 'customer_id')).toMatchObject({ references: 'id', inTable: 'customers', onDelete: 'SET NULL' });
     expect(byName(create, 'lead_id')).toMatchObject({ references: 'id', inTable: 'leads', onDelete: 'SET NULL' });
+    // Persisted last-10 phone - cross-tick dedupe key for contactless clicks.
+    expect(byName(create, 'contact_phone')).toMatchObject({ type: 'string', args: [20] });
     expect(byName(create, 'entity_type')).toMatchObject({ type: 'string' });
     expect(byName(create, 'entity_id')).toMatchObject({ type: 'uuid' });
     expect(byName(create, 'clicked_at')).toMatchObject({ type: 'timestamp' });
@@ -157,6 +159,8 @@ describe('20260705000120 click_followup_actions', () => {
     expect(sql).toContain("WHERE customer_id IS NOT NULL AND status IN ('pending','drafted')");
     expect(sql).toContain('CREATE UNIQUE INDEX click_followup_actions_open_lead_uniq');
     expect(sql).toContain("WHERE lead_id IS NOT NULL AND status IN ('pending','drafted')");
+    expect(sql).toContain('CREATE UNIQUE INDEX click_followup_actions_open_phone_uniq');
+    expect(sql).toContain("WHERE contact_phone IS NOT NULL AND status IN ('pending','drafted')");
   });
 
   test('idempotent: skips entirely when the table already exists', async () => {

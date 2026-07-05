@@ -52,6 +52,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { createTrackedShortLink } = require('./short-url');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
+const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { readCachedLineType } = require('./messaging/validators/line-type');
 
@@ -257,12 +258,15 @@ async function expireStaleActions(now = new Date()) {
 // Terminal outcome writer (dismissed / converted) — the row marks THIS click
 // as handled for the candidate query's per-click whereNotExists; a fresh
 // re-click later mints a new short_code_clicks row and re-qualifies.
+// Terminal statuses sit outside the open-only partial uniques, so these
+// inserts never contend.
 async function recordOutcome(candidate, status, extra = {}) {
   await db('click_followup_actions').insert({
     short_code_id: candidate.short_code_id,
     short_code_click_id: candidate.click_id || null,
     customer_id: candidate.customer_id || null,
     lead_id: candidate.lead_id || null,
+    contact_phone: candidate.contact_phone || null,
     entity_type: candidate.entity_type || null,
     entity_id: candidate.entity_id || null,
     clicked_at: candidate.clicked_at,
@@ -272,9 +276,12 @@ async function recordOutcome(candidate, status, extra = {}) {
 }
 
 // Does this contact already hold an OPEN action (from a different link)?
-// Advisory pre-check — the partial unique index is the atomic backstop.
-async function hasOpenAction({ customerId, leadId, entityId }) {
-  if (!customerId && !leadId && !entityId) return false;
+// Advisory pre-check — the partial unique indexes (customer / lead / phone)
+// are the atomic backstop. The phone key is what makes contactless dedupe
+// hold ACROSS ticks: same phone, different estimate tomorrow → still one
+// open action.
+async function hasOpenAction({ customerId, leadId, entityId, phoneLast10 }) {
+  if (!customerId && !leadId && !entityId && !phoneLast10) return false;
   const q = db('click_followup_actions')
     .whereIn('status', ['pending', 'drafted'])
     .first('id');
@@ -282,8 +289,70 @@ async function hasOpenAction({ customerId, leadId, entityId }) {
     if (customerId) this.orWhere('customer_id', customerId);
     if (leadId) this.orWhere('lead_id', leadId);
     if (entityId) this.orWhere('entity_id', entityId);
+    if (phoneLast10) this.orWhere('contact_phone', phoneLast10);
   });
   return !!(await q);
+}
+
+// Lead-side conversion for lead-only estimates. customerConvertedSince(est)
+// short-circuits to false when the estimate carries no customer_id, but
+// conversion CREATES the customer without backfilling the estimate (e.g. the
+// admin booking-link flow books via /book?service=... with no estimate id).
+// Evidence, in order: the lead's own conversion stamp / terminal 'won'
+// status, else the linked customer (leads.customer_id) run through the same
+// guard. Fails CLOSED like the guard itself — a transient error skips this
+// tick's draft rather than nudging on unverified state.
+async function leadConvertedSince(leadId, est) {
+  if (!leadId) return { converted: false };
+  try {
+    const lead = await db('leads')
+      .where({ id: leadId })
+      .first('id', 'status', 'customer_id', 'converted_at');
+    if (!lead) return { converted: false };
+    if (lead.converted_at || lead.status === 'won') {
+      return { converted: true, reason: lead.converted_at ? 'lead-converted' : 'lead-won' };
+    }
+    if (lead.customer_id) {
+      return await customerConvertedSince({
+        id: est.id,
+        customer_id: lead.customer_id,
+        created_at: est.created_at,
+      });
+    }
+    return { converted: false };
+  } catch (e) {
+    logger.warn(`[click-followup] lead conversion check failed — skipping this tick: ${e.message}`);
+    return { converted: true, reason: 'guard-error' };
+  }
+}
+
+// Deposit-abandonment cadence stage (estimate-follow-up.js
+// checkDepositAbandoned): fires when the estimate's latest PENDING deposit
+// intent was last touched minAge–maxAge hours ago. Not modelable from the
+// estimate row alone (the anchor lives in estimate_deposits), so it gets its
+// own async check beside the four timestamp stages. Only live while its gate
+// is on — off, that stage only shadow-logs and can't double-touch. Fails
+// toward suppression: an unreadable deposits table skips this tick's draft.
+async function depositStageDueSoon(est, now = new Date(), soonHours = 24) {
+  if (!isEnabled('estimateDepositAbandonmentSms')) return false;
+  if (!est || !['sent', 'viewed'].includes(est.status)) return false;
+  if (!(est.followup_deposit_abandoned_sent === false || est.followup_deposit_abandoned_sent == null)) return false;
+  try {
+    const row = await db('estimate_deposits')
+      .where({ estimate_id: est.id, status: 'pending' })
+      .max('updated_at as latest_pending_at')
+      .first();
+    const latest = row && row.latest_pending_at ? new Date(row.latest_pending_at).getTime() : null;
+    if (!latest || Number.isNaN(latest)) return false;
+    const H = 3600000;
+    const nowMs = now.getTime();
+    // Stage window [latest+minAge, latest+maxAge] vs lookahead [now, now+soon].
+    return latest + DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * H <= nowMs + soonHours * H
+      && latest + DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * H >= nowMs;
+  } catch (e) {
+    logger.warn(`[click-followup] deposit-stage check failed — suppressing this tick: ${e.message}`);
+    return true;
+  }
 }
 
 async function runQueue(now = new Date()) {
@@ -388,7 +457,13 @@ async function runQueue(now = new Date()) {
       // stage), NEVER estimate status. Its 'guard-error' reason is its
       // fail-closed path for transient lookup errors: skip without writing
       // so the next tick re-evaluates instead of permanently marking.
-      const conv = await customerConvertedSince(est);
+      // Lead-only estimates never trip the customer guard (no customer_id on
+      // the row — conversion creates a customer WITHOUT backfilling the
+      // estimate), so the lead-side check covers that shape.
+      let conv = await customerConvertedSince(est);
+      if (!conv.converted && !est.customer_id && c.lead_id) {
+        conv = await leadConvertedSince(c.lead_id, est);
+      }
       if (conv.converted && conv.reason === 'guard-error') {
         counts.skipped++;
         continue;
@@ -410,6 +485,10 @@ async function runQueue(now = new Date()) {
         counts.dismissed++;
         continue;
       }
+      // Persisted phone dedupe key — rides every action row (claim AND
+      // terminal outcomes) so the open-phone partial unique holds across
+      // ticks, not just within this run's grouping.
+      c.contact_phone = last10(phone) || null;
 
       const contact = { customerId: est.customer_id || c.customer_id || null, phone };
 
@@ -419,8 +498,9 @@ async function runQueue(now = new Date()) {
         counts.dismissed++;
         continue;
       }
-      // Cadence stage imminent → the existing follow-up loop owns the touch.
-      if (cadenceStageDueSoon(est, now)) {
+      // Cadence stage imminent (incl. the gated deposit-abandonment stage) →
+      // the existing follow-up loop owns the touch.
+      if (cadenceStageDueSoon(est, now) || await depositStageDueSoon(est, now)) {
         await recordOutcome(c, 'dismissed');
         counts.dismissed++;
         continue;
@@ -435,7 +515,12 @@ async function runQueue(now = new Date()) {
         counts.skipped++;
         continue;
       }
-      if (await hasOpenAction({ customerId: contact.customerId, leadId: c.lead_id, entityId: c.entity_id })) {
+      if (await hasOpenAction({
+        customerId: contact.customerId,
+        leadId: c.lead_id,
+        entityId: c.entity_id,
+        phoneLast10: c.contact_phone,
+      })) {
         counts.skipped++;
         continue;
       }
@@ -449,6 +534,7 @@ async function runQueue(now = new Date()) {
             short_code_click_id: c.click_id || null,
             customer_id: contact.customerId,
             lead_id: c.lead_id || null,
+            contact_phone: c.contact_phone,
             entity_type: c.entity_type,
             entity_id: c.entity_id,
             clicked_at: c.clicked_at,
@@ -488,27 +574,35 @@ async function runQueue(now = new Date()) {
         .replace('{estimate_url}', shortUrl);
 
       const ageHours = Math.max(1, Math.round((nowMs - new Date(c.clicked_at).getTime()) / 3600000));
-      const [draft] = await db('message_drafts')
-        .insert({
-          customer_id: contact.customerId,
-          draft_response: body,
-          intent: 'click_followup',
-          status: 'pending',
-          context_summary: `Clicked their ${c.kind} link ~${ageHours}h ago but hasn't booked. Auto-queued click-followup nudge for estimate ${est.id} — review and approve to send.`,
-          flags: JSON.stringify({
-            click_followup: true,
-            toPhone: normalizeE164(phone),
-            short_code_id: c.short_code_id,
-            estimate_id: est.id,
-            lead_id: c.lead_id || null,
-            clicked_at: c.clicked_at,
-          }),
-        })
-        .returning(['id']);
-
-      await db('click_followup_actions')
-        .where({ id: claimedId })
-        .update({ status: 'drafted', draft_id: draft.id, updated_at: db.fn.now() });
+      // Draft insert + action link commit or roll back TOGETHER: a draft
+      // that survives without its action's draft_id would be unlinked —
+      // re-draftable via the anti-join and unreachable by the stale-action
+      // sweep. On any failure the transaction leaves no draft, claimedId
+      // stays set, and the finally below releases the claim for a retry.
+      let draftId = null;
+      await db.transaction(async (trx) => {
+        const [draft] = await trx('message_drafts')
+          .insert({
+            customer_id: contact.customerId,
+            draft_response: body,
+            intent: 'click_followup',
+            status: 'pending',
+            context_summary: `Clicked their ${c.kind} link ~${ageHours}h ago but hasn't booked. Auto-queued click-followup nudge for estimate ${est.id} — review and approve to send.`,
+            flags: JSON.stringify({
+              click_followup: true,
+              toPhone: normalizeE164(phone),
+              short_code_id: c.short_code_id,
+              estimate_id: est.id,
+              lead_id: c.lead_id || null,
+              clicked_at: c.clicked_at,
+            }),
+          })
+          .returning(['id']);
+        await trx('click_followup_actions')
+          .where({ id: claimedId })
+          .update({ status: 'drafted', draft_id: draft.id, updated_at: db.fn.now() });
+        draftId = draft.id;
+      });
       claimedId = null; // success — keep the claim
 
       // Best-effort: point the freshly minted code back at the draft that
@@ -516,12 +610,12 @@ async function runQueue(now = new Date()) {
       if (code) {
         await db('short_codes')
           .where({ code })
-          .update({ message_ref: `message_drafts:${draft.id}`, updated_at: new Date() })
+          .update({ message_ref: `message_drafts:${draftId}`, updated_at: new Date() })
           .catch((err) => logger.warn(`[click-followup] message_ref stamp failed: ${err.message}`));
       }
 
       counts.drafted++;
-      logger.info(`[click-followup] queued draft ${draft.id} for estimate ${est.id} (click on ${c.kind} link)`);
+      logger.info(`[click-followup] queued draft ${draftId} for estimate ${est.id} (click on ${c.kind} link)`);
     } catch (e) {
       logger.error(`[click-followup] candidate ${c.short_code_id} failed: ${e.message}`);
       counts.skipped++;
@@ -549,6 +643,8 @@ module.exports = {
     runQueue,
     expireStaleActions,
     cadenceStageDueSoon,
+    depositStageDueSoon,
+    leadConvertedSince,
     hasRepliedRecently,
     hasRecentOutboundSms,
     isSuppressedContact,

@@ -137,7 +137,40 @@ describe('PUT /admin/drafts/:id/approve — click-followup conversion recheck', 
     });
 
     expect(customerConvertedSince).toHaveBeenCalled();
-    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550101' }));
+    // Proactive estimate nudge — must ride the estimate_followup policy
+    // rails (quiet hours + transactional consent), never the conversational
+    // anonymous-lead carve-out.
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550101',
+      purpose: 'estimate_followup',
+      audience: 'customer',
+      estimateId: 'est-1',
+    }));
+  });
+
+  test('P1: lead-only click-followup draft sends as estimate_followup with a transactional consentBasis', async () => {
+    enqueue('message_drafts', { update: [draftRow({ customer_id: null })] }); // claim
+    enqueue('estimates', { first: { id: 'est-1', customer_id: null, created_at: new Date() } });
+    enqueue('message_drafts', { update: 1 });                       // final sent stamp
+
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/drafts/draft-1/approve`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: 'estimate_followup',
+      audience: 'lead',
+      estimateId: 'est-1',
+      consentBasis: expect.objectContaining({
+        status: 'transactional_allowed',
+        source: 'click_followup_draft',
+      }),
+    }));
+    // Never the conversational carve-out for a proactive nudge.
+    expect(sendCustomerMessage).not.toHaveBeenCalledWith(expect.objectContaining({ purpose: 'conversational' }));
   });
 
   test('transient guard error → 503, claim released back to pending, draft NOT retired', async () => {
@@ -174,7 +207,11 @@ describe('PUT /admin/drafts/:id/approve — click-followup conversion recheck', 
     });
 
     expect(customerConvertedSince).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).toHaveBeenCalled();
+    // Legacy inbound-reply queue keeps its conversational shape untouched.
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: 'conversational',
+      audience: 'lead',
+    }));
   });
 });
 
