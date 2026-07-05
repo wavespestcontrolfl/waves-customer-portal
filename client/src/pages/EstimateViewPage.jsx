@@ -28,7 +28,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import FrequencySlider from '../components/estimate/FrequencySlider';
-import PriceCard, { priceCardSavingsInfo } from '../components/estimate/PriceCard';
+import PriceCard from '../components/estimate/PriceCard';
 import IncludedChecklist from '../components/estimate/IncludedChecklist';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
@@ -2307,10 +2307,10 @@ export function ServiceSection({
             waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
-            // Bundles keep showSavings on for the struck-through pre-discount
-            // anchor next to the member price; the in-card "You save" line
-            // stays bundle-suppressed via the null waveGuardTier above, so the
-            // consolidated save lines below the boxes remain the only ones.
+            // showSavings only governs the struck-through pre-discount anchor
+            // next to the member price now — the "You save" line is gone
+            // (anchor−cadence delta misattributed to the tier; owner
+            // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             showGuarantee={servicesLength === 1}
           />
@@ -3125,20 +3125,6 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
-          {/* Bundle save lines render once, BELOW all service boxes. Glass
-              drops them: the "saved" figure is the anchor-vs-cadence delta
-              misattributed to the tier (owner directive — one-time pricing
-              uses a multiplier, so the comparison isn't real). */}
-          {services.length > 1 && !glassContent ? services.map((section) => {
-            const frequency = selectedFrequencyForSection(section, selected);
-            const info = frequency ? priceCardSavingsInfo(frequency) : null;
-            if (!info || section?.waveGuardTierEligible === false || !waveGuardTier) return null;
-            return (
-              <div key={`${section.key}-savings`} style={{ textAlign: 'center', color: '#16A34A', fontSize: 16, fontWeight: 800, marginTop: 4 }}>
-                You save {fmtMoney(info.savings)}{info.periodLabel} with WaveGuard {waveGuardTier}
-              </div>
-            );
-          }) : null}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
