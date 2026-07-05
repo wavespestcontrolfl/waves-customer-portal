@@ -261,6 +261,16 @@ const gates = {
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
 
+  // Click-followup action queue — turns human short-link clicks on estimate /
+  // booking links that DIDN'T convert into PENDING message_drafts (intent
+  // 'click_followup') for owner review in /admin/drafts. This lane NEVER
+  // sends anything itself — the draft is the terminal artifact and only the
+  // owner's approval in /admin/drafts puts a message on the wire. The gate
+  // covers the queue writes (action rows + drafts): off → the cron only
+  // shadow-logs candidate counts so volume can be judged first. Flip
+  // GATE_CLICK_FOLLOWUP=true to start queueing drafts.
+  clickFollowup: process.env.GATE_CLICK_FOLLOWUP === 'true',
+
   // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
   // (BudgetManager.adjustBudgets) to push its budget changes to the Google
   // Ads API. Off until the owner verifies campaign links + base budgets in

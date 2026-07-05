@@ -342,6 +342,8 @@ async function checkDepositAbandoned(now = new Date()) {
         entityType: "estimates",
         entityId: est.id,
         customerId: est.customer_id,
+        channel: "sms",
+        purpose: "estimate_followup_deposit",
       });
       const smsBody = await renderTemplate("estimate_followup_deposit", {
         first_name: firstName,
@@ -442,6 +444,8 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            channel: "sms",
+            purpose: "estimate_followup_unviewed",
           });
           const smsBody = await renderTemplate("estimate_followup_unviewed", {
             first_name: firstName,
@@ -530,6 +534,8 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            channel: "sms",
+            purpose: "estimate_followup_viewed",
           });
           const smsBody = await renderTemplate("estimate_followup_viewed", {
             first_name: firstName,
@@ -619,6 +625,8 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            channel: "sms",
+            purpose: "estimate_followup_final",
           });
           const smsBody = await renderTemplate("estimate_followup_final", {
             first_name: firstName,
@@ -708,6 +716,8 @@ const EstimateFollowUp = {
             entityType: "estimates",
             entityId: est.id,
             customerId: est.customer_id,
+            channel: "sms",
+            purpose: "estimate_followup_expiring",
           });
           const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
             month: "long",

@@ -574,6 +574,8 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const viewUrl = await shortenOrPassthrough(longUrl, {
     kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+    // One link serves both channels on sendMethod='both' — tag the primary.
+    channel: sendMethod === 'email' ? 'email' : 'sms', purpose: 'estimate_send',
   });
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
   const monthlyTotal = parseFloat(estimate.monthly_total || 0);
@@ -1527,6 +1529,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
       kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      channel: 'sms', purpose: 'estimate_followup_manual',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
@@ -1652,6 +1655,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
     const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
       kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      channel: 'sms', purpose: 'estimate_booking_link',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
@@ -1757,6 +1761,7 @@ router.post('/:id/extend', async (req, res, next) => {
       const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
       const viewUrl = await shortenOrPassthrough(longUrl, {
         kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+        channel: 'sms', purpose: 'estimate_extended',
       });
       const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
         month: 'long', day: 'numeric', timeZone: 'America/New_York',
