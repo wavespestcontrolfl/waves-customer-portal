@@ -1229,6 +1229,22 @@ router.put('/customers/:customerId/property-zones', requireAdmin, async (req, re
       });
     }
 
+    // One entry per label: a clear + redraw pair for the same label would
+    // end UNMARKED in the write path (upsert applies all shapes, THEN all
+    // clears) — reject the ambiguity instead of guessing what was meant.
+    const seenLabels = new Set();
+    for (const entry of zoneShapes) {
+      const key = PropertyZones.normalizeZoneLabel(entry?.areaLabel);
+      if (!key) continue;
+      if (seenLabels.has(key)) {
+        return res.status(400).json({
+          error: `zoneShapes has more than one entry for "${String(entry.areaLabel).trim()}" — send one final state per zone`,
+          code: 'zone_shapes_duplicate',
+        });
+      }
+      seenLabels.add(key);
+    }
+
     const existingZones = await db('property_zones')
       .where({ customer_id: customer.id, is_active: true })
       .select('label', 'geometry_image', 'service_lines');
@@ -1250,8 +1266,10 @@ router.put('/customers/:customerId/property-zones', requireAdmin, async (req, re
     // image-only once ANY zone carries a mark and drops the rest, so a save
     // that leaves some zones unmarked while others end marked would silently
     // omit treated zones from the customer's coverage map. All-marked or
-    // all-cleared are both acceptable end states.
-    const gaps = PropertyZones.zoneShapeCoverageGaps(existingZones, zoneShapes);
+    // all-cleared are both acceptable end states. Scoped to the selected
+    // service line the way reports scope zones — an unmarked lawn-only row
+    // never co-renders on a pest overlay, so it must not block a pest save.
+    const gaps = PropertyZones.zoneShapeCoverageGaps(existingZones, zoneShapes, { serviceLine });
     if (gaps) {
       return res.status(400).json({
         error: `every zone needs a mark (or an explicit clear) before saving — missing: ${gaps.join(', ')}`,

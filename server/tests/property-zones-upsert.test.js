@@ -223,3 +223,39 @@ test('coverage gaps: new labels count as marked; unknown-label clears and status
     { areaLabel: 'No issues found', shape: SHAPE }, // status chip → never a zone
   ])).toBeNull();
 });
+
+test('coverage gaps: scoped to the service line the way reports scope zones', () => {
+  const mixed = [
+    { label: 'Perimeter', geometry_image: null, service_lines: ['pest'] },
+    { label: 'Front lawn', geometry_image: null, service_lines: ['lawn'] },
+    { label: 'Yard', geometry_image: null, service_lines: [] }, // untagged → every line
+  ];
+  // pest save covering the pest zone AND the untagged zone passes even
+  // though the lawn-only zone stays unmarked (it never co-renders on pest)
+  expect(zoneShapeCoverageGaps(mixed, [
+    { areaLabel: 'Perimeter', shape: SHAPE },
+    { areaLabel: 'Yard', shape: SHAPE },
+  ], { serviceLine: 'pest' })).toBeNull();
+  // ...but the untagged zone always counts — skipping it is still partial
+  expect(zoneShapeCoverageGaps(mixed, [{ areaLabel: 'Perimeter', shape: SHAPE }], { serviceLine: 'pest' }))
+    .toEqual(['Yard']);
+  // no serviceLine → conservative all-rows check
+  expect(zoneShapeCoverageGaps(mixed, [
+    { areaLabel: 'Perimeter', shape: SHAPE },
+    { areaLabel: 'Yard', shape: SHAPE },
+  ])).toEqual(['Front lawn']);
+});
+
+test('coverage gaps: clear + redraw for one label simulates the write order (shapes then clears)', () => {
+  // upsertZonesForCompletion applies all shapes FIRST and all clears AFTER,
+  // so a clear+shape pair ends unmarked regardless of entry order — the
+  // simulator must agree (the route additionally 400s duplicates outright)
+  const rows = [
+    { label: 'Perimeter', geometry_image: '{"type":"circle","cx":0.5,"cy":0.5,"r":0.06}', service_lines: [] },
+    { label: 'Yard', geometry_image: '{"type":"circle","cx":0.4,"cy":0.4,"r":0.06}', service_lines: [] },
+  ];
+  expect(zoneShapeCoverageGaps(rows, [
+    { areaLabel: 'Yard', clear: true },
+    { areaLabel: 'Yard', shape: SHAPE }, // later shape does NOT win
+  ])).toEqual(['Yard']);
+});
