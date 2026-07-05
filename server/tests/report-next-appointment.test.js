@@ -15,6 +15,7 @@ const { buildReportV1Data } = require('../services/service-report/report-data');
 function makeKnex(fixtures) {
   return (table) => {
     let rows = [...(fixtures[table] || [])];
+    const sortKeys = [];
     const query = {
       where(criteria, value) {
         if (criteria && typeof criteria === 'object') {
@@ -40,7 +41,16 @@ function makeKnex(fixtures) {
       modify(fn) { fn(query); return query; },
       limit: () => query,
       orderBy(column) {
-        rows = [...rows].sort((a, b) => String(a[column] || '').localeCompare(String(b[column] || '')));
+        // real knex chains orderBy calls as primary-then-tiebreak keys; a
+        // per-call re-sort would let the LAST key win instead
+        sortKeys.push(column);
+        rows = [...rows].sort((a, b) => {
+          for (const key of sortKeys) {
+            const cmp = String(a[key] || '').localeCompare(String(b[key] || ''));
+            if (cmp !== 0) return cmp;
+          }
+          return 0;
+        });
         return query;
       },
       leftJoin: () => query,
