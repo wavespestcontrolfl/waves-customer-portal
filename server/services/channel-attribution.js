@@ -40,6 +40,20 @@
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
 
+const { normalizeLeadSource } = require('./source-names');
+
+// Re-key a { source: amount } cost map by the normalized source key (summing
+// any collisions), so spend configured under a manual alias still lands on —
+// and divides into — the same bucket as its rows. Canonical keys pass through.
+function normalizeCostMap(map = {}) {
+  const out = {};
+  for (const [src, amt] of Object.entries(map)) {
+    const key = normalizeLeadSource(src);
+    out[key] = (out[key] || 0) + (Number(amt) || 0);
+  }
+  return out;
+}
+
 // DATE columns arrive as JS Date objects at UTC midnight; normalize to
 // 'YYYY-MM-DD' so first-touch compares chronologically, not by weekday text
 // (same recovery ad-attribution-sync's toDateStr does). Undated rows sort last.
@@ -61,6 +75,10 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
     if (!bySource[src]) bySource[src] = { revenue: 0, grossProfit: 0, lifetimeValue: 0, jobs: 0, customers: new Set() };
     return bySource[src];
   };
+  // Normalize the cost-map keys ONCE so seeding and the per-source lookups
+  // below stay on the same key space as the normalized row grouping.
+  const spendBySource = normalizeCostMap(platformSpendBySource);
+  const fixedBySource = normalizeCostMap(fixedCostBySource);
 
   // Each customer's completed-visit count is credited exactly once — to their
   // first-touch row (the same earliest lead_date → created_at pick as the
@@ -74,7 +92,12 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
   }
 
   for (const a of completedRows) {
-    const s = ensure(a.lead_source || 'unknown');
+    // Group by the NORMALIZED key so manual-entry vocabulary ('google',
+    // 'phone_call', …) lands in a sensible bucket instead of a stray one-off
+    // channel. Read-layer only — stored rows are never rewritten. Canonical
+    // keys (including splitFacebookByPaid's 'facebook_organic' remap, which
+    // runs before this) pass through unchanged.
+    const s = ensure(normalizeLeadSource(a.lead_source || 'unknown'));
     const gp = Number(a.gross_profit) || 0;
     const proj = Number(a.projected_ltv_12mo) || 0;
     s.revenue += Number(a.completed_revenue) || 0;
@@ -88,12 +111,12 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
   }
   // Seed channels that had spend (ad OR fixed) but no completed leads, so a
   // money-losing channel shows up instead of vanishing.
-  for (const src of Object.keys(platformSpendBySource)) ensure(src);
-  for (const src of Object.keys(fixedCostBySource)) ensure(src);
+  for (const src of Object.keys(spendBySource)) ensure(src);
+  for (const src of Object.keys(fixedBySource)) ensure(src);
 
   const sources = Object.entries(bySource).map(([sourceKey, s]) => {
-    const adSpend = round2(platformSpendBySource[sourceKey] || 0); // platform ad spend (display)
-    const fixedCost = round2(fixedCostBySource[sourceKey] || 0); // SEO retainer / mgmt fees etc.
+    const adSpend = round2(spendBySource[sourceKey] || 0); // platform ad spend (display)
+    const fixedCost = round2(fixedBySource[sourceKey] || 0); // SEO retainer / mgmt fees etc.
     const allInSpend = round2(adSpend + fixedCost); // true cost to acquire — ratios divide by this
     const revenue = round2(s.revenue);
     const grossProfit = round2(s.grossProfit);

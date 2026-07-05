@@ -1323,6 +1323,11 @@ async function createSelfBooking(payload = {}) {
         confirmation_code: confCode,
         source: source || 'direct',
         referrer_url: referrer_url || null,
+        // Full client attribution capture (UTMs + click ids + referrer/landing)
+        // for EVERY booking — raw record; classification happens at read time
+        // (attributeSelfBooking below only persisted the paid-click slice).
+        attribution: (attribution && typeof attribution === 'object')
+          ? JSON.stringify(attribution) : null,
         service_type: resolvedServiceType,
       }).returning('*');
 
@@ -1581,10 +1586,11 @@ async function createSelfBooking(payload = {}) {
     // recurring series. `lead_id` is only a trigger flag; the conversion is
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
+    let leadConversion = null;
     if (followUpRows.length > 0 || lead_id) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({
+        leadConversion = await convertLeadFromEvent({
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
@@ -1598,8 +1604,14 @@ async function createSelfBooking(payload = {}) {
     // offline-conversion pipeline (data-manager qualified_lead / Meta CAPI) can
     // report it to Google/Meta by deterministic click id, not just hashed PII.
     // A cold ad click that books straight from the funnel has no lead otherwise,
-    // so it would be invisible to ad optimization. Best-effort (booking is
-    // already committed); only mints for ad-tracked bookers with no lead on file.
+    // so it would be invisible to ad optimization. Non-paid bookings mint
+    // nothing but still get a channel-classified funnel row (deduped per
+    // booking via self_booked_appointment_id); owned re-engagement links
+    // (booking_recovery) are excluded — same journey completing, not a new
+    // acquisition. Best-effort (booking is already committed); only mints
+    // won leads for ad-tracked bookers with no lead on file. A booking that
+    // just converted an existing lead records nothing here: the bridge
+    // advanced that lead's own attribution row to booked already.
     try {
       const { attributeSelfBooking } = require('../services/lead-estimate-link');
       await attributeSelfBooking({
@@ -1609,12 +1621,36 @@ async function createSelfBooking(payload = {}) {
         // Only a customer this booking just created is a fresh paid acquisition;
         // a resolved existing customer is a repeat booker, not a new lead.
         customerCreated: !!createdCustomerId,
+        selfBookedAppointmentId: booking?.id || null,
+        bookingSource: source || null,
+        leadConverted: !!leadConversion?.converted,
       });
     } catch (err) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
     }
 
     return { ok: true, body: { booking, confirmationCode: confCode } };
+}
+
+// Public shape for a self_booked_appointments row — an EXPLICIT allow-list,
+// never `self_booked_appointments.*`. The raw row now persists the full
+// attribution capture (gclid, _fbc/_fbp, full referrer, and landing_url —
+// which can embed booking/estimate handoff tokens), and referrer_url carries
+// the same class of data. Unauthenticated callers reach these rows with just
+// a confirmation code (GET /status/:code) or the confirm response, so new
+// columns stay private unless deliberately added here.
+const PUBLIC_BOOKING_FIELDS = [
+  'id', 'confirmation_code', 'status', 'date', 'start_time', 'end_time',
+  'duration_minutes', 'service_type', 'customer_notes', 'source',
+  'created_at', 'updated_at',
+];
+function toPublicBookingShape(row) {
+  if (!row || typeof row !== 'object') return null;
+  const out = {};
+  for (const field of PUBLIC_BOOKING_FIELDS) {
+    if (field in row) out[field] = row[field];
+  }
+  return out;
 }
 
 // POST /api/booking/confirm — thin HTTP adapter over createSelfBooking. The
@@ -1632,7 +1668,10 @@ router.post('/confirm', async (req, res, next) => {
       payAtVisit: isEnabled('bookingPayAtVisit'),
     });
     if (!result.ok) return res.status(result.status).json({ error: result.error });
-    return res.json(result.body);
+    // Sanitize HERE, not inside createSelfBooking — the service returns the
+    // full row for internal callers; the public response gets the safe shape
+    // (covers BOTH the fresh-booking body and the double-submit replay body).
+    return res.json({ ...result.body, booking: toPublicBookingShape(result.body.booking) });
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);
@@ -1890,14 +1929,17 @@ router.get('/sources', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/booking/status/:code
+// GET /api/booking/status/:code — public (anyone holding a confirmation code).
+// Selects the explicit allow-list, NOT the wildcard row: the attribution jsonb
+// (click ids, referrer/landing URLs with handoff tokens) and referrer_url must
+// never ride along on a public payload.
 router.get('/status/:code', async (req, res, next) => {
   try {
     const booking = await db('self_booked_appointments')
       .where('confirmation_code', req.params.code)
       .leftJoin('customers', 'self_booked_appointments.customer_id', 'customers.id')
       .select(
-        'self_booked_appointments.*',
+        ...PUBLIC_BOOKING_FIELDS.map((field) => `self_booked_appointments.${field}`),
         'customers.first_name', 'customers.last_name',
         'customers.address_line1', 'customers.city'
       )
@@ -1928,4 +1970,8 @@ module.exports._internals = {
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,
+  // Public-response allow-list for self_booked_appointments rows (P1 guard:
+  // the raw row carries the full attribution capture).
+  PUBLIC_BOOKING_FIELDS,
+  toPublicBookingShape,
 };

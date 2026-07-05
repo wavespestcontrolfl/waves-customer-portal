@@ -8,6 +8,7 @@ const logger = require('./logger');
 // produced invalid E.164 strings on bad input.
 const { normalizePhone } = require('../utils/phone');
 const { startOfETMonth, etDateString } = require('../utils/datetime-et');
+const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact
@@ -136,6 +137,11 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
     return;
   }
 
+  // Mirror the win onto the lead's ad_service_attribution funnel row
+  // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
+  // in SQL and best-effort — never blocks the conversion.
+  await bridgeLeadFunnelStage(leadId, 'won');
+
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
   // a lead estimate kept customer_id = NULL and was invisible/unbookable). Lazy
@@ -177,6 +183,10 @@ async function markLost(leadId, { reason, competitor, notes }) {
     logger.info(`[LeadAttribution] markLost skipped — lead ${leadId} missing or deleted`);
     return;
   }
+
+  // Funnel-row mirror: 'lost' collapses any intermediate stage but never
+  // overwrites a 'completed' row (sticky — matches ad-attribution-sync).
+  await bridgeLeadFunnelStage(leadId, 'lost');
 
   await db('lead_activities').insert({
     lead_id: leadId,
