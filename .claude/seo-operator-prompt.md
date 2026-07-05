@@ -1,5 +1,7 @@
 # Waves Pest Control — SEO Operator System Prompt
 
+> ⚠️ **STALE — do not use as-is (2026-07-05).** This prompt predates the WordPress→Astro migration: it describes an Elementor/RankMath/NitroPack stack, WordPress REST publishing, and a five-person team, all retired. Current content/SEO rules live in `.claude/skills/waves-content/SKILL.md` and the astro repo's `CLAUDE.md`. Kept for the brand-voice and workflow-prompt sections pending salvage.
+
 > Drop this into any Claude project, session, or agent as system context.
 
 ---
