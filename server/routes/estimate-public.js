@@ -3913,7 +3913,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${prepayMembershipSummaryHtml}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
+        <p class="billing-small">${est.depositPolicy?.required
+          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
+          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -5205,7 +5207,9 @@ ${shellQuestionsBar()}
     if (pref === 'prepay_annual') {
       if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Annual prepay invoice';
-      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
+      if (body) body.textContent = DEPOSIT_POLICY.required
+        ? 'A ' + fmt(DEPOSIT_POLICY.recurringAmount) + ' deposit is due at confirmation and is credited toward your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ', sent automatically after confirmation; choose a service window to continue.'
+        : 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
     } else {
       if (bookingSubhead) bookingSubhead.textContent = 'Pay per application is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Pay per application';
@@ -5903,13 +5907,18 @@ ${shellQuestionsBar()}
   function updateDepositNote() {
     const note = document.getElementById('deposit-due-note');
     if (!note) return;
-    if (!DEPOSIT_POLICY.required || bookingState.pickedPref === 'prepay_annual') {
+    if (!DEPOSIT_POLICY.required) {
       note.style.display = 'none';
       return;
     }
+    // Prepay-annual owes the deposit too — it credits against the annual
+    // invoice minted at accept rather than a later first-visit invoice.
+    const creditTarget = bookingState.pickedPref === 'prepay_annual'
+      ? 'your annual prepay invoice'
+      : 'your first invoice';
     note.textContent = bookingState.depositPaymentIntentId
-      ? 'Deposit received — it will be applied to your first invoice.'
-      : 'A ' + fmt(depositAmountForMode()) + ' deposit is due today to hold your spot — it is applied to your first invoice.';
+      ? 'Deposit received — it will be applied to ' + creditTarget + '.'
+      : 'A ' + fmt(depositAmountForMode()) + ' deposit is due today to hold your spot — it is applied to ' + creditTarget + '.';
     note.style.display = '';
   }
 
@@ -5921,11 +5930,16 @@ ${shellQuestionsBar()}
   function showDepositOverlay(intent) {
     return new Promise(function (resolve) {
       closeDepositOverlay();
+      // Prepay-annual deposits credit the annual invoice minted at accept,
+      // not a later first-visit invoice — keep the modal copy honest.
+      const depositCreditTarget = bookingState.pickedPref === 'prepay_annual'
+        ? 'your annual prepay invoice'
+        : 'your first invoice';
       const overlay = document.createElement('div');
       overlay.id = 'deposit-overlay';
       overlay.innerHTML = '<div class="deposit-card">'
         + '<h3 style="margin:0 0 6px">Reserve your appointment</h3>'
-        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to your first invoice.'
+        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to ' + depositCreditTarget + '.'
         + (Number(intent.receivedTotal) > 0 ? ' (' + fmt(intent.receivedTotal) + ' already received.)' : '')
         + '</p>'
         + '<div id="deposit-payment-element"></div>'
@@ -6004,7 +6018,8 @@ ${shellQuestionsBar()}
 
   async function collectDepositIfNeeded() {
     if (!DEPOSIT_POLICY.required) return { ok: true };
-    if (bookingState.pickedPref === 'prepay_annual') return { ok: true }; // exempt — server re-verifies at accept
+    // Prepay-annual owes the deposit too (credited to the annual invoice at
+    // accept) — no preference skips the modal; the server gate re-verifies.
     if (bookingState.depositPaymentIntentId) return { ok: true }; // collected this session or via 3DS return
     let r;
     let data = {};
@@ -6550,15 +6565,15 @@ async function handleEstimateView(req, res, next) {
     // Existing-customer WaveGuard membership context (null for leads / on error).
     const membership = await buildEstimateMembershipContext(estimate);
 
-    // Deposit policy for the page's accept flow. Resolved without a payment
-    // preference — the prepay-annual exemption applies when the customer
-    // actually picks it, at deposit-intent/accept time. Both class amounts
-    // ride along so the page shows the right figure on the recurring/one-time
-    // toggle. Inert ({enforced:false}) while ESTIMATE_DEPOSIT_REQUIRED is off.
+    // Deposit policy for the page's accept flow. Payment preference plays no
+    // part — every non-exempt accept path owes the deposit, including
+    // prepay-annual (owner decision 2026-07-05: the $49 credits against the
+    // annual invoice minted at accept). Both class amounts ride along so the
+    // page shows the right figure on the recurring/one-time toggle. Inert
+    // ({enforced:false}) while ESTIMATE_DEPOSIT_REQUIRED is off.
     const depositStructuralOneTime = isStructuralOneTimeOnlyEstimate(estData, estimate);
     const depositPolicyForView = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
@@ -6895,15 +6910,17 @@ router.put('/:token/accept', async (req, res, next) => {
 
     // ─────────────────────────────────────────────
     // REQUIRED ACCEPTANCE DEPOSIT (dark until ESTIMATE_DEPOSIT_REQUIRED).
-    // Every acceptance requires a verified deposit except prepay-annual
-    // (paying in full) and existing plan customers — whose commitment gate
-    // is booking the appointment itself. Flat per-service-class amounts:
-    // one-time accepts pay the heavier amount and the credit lands on their
-    // completed-visit invoice (createFromService roll-forward); recurring
-    // accepts credit the first invoice created here. Verification never
-    // trusts the client: webhook-recorded deposit, else live Stripe
-    // retrieval of the named PaymentIntent with metadata pinned to this
-    // estimate.
+    // Every acceptance requires a verified deposit except existing plan
+    // customers — whose commitment gate is booking the appointment itself.
+    // Prepay-annual accepts owe it too (owner decision 2026-07-05: choosing
+    // prepay was the only zero-money accept path for a new customer); their
+    // $49 credits against the annual invoice the converter mints inside this
+    // same transaction. Flat per-service-class amounts: one-time accepts pay
+    // the heavier amount and the credit lands on their completed-visit
+    // invoice (createFromService roll-forward); recurring accepts credit the
+    // first invoice created here. Verification never trusts the client:
+    // webhook-recorded deposit, else live Stripe retrieval of the named
+    // PaymentIntent with metadata pinned to this estimate.
     // ─────────────────────────────────────────────
     const acceptMembership = await buildEstimateMembershipContext(estimate);
     // The scheduled_service whose per-job payer the eventual invoice will resolve.
@@ -6929,7 +6946,6 @@ router.put('/:token/accept', async (req, res, next) => {
     // (already resolved-mode-aware) collected the deposit.
     const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference,
       membership: acceptMembership,
       oneTime: treatAsOneTime,
       oneTimeUninvoiced: treatAsOneTime && !billByInvoice,
@@ -7720,6 +7736,14 @@ router.put('/:token/accept', async (req, res, next) => {
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
+    // Customer-facing prepay figure for SMS/notifications/success payload: the
+    // ACTUAL invoice total — net of the acceptance-deposit credit the converter
+    // applied — so every quoted amount matches what the pay link collects.
+    // annualPrepayDisplayAmount (pre-credit) only survives as the fallback for
+    // a conversion that produced no amount.
+    const annualPrepayQuotedAmount = annualPrepaySelected && invoiceAmount != null
+      ? invoiceAmount
+      : annualPrepayDisplayAmount;
     let acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
     if (annualPrepaySelected && acceptedAppointmentsToRegister.length) {
       const appointmentIds = acceptedAppointmentsToRegister.map((appt) => appt?.id).filter(Boolean);
@@ -7909,7 +7933,7 @@ router.put('/:token/accept', async (req, res, next) => {
             });
           }
         } else if (annualPrepaySelected) {
-          const amountText = annualPrepayDisplayAmount != null ? ` for ${fmtMoney(annualPrepayDisplayAmount)}` : '';
+          const amountText = annualPrepayQuotedAmount != null ? ` for ${fmtMoney(annualPrepayQuotedAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
@@ -8153,7 +8177,7 @@ router.put('/:token/accept', async (req, res, next) => {
         reservationCommitted,
         bookingUrl,
         billingTerm,
-        annualPrepayAmount: annualPrepayDisplayAmount,
+        annualPrepayAmount: annualPrepayQuotedAmount,
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
@@ -8188,7 +8212,7 @@ router.put('/:token/accept', async (req, res, next) => {
           invoicePayUrl,
           reservationCommitted,
           billingTerm,
-          annualPrepayAmount: annualPrepayDisplayAmount,
+          annualPrepayAmount: annualPrepayQuotedAmount,
         }),
       });
     } catch (e) {
@@ -8205,7 +8229,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceKind,
       invoiceServiceLabel,
       billingTerm,
-      prepayInvoiceAmount: annualPrepayDisplayAmount,
+      prepayInvoiceAmount: annualPrepayQuotedAmount,
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,
@@ -12936,7 +12960,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const depositStructuralOneTime = isStructuralOneTimeOnlyEstimate(depositEstData, estimate);
     const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
@@ -13191,10 +13214,12 @@ module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
+module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
+module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
@@ -13215,6 +13240,7 @@ module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVi
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
+module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;

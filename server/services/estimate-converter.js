@@ -1518,6 +1518,30 @@ const EstimateConverter = {
               baseRate: await resolveCommercialPrepayBaseRate(customerId, { database }),
             })
             : undefined;
+          // Acceptance deposit credits against this prepay invoice through
+          // create()'s depositCredit param, exactly like the standard branch
+          // below — prepay-annual accepts owe the $49 deposit (owner decision
+          // 2026-07-05), and this invoice is the only one a prepay estimate
+          // ever mints, so a credit missed here would strand on the ledger
+          // (covered visits invoice nothing at completion, and the
+          // required-path sweep never refunds it). That is also why the
+          // ledger read fails CLOSED: the accept gate may have just verified
+          // a real deposit, so a read error must abort the accept
+          // (retryable) rather than mint the year with the credit silently
+          // dropped. A clean null read is the legitimate no-deposit path
+          // (legacy/manual conversions). Ledger read and consumption both
+          // ride `database` (the accept transaction when called from
+          // accept): the credit line exists IFF the ledger consumed exactly
+          // that amount, or the whole accept rolls back — never an accepted
+          // prepay beside an unconsumed deposit row.
+          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+          let prepayDepositCredit;
+          try {
+            prepayDepositCredit = await pendingDepositCredit(estimateId, database);
+          } catch (ledgerErr) {
+            throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
+          }
+          const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
           const inv = await InvoiceService.create({
             database,
             customerId,
@@ -1530,11 +1554,31 @@ const EstimateConverter = {
             notes: prepayNotes,
             dueDate: etDateString(),
             ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
+            ...(requestedPrepayDepositCredit > 0
+              ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
+              : {}),
           });
+          // Assign the id BEFORE consuming the credit: an allocation-mismatch
+          // throw below must leave draftInvoiceId set so the outer cleanup can
+          // void the just-created invoice on a no-caller-transaction run
+          // (accept-path runs ride the caller trx and roll back wholesale).
           draftInvoiceId = inv?.id || null;
-          // Quote the amount actually invoiced/charged (tax-inclusive) so the
-          // customer/admin messaging matches the PaymentIntent. For residential
-          // (untaxed) inv.total === annualAmount, so this is a no-op there.
+          const appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
+          if (inv?.id && appliedPrepayDepositCredit > 0) {
+            const allocated = await consumeDepositCredit({
+              estimateId,
+              amount: appliedPrepayDepositCredit,
+              invoiceId: inv.id,
+              trx: database,
+            });
+            if (Math.round(allocated * 100) !== Math.round(appliedPrepayDepositCredit * 100)) {
+              throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
+            }
+          }
+          // Quote the amount actually invoiced/charged (tax-inclusive, net of
+          // the deposit credit) so the customer/admin messaging matches what
+          // the pay link collects. For residential (untaxed, no deposit)
+          // inv.total === annualAmount, so this is a no-op there.
           draftInvoiceAmount = inv?.total != null ? Number(inv.total) : annualAmount;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
 
@@ -1618,11 +1662,16 @@ const EstimateConverter = {
               prepayInvoiceId: draftInvoiceId,
               planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
-              // The TAX-INCLUSIVE invoice total (what the customer actually pays).
-              // Admin/portal read the term's prepayAmount as the paid amount and
-              // coverage stamping splits it across visits. Residential is untaxed
-              // so draftInvoiceAmount === annualAmount there.
-              prepayAmount: draftInvoiceAmount,
+              // The GROSS tax-inclusive prepay value (what the customer pays in
+              // total for the year): the net invoice total PLUS the acceptance
+              // deposit already collected and credited against it. Admin/portal
+              // read the term's prepayAmount as the paid amount and coverage
+              // stamping splits it across visits — recording the net would
+              // understate the year by the deposit. Residential with no deposit
+              // is untaxed so this stays === annualAmount there.
+              prepayAmount: draftInvoiceAmount != null
+                ? Math.round((draftInvoiceAmount + appliedPrepayDepositCredit) * 100) / 100
+                : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get
               // stamped on payment. A single service that couldn't be derived
@@ -1918,6 +1967,21 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+// Annual prepay supports exactly ONE recurring coverage unit — the same math
+// as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
+// guard (recurring.services lines + any supplemental companion a solo primary
+// absorbs into one combo visit). Shared with the public /deposit-intent mirror
+// so a deposit is never collected for a prepay the converter will 422.
+module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUnitCount(estimateData = {}) {
+  const recurring = recurringServicesFromEstimateData(estimateData);
+  const companions = supplementalCompanionLines(estimateData);
+  const soloKey = recurring.length === 1 ? recurringServiceKey(recurring[0]) : null;
+  const absorbed = soloKey
+    ? companions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
+      soloKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
+    : [];
+  return recurring.length + absorbed.length;
+};
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
 module.exports.reservedRowComboRewrites = reservedRowComboRewrites;

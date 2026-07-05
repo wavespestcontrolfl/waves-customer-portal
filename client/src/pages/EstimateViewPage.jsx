@@ -1637,7 +1637,7 @@ function ExistingAppointmentCard({ appointment }) {
 // `intent` is the POST /deposit-intent response: clientSecret, amount,
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
 // card-only server-side, so the Payment Element renders card fields only.
-function DepositModal({ intent, onSuccess, onCancel }) {
+function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -1716,7 +1716,7 @@ function DepositModal({ intent, onSuccess, onCancel }) {
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
-          A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to your first invoice.
+          A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to {creditTarget}.
           {Number(intent.receivedTotal) > 0 ? ` (${fmtMoney(intent.receivedTotal)} already received.)` : ''}
         </div>
         <div ref={mountRef} />
@@ -2910,7 +2910,9 @@ export default function EstimateViewPage() {
     // per mode and 409-exempts when nothing is owed.
     const depositRequired = depositPolicy?.required
       || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime);
-    if (depositRequired && paymentPreference !== 'prepay_annual' && !depositPaymentIntentIdRef.current) {
+    // Prepay-annual owes the deposit too — it credits against the annual
+    // invoice minted at accept; the server accept gate re-verifies either way.
+    if (depositRequired && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
       setError(null);
       try {
@@ -3407,10 +3409,12 @@ export default function EstimateViewPage() {
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
               ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
-              : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime)) && paymentPreference !== 'prepay_annual'
+              : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
                 ? (invoiceOnlyAccept
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
-                  : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
+                  : paymentPreference === 'prepay_annual'
+                    ? `A ${fmtMoney(data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your annual prepay invoice.`
+                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
                 : null)}
           />
           {depositIntent ? (
@@ -3418,6 +3422,7 @@ export default function EstimateViewPage() {
               intent={depositIntent}
               onSuccess={handleDepositSuccess}
               onCancel={handleDepositCancel}
+              creditTarget={paymentPreference === 'prepay_annual' ? 'your annual prepay invoice' : 'your first invoice'}
             />
           ) : null}
           {cardHoldIntent ? (

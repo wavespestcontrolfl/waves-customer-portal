@@ -99,17 +99,16 @@ describe('computeDepositAmount — flat per service class, never a percentage', 
 describe('resolveDepositPolicy', () => {
   const estimate = { id: 'est-1', onetime_total: 280 };
 
-  it('requires the deposit for new customers on any non-prepay acceptance', () => {
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'pay_at_visit', membership: {} });
+  it('requires the deposit for new customers on any acceptance', () => {
+    const policy = resolveDepositPolicy({ estimate, membership: {} });
     expect(policy).toEqual({ enforced: true, required: true, slotRequired: false, exemptReason: null, amount: 49 });
     // No preference chosen yet (data fetch) — still the required path.
-    expect(resolveDepositPolicy({ estimate, paymentMethodPreference: null, membership: {} }).required).toBe(true);
+    expect(resolveDepositPolicy({ estimate, membership: {} }).required).toBe(true);
   });
 
   it('one-time accepts are REQUIRED at the heavier flat amount — not exempt', () => {
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: {},
       oneTime: true,
     });
@@ -120,7 +119,6 @@ describe('resolveDepositPolicy', () => {
   it('one-time UNINVOICED accepts must book — no invoice at accept means the roll-forward needs source_estimate_id (P1)', () => {
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: {},
       oneTime: true,
       oneTimeUninvoiced: true,
@@ -131,14 +129,20 @@ describe('resolveDepositPolicy', () => {
     // accept transaction — no booking needed for the money to come back.
     expect(resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: {},
       oneTime: true,
     }).slotRequired).toBe(false);
   });
 
-  it('prepay-annual is exempt (paying in full)', () => {
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'prepay_annual', membership: {} });
+  it('choosing prepay-annual is REQUIRED at the recurring amount — no longer exempt (owner decision 2026-07-05)', () => {
+    const policy = resolveDepositPolicy({ estimate, membership: {} });
+    expect(policy.required).toBe(true);
+    expect(policy.amount).toBe(49);
+    expect(policy.exemptReason).toBe(null);
+  });
+
+  it('a COMMITTED prepay term is exempt (post-accept summaries: legacy accepts predate the deposit)', () => {
+    const policy = resolveDepositPolicy({ estimate, committedPrepayTerm: true, membership: {} });
     expect(policy.required).toBe(false);
     expect(policy.exemptReason).toBe('prepay_annual');
     expect(policy.slotRequired).toBe(false);
@@ -147,7 +151,6 @@ describe('resolveDepositPolicy', () => {
   it('existing plan customers skip the deposit but must book an appointment', () => {
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: { isExistingCustomer: true },
     });
     expect(policy.required).toBe(false);
@@ -157,7 +160,7 @@ describe('resolveDepositPolicy', () => {
 
   it('feature dark = nothing enforced', () => {
     delete process.env.ESTIMATE_DEPOSIT_REQUIRED;
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'pay_at_visit', membership: {} });
+    const policy = resolveDepositPolicy({ estimate, membership: {} });
     expect(policy.enforced).toBe(false);
     expect(policy.required).toBe(false);
     expect(policy.slotRequired).toBe(false);
@@ -171,7 +174,6 @@ describe('resolveDepositPolicyForEstimate — live plan-customer fallback (P2)',
     mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([{ id: 'svc-1' }]);
     const policy = await resolveDepositPolicyForEstimate({
       estimate: linkedEstimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: { isExistingCustomer: false },
     });
     expect(mockLoadExistingRecurringQualifyingRows).toHaveBeenCalledWith(expect.anything(), 'cust-9');
@@ -214,7 +216,6 @@ describe('resolveDepositPolicyForEstimate — third-party payer exemption', () =
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
     const policy = await resolveDepositPolicyForEstimate({
       estimate: linkedEstimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: { isExistingCustomer: false },
     });
     expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null });

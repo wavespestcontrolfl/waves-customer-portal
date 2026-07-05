@@ -68,7 +68,10 @@ describe('server-rendered estimate page deposit injection', () => {
     expect(html).toContain('deposit-payment-element');
     expect(html).toContain('js.stripe.com/v3/');
     // Customer-visible copy stays flat-amount (no percentage language).
-    expect(html).toContain('deposit holds your spot. It is applied to your first invoice.');
+    // Overlay copy is preference-aware: prepay-annual deposits credit the
+    // annual invoice, everything else the first invoice.
+    expect(html).toContain("deposit holds your spot. It is applied to ' + depositCreditTarget + '.");
+    expect(html).toContain("? 'your annual prepay invoice'");
     expect(html).not.toMatch(/25%|percent/i);
     // Review-area note element exists for the due-today line.
     expect(html).toContain('id="deposit-due-note"');
@@ -94,10 +97,13 @@ describe('server-rendered estimate page deposit injection', () => {
     expect(html).toContain('"exemptReason":"existing_plan_customer"');
   });
 
-  test('prepay-annual preference short-circuits collection client-side', () => {
+  test('prepay-annual preference does NOT short-circuit collection client-side (owner decision 2026-07-05)', () => {
     const html = renderPage('deposit-token', baseEstimate({
       depositPolicy: { enforced: true, required: true, slotRequired: false, exemptReason: null, recurringAmount: 49, oneTimeAmount: 99 },
     }), BASE_EST_DATA);
-    expect(html).toContain("if (bookingState.pickedPref === 'prepay_annual') return { ok: true };");
+    expect(html).not.toContain("if (bookingState.pickedPref === 'prepay_annual') return { ok: true };");
+    // The deposit note stays visible for prepay and names the annual invoice
+    // as the credit target.
+    expect(html).toContain('your annual prepay invoice');
   });
 });
