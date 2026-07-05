@@ -10,6 +10,7 @@
  * "Coming soon to iPhone & Android".
  */
 import { estimateCard } from './cardStyles';
+import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
 
 const W = {
   blueDeeper: '#1B2C5B', blueDark: '#065A8C', blueLight: '#E3F5FD',
@@ -94,6 +95,8 @@ function StoreBadge({ url, label, children }) {
 // and review-before-booking states).
 export default function AppShowcaseCard({ onBookToday = null }) {
   const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
+  // Glass copy pack (?glass=1, PR B).
+  const glass = glassCopyActive();
   return (
     <section style={estimateCard()}>
       <div style={{
@@ -107,10 +110,12 @@ export default function AppShowcaseCard({ onBookToday = null }) {
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
         color: W.blueDeeper, margin: '0 0 6px',
       }}>
-        Watch every visit — right from your phone
+        {glass ? GLASS_COPY.appTitle : 'Watch every visit — right from your phone'}
       </h2>
       <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
-        Live GPS, visit reports, and alerts you control — the Waves app keeps you in the loop from booking to done.
+        {glass
+          ? GLASS_COPY.appExcerpt
+          : 'Live GPS, visit reports, and alerts you control — the Waves app keeps you in the loop from booking to done.'}
       </p>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 16, margin: '4px 0 18px' }}>
@@ -141,7 +146,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
         <div style={{ marginBottom: 12 }}>
           <strong style={{ display: 'block', fontSize: 15, color: W.blueDeeper }}>It&rsquo;s all in the Waves app</strong>
           <span style={{ display: 'block', marginTop: 2, fontSize: 13, color: W.textBody, lineHeight: 1.4 }}>
-            One login for your whole household — everything in one place.
+            {glass ? GLASS_COPY.appHouseholdLine : 'One login for your whole household — everything in one place.'}
           </span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, margin: '12px 0 14px' }}>
@@ -196,7 +201,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
               cursor: 'pointer',
             }}
           >
-            Book today!
+            {glass ? GLASS_COPY.ctaBook : 'Book today!'}
           </button>
         </div>
       ) : null}

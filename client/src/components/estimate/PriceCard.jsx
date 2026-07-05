@@ -1,4 +1,5 @@
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
+import { glassCopyActive, glassPestInclusions, glassTierDisplay } from '../../lib/estimate-glass-copy';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
@@ -145,6 +146,10 @@ export function priceCardSavingsInfo(frequency = {}) {
 export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true }) {
   if (!frequency) return null;
 
+  // Glass copy pack (?glass=1, PR B): tier display + save-line + pest
+  // inclusion swaps live here because they're card-internal content the
+  // parent never threads through props.
+  const glass = glassCopyActive();
   const monthly = frequency.monthly;
   const annual = frequency.annual;
   const quoteRequired = frequency.quoteRequired === true;
@@ -263,7 +268,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
             fontWeight: 700,
             letterSpacing: '0.02em',
           }}>
-            WaveGuard {waveGuardTier}
+            WaveGuard {glass ? glassTierDisplay(waveGuardTier) : waveGuardTier}
           </span>
         ) : null}
       </div>
@@ -275,7 +280,10 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
+      {/* Glass drops the save line: the figure is the anchor-vs-cadence
+          delta misattributed to the tier (owner directive). The struck
+          anchor above still evidences the member discount. */}
+      {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange && !glass ? (
         <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
           You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
         </div>
@@ -326,7 +334,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
 
       {dayPrice && !showLowConfidenceRange ? (
         <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-          {(wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
+          {(wording?.dayLineByKey?.[billingKey] || wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}
 
@@ -358,10 +366,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
               </div>
               <div style={{ marginTop: 3, fontSize: 12, color: W.textCaption, lineHeight: 1.4 }}>
                 {Number(row.visitsPerYear) > 0 ? `${row.visitsPerYear} applications/year` : 'Service applications/year'}
-                {waveGuardTier ? ` - WaveGuard ${normalizedTier(waveGuardTier)}` : ''}
+                {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
               <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
-                {serviceInclusions(row).map((item) => (
+                {(glass && serviceKey(row) === 'pest_control'
+                  ? glassPestInclusions(row.visitsPerYear)
+                  : serviceInclusions(row)).map((item) => (
                   <li key={item} style={{ position: 'relative', paddingLeft: 18, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
                     <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
                     {item}
