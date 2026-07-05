@@ -128,9 +128,9 @@ function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
 export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
   if (!frequency) return null;
 
-  // Glass copy pack (?glass=1, PR B): tier display + save-line + pest
-  // inclusion swaps live here because they're card-internal content the
-  // parent never threads through props.
+  // Glass copy pack (?glass=1, PR B): tier display + pest inclusion swaps
+  // live here because they're card-internal content the parent never
+  // threads through props.
   const glass = glassCopyActive();
   const monthly = frequency.monthly;
   const annual = frequency.annual;

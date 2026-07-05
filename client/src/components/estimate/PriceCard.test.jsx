@@ -153,7 +153,7 @@ describe('PriceCard — WaveGuard savings display', () => {
     expect(screen.queryByText(/\/ year/)).toBeNull();
   });
 
-  it('still shows a real tier discount as savings', () => {
+  it('shows a real tier discount as the struck-through anchor, with no savings line', () => {
     // Anchor $100/visit, member pays $90/quarter (10% Silver).
     render(
       <PriceCard
