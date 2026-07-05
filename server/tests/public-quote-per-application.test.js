@@ -199,3 +199,44 @@ describe('one-time quote booking source', () => {
     expect(source).toContain('quoted_service_label: quotedServiceLabel || null');
   });
 });
+
+describe('treeShrub count mapping — omitted count must reach the engine as ABSENT (2026-07-05)', () => {
+  // The /calculate mapping used `treeCount: services.treeShrub.treeCount ?? 0`,
+  // and priceTreeShrub's density fallback runs ONLY when the field is absent/
+  // null/empty — an explicit 0 is treated as a real count. So every
+  // blank-count public quote priced zero trees. These pin the engine contract
+  // the fixed mapping relies on.
+
+  const TREED_PROPERTY = { ...BASE_PROPERTY, treeDensity: 'moderate' };
+
+  test('omitted treeCount → density fallback estimates the count', () => {
+    const estimate = generateEstimate({
+      ...TREED_PROPERTY,
+      services: { treeShrub: { access: 'easy' } },
+    });
+    const line = (estimate.lineItems || []).find((l) => /tree/i.test(l.service || l.label || ''));
+    expect(line).toBeTruthy();
+    expect(JSON.stringify(estimate.warnings || line.warnings || [])).toMatch(/estimated 6 trees/i);
+  });
+
+  test('explicit treeCount: 0 suppresses the fallback (why the mapping must omit the key)', () => {
+    const withZero = generateEstimate({
+      ...TREED_PROPERTY,
+      services: { treeShrub: { access: 'easy', treeCount: 0 } },
+    });
+    const withOmitted = generateEstimate({
+      ...TREED_PROPERTY,
+      services: { treeShrub: { access: 'easy' } },
+    });
+    const total = (e) => Number(e.summary?.recurringAnnualAfterDiscount || 0) + Number(e.summary?.oneTimeTotal || 0);
+    expect(total(withOmitted)).toBeGreaterThan(total(withZero));
+  });
+
+  test('route mapping omits treeCount unless a positive number was sent', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).not.toContain('treeCount ?? 0');
+    expect(source).toMatch(/Number\.isFinite\(treeShrubCount\) && treeShrubCount > 0/);
+  });
+});
