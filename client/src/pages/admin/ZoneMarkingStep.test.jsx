@@ -138,4 +138,26 @@ describe('ZoneMarkingStep', () => {
     firePointer(svg, 'pointerup', 320, 170);
     expect(onSetMark).not.toHaveBeenCalled();
   });
+
+  it('disabled freezes Remove and resize too, not just the pointer handlers', () => {
+    // an edit landing mid-submit is not in the already-sent payload — it
+    // would silently vanish behind a successful save
+    const onSetMark = vi.fn();
+    const onClearMark = vi.fn();
+    render(
+      <ZoneMarkingStep
+        map={MAP}
+        areas={['Perimeter']}
+        marks={{ Perimeter: { type: 'circle', cx: 0.4, cy: 0.4, r: 0.07 } }}
+        onSetMark={onSetMark}
+        onClearMark={onClearMark}
+        disabled
+      />,
+    );
+    fireEvent.click(screen.getByText('+'));
+    fireEvent.click(screen.getByText('-'));
+    fireEvent.click(screen.getByText('Remove mark'));
+    expect(onSetMark).not.toHaveBeenCalled();
+    expect(onClearMark).not.toHaveBeenCalled();
+  });
 });
