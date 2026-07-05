@@ -27,7 +27,7 @@ import {
   FONTS,
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import ActivityCard from '../components/ActivityCard';
 
@@ -4571,10 +4571,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
   const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
 
-  // Liquid-glass dark launch: ?glass=1 on the live view only. PDF / static /
-  // sms_preview renders never mount the scene, so the Playwright print
-  // pipeline and cached artifacts stay byte-identical.
-  const glassActive = mode === 'live' && glassParamRequested();
+  // Liquid-glass theme gate (GATE_REPORT_GLASS → /data glassDefault): live
+  // view only — PDF / static / sms_preview renders never mount the scene, so
+  // the Playwright print pipeline and cached artifacts stay byte-identical.
+  // ?glass=1 still forces on (preview), ?glass=0 is the per-link escape hatch
+  // back to the old page, and otherwise the server's release flag decides.
+  // ServiceReportV1 mounts only after /data resolves, so glassDefault is
+  // already in the payload on first render.
+  const glassActive = mode === 'live' && glassReleaseActive(data.glassDefault);
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {

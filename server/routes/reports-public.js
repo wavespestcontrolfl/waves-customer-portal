@@ -12,6 +12,7 @@ const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
+const featureGates = require('../config/feature-gates');
 const config = require('../config');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
@@ -1063,6 +1064,14 @@ router.get('/:token/data', async (req, res, next) => {
             v1Data.recap = { ready: true, durationMs: recap.duration_ms || null };
           }
         } catch { /* best-effort */ }
+      }
+      // Glass release flag (GATE_REPORT_GLASS): when on, the React viewer
+      // renders the liquid-glass experience without needing ?glass=1. Live
+      // views only — pdf/static/sms_preview renders never mount the scene, so
+      // the print pipeline stays byte-identical — and absent (not false) while
+      // the gate is off so pre-release responses stay byte-identical too.
+      if (mode === 'live' && featureGates.isEnabled('reportGlassTheme')) {
+        v1Data.glassDefault = true;
       }
       return res.json(v1Data);
     }
