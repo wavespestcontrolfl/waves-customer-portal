@@ -70,6 +70,14 @@ test('failure alerts immediately with the reason and fallback model', async () =
   expect(body).toContain('openai_404');
   expect(body).toContain(MODELS.FLAGSHIP);
   expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+  // allowOwnerSms: internal_alert to a known owner phone is otherwise
+  // redirected into the notification trigger — the bell already fired above,
+  // so without the bypass Adam never gets the out-of-band text.
+  expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+    process.env.ADAM_PHONE,
+    expect.any(String),
+    expect.objectContaining({ messageType: 'internal_alert', allowOwnerSms: true }),
+  );
 });
 
 test('same persisting failure does not re-alert within 24h; reason change does', async () => {

@@ -1175,10 +1175,13 @@ router.post('/rewrite-sms', async (req, res) => {
     let rewriteText = '';
     const routed = await require('../services/llm/call')
       .dispatch(MODELS.ROUTES.smsToneRewrite, { text: rewritePrompt, jsonMode: false, maxTokens: 500 });
-    if (routed.ok) {
-      rewriteText = routed.text || '';
+    // A blank routed body counts as a miss (provider-side empty response /
+    // content-filtered output can come back ok at the HTTP level) — otherwise
+    // this would 502 the composer button while the fallback could still work.
+    if (routed.ok && (routed.text || '').trim()) {
+      rewriteText = routed.text;
     } else {
-      logger.warn(`[sms-rewrite] routed rewrite unavailable (${routed.reason}); falling back to ${MODELS.WORKHORSE}`);
+      logger.warn(`[sms-rewrite] routed rewrite unavailable (${routed.ok ? 'empty_response' : routed.reason}); falling back to ${MODELS.WORKHORSE}`);
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       const msg = await client.messages.create({

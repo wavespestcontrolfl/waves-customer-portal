@@ -78,6 +78,18 @@ describe('route selection', () => {
       intentName: 'GENERAL',
       inboundMessage: 'I want to cancel my service',
     })).toBe(MODELS.ROUTES.smsDraftSaveSale);
+    // Cancellation verb variants — an active scheduling thread can label
+    // these service_scheduling_window_reply via the time word, so the text
+    // match is the only thing pulling them onto the Sonnet lane.
+    for (const msg of [
+      'I canceled tomorrow morning',
+      'I cancelled tomorrow morning',
+      'I am cancelling my Tuesday appointment',
+      'canceling service, please confirm',
+    ]) {
+      expect(draftRouteFor({ intentName: 'service_scheduling_window_reply', inboundMessage: msg }))
+        .toBe(MODELS.ROUTES.smsDraftSaveSale);
+    }
     // A clean scheduling reply stays on the default lane
     expect(draftRouteFor({
       intentName: 'service_scheduling_window_reply',

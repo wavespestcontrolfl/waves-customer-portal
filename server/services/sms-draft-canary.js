@@ -47,7 +47,15 @@ async function alertAdmin(title, body) {
     const TwilioService = require('./twilio');
     const phone = process.env.ADAM_PHONE;
     if (phone) {
-      await TwilioService.sendSMS(phone, `${title}\n${body}`, { messageType: 'internal_alert' });
+      // allowOwnerSms: without it, internal_alert to a known owner phone is
+      // redirected into the admin-notification trigger — which this canary
+      // already fired above, so the redirect would just duplicate the bell
+      // and Adam would never get the out-of-band text. The OWNER_SMS_DISABLED
+      // kill switch still applies after the bypass.
+      await TwilioService.sendSMS(phone, `${title}\n${body}`, {
+        messageType: 'internal_alert',
+        allowOwnerSms: true,
+      });
     }
   } catch (err) {
     logger.error(`[sms-draft-canary] alert SMS failed: ${err.message}`);

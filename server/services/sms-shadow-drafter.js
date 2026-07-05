@@ -317,7 +317,7 @@ const MAX_REVISIONS = (() => {
 //   here labeled service_scheduling_window_reply — the intent string alone
 //   would misroute exactly the retention-critical class to the mini lane.
 const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
-const SAVE_SALE_TEXT_RE = /\b(cancel(?:ing|lation)?|complain(?:t|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
+const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
 
 function draftRouteFor({ intentName, inboundMessage } = {}) {
   if (SAVE_SALE_INTENT_RE.test(String(intentName || ''))) return MODELS.ROUTES.smsDraftSaveSale;
