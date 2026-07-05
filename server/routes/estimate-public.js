@@ -1792,6 +1792,41 @@ function firstPositiveNumber(...values) {
   return null;
 }
 
+// The engine's true annual (result.totals.year2) is NOT 12x the rounded
+// monthly for non-monthly cadences: quarterly $392/yr displays as $32.67/mo,
+// and 32.67 * 12 = 392.04 — so recomputing an annual as round(monthly) * 12
+// drifts the quoted price by cents even when nothing about the plan changed.
+// Anchor to the engine annual shifted by 12x the monthly delta: a recompute
+// that leaves the monthly unchanged returns the quoted annual exactly, and a
+// real discount moves it by its true annualized amount.
+function anchoredAnnualTotal(estData, monthlyTotal) {
+  const monthly = Number(monthlyTotal) || 0;
+  // A comped/fully-discounted plan is $0/yr. Without this, the anchor's
+  // rounding residue (engineAnnual - engineMonthly*12, up to a few cents)
+  // would survive a zeroed monthly and persist a positive annual_total.
+  if (monthly <= 0) return 0;
+  const fallback = Math.max(0, Math.round(monthly * 12 * 100) / 100);
+  const root = estData && typeof estData === 'object'
+    ? (estData.result && typeof estData.result === 'object' ? estData.result : estData)
+    : null;
+  const engineAnnual = firstPositiveNumber(root?.totals?.year2);
+  // grandTotal before monthlyTotal: in v1-mapped blobs grandTotal is the full
+  // monthly counterpart to year2 while monthlyTotal can exclude recurring
+  // supplements (rodent bait, palm injection) — the partial value would trip
+  // the correspondence guard below and forfeit the anchor.
+  const engineMonthly = firstPositiveNumber(
+    root?.totals?.year2mo,
+    root?.recurring?.grandTotal,
+    root?.recurring?.monthlyTotal,
+  );
+  if (!engineAnnual || !engineMonthly) return fallback;
+  // Only trust the anchor when the engine pair actually corresponds (year2 is
+  // year2mo x 12 up to rounding); otherwise the blob carries something else
+  // (e.g. an annual that includes one-time work) and 12x monthly is safer.
+  if (Math.abs(engineMonthly * 12 - engineAnnual) > 0.5) return fallback;
+  return Math.max(0, Math.round((engineAnnual + (monthly - engineMonthly) * 12) * 100) / 100);
+}
+
 function treatmentVisitsForPricingRow(row = {}) {
   return firstPositiveNumber(
     row?.visitsPerYear,
@@ -3461,7 +3496,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
 
   const monthlyTotal = Math.max(0, Math.round((recurringMonthlyBeforeDiscounts - manualDiscountMonthly - prefMonthlyOff) * 100) / 100);
-  const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+  const annualTotal = anchoredAnnualTotal(estData, monthlyTotal);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   // A wide low-confidence commercial estimate is force-manual: the customer view
   // must show the "site confirmation" state (not an approve button that the
@@ -8200,7 +8235,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
       manualMonthlyOff,
       (tierName) => tierDiscountForEstimate(parsedData, tierName),
     );
-    const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+    const annualTotal = anchoredAnnualTotal(parsedData, monthlyTotal);
 
     // Self-heal estimate_data.baseMonthly when we resolved it from the
     // engine result or summed services. Doesn't write when source is
@@ -8321,7 +8356,7 @@ router.put('/:token/preferences', async (req, res, next) => {
     const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
       ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - manualMonthlyOff - monthlyOff) * 100) / 100)
       : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
-    const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+    const annualTotal  = anchoredAnnualTotal(parsedData, monthlyTotal);
     const derivedOneTimeChoiceBase = estimate.show_one_time_option
       ? oneTimeChoiceAmountForEstimate(
           { ...estimate, estimate_data: parsedData },
@@ -13194,3 +13229,4 @@ module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
+module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
