@@ -900,7 +900,11 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
 
     const result = await attributeSelfBooking({
       customerId: 'c1',
-      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null,
+        fbp: 'fb.1.x.ambient',
+        landing_url: 'https://wavespestcontrol.com/book', // real capture — the client always sends the landing
+      },
       customerCreated: true,
       selfBookedAppointmentId: 'sba-1',
       database,
@@ -918,6 +922,47 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       funnel_stage: 'booked', // the booking already committed when this runs
       fbp: 'fb.1.x.ambient', // aux CAPI match key only — never a paid signal
     });
+  });
+
+  test('no capture, no row: attribution-less bookings (legacy page / voice agent / fbp-only) fabricate nothing', async () => {
+    for (const attribution of [
+      null,
+      undefined,
+      {},
+      { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null, referrer: null, landing_url: null },
+      // ambient _fbp alone is not a capture — it carries zero classification signal
+      { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+    ]) {
+      const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+      const result = await attributeSelfBooking({
+        customerId: 'c1', attribution, customerCreated: true, selfBookedAppointmentId: 'sba-none', database,
+      });
+      expect(result).toEqual({ attributed: false, reason: 'no_attribution_capture' });
+      expect(database._inserted).toEqual([]);
+    }
+  });
+
+  test('paid Meta UTMs with a stripped click id stay PAID (is_paid from the classifier channel, like the webhook)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: { source: 'facebook', medium: 'cpc', campaign: 'spring', term: null, content: null },
+        gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        landing_url: 'https://wavespestcontrol.com/book',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-fbcpc',
+      database,
+    });
+
+    // Still no minted lead (no deterministic click id) — but the funnel row
+    // carries the paid channel so splitFacebookByPaid keeps it under paid Meta.
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'facebook' });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ lead_source: 'facebook', is_paid: true, funnel_stage: 'booked' });
   });
 
   test('does NOT mint on a non-ad UTM + ambient _fbp (newsletter/organic must not become a paid won lead)', async () => {

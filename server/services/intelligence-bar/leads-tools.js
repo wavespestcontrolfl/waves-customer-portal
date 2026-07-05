@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
 
 const LEAD_STATUSES = [
   'new',
@@ -492,6 +493,10 @@ async function updateLeadStatus(input) {
 
   await db('leads').where('id', lead.id).update(updates);
 
+  // Mirror the transition onto the lead's ad_service_attribution funnel row
+  // (same guarded pattern as the admin-leads routes — monotonic, best-effort).
+  await bridgeLeadFunnelStage(lead.id, new_status);
+
   await db('lead_activities').insert({
     lead_id: lead.id,
     activity_type: 'status_change',
@@ -545,6 +550,10 @@ async function bulkUpdateLeads(input) {
   if (lost_reason) updates.lost_reason = lost_reason;
 
   await db('leads').whereIn('id', ids).update(updates);
+
+  // Funnel-row mirror for the whole batch — one set-based UPDATE with the
+  // same monotonic stage predicate as the single-lead bridge.
+  await bridgeLeadsFunnelStage(ids, new_status);
 
   // Log activity for each
   const activities = ids.map(id => ({

@@ -825,10 +825,31 @@ function attributionHost(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
 }
 
+// True only when the payload contains a REAL client-side capture: any UTM
+// value, a click id (paid or Meta cookie), a referrer, or a landing URL. The
+// ambient _fbp cookie alone does NOT count — it carries zero classification
+// signal. Callers that never capture (the legacy BookingPage posts no
+// attribution at all; createSelfBooking is shared by non-HTTP callers like the
+// voice agent) must not fabricate a 'website' funnel row out of an empty
+// object — those rows would later be completed by the revenue sync and
+// pollute channel ROI.
+function attributionHasCapture(attribution) {
+  if (!attribution || typeof attribution !== 'object') return false;
+  const utm = (attribution.utm && typeof attribution.utm === 'object') ? attribution.utm : {};
+  return !!(
+    Object.values(utm).some(Boolean)
+    || attribution.gclid || attribution.wbraid || attribution.gbraid
+    || attribution.fbclid || attribution.fbc
+    || attribution.referrer || attribution.landing_url
+  );
+}
+
 // Organic (non-paid) self-booking → funnel row only, no lead. Classified with
-// the shared determineLeadSource. is_paid=false always: this branch is only
-// reachable WITHOUT a deterministic paid click id, and a bare UTM is not paid
-// evidence (mirrors attributionHasPaidClickId).
+// the shared determineLeadSource. This branch is only reachable WITHOUT a
+// deterministic paid click id; is_paid comes from the classifier's channel —
+// exactly like the lead webhook — so a paid Meta/Google click whose click id
+// was stripped but whose cpc UTMs survived is still counted paid
+// (splitFacebookByPaid would otherwise misfile it as facebook_organic).
 //
 // Embedded-iframe correction (booking context ONLY — lead-webhook semantics
 // are untouched): PublicBookingPage captures landing_url = the PORTAL's own
@@ -842,7 +863,9 @@ function attributionHost(url) {
 // determineLeadSource before any URL handling, so they are unaffected.
 //
 // Requires the booking id — without it there is no per-booking dedupe key, so
-// it fails closed rather than risking duplicate funnel rows.
+// it fails closed rather than risking duplicate funnel rows. Requires a real
+// capture (attributionHasCapture) — a no-capture booking writes no row, in
+// parity with its self_booked_appointments.attribution staying NULL.
 async function recordOrganicSelfBookingAttribution({
   customerId,
   attribution,
@@ -851,8 +874,9 @@ async function recordOrganicSelfBookingAttribution({
   database,
 }) {
   if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
+  if (!attributionHasCapture(attribution)) return { attributed: false, reason: 'no_attribution_capture' };
 
-  const attr = (attribution && typeof attribution === 'object') ? attribution : {};
+  const attr = attribution;
   const utm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
   const { determineLeadSource } = require('./lead-source-classify');
   const classify = (url) => determineLeadSource(
@@ -894,7 +918,10 @@ async function recordOrganicSelfBookingAttribution({
     // self-book conversions until the revenue sync). 'completed' stays the
     // sync's to write ('booked' is in its ADVANCEABLE_STAGES).
     funnel_stage: 'booked',
-    is_paid: false,
+    // Paid flag from the classifier's channel — mirrors lead-webhook.js. A
+    // cpc-UTM booking with a stripped click id classifies channel='paid' and
+    // must count paid; everything genuinely organic classifies otherwise.
+    is_paid: classified.channel === 'paid',
   }).onConflict('self_booked_appointment_id').ignore();
 
   return { attributed: true, organic: true, leadSource: classified.source };

@@ -118,9 +118,13 @@ describe('lead-estimate-link organic self-booking row wiring', () => {
     expect(src).toMatch(/require\('\.\/lead-source-classify'\)/);
   });
 
-  test('organic rows are explicitly non-paid and dedupe per booking', () => {
-    expect(src).toMatch(/is_paid:\s*false/);
+  test('organic rows derive is_paid from the classifier channel (webhook parity) and dedupe per booking', () => {
+    expect(src).toMatch(/is_paid:\s*classified\.channel === 'paid'/);
     expect(src).toMatch(/\.onConflict\('self_booked_appointment_id'\)\.ignore\(\)/);
+  });
+
+  test('no capture, no row — attribution-less callers never fabricate a funnel row', () => {
+    expect(src).toMatch(/if \(!attributionHasCapture\(attribution\)\) return \{ attributed: false, reason: 'no_attribution_capture' \}/);
   });
 
   test('BOTH self-booking funnel rows are born at booked — the booking is committed, and a born-won lead never fires the bridge', () => {
@@ -173,6 +177,17 @@ describe('lead-funnel-bridge call sites', () => {
   test('phone-booking conversion bridges inside its savepoint', () => {
     const src = read('../services/call-recording-processor.js');
     expect(src).toMatch(/bridgeLeadFunnelStage\(leadId, 'won', inner\)/);
+  });
+
+  test('Intelligence Bar lead tools bridge (single status update + set-based bulk)', () => {
+    const src = read('../services/intelligence-bar/leads-tools.js');
+    expect(src).toMatch(/bridgeLeadFunnelStage\(lead\.id, new_status\)/);
+    expect(src).toMatch(/bridgeLeadsFunnelStage\(ids, new_status\)/);
+  });
+
+  test('staleness sweep collapses flipped leads to the lost bucket in the same transaction', () => {
+    const src = read('../services/lead-staleness.js');
+    expect(src).toMatch(/bridgeLeadsFunnelStage\(flipped\.map\(\(\{ id \}\) => id\), 'unresponsive', trx\)/);
   });
 });
 

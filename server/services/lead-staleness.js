@@ -15,6 +15,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { bridgeLeadsFunnelStage } = require('./lead-funnel-bridge');
 
 function getThresholdDays() {
   const raw = process.env.LEAD_STALENESS_DAYS;
@@ -110,6 +111,12 @@ async function runLeadStalenessSweep() {
         performed_by: 'system',
         metadata: JSON.stringify({ auto: true, threshold_days: thresholdDays }),
       })));
+
+      // Collapse the flipped leads' ad_service_attribution funnel rows to the
+      // terminal 'lost' bucket (unresponsive is a closed status — leaving the
+      // rows at an open stage would overstate active leads). Same transaction,
+      // one set-based UPDATE via the shared monotonic bridge.
+      await bridgeLeadsFunnelStage(flipped.map(({ id }) => id), 'unresponsive', trx);
     }
 
     return flipped.length;
