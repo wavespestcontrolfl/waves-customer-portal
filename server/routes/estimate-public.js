@@ -7195,6 +7195,7 @@ router.put('/:token/accept', async (req, res, next) => {
     const effectiveBillingCadence = !treatAsOneTime
       ? BillingCadence.resolveBillingCadence({
           monthlyRate: effectiveMonthlyTotal,
+          annualRate: effectiveAnnualTotal,
           frequencyKey: selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey,
           estimateData: acceptedEstDataForPricing,
           fallbackFrequencyKey: 'quarterly',
