@@ -10149,19 +10149,26 @@ function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
 const GLASS_RELEASE_CATEGORIES = (process.env.GATE_ESTIMATE_GLASS_CATEGORIES || '')
   .split(',').map((c) => c.trim()).filter(Boolean);
 
-function glassCategoryEligible(estData, recurringServices, oneTimeItems, derivedCategory, allowedList = GLASS_RELEASE_CATEGORIES) {
+function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowedList = GLASS_RELEASE_CATEGORIES) {
   if (!allowedList.length) return true;
   const allowed = new Set(allowedList);
-  const categories = collectServiceCategories(recurringServices, oneTimeItems);
-  // Engine-inputs-only estimates collect nothing — expand the engine-input
-  // services into their underlying categories rather than falling back to the
-  // aggregate derived category, which is 'bundle' for 2+ inferred services and
-  // would wrongly hold an in-scope pest+lawn bundle on the old page (Codex P2,
-  // PR #2373). derivedCategory remains the last resort only when nothing is
-  // inferable at all, where it's the same single default the page renders.
-  const inferred = categories.size ? [...categories] : inferCategoriesFromEngineInputs(estData);
-  const effective = inferred.length ? inferred : [derivedCategory].filter(Boolean);
-  return effective.length > 0 && effective.every((c) => allowed.has(c));
+  const recurring = Array.isArray(recurringServices) ? recurringServices : [];
+  const categories = collectServiceCategories(recurring, oneTimeItems);
+  // Without persisted recurring rows the collected set can under-count: a
+  // generated one-time add-on (e.g. pest_initial_roach from roach activity)
+  // classifies alone while the engine inputs still carry the other selected
+  // services, letting an out-of-scope service hide behind an in-scope add-on.
+  // Union the inferred engine-input categories in. Persisted recurring rows
+  // are authoritative (every selected recurring service has a row), so they
+  // skip the union.
+  if (!recurring.length) {
+    inferCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
+  }
+  // Fail closed: an estimate neither classifier understands (e.g. a WDO
+  // inspection — no engine-input mapping, and the one-time item classifier
+  // returns null) keeps the old page under a scoped release rather than
+  // riding deriveServiceCategory's pest_control default into glass.
+  return categories.size > 0 && [...categories].every((c) => allowed.has(c));
 }
 
 function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
@@ -12695,7 +12702,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // 2026-07-05: pest + lawn first; other categories keep the old page
       // until their glass copy packs are approved).
       ...(featureGates.isEnabled('estimateGlassTheme')
-        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, pricingBundle?.oneTimeBreakdown?.items || [], serviceCategory)
+        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, pricingBundle?.oneTimeBreakdown?.items || [])
         ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
