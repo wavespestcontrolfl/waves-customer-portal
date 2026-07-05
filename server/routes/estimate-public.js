@@ -13155,6 +13155,7 @@ module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
+module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;

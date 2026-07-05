@@ -41,6 +41,8 @@ const {
   buildPricingBundle,
   commercialAcceptDepositExempt,
   isCommercialAutoAcceptEstimate,
+  isPestServiceName,
+  shouldPersistPestOnlyRecurringChoice,
   estimateTrenchingReviewRequired,
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
@@ -515,8 +517,25 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       // (ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED, thrown INSIDE the accept
       // transaction): a bundled recurring estimate can pass the eligibility
       // mix yet 422 at conversion — the deposit must not be collected for a
-      // prepay that cannot complete.
-      const prepayUnitCount = require('../services/estimate-converter').annualPrepayRecurringUnitCount(estData);
+      // prepay that cannot complete. Count the mix the CONVERTER will see:
+      // a show_one_time_option pest estimate's recurring accept narrows the
+      // recurring rows to pest-only before persisting + converting (accept's
+      // shouldPersistPestOnlyRecurringChoice path), so that shape prepays as
+      // a single-service plan and must not 400 here on its raw rows.
+      let prepayCountData = estData;
+      if (shouldPersistPestOnlyRecurringChoice(estimate, estData)) {
+        const pestOnly = (recurring) => (recurring && Array.isArray(recurring.services)
+          ? { ...recurring, services: recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)) }
+          : recurring);
+        prepayCountData = { ...estData };
+        if (estData.result?.recurring) {
+          prepayCountData.result = { ...estData.result, recurring: pestOnly(estData.result.recurring) };
+        }
+        if (estData.recurring) {
+          prepayCountData.recurring = pestOnly(estData.recurring);
+        }
+      }
+      const prepayUnitCount = require('../services/estimate-converter').annualPrepayRecurringUnitCount(prepayCountData);
       if (prepayUnitCount > 1) {
         return res.status(400).json({ error: 'annual prepay is not available for multi-service plans — choose pay per application' });
       }
