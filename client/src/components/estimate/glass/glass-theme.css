@@ -269,6 +269,52 @@ html[data-glass-theme] [data-glass-accent]:disabled {
   box-shadow: 0 6px 18px rgba(180, 110, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.5) !important;
 }
 
+/* ---------- payment dialogs ---------- */
+/* Modals carry the strongest glass — the user is making the decision here,
+   so the surface gets more opacity for focus (master-prompt modal ratios). */
+html[data-glass-theme] [data-glass="modal"] {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.28)),
+    rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(36px) saturate(190%) !important;
+  -webkit-backdrop-filter: blur(36px) saturate(190%) !important;
+  border: 1px solid rgba(255, 255, 255, 0.75) !important;
+  border-radius: 24px !important;
+  box-shadow: 0 40px 120px rgba(4, 57, 94, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 1px 1px 0 rgba(175, 225, 255, 0.35) !important;
+}
+html[data-glass-theme] [data-glass-scrim] {
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.08), transparent 45%),
+    rgba(4, 57, 94, 0.38) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* ---------- pro variant (invoices / receipts / statements) ---------- */
+/* Financial documents keep the glass material but drop the theatrics: no
+   specular shine, no hover lift, flatter shadows, quieter scene. */
+html[data-glass-theme="pro"] [data-glass]::before {
+  display: none;
+}
+html[data-glass-theme="pro"] [data-glass="card"]:hover,
+html[data-glass-theme="pro"] [data-glass="chip"]:hover,
+html[data-glass-theme="pro"] [data-glass="card"]:active,
+html[data-glass-theme="pro"] [data-glass="chip"]:active {
+  transform: none;
+}
+html[data-glass-theme="pro"] [data-glass] {
+  box-shadow: 0 12px 36px rgba(4, 57, 94, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.5) !important;
+  transition: box-shadow 240ms ease, border-color 240ms ease !important;
+}
+html[data-glass-theme="pro"] [data-glass="soft"] {
+  box-shadow: 0 4px 14px rgba(4, 57, 94, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.45) !important;
+}
+html[data-glass-theme="pro"] [data-glass-accent]:hover {
+  transform: none;
+}
+html[data-glass-theme="pro"] h1 {
+  font-size: clamp(1.9rem, 3.4vw, 2.4rem) !important;
+}
+
 /* ---------- scene layers / misc ---------- */
 html[data-glass-theme] .glass-scene-orbs {
   position: fixed;

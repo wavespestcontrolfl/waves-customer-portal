@@ -17,7 +17,7 @@
  * observers, listeners. Stray data attributes are inert without the html
  * attribute, so they are left in place rather than walked again.
  */
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import './glass-theme.css';
 
 const TINT = {
@@ -27,7 +27,7 @@ const TINT = {
   'rgb(254, 247, 224)': 'rgba(254,247,224,.44)',
   'rgb(227, 245, 253)': 'rgba(222,242,253,.40)',
 };
-const PAGE_BG = ['rgb(250, 248, 243)', 'rgb(250, 250, 250)'];
+const PAGE_BG = ['rgb(250, 248, 243)', 'rgb(250, 250, 250)', 'rgb(248, 250, 251)', 'rgb(250, 251, 252)', 'rgb(247, 249, 251)'];
 // Section titles that render as styled divs rather than real h2/h3 — the
 // theme normalizes them onto the heading scale (visual only; text untouched).
 const DIV_H2 = new Set(['Find a date & time that works for you', "Skip parts you don't need", 'Skip parts you don’t need']);
@@ -39,17 +39,34 @@ const ownText = (el) => {
   return s.trim();
 };
 
-function buildScene(html) {
-  html.setAttribute('data-glass-theme', '');
-  html.style.background = [
-    'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
-    'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
-    'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
-    'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
-    'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
-    'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
-  ].join(',');
+function buildScene(html, variant) {
+  html.setAttribute('data-glass-theme', variant);
+  // The 'pro' scene (invoices/receipts/statements) stays quiet: one soft
+  // brand-tinted wash, no orbs, no grain — financial documents should feel
+  // composed, not playful.
+  html.style.background = variant === 'pro'
+    ? [
+      'radial-gradient(900px 600px at 80% -10%, rgba(10,126,194,.14), transparent 60%)',
+      'radial-gradient(700px 500px at 0% 100%, rgba(4,57,94,.08), transparent 60%)',
+      'linear-gradient(180deg,#EDF3F9 0%,#F8FAFC 50%,#EEF3F8 100%)',
+    ].join(',')
+    : [
+      'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
+      'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
+      'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
+      'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
+      'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
+      'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
+    ].join(',');
   document.body.style.setProperty('background', 'transparent', 'important');
+  if (variant === 'pro') {
+    const root = document.getElementById('root');
+    if (root) {
+      root.style.position = 'relative';
+      root.style.zIndex = '1';
+    }
+    return { orbs: null, grain: null };
+  }
 
   const orbs = document.createElement('div');
   orbs.className = 'glass-scene-orbs';
@@ -81,7 +98,7 @@ function buildScene(html) {
   return { orbs, grain };
 }
 
-function classify(revealIO, statIO) {
+function classify(revealIO, statIO, pro) {
   for (const el of document.querySelectorAll('#root *')) {
     if (el.closest('svg')) continue;
     const cs = getComputedStyle(el);
@@ -126,7 +143,14 @@ function classify(revealIO, statIO) {
         if (cs.position === 'static') el.style.position = 'relative';
         const interactive = el.tagName === 'BUTTON' || el.tagName === 'A';
         const nested = !!(el.parentElement && el.parentElement.closest('[data-glass]'));
-        el.setAttribute('data-glass', interactive ? 'chip' : nested ? 'soft' : 'card');
+        // Dialog cards (deposit / card-hold modals) sit directly inside a
+        // fixed full-viewport overlay — they get the heavier modal tier and
+        // their backdrop becomes a glass scrim.
+        const parent = el.parentElement;
+        const isModal = !interactive && parent && getComputedStyle(parent).position === 'fixed'
+          && parent.getBoundingClientRect().width >= window.innerWidth * 0.9;
+        if (isModal) parent.setAttribute('data-glass-scrim', '');
+        el.setAttribute('data-glass', isModal ? 'modal' : interactive ? 'chip' : nested ? 'soft' : 'card');
         if (interactive && el.getBoundingClientRect().height <= 56) el.style.setProperty('border-radius', '999px', 'important');
         if (tint) el.style.setProperty('--glass-bg', tint);
       }
@@ -198,8 +222,8 @@ function classify(revealIO, statIO) {
     });
   }
 
-  // floating pill nav
-  const header = document.querySelector('header, [role="banner"]');
+  // floating pill nav (estimate page only — financial pages keep their headers)
+  const header = pro ? null : document.querySelector('header, [role="banner"]');
   if (header && !header.hasAttribute('data-g-nav')) {
     header.setAttribute('data-g-nav', '');
     Object.assign(header.style, { position: 'sticky', top: '10px', zIndex: '60', margin: '10px auto 0', maxWidth: '780px', borderRadius: '999px', padding: '8px 26px' });
@@ -232,16 +256,44 @@ function classify(revealIO, statIO) {
   }
 }
 
-export default function EstimateGlassTheme({ active }) {
+/**
+ * Celebration burst for booking confirmation — exported for the accept flow.
+ * No-ops unless the glass theme is mounted or the user prefers reduced motion.
+ */
+export function fireGlassConfetti(cx, cy) {
+  if (!document.documentElement.hasAttribute('data-glass-theme')) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const colors = ['#F0A500', '#FFD666', '#0A7EC2', '#04395E', '#7CC7F0'];
+  for (let i = 0; i < 30; i += 1) {
+    const b = document.createElement('div');
+    b.setAttribute('aria-hidden', 'true');
+    b.style.cssText = `position:fixed;left:${cx}px;top:${cy}px;width:9px;height:9px;border-radius:${i % 3 === 0 ? '50%' : '2px'};background:${colors[i % colors.length]};pointer-events:none;z-index:2000`;
+    document.body.appendChild(b);
+    const ang = Math.random() * Math.PI * 2;
+    const v = 70 + Math.random() * 170;
+    b.animate([
+      { transform: 'translate(0,0) rotate(0deg)', opacity: 1 },
+      { transform: `translate(${Math.cos(ang) * v}px,${Math.sin(ang) * v - 100}px) rotate(${Math.random() * 540 - 270}deg)`, opacity: 0 },
+    ], { duration: 950 + Math.random() * 450, easing: 'cubic-bezier(.16,.8,.4,1)' }).onfinish = () => b.remove();
+  }
+}
+
+/**
+ * Hook form of the theme — pages with multiple return branches (loading /
+ * error / loaded) call this once at the top of the component instead of
+ * mounting the component in every branch.
+ */
+export function useGlassTheme(active, variant = 'full') {
   useEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const prevHtmlBg = html.style.background;
     const prevBodyBg = document.body.style.background;
-    const { orbs, grain } = buildScene(html);
+    const { orbs, grain } = buildScene(html, variant);
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const pro = variant === 'pro';
 
-    const revealIO = new IntersectionObserver((ents) => {
+    const revealIO = pro ? null : new IntersectionObserver((ents) => {
       ents.forEach((en) => {
         if (!en.isIntersecting) return;
         en.target.classList.add('glass-reveal-in');
@@ -250,7 +302,7 @@ export default function EstimateGlassTheme({ active }) {
       });
     }, { threshold: 0.06 });
 
-    const statIO = new IntersectionObserver((ents) => {
+    const statIO = pro ? null : new IntersectionObserver((ents) => {
       ents.forEach((en) => {
         if (!en.isIntersecting) return;
         statIO.unobserve(en.target);
@@ -270,7 +322,7 @@ export default function EstimateGlassTheme({ active }) {
       });
     }, { threshold: 0.5 });
 
-    const run = () => classify(revealIO, statIO);
+    const run = () => classify(revealIO, statIO, pro);
     run();
 
     // Re-tag after React re-renders. childList covers mount/unmount;
@@ -290,11 +342,12 @@ export default function EstimateGlassTheme({ active }) {
     if (rootEl) mo.observe(rootEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
 
     // cursor-follow specular + pointer/scroll parallax on the orbs
+    // (skipped entirely for the pro variant — no orbs, no motion)
     let raf = 0;
     let lastEvt = null;
     let px = 0;
     let py = 0;
-    const orbEls = orbs.querySelectorAll('.glass-orb');
+    const orbEls = pro ? [] : orbs.querySelectorAll('.glass-orb');
     const parallax = () => {
       if (reduced) return;
       const sy = window.scrollY;
@@ -326,8 +379,10 @@ export default function EstimateGlassTheme({ active }) {
       });
     };
     const onScroll = () => requestAnimationFrame(parallax);
-    document.addEventListener('pointermove', onMove, { passive: true });
-    window.addEventListener('scroll', onScroll, { passive: true });
+    if (!pro) {
+      document.addEventListener('pointermove', onMove, { passive: true });
+      window.addEventListener('scroll', onScroll, { passive: true });
+    }
 
     return () => {
       document.removeEventListener('pointermove', onMove);
@@ -335,17 +390,35 @@ export default function EstimateGlassTheme({ active }) {
       if (raf) cancelAnimationFrame(raf);
       if (retagTimer) clearTimeout(retagTimer);
       mo.disconnect();
-      revealIO.disconnect();
-      statIO.disconnect();
-      orbs.remove();
-      grain.remove();
+      if (revealIO) revealIO.disconnect();
+      if (statIO) statIO.disconnect();
+      if (orbs) orbs.remove();
+      if (grain) grain.remove();
       html.style.removeProperty('--mx');
       html.style.removeProperty('--my');
       html.removeAttribute('data-glass-theme');
       html.style.background = prevHtmlBg;
       document.body.style.background = prevBodyBg;
     };
-  }, [active]);
+  }, [active, variant]);
+}
 
+/**
+ * One-liner for financial documents (invoices / receipts / statements):
+ * reads the same ?glass=1 gate and applies the restrained 'pro' variant.
+ */
+export function useGlassProGate() {
+  const requested = useMemo(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('glass') === '1';
+    } catch {
+      return false;
+    }
+  }, []);
+  useGlassTheme(requested, 'pro');
+}
+
+export default function EstimateGlassTheme({ active, variant = 'full' }) {
+  useGlassTheme(active, variant);
   return null;
 }
