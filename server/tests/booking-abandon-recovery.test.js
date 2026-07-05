@@ -23,12 +23,20 @@ jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(async () => "Hi Dana! You were almost booked for Pest Control: url"),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Hermetic experiment mock — the real module keys off GROWTHBOOK_CLIENT_KEY in
+// the environment; default here = not-in-experiment (today's behavior).
+jest.mock('../services/experimentation/growthbook', () => ({
+  assignBookingRecoveryExperiment: jest.fn(async () => ({
+    inExperiment: false, value: true, variationId: null, variationKey: null,
+  })),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const smsTemplates = require('../routes/admin-sms-templates');
+const Experiments = require('../services/experimentation/growthbook');
 const { _internals } = require('../services/booking-abandon-recovery');
 
 const updates = [];
@@ -81,6 +89,9 @@ beforeEach(() => {
   sendCustomerMessage.mockResolvedValue({ sent: true });
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({});
   smsTemplates.getTemplate.mockResolvedValue("Hi Dana! You were almost booked for Pest Control: url");
+  Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+    inExperiment: false, value: true, variationId: null, variationKey: null,
+  });
 });
 
 describe('runSmsStage (touch 1)', () => {
@@ -305,6 +316,75 @@ describe('runEmailStage (touch 2)', () => {
     expect(updates).toEqual([
       { table: 'booking_intents', payload: expect.objectContaining({ followup_email_sent: true }) },
     ]);
+  });
+});
+
+// Measured-rollout holdback (GrowthBook booking-abandon-recovery): a control
+// assignment means NO touches — both stage flags claimed in one update, no
+// followup_sms_sent_at stamp (nothing sent). Any assignment miss/failure fails
+// open to today's send behavior.
+describe('experiment holdback', () => {
+  test('control assignment → no SMS, both stage flags claimed, no sent_at stamp', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+      inExperiment: true, value: false, variationId: 0, variationKey: 'holdback',
+    });
+    enqueue('booking_intents', { rows: [intent()] }); // candidates
+    enqueue('booking_intents', { update: 1 });        // holdback claim
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([{
+      table: 'booking_intents',
+      payload: expect.objectContaining({ followup_sms_sent: true, followup_email_sent: true }),
+    }]);
+    expect(updates[0].payload.followup_sms_sent_at).toBeUndefined();
+    expect(Experiments.assignBookingRecoveryExperiment).toHaveBeenCalledWith('9415550101', 'bi-1');
+  });
+
+  test('control assignment → email stage held back too', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+      inExperiment: true, value: false, variationId: 0, variationKey: 'holdback',
+    });
+    enqueue('booking_intents', { rows: [intent()] }); // candidates
+    enqueue('booking_intents', { update: 1 });        // holdback claim
+
+    const sent = await _internals.runEmailStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(updates).toEqual([{
+      table: 'booking_intents',
+      payload: expect.objectContaining({ followup_sms_sent: true, followup_email_sent: true }),
+    }]);
+  });
+
+  test('treatment assignment → sends exactly as before', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+      inExperiment: true, value: true, variationId: 1, variationKey: 'recovery-on',
+    });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sibling-mark
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(1);
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('assignment failure → fails open to send (never blocks the program)', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockRejectedValue(new Error('growthbook down'));
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sibling-mark
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(1);
   });
 });
 

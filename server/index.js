@@ -146,7 +146,11 @@ const cspDirectives = {
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
+  // GrowthBook feature-definition host for the client SDK (harmless while
+  // VITE_GROWTHBOOK_CLIENT_KEY is unset). Follows GROWTHBOOK_API_HOST so a
+  // self-hosted/proxy deployment stays CSP-allowed — keep it in lockstep with
+  // the VITE_GROWTHBOOK_API_HOST baked into the client build.
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", (process.env.GROWTHBOOK_API_HOST || 'https://cdn.growthbook.io').replace(/\/+$/, '')],
   frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
   mediaSrc: ["'self'", "https:"],
   // PostHog session replay records via a web worker created from a blob URL.
@@ -379,6 +383,9 @@ app.use('/api/public/automation-preview', require('./routes/public-automation-pr
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
+// Client-side GrowthBook exposure intake (experimentation Phase 2) — gated by
+// GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
+app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));

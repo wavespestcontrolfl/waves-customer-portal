@@ -42,6 +42,13 @@ const FETCH_TIMEOUT_MS = 2500;
 const ESTIMATE_VIEW_EXPERIMENT = 'estimate-view';
 const ESTIMATE_VIEW_FEATURE = 'estimate-view-v2';
 
+// Booking-abandon recovery measured rollout (Phase 2). BOOLEAN feature:
+// true  = run the recovery touches (SMS + email — today's behavior),
+// false = hold this person back from BOTH touches so GrowthBook can measure
+//         whether the recovery program actually causes bookings.
+const BOOKING_RECOVERY_EXPERIMENT = 'booking-abandon-recovery';
+const BOOKING_RECOVERY_FEATURE = 'booking-abandon-recovery';
+
 let cachedFeatures = null;
 let cachedAt = 0;
 let refreshing = null;
@@ -86,6 +93,21 @@ function getFeaturesNonBlocking() {
   return cachedFeatures; // may be stale or null; null → caller gets control
 }
 
+// True once a feature payload is cached. The public /status probe advertises
+// this alongside the gate: while the cache is cold (missing server key, first
+// fetch failed) the exposure intake can't validate tracking keys and would
+// silently drop every client post — so the client SDK must not start either.
+function hasFeatureCache() {
+  return !!getFeaturesNonBlocking();
+}
+
+// unit_id can be PII (booking-recovery units are phone last-10) — warnings go
+// to Railway logs, so never print it raw; a 4-char tail is enough to correlate.
+function maskUnit(unitId) {
+  const s = String(unitId == null ? '' : unitId);
+  return s.length <= 4 ? '****' : `…${s.slice(-4)}`;
+}
+
 async function logExposure({ experimentKey, variationId, variationKey, unitId, unitType, metadata }) {
   try {
     await db('experiment_exposures')
@@ -102,7 +124,7 @@ async function logExposure({ experimentKey, variationId, variationKey, unitId, u
       .onConflict(['experiment_key', 'unit_id'])
       .ignore();
   } catch (e) {
-    logger.warn(`[growthbook] exposure log failed (${experimentKey}/${unitId}): ${e.message}`);
+    logger.warn(`[growthbook] exposure log failed (${experimentKey}/${maskUnit(unitId)}): ${e.message}`);
   }
 }
 
@@ -127,7 +149,7 @@ async function getPriorAssignment(experimentKey, unitId) {
       .where({ experiment_key: experimentKey, unit_id: String(unitId) })
       .first()) || null;
   } catch (e) {
-    logger.warn(`[growthbook] prior-assignment lookup failed (${experimentKey}/${unitId}): ${e.message}`);
+    logger.warn(`[growthbook] prior-assignment lookup failed (${experimentKey}/${maskUnit(unitId)}): ${e.message}`);
     return null;
   }
 }
@@ -213,6 +235,54 @@ async function assignEstimateViewExperiment(estimate) {
   });
 }
 
+/**
+ * Booking-abandon recovery holdback (Phase 2). Unit = the abandoner's phone
+ * (last 10 digits) — person-level, matching how the recovery cron dedups
+ * sibling intents — so one person is consistently in one arm across intents
+ * AND across the SMS + email touches (sticky replay). `value===false` → hold
+ * back both touches; anything else (miss, gate off, feature absent) defaults
+ * TRUE = send, i.e. today's behavior.
+ */
+async function assignBookingRecoveryExperiment(phoneLast10, intentId) {
+  const ten = String(phoneLast10 || '');
+  if (ten.length < 10) {
+    // No usable person key (missing/short phone) — stay outside the experiment
+    // and keep current behavior.
+    return { inExperiment: false, value: true, variationId: null, variationKey: null };
+  }
+  return assignExperiment({
+    experimentKey: BOOKING_RECOVERY_EXPERIMENT,
+    featureKey: BOOKING_RECOVERY_FEATURE,
+    attributes: { id: ten },
+    unitId: ten,
+    unitType: 'phone',
+    metadata: { intentId: intentId || null },
+    defaultValue: true,
+  });
+}
+
+/**
+ * True when `key` is the tracking key of an experiment rule in the CACHED
+ * feature payload. Used by the public client-exposure endpoint to accept only
+ * experiments that actually exist — unknown keys (or a cold cache, which
+ * schedules a refresh) are rejected, so the endpoint can't be used to write
+ * arbitrary rows.
+ */
+function isKnownTrackingKey(key) {
+  const features = getFeaturesNonBlocking();
+  if (!features) return false;
+  for (const [featureId, feature] of Object.entries(features)) {
+    for (const rule of (feature && feature.rules) || []) {
+      // Experiment rules carry `variations` + a tracking `key` — but
+      // GrowthBook DEFAULTS the tracking key to the FEATURE id when the rule
+      // doesn't set one, and the SDK reports that defaulted key in
+      // trackingCallback. Both spellings must count as live.
+      if (rule && Array.isArray(rule.variations) && (rule.key || featureId) === key) return true;
+    }
+  }
+  return false;
+}
+
 // Best-effort cache warm at boot so the first eligible view can participate
 // rather than fail open to control.
 if (experimentsEnabled()) scheduleRefresh();
@@ -220,8 +290,13 @@ if (experimentsEnabled()) scheduleRefresh();
 module.exports = {
   assignExperiment,
   assignEstimateViewExperiment,
+  assignBookingRecoveryExperiment,
+  isKnownTrackingKey,
+  hasFeatureCache,
   logExposure,
   experimentsEnabled,
   ESTIMATE_VIEW_EXPERIMENT,
   ESTIMATE_VIEW_FEATURE,
+  BOOKING_RECOVERY_EXPERIMENT,
+  BOOKING_RECOVERY_FEATURE,
 };

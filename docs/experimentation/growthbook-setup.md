@@ -37,7 +37,8 @@ GrowthBook → **Metrics and Data → Data Sources → Add → Postgres**. Use a
 public endpoint from the *Postgres* service, never `DATABASE_URL` in the shell).
 Grant `SELECT` on `experiment_exposures`, `estimates`, `estimate_deposits`,
 `invoices`, `payments`, `scheduled_services`, `self_booked_appointments`,
-`customers`.
+`customers`, `booking_intents` (the booking-abandon-recovery conversion
+metric queries it).
 
 ### Identifier type + Experiment Assignment Query
 
@@ -61,43 +62,49 @@ wins (matches GrowthBook's analysis default).
 
 ## 3. Metrics (SQL)
 
-Each metric returns `estimate_id` + a `timestamp`. **Primary is solid; verify
-the secondary column names against the live schema (read-only) before saving —
-per the repo's "test your SQL" rule.**
+Each metric returns `estimate_id` + a `timestamp`. **All column names below were
+verified against the live prod schema (read-only) on 2026-07-05** and match the
+metrics created in GrowthBook (`met_19g6rmr7kl1tp` accepted /
+`met_19g6rmr7klxod` deposit / `met_19g6qmr7klxwz` self-booked /
+`met_19g6rmr7klyc0` revenue). Set the metric **conversion window to "none"** —
+the default 72h is shorter than the estimate follow-up cadence.
 
-**`estimate_accepted`** — binomial, PRIMARY:
+Schema facts that shaped these queries: `invoices` and `scheduled_services`
+have **no `estimate_id` column** (join through `customer_id`);
+`self_booked_appointments` **does** have `estimate_id`; the deposit paid signal
+is `estimate_deposits.received_at IS NOT NULL` (statuses `received`/`credited`
+both carry it).
+
+**`Estimate Accepted`** — binomial, PRIMARY:
 ```sql
 SELECT id AS estimate_id, accepted_at AS timestamp
 FROM estimates
 WHERE accepted_at IS NOT NULL
 ```
 
-**`estimate_deposit_paid`** — binomial (secondary; confirm the paid signal):
+**`Estimate Deposit Paid`** — binomial (secondary):
 ```sql
--- VERIFY: estimate_deposits paid indicator (ledger has deposit_credit mechanics)
-SELECT estimate_id, created_at AS timestamp
+SELECT estimate_id, received_at AS timestamp
 FROM estimate_deposits
--- WHERE <paid condition>
+WHERE received_at IS NOT NULL
 ```
 
-**`booking_created`** — binomial (secondary; confirm the estimate→booking link):
+**`Self-Booked From Estimate`** — binomial (secondary):
 ```sql
--- VERIFY: how a booking references its estimate (estimate_id FK vs accept flow)
 SELECT estimate_id, created_at AS timestamp
-FROM scheduled_services
+FROM self_booked_appointments
 WHERE estimate_id IS NOT NULL
 ```
 
-**`invoice_paid_revenue`** — revenue/mean (secondary; confirm estimate linkage):
+**`Customer Invoice Revenue (post-estimate)`** — revenue (secondary,
+**directional only**: invoices carry no estimate reference, so this attributes
+ANY paid invoice of the estimate's customer after exposure):
 ```sql
--- VERIFY: invoices→estimate join (direct estimate_id, or via customer_id)
-SELECT i.estimate_id, i.paid_at AS timestamp, i.amount_cents / 100.0 AS value
+SELECT e.id AS estimate_id, i.paid_at AS timestamp, i.total::float AS value
 FROM invoices i
+JOIN estimates e ON e.customer_id = i.customer_id
 WHERE i.paid_at IS NOT NULL
 ```
-
-**Guardrail** — `estimate_question_asked` (make sure the holdback control isn't
-just confusing people into asking more questions). Confirm the events table.
 
 ## 4. Phase 1 experiment — estimate view v1 vs v2 (holdback)
 
@@ -136,7 +143,73 @@ customer view). Forced-React and explicitly-v1 estimates never reach it.
    `GATE_GROWTHBOOK`** (instant return to 100% v2, no deploy needed if you can
    flip env + restart).
 
-## 5. Phase 2/3 (next)
+## 5. Phase 2 — booking-abandon recovery measured rollout
+
+The first `GATE_*` migrated to a measured rollout. The GrowthBook feature
+`booking-abandon-recovery` (boolean, default `true`) holds back a slice of
+abandoners from BOTH recovery touches (SMS + email) so the program's true lift
+on bookings is measurable.
+
+**Mechanics** (`server/services/booking-abandon-recovery.js`):
+- Unit = the abandoner's **phone last-10** (person-level — the same key the
+  send-dedup uses), `unit_type='phone'` in `experiment_exposures`.
+- Intent-to-treat: assigned at candidacy, before quiet-hours/reply-pause
+  filters, so both arms measure from the same point. A held-back person gets
+  neither touch (both stage flags claimed).
+- Fail-open to SEND: gate off, missing/short phone, GrowthBook unreachable, or
+  feature absent → today's behavior. `GATE_BOOKING_ABANDON_RECOVERY` remains
+  the hard kill switch for the whole program.
+
+**GrowthBook setup** (mirrors §2/§4, new unit):
+1. Data source → add identifier type `phone` + a second assignment query
+   (UI-only, like the first):
+```sql
+SELECT
+  unit_id        AS phone,
+  exposed_at     AS timestamp,
+  experiment_key AS experiment_id,
+  variation_id   AS variation_id
+FROM experiment_exposures
+WHERE unit_type = 'phone'
+```
+2. Metric **`Booking Intent Converted`** — binomial, identifier `phone`,
+   window "none":
+```sql
+SELECT RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) AS phone,
+       converted_at AS timestamp
+FROM booking_intents
+WHERE converted_at IS NOT NULL AND phone IS NOT NULL
+```
+3. Feature `booking-abandon-recovery` (boolean, default `true`) + experiment
+   rule — **tracking key MUST be `booking-abandon-recovery`**, hash attribute
+   `id`, variations `false` (held back) / `true` (recovery runs). Recommended
+   split: **20% holdback / 80% treatment** — control forgoes real recovery
+   touches, so keep it small.
+
+## 6. Phase 2 — client-side React SDK
+
+`client/src/lib/growthbook.js` + `GrowthBookProvider` in `App.jsx`. **Dark by
+default**: without `VITE_GROWTHBOOK_CLIENT_KEY` at build time the instance is
+null and nothing changes. To activate, set on the Railway client build:
+
+| Var | Value |
+|-----|-------|
+| `VITE_GROWTHBOOK_CLIENT_KEY` | the same `sdk-…` client key (safe to embed) |
+| `VITE_GROWTHBOOK_API_HOST` | optional, defaults to `https://cdn.growthbook.io` |
+
+- Unit = anonymous visitor id (`waves_exp_uid` in localStorage), hashed on
+  attribute `id`. Exposures POST to `POST /api/public/experiments/exposure`
+  (gated by `GATE_GROWTHBOOK`, per-route rate limit, only live tracking keys
+  accepted, `unit_type='anon'`).
+- **Server-owned experiment keys (`estimate-view`, `booking-abandon-recovery`)
+  are refused by that endpoint** — client exposures can never poison the
+  server's sticky-replay rows.
+- Client experiments need their own `anon` identifier type + assignment query
+  (`WHERE unit_type = 'anon'`) in the data source when the first one ships.
+- In components: `useFeatureIsOn('<feature>')` / `useFeatureValue('<feature>',
+  fallback)` from `@growthbook/growthbook-react`.
+
+## 7. Phase 3 (next)
 
 - **Experiment #2 — glass theme on/off** (the live redesign question). `?glass=1`
   today (`EstimateViewPage.jsx`) is a client-side CSS layer *inside* v2. Turning
@@ -144,9 +217,6 @@ customer view). Forced-React and explicitly-v1 estimates never reach it.
   wiring keeps assignment server-side and passes it to the client via the
   existing `GET /:token/data` response (`experiment.glass`), so React just reads
   a field — no client GrowthBook SDK required for the decision.
-- **Gates → measured rollouts** — migrate one `GATE_*` (e.g. self-booking) to a
-  GrowthBook feature with a % rollout + a linked metric; keep the env gate as the
-  kill-switch backstop.
 - **Marketing (Astro)** — client-side GrowthBook JS SDK in an island, hashing on
   the existing PostHog cross-subdomain `distinct_id`, gated by `waves_consent`;
   POST exposures to a portal endpoint so they land in the same warehouse.

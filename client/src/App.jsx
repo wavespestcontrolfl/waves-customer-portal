@@ -1,5 +1,7 @@
 import React, { Component } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { GrowthBookProvider } from '@growthbook/growthbook-react';
+import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import Icon from './components/Icon';
@@ -269,7 +271,7 @@ function ProtectedRoute({ children }) {
 }
 
 export default function App() {
-  return (
+  const app = (
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PublicFunnelTracking />
@@ -392,4 +394,12 @@ export default function App() {
       </BrowserRouter>
     </AuthProvider>
   );
+  // GrowthBook React requires a REAL instance — with no client key there is
+  // none, and <GrowthBookProvider growthbook={undefined}> can crash the SPA.
+  // Skip the provider entirely instead; no feature hooks are mounted while
+  // the lane is dark, and any future hook must tolerate the missing context
+  // exactly as it tolerates fallback values.
+  return growthbook
+    ? <GrowthBookProvider growthbook={growthbook}>{app}</GrowthBookProvider>
+    : app;
 }
