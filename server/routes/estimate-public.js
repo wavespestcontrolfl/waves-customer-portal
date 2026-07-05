@@ -10149,13 +10149,18 @@ function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
 const GLASS_RELEASE_CATEGORIES = (process.env.GATE_ESTIMATE_GLASS_CATEGORIES || '')
   .split(',').map((c) => c.trim()).filter(Boolean);
 
-function glassCategoryEligible(estData, recurringServices, oneTimeItems, derivedCategory) {
-  if (!GLASS_RELEASE_CATEGORIES.length) return true;
-  const allowed = new Set(GLASS_RELEASE_CATEGORIES);
+function glassCategoryEligible(estData, recurringServices, oneTimeItems, derivedCategory, allowedList = GLASS_RELEASE_CATEGORIES) {
+  if (!allowedList.length) return true;
+  const allowed = new Set(allowedList);
   const categories = collectServiceCategories(recurringServices, oneTimeItems);
-  // Engine-inputs-only estimates collect nothing — fall back to the derived
-  // single category ('bundle' never reaches here from that path).
-  const effective = categories.size ? [...categories] : [derivedCategory].filter(Boolean);
+  // Engine-inputs-only estimates collect nothing — expand the engine-input
+  // services into their underlying categories rather than falling back to the
+  // aggregate derived category, which is 'bundle' for 2+ inferred services and
+  // would wrongly hold an in-scope pest+lawn bundle on the old page (Codex P2,
+  // PR #2373). derivedCategory remains the last resort only when nothing is
+  // inferable at all, where it's the same single default the page renders.
+  const inferred = categories.size ? [...categories] : inferCategoriesFromEngineInputs(estData);
+  const effective = inferred.length ? inferred : [derivedCategory].filter(Boolean);
   return effective.length > 0 && effective.every((c) => allowed.has(c));
 }
 
@@ -10165,9 +10170,14 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
   if (categories.size > 1) return 'bundle';
   if (categories.size === 1) return Array.from(categories)[0];
 
+  const inferred = inferCategoriesFromEngineInputs(estData);
+  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
+}
+
+function inferCategoriesFromEngineInputs(estData = {}) {
   const inputs = estData?.inputs || estData?.engineInputs || {};
   const services = inputs.services || {};
-  const inferred = [
+  return [
     services.pest || inputs.svcPest ? 'pest_control' : null,
     services.lawn || services.lawnCare || inputs.svcLawn ? 'lawn_care' : null,
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
@@ -10182,7 +10192,6 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     // the 'pest_control' default and the public page mislabels it as Pest Control.
     services.foamRecurring || inputs.svcFoamRecurring ? 'foam_recurring' : null,
   ].filter(Boolean);
-  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
 }
 
 function chipsForServiceCategory(category) {
@@ -12850,6 +12859,7 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
