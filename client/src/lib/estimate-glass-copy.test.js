@@ -8,6 +8,7 @@ import {
   glassSchedQualifier,
   glassSchedTitle,
   glassTierDisplay,
+  setGlassDefault,
 } from './estimate-glass-copy';
 
 const setSearch = (search) => {
@@ -16,15 +17,28 @@ const setSearch = (search) => {
 
 afterEach(() => {
   setSearch('');
+  setGlassDefault(false);
   vi.useRealTimers();
 });
 
 describe('glassCopyActive', () => {
-  it('is active only when the URL carries ?glass=1', () => {
+  it('is active only when the URL carries ?glass=1 (pre-release default)', () => {
     expect(glassCopyActive()).toBe(false);
     setSearch('?glass=1');
     expect(glassCopyActive()).toBe(true);
     setSearch('?glass=0');
+    expect(glassCopyActive()).toBe(false);
+  });
+
+  it('is active by default once the server releases it (GATE_ESTIMATE_GLASS → glassDefault)', () => {
+    setGlassDefault(true);
+    expect(glassCopyActive()).toBe(true);
+    // ?glass=0 stays the per-link escape hatch back to the old page.
+    setSearch('?glass=0');
+    expect(glassCopyActive()).toBe(false);
+    setSearch('');
+    // Only a literal payload true releases.
+    setGlassDefault(undefined);
     expect(glassCopyActive()).toBe(false);
   });
 });
