@@ -19,6 +19,11 @@
 //   specialty keys (top_dressing/dethatching/plugging) classify as lawn_care,
 //   and commercial pest/lawn engine-input flags (objects — selected semantics)
 //   infer their residential categories.
+// r5 — legacy setup-fee rows identified only by label ("WaveGuard Setup",
+//   no service key) are non-service; and the /data call site feeds the RAW
+//   normalized rows unioned with the (possibly choice-aligned) bundle items,
+//   because alignOneTimeChoiceBreakdown drops raw out-of-scope rows — the
+//   union test here locks the semantics the call site relies on.
 const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
@@ -123,6 +128,26 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
     // A deselected commercial object must not read as active — nothing
     // classifies, so the scoped release fails closed.
     expect(glassCategoryEligible(deselected, [], [], PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r5: legacy label-only WaveGuard setup rows are non-service and never block', () => {
+    const recurringPest = [{ service: 'pest_control' }];
+    const legacySetup = [{ name: 'WaveGuard Setup', amount: 99 }];
+    expect(glassCategoryEligible({}, recurringPest, legacySetup, PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r5: raw rows unioned with choice-aligned items still fail closed on a dropped WDO row', () => {
+    // Mirrors the /data call site for show_one_time_option estimates: the
+    // aligned bundle keeps only the synthetic choice + pest add-ons, but the
+    // raw normalized rows (with the WDO line) ride along in the union.
+    const recurringPest = [{ service: 'pest_control' }];
+    const alignedOnly = [{ service: 'one_time_pest', label: 'One-Time Pest', amount: 250, kind: 'charge' }];
+    const unionWithRaw = [
+      ...alignedOnly,
+      { service: 'wdo_inspection', name: 'WDO Inspection', amount: 175, kind: 'charge' },
+    ];
+    expect(glassCategoryEligible({}, recurringPest, alignedOnly, PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible({}, recurringPest, unionWithRaw, PEST_LAWN_SCOPE)).toBe(false);
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {

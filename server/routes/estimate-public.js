@@ -10114,7 +10114,9 @@ function isNonServiceOneTimeItem(item = {}) {
   // Discount rows (manual_discount, negative adjustments) take money off —
   // they can't be an out-of-scope service.
   if (item?.kind === 'discount' || service === 'manual_discount') return true;
-  if (service === 'waveguard_setup' || service === 'rodent_bundle_discount') return true;
+  // Label-based WaveGuard check too: legacy saved rows carry only a
+  // "WaveGuard Setup" label without service: 'waveguard_setup'.
+  if (service === 'waveguard_setup' || service === 'rodent_bundle_discount' || isWaveGuardSetupOneTimeItem(item)) return true;
   // A POSITIVE one_time_adjustment is the residual "Other one-time services"
   // charge normalizeOneTimeBreakdown mints when the saved one-time total
   // exceeds the classified rows — that's real unclassified work, so it stays
@@ -12743,7 +12745,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // 2026-07-05: pest + lawn first; other categories keep the old page
       // until their glass copy packs are approved).
       ...(featureGates.isEnabled('estimateGlassTheme')
-        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, pricingBundle?.oneTimeBreakdown?.items || [])
+        // The scope decision sees the RAW normalized rows unioned with the
+        // bundle items: alignOneTimeChoiceBreakdown (show_one_time_option)
+        // replaces raw rows with the synthetic choice + preserved pest/Bora
+        // add-ons, which would drop an out-of-scope row (e.g. WDO) before the
+        // fail-closed check could catch it. Union keeps both the dropped raw
+        // rows and any bundle-only generated add-ons in view.
+        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, [
+          ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+          ...(pricingBundle?.oneTimeBreakdown?.items || []),
+        ])
         ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
