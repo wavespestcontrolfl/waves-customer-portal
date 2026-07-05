@@ -20,6 +20,8 @@ import {
   glassSchedTitle,
   GLASS_COPY,
 } from '../../lib/estimate-glass-copy';
+import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/estimate-glass-slots';
+import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -51,14 +53,17 @@ function formatSlotDate(date, windowStart) {
   }
 }
 
-function SlotCard({ slot, isSelected, onSelect }) {
+function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) {
   const { day, window } = formatSlotDate(slot.date, slot.windowStart);
   const startTime = String(window || '').split('–')[0] || window;
 
   return (
     <button
       type="button"
-      onClick={() => onSelect(slot.slotId)}
+      className={stale ? 'gc-slot-stale' : undefined}
+      disabled={stale}
+      aria-disabled={stale || undefined}
+      onClick={() => onSelect(slot)}
       style={{
         textAlign: 'left', width: '100%',
         background: isSelected ? W.blueDeeper : W.white,
@@ -76,7 +81,9 @@ function SlotCard({ slot, isSelected, onSelect }) {
       <div style={{ fontSize: 13, color: isSelected ? 'rgba(255,255,255,.86)' : W.textCaption }}>
         Arrival window: {window}
       </div>
-      {slot.routeOptimal ? (
+      {slot.routeOptimal && glass ? (
+        <span className="gc-slot-priority">⚡ Tech nearby — priority</span>
+      ) : slot.routeOptimal ? (
         <div style={{
           marginTop: 6, fontSize: 12, fontWeight: 700, color: isSelected ? W.white : W.green,
           background: isSelected ? 'rgba(255,255,255,.16)' : W.greenLight, padding: '4px 8px', borderRadius: 999,
@@ -96,6 +103,8 @@ export default function SlotPicker({
   askToken = null,
   selectedSlotId,
   onSelect,
+  onSelectMeta = null,
+  licenseNumber = null,
   refreshSignal,
   serviceMode = 'recurring',
   selectedFrequency = null,
@@ -114,6 +123,40 @@ export default function SlotPicker({
   const pickedDateInputId = useId();
   // Glass copy pack (?glass=1, PR B) — availability-first phrasing.
   const glass = glassCopyActive();
+  // Slot freshness (glass, PR C): re-evaluate the 2-hour booking lead every
+  // minute so a page left open grays out windows the server would now
+  // reject — matching reserveSlot's guard instead of surfacing a
+  // slot_conflict after the customer taps.
+  const [freshnessTick, setFreshnessTick] = useState(0);
+  useEffect(() => {
+    if (!glass) return undefined;
+    const id = setInterval(() => setFreshnessTick((t) => t + 1), 60000);
+    return () => clearInterval(id);
+  }, [glass]);
+
+  const selectSlot = (slot) => {
+    onSelect(slot ? slot.slotId : null);
+    if (onSelectMeta) onSelectMeta(slot ? glassSlotMeta(slot) : null);
+  };
+
+  // Every slot list currently on screen (default + search + picked-date).
+  const visibleSlots = [
+    ...(data ? [...(data.primary || []), ...(data.expander || [])] : []),
+    ...(searchData ? [...(searchData.primary || []), ...(searchData.expander || [])] : []),
+    ...(pickedData ? [...(pickedData.primary || []), ...(pickedData.expander || [])] : []),
+  ];
+  const selectedSlot = selectedSlotId
+    ? visibleSlots.find((s) => s.slotId === selectedSlotId) || null
+    : null;
+
+  // A selection is only valid while its slot is on screen AND outside the
+  // booking lead — otherwise clear it (and the CTA labels with it).
+  useEffect(() => {
+    if (!glass || !selectedSlotId) return;
+    if (!selectedSlot || glassSlotIsStale(selectedSlot)) selectSlot(null);
+    // freshnessTick re-runs the check each minute while the page sits open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [glass, selectedSlotId, selectedSlot, freshnessTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -175,7 +218,7 @@ export default function SlotPicker({
     if (!res.ok) throw new Error(body.error || 'search failed');
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
     setPickedDate(null);
-    onSelect(null);
+    selectSlot(null);
     setSearchData(body);
     return { summary: body.summary };
   };
@@ -186,7 +229,7 @@ export default function SlotPicker({
     setPickedDate(null);
     setPickedData(null);
     setPickedLoading(false);
-    onSelect(null);
+    selectSlot(null);
   };
 
   const onPickDate = async (date) => {
@@ -195,7 +238,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
-    onSelect(null);
+    selectSlot(null);
     if (!date) {
       setPickedLoading(false);
       return;
@@ -241,7 +284,14 @@ export default function SlotPicker({
       <>
         {!nearby && !glass ? <SoftRouteBanner /> : null}
         {list.map((slot) => (
-          <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
+          <SlotCard
+            key={slot.slotId}
+            slot={slot}
+            isSelected={selectedSlotId === slot.slotId}
+            onSelect={selectSlot}
+            stale={glass && glassSlotIsStale(slot)}
+            glass={glass}
+          />
         ))}
       </>
     );
@@ -400,9 +450,22 @@ export default function SlotPicker({
   return (
     <div style={estimateCard()}>
       {heading}
+      {glass && selectedSlot && !glassSlotIsStale(selectedSlot) ? (
+        <GlassTechChip slotMeta={glassSlotMeta(selectedSlot)} licenseNumber={licenseNumber} />
+      ) : null}
       {finder}
+      {glass && !(searchData || pickedData || pickedLoading) ? (
+        <GlassScarcityBadge info={glassScarcityInfo(allSlots)} />
+      ) : null}
       {searchData || pickedData || pickedLoading ? null : initial.map((slot) => (
-        <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
+        <SlotCard
+          key={slot.slotId}
+          slot={slot}
+          isSelected={selectedSlotId === slot.slotId}
+          onSelect={selectSlot}
+          stale={glass && glassSlotIsStale(slot)}
+          glass={glass}
+        />
       ))}
 
       {(searchData || pickedData || pickedLoading) ? null : more.length > 0 ? (
@@ -421,7 +484,14 @@ export default function SlotPicker({
           {showMore ? (
             <div style={{ marginTop: 14 }}>
               {more.map((slot) => (
-                <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
+                <SlotCard
+                  key={slot.slotId}
+                  slot={slot}
+                  isSelected={selectedSlotId === slot.slotId}
+                  onSelect={selectSlot}
+                  stale={glass && glassSlotIsStale(slot)}
+                  glass={glass}
+                />
               ))}
             </div>
           ) : null}

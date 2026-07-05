@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { glassCopyActive, glassPestInclusions, glassTierDisplay } from '../../lib/estimate-glass-copy';
 
@@ -123,6 +124,38 @@ function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
   const recurringAnnual = Number(md.recurringAmount ?? md.amount);
   if (!(recurringAnnual > 0)) return 0;
   return Math.round((recurringAnnual / 12) * intervalMonths * 100) / 100;
+}
+
+// Inclusion list for a treatment row. Under glass the pest offer stack is
+// an accordion, collapsed by default behind "See everything included (N)"
+// (approved blueprint behavior) — the full seven bullets are a wall on
+// first paint; the count is the hook.
+function RowInclusions({ items, collapsible = false }) {
+  const [open, setOpen] = useState(false);
+  const list = (
+    <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
+      {items.map((item) => (
+        <li key={item} style={{ position: 'relative', paddingLeft: 18, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
+          <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+  if (!collapsible) return list;
+  return (
+    <>
+      <button
+        type="button"
+        className="gc-svc-hint"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? 'Hide details ▴' : `See everything included (${items.length}) ▾`}
+      </button>
+      {open ? list : null}
+    </>
+  );
 }
 
 export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
@@ -341,16 +374,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                 {Number(row.visitsPerYear) > 0 ? `${row.visitsPerYear} applications/year` : 'Service applications/year'}
                 {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
-              <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
-                {(glass && serviceKey(row) === 'pest_control'
+              <RowInclusions
+                items={glass && serviceKey(row) === 'pest_control'
                   ? glassPestInclusions(row.visitsPerYear, glassSetupBullet)
-                  : serviceInclusions(row)).map((item) => (
-                  <li key={item} style={{ position: 'relative', paddingLeft: 18, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
-                    <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
-                    {item}
-                  </li>
-                ))}
-              </ul>
+                  : serviceInclusions(row)}
+                collapsible={glass && serviceKey(row) === 'pest_control'}
+              />
             </div>
           ))}
         </div>

@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
+import { fiveStarReviews, GlassReviewMarquee, GlassSectionCta } from './glass/GlassEstimateExtras';
 
 const W = {
   blueDeeper: '#1B2C5B', yellow: '#FFD700',
@@ -73,7 +74,7 @@ function ReviewCard({ review }) {
   );
 }
 
-export default function CustomerReviews() {
+export default function CustomerReviews({ onJoinNeighbors = null }) {
   const [reviews, setReviews] = useState(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(pageSizeForViewport);
@@ -124,6 +125,17 @@ export default function CustomerReviews() {
 
   if (!reviews) return null;
 
+  // Glass (PR C): real 5-star reviews render as the continuous GBP-native
+  // marquee; the paged carousel stays for the non-glass control, for the
+  // GBP profile fallbacks (a marquee of fallback links reads as fake
+  // reviews), and when fewer than three TRUE 5-star reviews exist — the
+  // gate uses the same filter the marquee applies, so it can never render
+  // an empty section.
+  const marqueeReviews = fiveStarReviews(reviews);
+  const glassMarquee = glassCopyActive() && marqueeReviews.length >= 3
+    ? <GlassReviewMarquee reviews={marqueeReviews} />
+    : null;
+
   const start = page * pageSize;
   const visibleCount = Math.min(pageSize, reviews.length);
   const visible = Array.from({ length: visibleCount }, (_, offset) => reviews[(start + offset) % reviews.length]);
@@ -148,15 +160,20 @@ export default function CustomerReviews() {
           ? GLASS_COPY.reviewsExcerpt
           : 'Real Google reviews from homeowners across our service area.'}
       </p>
-      <div style={{
-        display: 'grid', gap: 12,
-        gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
-      }}>
-        {visible.map((review, i) => (
-          <ReviewCard key={`${review.reviewerName || 'review'}-${start + i}`} review={review} />
-        ))}
-      </div>
-      {pageCount > 1 ? (
+      {glassCopyActive() && onJoinNeighbors ? (
+        <GlassSectionCta label="Join your neighbors →" onClick={onJoinNeighbors} style={{ margin: '0 0 10px' }} />
+      ) : null}
+      {glassMarquee || (
+        <div style={{
+          display: 'grid', gap: 12,
+          gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+        }}>
+          {visible.map((review, i) => (
+            <ReviewCard key={`${review.reviewerName || 'review'}-${start + i}`} review={review} />
+          ))}
+        </div>
+      )}
+      {pageCount > 1 && !glassMarquee ? (
         <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 14 }}>
           {Array.from({ length: pageCount }, (_, i) => (
             <button

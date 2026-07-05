@@ -334,6 +334,56 @@ describe('slot reservation helpers', () => {
     expect(chain.whereNotNull).toHaveBeenCalledWith('reservation_expires_at');
     expect(chain.del).toHaveBeenCalledTimes(1);
   });
+
+  test('reserveSlot rejects a same-day slot inside the 2-hour booking lead', async () => {
+    // The guard fires before any db work, so no query mocks are needed.
+    jest.useFakeTimers();
+    // 15:00Z = 11:00 ET (EDT): a 12:30 ET start is only 90 minutes out.
+    jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
+    try {
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-07-14_12-30_tech-1',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot lets a same-day slot outside the booking lead through the guard', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
+    // Sentinel transaction: reaching the db proves the lead guard passed.
+    db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
+    try {
+      // 13:30 ET start = 150 minutes out — bookable.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-07-14_13-30_tech-1',
+      })).rejects.toThrow('REACHED_DB');
+      expect(db.transaction).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot accepts a slot exactly at the lead boundary — the generator still offers it', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
+    db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
+    try {
+      // 13:00 ET start = exactly 120 minutes out; the generator's
+      // startMin >= earliest offers it, so the guard must not 409 it.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-07-14_13-00_tech-1',
+      })).rejects.toThrow('REACHED_DB');
+      expect(db.transaction).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('scheduled service reservation hold migration', () => {
