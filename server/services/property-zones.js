@@ -133,8 +133,9 @@ function makeLetterAllocator(existingZones) {
  * @param {string} args.customerId
  * @param {string} args.serviceLine   detected line for this visit ('pest', 'lawn', ...)
  * @param {string[]} args.areaLabels  the technician's chipped areas (raw labels)
- * @param {Array}  args.zoneShapes    [{ areaLabel, shape }] satellite marks (may be empty)
- * @returns {{ created: number, updated: number, shapesApplied: number, skipped: string[] }}
+ * @param {Array}  args.zoneShapes    [{ areaLabel, shape }] satellite marks and/or
+ *                                    [{ areaLabel, clear: true }] mark removals (may be empty)
+ * @returns {{ created: number, updated: number, shapesApplied: number, cleared: number, skipped: string[] }}
  */
 async function upsertZonesForCompletion(trx, {
   customerId,
@@ -142,7 +143,7 @@ async function upsertZonesForCompletion(trx, {
   areaLabels = [],
   zoneShapes = [],
 } = {}) {
-  const summary = { created: 0, updated: 0, shapesApplied: 0, skipped: [] };
+  const summary = { created: 0, updated: 0, shapesApplied: 0, cleared: 0, skipped: [] };
   if (!customerId) return summary;
 
   const spatialLabels = [];
@@ -154,21 +155,27 @@ async function upsertZonesForCompletion(trx, {
     spatialLabels.push({ key, label: String(raw).trim() });
   }
 
-  const incomingShapes = (Array.isArray(zoneShapes) ? zoneShapes : [])
-    .slice(0, MAX_ZONE_SHAPES_PER_COMPLETION)
-    .map((entry) => ({
-      key: normalizeZoneLabel(entry?.areaLabel),
-      shape: sanitizeZoneShape(entry?.shape),
-      rawLabel: String(entry?.areaLabel || '').trim(),
-    }))
-    .filter((entry) => {
-      if (!entry.key || NON_SPATIAL_CHIP_KEYS.has(entry.key)) return false;
-      if (!entry.shape) {
-        summary.skipped.push(entry.rawLabel || 'invalid-shape');
-        return false;
-      }
-      return true;
-    });
+  // Entries split into shape WRITES and CLEARS ({ areaLabel, clear: true } —
+  // the tech removed a previously-stored mark). Clears never create rows and
+  // never count toward the prod guard: they only null geometry_image on a
+  // row that already exists.
+  const incomingShapes = [];
+  const incomingClears = [];
+  for (const entry of (Array.isArray(zoneShapes) ? zoneShapes : []).slice(0, MAX_ZONE_SHAPES_PER_COMPLETION)) {
+    const key = normalizeZoneLabel(entry?.areaLabel);
+    const rawLabel = String(entry?.areaLabel || '').trim();
+    if (!key || NON_SPATIAL_CHIP_KEYS.has(key)) continue;
+    if (entry?.clear === true) {
+      incomingClears.push({ key, rawLabel });
+      continue;
+    }
+    const shape = sanitizeZoneShape(entry?.shape);
+    if (!shape) {
+      summary.skipped.push(rawLabel || 'invalid-shape');
+      continue;
+    }
+    incomingShapes.push({ key, shape, rawLabel });
+  }
 
   const existing = await trx('property_zones')
     .where({ customer_id: customerId, is_active: true })
@@ -240,6 +247,20 @@ async function upsertZonesForCompletion(trx, {
     summary.shapesApplied += 1;
   }
 
+  for (const entry of incomingClears) {
+    const zone = byLabel.get(entry.key);
+    if (!zone || !zone.id) {
+      // nothing stored under that label — a clear with no target is a no-op,
+      // not an error (the row may have been deactivated since preload)
+      summary.skipped.push(entry.rawLabel);
+      continue;
+    }
+    await trx('property_zones')
+      .where({ id: zone.id })
+      .update({ geometry_image: null, updated_at: trx.fn.now() });
+    summary.cleared += 1;
+  }
+
   return summary;
 }
 
@@ -254,6 +275,13 @@ function validateZoneShapesBody(zoneShapes) {
   for (const entry of zoneShapes) {
     if (!entry || typeof entry !== 'object' || typeof entry.areaLabel !== 'string' || !entry.areaLabel.trim()) {
       return 'each zoneShapes entry needs an areaLabel string and a shape object';
+    }
+    // { areaLabel, clear: true } removes a stored mark — no shape allowed.
+    if (entry.clear === true) {
+      if (entry.shape != null) {
+        return `zoneShapes entry "${entry.areaLabel.trim()}" sets clear alongside a shape — send one or the other`;
+      }
+      continue;
     }
     // A malformed shape must 400 here, not silently drop in the upsert: on a
     // first-marked property the prod guard writes nothing, so a silent skip

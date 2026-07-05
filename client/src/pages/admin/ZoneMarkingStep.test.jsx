@@ -89,6 +89,28 @@ describe('ZoneMarkingStep', () => {
     expect(onSetMark).not.toHaveBeenCalled();
   });
 
+  it('fast drag with no pointermove still commits the full rect (release point wins)', () => {
+    const onSetMark = vi.fn();
+    const { container } = render(
+      <ZoneMarkingStep map={MAP} areas={['Perimeter']} marks={{}} onSetMark={onSetMark} onClearMark={() => {}} />,
+    );
+    fireEvent.click(screen.getByText('Box'));
+    const svg = stubSvgRect(container);
+
+    // pointer streams may deliver zero move events before release — the box
+    // must close at the pointerup coordinates, not the stale draft corner
+    firePointer(svg, 'pointerdown', 64, 34);
+    firePointer(svg, 'pointerup', 320, 170);
+    expect(onSetMark).toHaveBeenCalledWith('Perimeter', { type: 'rect', x: 0.1, y: 0.1, w: 0.4, h: 0.4 });
+  });
+
+  it('warns while partially marked (partial posts are discarded at submit)', () => {
+    render(
+      <ZoneMarkingStep map={MAP} areas={['Perimeter', 'Yard']} marks={{ Perimeter: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.07 } }} onSetMark={() => {}} onClearMark={() => {}} />,
+    );
+    expect(screen.getByText(/Marks only save when every area is marked/)).toBeInTheDocument();
+  });
+
   it('remove clears the active area mark; resize nudges the circle radius', () => {
     const onSetMark = vi.fn();
     const onClearMark = vi.fn();

@@ -6617,10 +6617,14 @@ export function ZoneMarkingStep({
   const handlePointerUp = (evt) => {
     if (disabled || !activeLabel) { setRectDraft(null); return; }
     if (tool === "rect" && rectDraft) {
-      const x = Math.min(rectDraft.x0, rectDraft.x1);
-      const y = Math.min(rectDraft.y0, rectDraft.y1);
-      const w = Math.abs(rectDraft.x1 - rectDraft.x0);
-      const h = Math.abs(rectDraft.y1 - rectDraft.y0);
+      // Close the box at the RELEASE point, not the last pointermove — a fast
+      // drag can release with zero/stale move events, and committing the
+      // draft alone would shrink the box to the down point and drop the mark.
+      const end = svgPointFromEvent(evt) || { x: rectDraft.x1, y: rectDraft.y1 };
+      const x = Math.min(rectDraft.x0, end.x);
+      const y = Math.min(rectDraft.y0, end.y);
+      const w = Math.abs(end.x - rectDraft.x0);
+      const h = Math.abs(end.y - rectDraft.y0);
       setRectDraft(null);
       if (w >= ZONE_MARK_MIN_RECT && h >= ZONE_MARK_MIN_RECT) {
         onSetMark(activeLabel, { type: "rect", x, y, w, h });
@@ -6679,6 +6683,11 @@ export function ZoneMarkingStep({
         Pick an area, then tap the photo to drop a circle (or switch to box and drag).
         Mark every area to unlock the satellite map on the customer report.
       </div>
+      {markedCount > 0 && markedCount < areas.length ? (
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 600, margin: "0 0 8px" }}>
+          Marks only save when every area is marked — finish the remaining {areas.length - markedCount} or they will be discarded.
+        </div>
+      ) : null}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
         {areas.map((label) => {
           const isActive = label === activeLabel;
@@ -7068,6 +7077,10 @@ export function CompletionPanel({
   const [zoneMarks, setZoneMarks] = useState({});
   const [zonePreloads, setZonePreloads] = useState({});
   const [propertyMap, setPropertyMap] = useState(null);
+  // Image params restored from a saved draft (checkout detour) — lets submit
+  // stamp the drift ref for marks drawn pre-detour even if the live
+  // /property-map refetch hasn't resolved yet.
+  const [zoneMapImageFallback, setZoneMapImageFallback] = useState(null);
   const zoneDirtyRef = useRef(new Set());
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
@@ -7084,10 +7097,19 @@ export function CompletionPanel({
         setPropertyMap(res || null);
         if (!res?.available) return;
         const preload = {};
+        const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
         (res.zones || []).forEach((zone) => {
           const shape = zone.geometryImage;
-          if (shape && typeof shape === "object" && (shape.type === "rect" || shape.type === "circle")) {
+          if (!shape || typeof shape !== "object") return;
+          if (shape.type === "rect" || shape.type === "circle") {
             preload[normalizeZoneMarkLabel(zone.label)] = shape;
+          } else if (shape.type == null && [shape.x, shape.y, shape.w, shape.h].every(norm01)) {
+            // The report renderer treats a typeless {x,y,w,h} as a rect
+            // (satellite-treatment-map normalizeRectGeometry) — preload those
+            // legacy marks too, or the step would show them as unmarked and
+            // invite an accidental overwrite. Normalized coords only; the
+            // renderer's pixel-space branch has no meaning on this 0-1 canvas.
+            preload[normalizeZoneMarkLabel(zone.label)] = { ...shape, type: "rect" };
           }
         });
         setZonePreloads(preload);
@@ -7112,9 +7134,15 @@ export function CompletionPanel({
     setZoneMarks((prev) => ({ ...prev, [label]: shape }));
   };
   const clearZoneMark = (label) => {
-    // local-only: clearing lets the tech redraw; it never deletes the
-    // property's stored shape (no delete path in the write API by design)
-    zoneDirtyRef.current.delete(label);
+    // Removing a mark drawn THIS session is local-only. Removing a PRELOADED
+    // mark must stay dirty so submit sends a clear tombstone — otherwise the
+    // step shows the area unmarked while property_zones.geometry_image keeps
+    // the stale shape and the report goes on painting it.
+    if (zonePreloads[normalizeZoneMarkLabel(label)]) {
+      zoneDirtyRef.current.add(label);
+    } else {
+      zoneDirtyRef.current.delete(label);
+    }
     setZoneMarks((prev) => ({ ...prev, [label]: null }));
   };
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
@@ -7979,8 +8007,20 @@ export function CompletionPanel({
         areasServiced,
         // Zone marks survive the billing-409 checkout detour like everything
         // else; the dirty list rides along so restore keeps resubmit intent.
+        // The image params the marks were drawn against ride too (center/zoom
+        // /size only — never the live-display-only image URL), so a restored
+        // draft can submit with the CORRECT drift ref even before the
+        // /property-map refetch resolves.
         zoneMarks,
         zoneDirty: [...zoneDirtyRef.current],
+        zoneMapImage: propertyMap?.available && propertyMap.image
+          ? {
+            center: propertyMap.image.center || null,
+            zoom: propertyMap.image.zoom,
+            width: propertyMap.image.width || 640,
+            height: propertyMap.image.height || 340,
+          }
+          : null,
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
@@ -8114,6 +8154,11 @@ export function CompletionPanel({
     );
     zoneDirtyRef.current = new Set(
       Array.isArray(savedDraft.zoneDirty) ? savedDraft.zoneDirty : [],
+    );
+    setZoneMapImageFallback(
+      savedDraft.zoneMapImage && typeof savedDraft.zoneMapImage === "object"
+        ? savedDraft.zoneMapImage
+        : null,
     );
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -9044,19 +9089,44 @@ export function CompletionPanel({
         areasServiced,
         // Satellite zone marks: only labels the tech TOUCHED this session,
         // stamped with the image params they were drawn against (drift ref).
-        ...(zoneMarkingFlag && propertyMap?.available && propertyMap.image
+        // Shape WRITES post only when EVERY selected spatial area is marked —
+        // the report switches to satellite mode the moment any zone carries
+        // geometry_image and drops schematic-only zones, so a partial post
+        // would publish a coverage map missing treated areas. CLEARS (tech
+        // removed a preloaded mark) always post: suppressing one would keep
+        // painting a mark the tech just said is wrong. Image params fall back
+        // to the draft-saved copy so a restore after the checkout detour can
+        // submit before the /property-map refetch resolves.
+        ...(zoneMarkingFlag
           ? (() => {
+            const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
+            if (!image) return {};
             const ref = {
-              lat: propertyMap.image.center?.lat,
-              lng: propertyMap.image.center?.lng,
-              zoom: propertyMap.image.zoom,
-              width: propertyMap.image.width || 640,
-              height: propertyMap.image.height || 340,
+              lat: image.center?.lat,
+              lng: image.center?.lng,
+              zoom: image.zoom,
+              width: image.width || 640,
+              height: image.height || 340,
               capturedAt: new Date().toISOString(),
             };
-            const shapes = [...zoneDirtyRef.current]
-              .filter((label) => zoneMarks[label] && areasServiced.includes(label))
-              .map((label) => ({ areaLabel: label, shape: { ...zoneMarks[label], ref } }));
+            const effectiveMark = (label) => {
+              const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
+              return local !== undefined ? local : (zonePreloads[normalizeZoneMarkLabel(label)] || null);
+            };
+            const allMarked = zoneSpatialAreas.length > 0
+              && zoneSpatialAreas.every((label) => effectiveMark(label));
+            const dirty = [...zoneDirtyRef.current].filter((label) => areasServiced.includes(label));
+            const writes = allMarked
+              ? dirty
+                .filter((label) => zoneMarks[label])
+                .map((label) => ({ areaLabel: label, shape: { ...zoneMarks[label], ref } }))
+              : [];
+            const clears = dirty
+              .filter((label) => Object.prototype.hasOwnProperty.call(zoneMarks, label)
+                && zoneMarks[label] == null
+                && zonePreloads[normalizeZoneMarkLabel(label)])
+              .map((label) => ({ areaLabel: label, clear: true }));
+            const shapes = [...writes, ...clears];
             return shapes.length ? { zoneShapes: shapes } : {};
           })()
           : {}),
