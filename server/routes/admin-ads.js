@@ -438,18 +438,84 @@ router.get('/capacity-heatmap', async (req, res, next) => {
 // AD ATTRIBUTION FOR REVENUE PAGE
 // =========================================================================
 
+// Optional row exclusions for fetchChannelAttribution, mirroring the dashboard
+// lead-funnel handler's parity rules (soft-deleted leads drop out; internal/test
+// names excluded via the linked lead OR customer — both joins LEFT and the name
+// expressions COALESCE to '', so unlinked rows are never silently dropped). Only
+// the dashboard's /channel-roi passes this; without it the ads routes' existing
+// behavior is unchanged (aligning them is a separate owner decision).
+function applyAttributionExclusions(qb, exclude) {
+  if (!exclude) return qb;
+  qb.leftJoin('leads as l', 'l.id', 'asa.lead_id')
+    .leftJoin('customers as c', 'c.id', 'asa.customer_id');
+  if (exclude.deletedLeads) qb.whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
+  const names = exclude.internalNames || [];
+  if (names.length) {
+    const marks = names.map(() => '?').join(',');
+    qb.whereRaw(
+      `LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) NOT IN (${marks})`,
+      names,
+    ).whereRaw(
+      `LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) NOT IN (${marks})`,
+      names,
+    );
+  }
+  return qb;
+}
+
 // Shared channel attribution: completed-lead revenue/GP/customers + TRUE platform
 // spend (ad_performance_daily by platform, so a paid channel-month with spend but
 // zero tracked leads still surfaces, with no cent-rounding drift). Platform values
 // equal the paid lead_source keys (google_ads / google_lsa / facebook).
-async function fetchChannelAttribution(since, months = 1) {
-  const completedRaw = await db('ad_service_attribution')
-    .where('lead_date', '>=', since)
-    .where('funnel_stage', 'completed')
-    .select('lead_source', 'completed_revenue', 'gross_profit', 'projected_ltv_12mo', 'is_recurring', 'customer_id', 'fbclid', 'fbc', 'is_paid');
+async function fetchChannelAttribution(since, months = 1, exclude = null) {
+  const completedRaw = await applyAttributionExclusions(
+    db('ad_service_attribution as asa')
+      .where('asa.lead_date', '>=', since)
+      .where('asa.funnel_stage', 'completed')
+      .select(
+        'asa.lead_source', 'asa.completed_revenue', 'asa.gross_profit', 'asa.projected_ltv_12mo',
+        'asa.is_recurring', 'asa.customer_id', 'asa.fbclid', 'asa.fbc', 'asa.is_paid',
+        // lead_date/created_at feed the builder's first-touch pick so a
+        // customer's completed-visit count lands on the same row the
+        // attribution sync wrote their realized revenue to.
+        'asa.lead_date', 'asa.created_at',
+      ),
+    exclude,
+  );
   // Split organic Facebook off the paid Meta bucket so organic-social completions
   // don't inflate the paid ratio (organic facebook still shows as its own channel).
   const completed = splitFacebookByPaid(completedRaw);
+
+  // Jobs = completed COSTED VISITS credited to the channel — the same job_costs
+  // ⨝ completed scheduled_services set ad-attribution-sync's customerRealized
+  // sums the realized revenue from, bounded by each customer's first-touch
+  // lead_date so pre-lead history stays uncredited here too. NOT a count of
+  // attribution rows: the sync writes a customer's whole realized total onto
+  // ONE primary row, so row-counting would call a 5-visit repeat customer one
+  // "job" and inflate cost/job. Guarded like customerRealized — a pre-costing
+  // environment just reports zero jobs.
+  const jobsByCustomer = {};
+  try {
+    const jobRows = await db('job_costs as jc')
+      .join('scheduled_services as ss', 'ss.id', 'jc.scheduled_service_id')
+      .join(
+        db('ad_service_attribution')
+          .select('customer_id')
+          .min({ lead_date: 'lead_date' })
+          .where('funnel_stage', 'completed')
+          .where('lead_date', '>=', since)
+          .whereNotNull('customer_id')
+          .groupBy('customer_id')
+          .as('first'),
+        'first.customer_id',
+        'jc.customer_id',
+      )
+      .where('ss.status', 'completed')
+      .whereRaw('jc.service_date >= first.lead_date')
+      .groupBy('jc.customer_id')
+      .select('jc.customer_id', db.raw('COUNT(*) as visits'));
+    for (const r of jobRows) jobsByCustomer[r.customer_id] = Number(r.visits) || 0;
+  } catch { /* job_costs / service_date not present — jobs stay 0, like the sync no-op */ }
 
   const spendRows = await db('ad_performance_daily as apd')
     .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
@@ -486,15 +552,19 @@ async function fetchChannelAttribution(since, months = 1) {
       // settings) keeps the $25+$25 default.
       perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
     } catch { /* settings unreadable — keep the default */ }
-    const [{ n }] = await db('ad_service_attribution')
-      .where({ lead_source: 'referral', funnel_stage: 'completed' })
-      .where('lead_date', '>=', since)
-      .countDistinct({ n: 'customer_id' });
+    // Same exclusions as the completed rows — an excluded internal/deleted
+    // "conversion" must not add reward cost the card's rows don't show.
+    const [{ n }] = await applyAttributionExclusions(
+      db('ad_service_attribution as asa')
+        .where({ 'asa.lead_source': 'referral', 'asa.funnel_stage': 'completed' })
+        .where('asa.lead_date', '>=', since),
+      exclude,
+    ).countDistinct({ n: 'asa.customer_id' });
     const refCost = round((Number(n) || 0) * perConversion, 2);
     if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
   } catch { /* ad_service_attribution shape / no referrals — no-op */ }
 
-  const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource, fixedCostBySource);
+  const { sources, ...totals } = buildChannelAttribution(completed, platformSpendBySource, fixedCostBySource, jobsByCustomer);
   return { sources: sources.map((s) => ({ source: formatSourceName(s.sourceKey), ...s })), ...totals };
 }
 
@@ -644,3 +714,8 @@ function aggregate(rows) {
 }
 
 module.exports = router;
+// Shared with the dashboard's Channel ROI card (routes/admin-dashboard.js
+// /channel-roi) so both surfaces read ONE attribution/spend basis — the
+// dashboard only swaps in its own window semantics (ET calendar periods +
+// attribution fresh-start floor) for this file's trailing-days windows.
+module.exports.fetchChannelAttribution = fetchChannelAttribution;

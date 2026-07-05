@@ -1755,6 +1755,35 @@ router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/channel-roi?period=mtd[&from=YYYY-MM-DD]
+// Per-channel ROI for the Growth section: revenue, gross profit, ad + fixed
+// spend (all-in), CAC, cost per booked job, ROAS, LTV:CAC. Thin wrapper over
+// the ads revenue-attribution fetch (routes/admin-ads.js) so this card, the
+// revenue page, and the capital-allocation card share ONE attribution/spend
+// basis; only the window differs — the dashboard's standard period selector
+// (ET calendar windows + attribution fresh-start floor, same resolution as
+// /lead-funnel) instead of the ads routes' trailing-days windows. Basis
+// caveat (the card states it): attribution rows + job costs, not raw leads.
+router.get('/channel-roi', dashboardCache, async (req, res, next) => {
+  try {
+    // Lazy require, mirroring the sibling handlers' service requires.
+    const { fetchChannelAttribution } = require('./admin-ads');
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    // Every dashboard window ends today, so the fetch's single `since` bound
+    // (lead_date >= from) reproduces from→to exactly. Fixed monthly costs
+    // prorate to the window's inclusive day span — a one-day window carries
+    // ~1/30 of a retainer, never zero — using the same 30.44 avg-month-length
+    // constant as the ads routes' periodWindow.
+    const days = Math.max(1, Math.round((Date.parse(win.to) - Date.parse(win.from)) / 86400000) + 1);
+    // Parity with the sibling Growth cards (/lead-funnel above): soft-deleted
+    // leads and internal/test names are excluded HERE — the ads routes keep
+    // their pre-existing unfiltered behavior (aligning them is a separate
+    // owner decision).
+    const exclude = { deletedLeads: true, internalNames: INTERNAL_TEST_CUSTOMERS };
+    res.json({ period: win, ...(await fetchChannelAttribution(win.from, days / 30.44, exclude)) });
+  } catch (err) { next(err); }
+});
+
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
