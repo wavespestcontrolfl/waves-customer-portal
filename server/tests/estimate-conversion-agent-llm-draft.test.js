@@ -32,7 +32,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
 
 jest.mock('../models/db', () => {
-  const state = { inserts: [], smsLogRows: [] };
+  const state = { inserts: [], smsLogRows: [], existingDecision: null };
   const makeBuilder = (table) => {
     const builder = {};
     const self = () => builder;
@@ -47,7 +47,7 @@ jest.mock('../models/db', () => {
       orderBy: jest.fn(self),
       orderByRaw: jest.fn(self),
       limit: jest.fn(self),
-      first: jest.fn(async () => null),
+      first: jest.fn(async () => (table === 'agent_decisions' ? state.existingDecision : null)),
       insert: jest.fn((payload) => {
         state.inserts.push({ table, payload });
         return builder;
@@ -101,6 +101,7 @@ function lastDecisionInsert() {
 beforeEach(() => {
   db.__state.inserts.length = 0;
   db.__state.smsLogRows = [];
+  db.__state.existingDecision = null;
   generateGroundedDraft.mockReset();
   delete process.env.AGENT_REVIEW_LLM_DRAFTS;
 });
@@ -245,6 +246,25 @@ describe('processInboundSms — grounded LLM review draft', () => {
     });
 
     expect(generateGroundedDraft).not.toHaveBeenCalled();
+  });
+
+  test('webhook redelivery: existing idempotency key short-circuits BEFORE any LLM call', async () => {
+    seedActiveSchedulingThread();
+    db.__state.existingDecision = { id: 'decision-already-there' };
+    generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'x' }, passes: 1, converged: true, model: 'm' });
+
+    const row = await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'Hello what happened this morning',
+      smsLogId: 'sms-in-8',
+      sourceMessageId: 'SM-redelivered',
+    });
+
+    expect(row).toBeNull(); // same semantics as the ignored insert
+    expect(generateGroundedDraft).not.toHaveBeenCalled();
+    expect(db.__state.inserts.filter((i) => i.table === 'agent_decisions')).toHaveLength(0);
   });
 
   test('kill switch AGENT_REVIEW_LLM_DRAFTS=false: drafter never called', async () => {

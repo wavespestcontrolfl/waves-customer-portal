@@ -648,15 +648,30 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
 
     if (!decision.intent) return null;
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
-
-    const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
-    const entityId = estimate?.id || lead?.id || customer?.id || null;
     const idempotencyKey = sourceMessageId
       ? `${workflow}:twilio:${sourceMessageId}`
       : smsLogId
         ? `${workflow}:sms_log:${smsLogId}`
         : null;
+
+    // Idempotency BEFORE the LLM draft, not just on insert: a fail-open
+    // webhook redelivery or replay of an already-handled SMS would otherwise
+    // run the full context aggregation + draft→verify→revise loop and then
+    // have the insert dropped by onConflict — burning provider calls for
+    // nothing. A concurrent duplicate can still slip past this read, but the
+    // onConflict ignore below keeps the table correct; this check only
+    // exists to avoid the wasted LLM spend on the common redelivery path.
+    if (idempotencyKey) {
+      const existing = await db('agent_decisions')
+        .where({ idempotency_key: idempotencyKey })
+        .first('id');
+      if (existing) return null; // same semantics as the ignored insert: nothing new
+    }
+
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+
+    const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
+    const entityId = estimate?.id || lead?.id || customer?.id || null;
 
     const payload = {
       workflow,

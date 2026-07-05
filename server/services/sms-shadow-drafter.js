@@ -306,15 +306,23 @@ const MAX_REVISIONS = (() => {
 // Save-the-sale routing (owner directive 2026-07-05): retention-critical
 // inbound — a customer trying to cancel, complaining, or reporting an issue —
 // drafts on Claude Sonnet (ROUTES.smsDraftSaveSale); everything else drafts on
-// the default mini route (ROUTES.smsDraftDefault). Matches both the triage
-// intent names (customer_issue_needs_review) and the legacy webhook labels
-// (COMPLAINT, CANCEL_REQUEST).
+// the default mini route (ROUTES.smsDraftDefault).
+//
+// Two signals, either one routes to save-the-sale:
+// - intent name: triage labels (customer_issue_needs_review) and legacy
+//   webhook labels (COMPLAINT, CANCEL_REQUEST).
+// - the raw message text: the upstream router classifies service scheduling
+//   BEFORE customer triage, so a complaint that also carries a time word
+//   ("still have spiders this morning", "what happened this morning") arrives
+//   here labeled service_scheduling_window_reply — the intent string alone
+//   would misroute exactly the retention-critical class to the mini lane.
 const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
+const SAVE_SALE_TEXT_RE = /\b(cancel(?:ing|lation)?|complain(?:t|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
 
-function draftRouteForIntent(intentName) {
-  return SAVE_SALE_INTENT_RE.test(String(intentName || ''))
-    ? MODELS.ROUTES.smsDraftSaveSale
-    : MODELS.ROUTES.smsDraftDefault;
+function draftRouteFor({ intentName, inboundMessage } = {}) {
+  if (SAVE_SALE_INTENT_RE.test(String(intentName || ''))) return MODELS.ROUTES.smsDraftSaveSale;
+  if (SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))) return MODELS.ROUTES.smsDraftSaveSale;
+  return MODELS.ROUTES.smsDraftDefault;
 }
 
 /**
@@ -325,8 +333,7 @@ function draftRouteForIntent(intentName) {
  * one that actually produced the draft, persisted on the row for the judge),
  * or null when both paths are unusable.
  */
-async function generateDraftOnce(client, system, userContent, intentName) {
-  const route = draftRouteForIntent(intentName);
+async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault) {
   try {
     const { dispatch } = require('./llm/call');
     const routed = await dispatch(route, { system, text: userContent, jsonMode: false, maxTokens: 600 });
@@ -377,7 +384,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const exemplarBlock = formatExemplarBlock(exemplars);
   const userContent = buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock);
 
-  const first = await generateDraftOnce(client, system, userContent, intent?.intent);
+  // Route once for the whole loop (revisions included) — routing looks at the
+  // intent label AND the raw message so complaints mislabeled as scheduling
+  // still draft on the save-the-sale lane.
+  const route = draftRouteFor({ intentName: intent?.intent, inboundMessage });
+  const first = await generateDraftOnce(client, system, userContent, route);
   if (!first) return { parsed: null, passes: 1, converged: false, model: null };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
@@ -419,7 +430,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         client,
         system,
         `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`,
-        intent?.intent
+        route
       );
     } catch (err) {
       // A revise call that times out / rate-limits must NOT drop the whole
@@ -660,8 +671,9 @@ module.exports = {
   draftShadowReply,
   generateGroundedDraft,
   generateDraftOnce,
-  draftRouteForIntent,
+  draftRouteFor,
   SAVE_SALE_INTENT_RE,
+  SAVE_SALE_TEXT_RE,
   parseShadowResponse,
   buildSystemPrompt,
   buildUserPrompt,
