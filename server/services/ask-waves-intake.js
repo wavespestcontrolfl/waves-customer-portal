@@ -34,14 +34,13 @@ const COMPANY = {
 // server-side defaults (routes/public-quote.js engineInput mapping) AND the
 // astro island's SERVICE_DEFS (AskWaves.tsx) — a key the island doesn't carry
 // is filtered client-side and never reaches the gate. An entry belongs here
-// only when the gate's inputless payload prices the visitor's actual problem:
-// engines that price off a visitor-entered count (palm → palmCount, bedBug →
-// rooms), ride another key with a conflicting payload (cockroach → pest +
-// roachType), need job-scoping inputs the gate can't collect (stinging →
-// species/removal tier; plugging → patch area, else the engine prices the
-// whole lawn), hit the treeCount ?? 0 mapping that suppresses the engine's
-// density fallback (treeShrub), or have no pricing-engine consumer at all
-// (lawnPestControl) stay out.
+// only when the gate's payload for that key prices the visitor's actual
+// problem — either inputless, or via the number field the island's chip now
+// collects (palm → palmCount, bedBug → rooms, treeShrub → optional count,
+// plugging → optional patch area). Still out: stinging (the engine scopes
+// jobs across species/tier/removal/aggression/height — no honest gate
+// version) and cockroach (page-seed only — chat can't tell a regular-roach
+// knockdown from a German cleanout).
 const QUOTABLE_SERVICES = [
   { key: 'pest', label: 'Recurring Pest Control (WaveGuard)', covers: 'ants, roaches, spiders, earwigs, silverfish, millipedes, and general household pests — quarterly barrier treatments with free re-treats' },
   { key: 'mosquito', label: 'Mosquito & No-See-Um Control', covers: 'mosquitoes and no-see-ums — recurring yard treatments' },
@@ -50,6 +49,11 @@ const QUOTABLE_SERVICES = [
   { key: 'rodentBait', label: 'Rodent Bait Stations', covers: 'exterior rodent bait stations for rat and mouse prevention' },
   { key: 'flea', label: 'Flea Treatment', covers: 'flea infestations inside the home (yard-only flea problems need a custom quote — suggest calling)' },
   { key: 'oneTimeLawn', label: 'Lawn Weed Treatment', covers: 'a one-time whole-lawn weed knockdown treatment (visitor asks about weeds only, not an ongoing program)' },
+  { key: 'treeShrub', label: 'Tree & Shrub Care', covers: 'ornamental tree and shrub fertilization and insect treatment (the quote form asks how many plants, or estimates from satellite)' },
+  { key: 'palm', label: 'Palm Injections', covers: 'palm tree health injections (the quote form asks how many palms)' },
+  { key: 'bedBug', label: 'Bed Bug Treatment', covers: 'bed bug infestations (the quote form asks how many bedrooms)' },
+  { key: 'plugging', label: 'Lawn Plugging', covers: 'St. Augustine plug installation for dead patches or a full lawn (the quote form asks the patch size)' },
+  { key: 'lawnPestControl', label: 'Lawn Pest Knockdown', covers: 'a one-time turf-pest knockdown for chinch bugs, sod webworms, armyworms, and grubs damaging the lawn (the recurring lawn program covers season-long prevention)' },
 ];
 const QUOTABLE_KEYS = new Set(QUOTABLE_SERVICES.map((s) => s.key));
 
@@ -135,7 +139,7 @@ const SYSTEM_PROMPT = `You are "Ask Waves", the intake assistant on the ${COMPAN
 SERVICES YOU CAN QUOTE INSTANTLY (service_keys values):
 ${QUOTABLE_SERVICES.map((s) => `- ${s.key}: ${s.label} — ${s.covers}`).join('\n')}
 
-NOT instantly quotable (do NOT put these in service_keys; suggest calling ${COMPANY.phone} or the full quote page instead): bed bugs, German roach cleanouts, wasp/hornet/bee nest treatment or removal, yard-only flea problems, lawn insects like chinch bugs or sod webworms or grubs, lawn plugging and patch repair, tree & shrub care, rodent trapping/exclusion work inside an attic, palm tree injections, termite inspections and WDO inspections, and commercial properties.
+NOT instantly quotable (do NOT put these in service_keys; suggest calling ${COMPANY.phone} or the full quote page instead): German roach cleanouts and heavy indoor roach infestations, wasp/hornet/bee nest treatment or removal, yard-only flea problems, rodent trapping/exclusion work inside an attic, termite inspections and WDO inspections, and commercial properties.
 
 YOUR JOB each turn:
 1. Answer the visitor's question helpfully in 1-3 short sentences — you are a knowledgeable Florida pest expert (sandy soil, humidity, afternoon storms, St. Augustine grass). Identify the likely pest when you can.

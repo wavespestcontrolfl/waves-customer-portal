@@ -912,6 +912,28 @@ function generateEstimate(input) {
     }
   }
 
+  // Standalone one-time turf-pest knockdown (chinch bugs, sod webworms,
+  // armyworms, grubs) — the ONE_TIME.lawn 'pest' treatment multiplier, priced
+  // as its own line so it can coexist with a weed-type oneTimeLawn line
+  // (owner decision 2026-07-05: lawn-pest-control sells the one-time
+  // knockdown product, not a recurring program).
+  if (services.lawnPestControl) {
+    if (propertyIsCommercial) {
+      addCommercialManualQuote('lawn_care');
+    } else {
+      const result = priceOneTimeLawn(property, {
+        treatmentType: 'pest',
+        urgency: services.lawnPestControl.urgency || 'NONE',
+        afterHours: services.lawnPestControl.afterHours || false,
+        isRecurringCustomer,
+        track: services.lawnPestControl.track || services.lawn?.track || 'st_augustine',
+        tier: services.lawnPestControl.tier || services.lawn?.tier || 'enhanced',
+        lawnFreq: services.lawnPestControl.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
+      });
+      lineItems.push(result);
+    }
+  }
+
   if (services.oneTimeMosquito && !useCommercialManualQuote(services.oneTimeMosquito, 'pest_control')) {
     const result = priceOneTimeMosquito(property, {
       stationCount: services.oneTimeMosquito.stationCount,

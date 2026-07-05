@@ -209,7 +209,13 @@ function publicQuotePestLabel(pest = {}) {
     bimonthly: 'Bi-Monthly Pest Control',
     monthly: 'Monthly Pest Control',
   };
-  return labels[frequency] || 'Quarterly Pest Control';
+  const base = labels[frequency] || 'Quarterly Pest Control';
+  // The engine prices a roach-knockdown modifier on the pest line when
+  // roachType is set (the cockroach estimate/chip path) — reflect it in the
+  // lead's service-interest label so the office sees what was quoted.
+  return pest.roachType && pest.roachType !== 'none'
+    ? `${base} + Roach Knockdown`
+    : base;
 }
 
 function publicQuoteCompactPestLabel(pest = {}) {
@@ -636,8 +642,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.dethatching = {};
     }
     if (services.plugging) {
+      // Forward a positive patch area so the engine prices the patch; when
+      // absent the engine falls back to the whole lawn (the /estimate page's
+      // default behavior).
+      const pluggingArea = Number(services.plugging.area);
       engineInput.services.plugging = {
         spacing: services.plugging.spacing || 12,
+        ...(Number.isFinite(pluggingArea) && pluggingArea > 0 ? { area: pluggingArea } : {}),
       };
     }
     if (services.topDressing) {

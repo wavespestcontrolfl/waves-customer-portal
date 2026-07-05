@@ -112,7 +112,7 @@ describe('normalizeIntakeResult', () => {
     const out = normalizeIntakeResult({
       reply: 'ok',
       intent: 'sell_hard',
-      service_keys: ['pest', 'pest', 'bedBug', 'exclusion', 'mosquito', 42],
+      service_keys: ['pest', 'pest', 'stinging', 'exclusion', 'mosquito', 42],
       ready_for_quote: 'yes',
     }, 'openai');
     expect(out.intent).toBe('other');
@@ -181,23 +181,24 @@ describe('normalizeIntakeResult', () => {
   test('every quotable key matches a services key /calculate accepts', () => {
     const CALCULATE_KEYS = [
       'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'flea', 'oneTimeLawn',
+      'treeShrub', 'palm', 'bedBug', 'plugging', 'lawnPestControl',
     ];
     for (const s of QUOTABLE_SERVICES) expect(CALCULATE_KEYS).toContain(s.key);
   });
 
-  test('expanded specialty keys survive normalization; input-dependent engines stay out', () => {
+  test('gate-input engines survive normalization; unquotable engines stay out', () => {
     const out = normalizeIntakeResult({
       reply: 'ok',
       intent: 'quote',
-      // The dropped keys must keep dropping even though /calculate accepts
-      // them: palm/bedBug price off visitor-entered counts, stinging defaults
-      // to a no-removal paper-wasp job, plugging prices the whole lawn without
-      // a patch area, treeShrub hits the treeCount ?? 0 mapping, and
-      // lawnPestControl has no pricing-engine consumer at all.
-      service_keys: ['flea', 'oneTimeLawn', 'stinging', 'lawnPestControl', 'plugging', 'treeShrub', 'palm', 'bedBug'],
+      // treeShrub/palm/bedBug/plugging are quotable now that the island's gate
+      // collects their count/area fields; lawnPestControl prices as the
+      // one-time turf-pest knockdown. Still dropping: stinging (job scoping
+      // the gate can't collect) and cockroach (page-seed only — chat can't
+      // tell a regular-roach knockdown from a German cleanout).
+      service_keys: ['treeShrub', 'palm', 'bedBug', 'plugging', 'lawnPestControl', 'stinging', 'cockroach'],
       ready_for_quote: true,
     }, 'openai');
-    expect(out.service_keys).toEqual(['flea', 'oneTimeLawn']);
+    expect(out.service_keys).toEqual(['treeShrub', 'palm', 'bedBug', 'plugging', 'lawnPestControl']);
   });
 });
 

@@ -240,3 +240,29 @@ describe('treeShrub count mapping — omitted count must reach the engine as ABS
     expect(source).toMatch(/Number\.isFinite\(treeShrubCount\) && treeShrubCount > 0/);
   });
 });
+
+describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-07-05)', () => {
+  test('services.lawnPestControl produces a priced one-time pest line', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { lawnPestControl: {} },
+    });
+    const line = (estimate.lineItems || []).find((l) => l.service === 'one_time_lawn' && l.treatmentType === 'pest');
+    expect(line).toBeTruthy();
+    // ONE_TIME.lawn floor ($115) is the engine's owner-set minimum.
+    expect(line.price).toBeGreaterThanOrEqual(115);
+    expect(Number(estimate.summary?.oneTimeTotal || 0)).toBeGreaterThanOrEqual(line.price);
+  });
+
+  test('coexists with a weed-type oneTimeLawn line (separate line items)', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { oneTimeLawn: { treatmentType: 'weed' }, lawnPestControl: {} },
+    });
+    const types = (estimate.lineItems || [])
+      .filter((l) => l.service === 'one_time_lawn')
+      .map((l) => l.treatmentType)
+      .sort();
+    expect(types).toEqual(['pest', 'weed']);
+  });
+});
