@@ -1586,10 +1586,11 @@ async function createSelfBooking(payload = {}) {
     // recurring series. `lead_id` is only a trigger flag; the conversion is
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
+    let leadConversion = null;
     if (followUpRows.length > 0 || lead_id) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({
+        leadConversion = await convertLeadFromEvent({
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
@@ -1608,7 +1609,9 @@ async function createSelfBooking(payload = {}) {
     // booking via self_booked_appointment_id); owned re-engagement links
     // (booking_recovery) are excluded — same journey completing, not a new
     // acquisition. Best-effort (booking is already committed); only mints
-    // won leads for ad-tracked bookers with no lead on file.
+    // won leads for ad-tracked bookers with no lead on file. A booking that
+    // just converted an existing lead records nothing here: the bridge
+    // advanced that lead's own attribution row to booked already.
     try {
       const { attributeSelfBooking } = require('../services/lead-estimate-link');
       await attributeSelfBooking({
@@ -1620,6 +1623,7 @@ async function createSelfBooking(payload = {}) {
         customerCreated: !!createdCustomerId,
         selfBookedAppointmentId: booking?.id || null,
         bookingSource: source || null,
+        leadConverted: !!leadConversion?.converted,
       });
     } catch (err) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);

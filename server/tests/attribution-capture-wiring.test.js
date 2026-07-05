@@ -109,6 +109,11 @@ describe('booking.js self-booking attribution wiring', () => {
   test('hands attributeSelfBooking the booking id (the per-booking funnel-row dedupe key)', () => {
     expect(src).toMatch(/selfBookedAppointmentId:\s*booking\?\.id \|\| null/);
   });
+
+  test('threads the convertLeadFromEvent outcome into attributeSelfBooking (a converting booking must skip row-only attribution)', () => {
+    expect(src).toMatch(/leadConversion = await convertLeadFromEvent\(/);
+    expect(src).toMatch(/leadConverted:\s*!!leadConversion\?\.converted/);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1038,11 +1038,19 @@ async function attributeSelfBooking({
   customerCreated = false,
   selfBookedAppointmentId = null,
   bookingSource = null,
+  leadConverted = false,
   database = db,
 }) {
   try {
     if (!customerId) return { attributed: false, reason: 'no_customer_id' };
-    // Owned-source gate FIRST — before the paid-click AND organic paths. A
+    // Converted-lead gate FIRST: when this booking just converted an existing
+    // open lead (convertLeadFromEvent → markConverted → funnel bridge), that
+    // lead's ad_service_attribution row was advanced to booked — it IS the
+    // journey's funnel entry. Minting a lead_id-NULL organic or repeat-paid
+    // row here would make one booking count as two booked funnel entries.
+    // Same rule for both paths: the lead is the canonical journey record.
+    if (leadConverted) return { attributed: false, reason: 'lead_converted' };
+    // Owned-source gate next — before the paid-click AND organic paths. A
     // recovery/estimate-originated booking is our own link completing an
     // already-attributed journey; its browser can still carry the original
     // ad's click id (_fbc/gclid), so gating only the organic recorder would

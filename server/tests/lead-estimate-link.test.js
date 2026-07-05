@@ -1075,6 +1075,43 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(database._inserted).toEqual([]);
   });
 
+  test('a booking that just converted an existing lead records NO row-only attribution (the bridge advanced that lead\'s own funnel row — a second row double-counts the booking)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: { source: 'google', medium: 'organic', campaign: null, term: null, content: null },
+        gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        landing_url: 'https://wavespestcontrol.com/book',
+        referrer: 'https://www.google.com/',
+      },
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-converted-organic',
+      leadConverted: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'lead_converted' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('converted-lead gate runs before the PAID branch too (a live click id on a converting booking must not add a repeat-paid row)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: FB_ATTR,
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-converted-paid',
+      leadConverted: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'lead_converted' });
+    expect(database._inserted).toEqual([]);
+  });
+
   test('paid Meta UTMs with a stripped click id stay PAID (is_paid from the classifier channel, like the webhook)', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 
