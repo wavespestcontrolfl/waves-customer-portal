@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
 import Icon from '../components/Icon';
+import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 
 const SUPPORT_LINKS = [
   { label: 'Call', href: 'tel:+19412975749', icon: 'phone' },
@@ -40,6 +41,10 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
+  // Glass dark-launch (?glass=1): the login page is the app's front door,
+  // so it gets the full scene like the estimate hero.
+  const [glassActive] = useState(glassParamRequested);
+  useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
     if (isAuthenticated) navigate(nextPath, { replace: true });
@@ -102,7 +107,8 @@ export default function LoginPage() {
         '--login-border-strong': '#D8D0C0',
         '--login-soft': '#F8FCFE',
         '--login-soft-border': '#CFE7F5',
-        '--login-bg': '#FAF8F3',
+        // Under glass the fixed scene on <html> is the backdrop.
+        '--login-bg': glassActive ? 'transparent' : '#FAF8F3',
         '--login-card': B.white,
         '--login-red': B.red,
         fontFamily: FONTS.body,
@@ -507,7 +513,7 @@ export default function LoginPage() {
             <img src="/waves-logo.png" alt="Waves" />
             <span>Waves Customer Portal</span>
           </a>
-          <div className="portal-login-eyebrow">
+          <div className="portal-login-eyebrow" data-glass="chip" style={{ position: 'relative' }}>
             <Icon name="lock" size={15} strokeWidth={2.2} />
             Secure customer access
           </div>
@@ -516,7 +522,7 @@ export default function LoginPage() {
         </section>
 
         <section className="portal-login-panel" aria-label="Sign in">
-          <div className="portal-login-card">
+          <div className="portal-login-card" data-glass="card" style={{ position: 'relative' }}>
             <div className="portal-login-card-header">
               <span className="portal-login-icon">
                 <Icon name={step === 'phone' ? 'smartphone' : 'key'} size={20} strokeWidth={2.1} />
@@ -596,6 +602,8 @@ export default function LoginPage() {
               <button
                 type="submit"
                 className="portal-login-submit"
+                data-glass-accent=""
+                style={{ position: 'relative' }}
                 disabled={submitDisabled}
                 aria-live="polite"
               >
@@ -636,7 +644,7 @@ export default function LoginPage() {
             )}
           </div>
 
-          <div className="portal-login-help" aria-label="Support links">
+          <div className="portal-login-help" aria-label="Support links" data-glass="soft" style={{ position: 'relative' }}>
             {SUPPORT_LINKS.map(link => (
               <a key={link.label} href={link.href}>
                 <Icon name={link.icon} size={15} strokeWidth={2} />

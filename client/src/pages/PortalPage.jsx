@@ -20,6 +20,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp } from '../native/platform';
 import { captureCameraPhoto } from '../native/camera';
+import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -1041,7 +1042,9 @@ function DashboardTab({ customer, onSwitchTab }) {
     setSatSubmitting(false);
   };
 
-  const card = PORTAL_CARD_STYLE;
+  // position:relative lets the glass specular pseudo-elements anchor to each
+  // card; inert without the glass gate (no offsets, no stacking context).
+  const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
   const subtle = PORTAL_SHELL.page;
   const dashboardLabel = {
@@ -1067,6 +1070,7 @@ function DashboardTab({ customer, onSwitchTab }) {
     justifyContent: compact ? 'center' : 'flex-start',
     gap: compact ? 6 : 8,
     boxShadow: 'none',
+    position: 'relative',
   };
   const dashboardSecondaryButton = {
     ...PORTAL_SECONDARY_ACTION,
@@ -1077,6 +1081,7 @@ function DashboardTab({ customer, onSwitchTab }) {
     ...PORTAL_PRIMARY_ACTION,
     padding: '11px 18px',
     fontSize: 14,
+    position: 'relative',
   };
   const balanceReady = balanceStatus === 'ready' && !!balance;
   const balancePending = balanceStatus === 'loading';
@@ -1147,7 +1152,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1229,7 +1234,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
-            <button key={item.label} type="button" onClick={item.action} style={dashboardActionCard}>
+            <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
               <div style={{ fontSize: compact ? 12 : 14, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
               {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
@@ -1239,7 +1244,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       </section>
 
       {pendingSatisfaction && !satDismissed && (
-        <section style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
+        <section data-glass="card" style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
           {satPhase === 'rate' && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -1319,7 +1324,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
-        <section style={{ ...card, overflow: 'hidden' }}>
+        <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <ShellIconTile icon="calendar" size={38} />
@@ -1353,7 +1358,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   api.confirmAppointment(nextService.id).then(() => {
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
                   });
-                }} style={{
+                }} data-glass-accent="" style={{
                   ...dashboardPrimaryButton,
                 }}>
                   Confirm Visit
@@ -1371,7 +1376,7 @@ function DashboardTab({ customer, onSwitchTab }) {
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
-              <button type="button" onClick={() => onSwitchTab?.('request')} style={{
+              <button type="button" onClick={() => onSwitchTab?.('request')} data-glass-accent="" style={{
                 ...dashboardPrimaryButton,
               }}>
                 Request Service
@@ -1386,7 +1391,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           )}
         </section>
 
-        <section style={{ ...card, padding: 18 }}>
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
           <div style={dashboardLabel}>At a glance</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
@@ -1415,7 +1420,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       <ServiceTracker />
 
       {lastServiceStatus === 'loading' ? (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="clipboard"
             title="Loading last visit"
@@ -1423,7 +1428,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           />
         </section>
       ) : lastServiceStatus === 'error' ? (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="warning"
             tone="danger"
@@ -1432,7 +1437,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           />
         </section>
       ) : lastService ? (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <ShellIconTile icon="clipboard" tone="success" size={38} />
@@ -1462,7 +1467,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           )}
         </section>
       ) : (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="calendar"
             title="No completed visits yet"
@@ -1486,7 +1491,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         />
       )}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           {/* Mowing height shows even before the first vision assessment. */}
           <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
           <PortalInlineState
@@ -1499,7 +1504,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
         {rewardCards.map(item => (
-          <section key={item.label} style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <section key={item.label} data-glass="card" style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
               <ShellIconTile icon={item.icon} size={38} />
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -10454,7 +10459,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
     </button>
   );
   return (
-    <nav aria-label="Main" style={{
+    <nav aria-label="Main" data-glass="" style={{
       position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
@@ -10488,6 +10493,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     border: `1px solid ${PORTAL_SHELL.border}`,
     borderRadius: 8,
     boxShadow: PORTAL_SHELL.shadowSoft,
+    position: 'relative',
   };
   const iconTile = {
     width: 38,
@@ -10520,6 +10526,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      data-glass-scrim=""
       style={{
         position: 'fixed', inset: 0, zIndex: 150,
         background: 'rgba(15,23,42,0.42)',
@@ -10527,9 +10534,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="More navigation" style={{
+      <div role="dialog" aria-modal="true" aria-label="More navigation" data-glass="" style={{
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
+        position: 'relative',
         padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
@@ -10551,7 +10559,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
           <ShellCloseButton onClick={onClose} label="Close more menu" />
         </div>
 
-        <section style={{ ...card, padding: 8, marginBottom: 10 }}>
+        <section data-glass="soft" style={{ ...card, padding: 8, marginBottom: 10 }}>
           {MORE_TABS.map(t => {
             const isActive = activeTab === t.id;
             return (
@@ -10582,7 +10590,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
           })}
         </section>
 
-        <section style={{ ...card, padding: 14 }}>
+        <section data-glass="soft" style={{ ...card, padding: 14 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={iconTile}><Icon name="sos" size={18} strokeWidth={2} /></span>
             <div>
@@ -10953,6 +10961,11 @@ export default function PortalPage() {
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
+  // Glass dark-launch: same ?glass=1 gate as the estimate/pay pages, read
+  // once at mount. Home is the hero surface (full scene with orbs); every
+  // other tab keeps the quiet pro wash so utility work stays composed.
+  const [glassActive] = useState(glassParamRequested);
+  useGlassSurface(glassActive, activeTab === 'dashboard' ? 'full' : 'pro');
 
   // Close menu on outside click
   useEffect(() => {
@@ -11013,12 +11026,14 @@ export default function PortalPage() {
   return (
     <div style={{
       minHeight: '100vh',
-      background: PORTAL_SHELL.page,
+      // Under glass the fixed scene on <html> provides the backdrop; an
+      // opaque page wash here would occlude it.
+      background: glassActive ? 'transparent' : PORTAL_SHELL.page,
       fontFamily: FONTS.body,
       color: PORTAL_SHELL.body,
     }}>
       {/* Header */}
-      <div style={{
+      <div data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
@@ -11036,7 +11051,7 @@ export default function PortalPage() {
           </div>
         </div>
         {!isMobileShell && (
-          <nav aria-label="Customer portal" style={{
+          <nav aria-label="Customer portal" data-glass="soft" style={{
             flex: 1, minWidth: 0, margin: '0 10px',
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
@@ -11044,6 +11059,7 @@ export default function PortalPage() {
             border: `1px solid ${PORTAL_SHELL.border}`,
             borderRadius: 12,
             padding: 4,
+            position: 'relative',
           }}>
             {headerNavItems.map(headerNavButton)}
           </nav>
@@ -11053,12 +11069,14 @@ export default function PortalPage() {
             <button
               type="button"
               onClick={() => setShowReportIssue(true)}
+              data-glass-accent=""
               style={{
                 minHeight: 38,
                 borderRadius: 10,
                 border: 'none',
                 background: PORTAL_SHELL.text,
                 color: '#fff',
+                position: 'relative',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -11082,12 +11100,14 @@ export default function PortalPage() {
               aria-label="Account menu"
               aria-haspopup="dialog"
               aria-expanded={showMenu}
+              data-glass="chip"
               style={{
                 minHeight: 38,
                 width: isMobileShell ? 38 : 'auto',
                 borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+                position: 'relative',
                 padding: isMobileShell ? 0 : '4px 8px 4px 4px',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -11122,7 +11142,7 @@ export default function PortalPage() {
               )}
             </button>
             {showMenu && (
-              <div role="dialog" aria-label="Account menu" style={{
+              <div role="dialog" aria-label="Account menu" data-glass="modal" style={{
                 position: 'absolute',
                 right: 0,
                 top: 46,
