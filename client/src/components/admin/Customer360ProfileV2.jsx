@@ -2339,7 +2339,11 @@ function PropertyZonesPanel({ customerId }) {
   // The 360 sheet swaps customers in place (selected360Id) — everything here
   // is per-property state, so a customer change must drop it all or the old
   // satellite image/zones would stay on screen while saves hit the new id.
+  // customerRef lets in-flight save responses check whether they still
+  // belong to the customer on screen (the load effect uses its own cleanup).
+  const customerRef = useRef(customerId);
   useEffect(() => {
+    customerRef.current = customerId;
     setOpen(false);
     setMap(null);
     setMarks({});
@@ -2348,6 +2352,7 @@ function PropertyZonesPanel({ customerId }) {
     setLine("pest");
     setErr("");
     setMsg("");
+    setSaving(false);
   }, [customerId]);
 
   // Deps are the EXPANSION triggers only (open / customer / Retry nonce) —
@@ -2448,10 +2453,15 @@ function PropertyZonesPanel({ customerId }) {
     clearingStaleOnly;
 
   const setZoneMark = (label, shape) => {
+    // frozen during a save: ZoneMarkingStep's Remove/resize buttons bypass
+    // its disabled prop, and an edit landing here mid-PUT would be wiped by
+    // the success handler while the panel reports Saved
+    if (saving) return;
     dirtyRef.current.add(label);
     setMarks((prev) => ({ ...prev, [label]: shape }));
   };
   const clearZoneMark = (label) => {
+    if (saving) return;
     // removing a preload must submit a clear; removing a session mark is local
     if (preloads[normalizeZoneKey(label)]) dirtyRef.current.add(label);
     else dirtyRef.current.delete(label);
@@ -2485,6 +2495,10 @@ function PropertyZonesPanel({ customerId }) {
           body: JSON.stringify({ serviceLine: line, zoneShapes: entries }),
         },
       );
+      // the 360 sheet may have swapped customers while the PUT was in
+      // flight — this response belongs to the OLD customer, and folding it
+      // into state would overwrite the new customer's panel
+      if (customerRef.current !== customerId) return;
       // fold the saved state into the preloads so the panel reflects
       // reality, and drop ONLY the saved labels from the edit state — an
       // operator can have unsaved marks on another service line, and wiping
@@ -2528,9 +2542,9 @@ function PropertyZonesPanel({ customerId }) {
         `Saved — ${s.shapesApplied || 0} mark${(s.shapesApplied || 0) === 1 ? "" : "s"} applied${s.cleared ? `, ${s.cleared} cleared` : ""}${s.created ? `, ${s.created} zone${s.created === 1 ? "" : "s"} created` : ""}`,
       );
     } catch (e) {
-      setErr(e.message || "Save failed");
+      if (customerRef.current === customerId) setErr(e.message || "Save failed");
     } finally {
-      setSaving(false);
+      if (customerRef.current === customerId) setSaving(false);
     }
   };
 
