@@ -10111,7 +10111,17 @@ function isNonServiceOneTimeItem(item = {}) {
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
   if (!name && !service) return true;
-  return service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount';
+  // Discount rows (manual_discount, negative adjustments) take money off —
+  // they can't be an out-of-scope service.
+  if (item?.kind === 'discount' || service === 'manual_discount') return true;
+  if (service === 'waveguard_setup' || service === 'rodent_bundle_discount') return true;
+  // A POSITIVE one_time_adjustment is the residual "Other one-time services"
+  // charge normalizeOneTimeBreakdown mints when the saved one-time total
+  // exceeds the classified rows — that's real unclassified work, so it stays
+  // a service row and a scoped release fails closed on it. Zero/negative
+  // adjustments are discounts/rounding and never block.
+  if (service === 'one_time_adjustment') return !(Number(item?.amount) > 0);
+  return false;
 }
 
 function serviceCategoryForOneTimeItem(item = {}) {
@@ -10127,6 +10137,13 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
+  // One-time lawn specialty rows from the pricing engine (priceTopDressing /
+  // priceDethatching / pricePlugging) carry keys with no 'lawn' substring, so
+  // the generic lawn heuristic below never sees them.
+  if (
+    service.includes('top_dress') || service.includes('dethatch') || service.includes('plugging')
+    || /top[ -_]?dress|dethatch|\bplugging\b/i.test(name)
+  ) return 'lawn_care';
   if (isTreeShrubServiceName(name) || service.includes('tree') || service.includes('shrub') || service.includes('palm')) return 'tree_shrub';
   if (isMosquitoServiceName(name) || service.includes('mosquito')) return 'mosquito';
   if (isLawnServiceName(name) || service.includes('lawn')) return 'lawn_care';
@@ -10196,12 +10213,21 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
   return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
 }
 
+// Mirrors the pricing engine's serviceSelected(): commercial engine-input
+// flags are OBJECTS ({selected, commercialSubtype, ...}), so plain truthiness
+// would read a deselected {selected:false} as an active service.
+function engineCommercialServiceSelected(value) {
+  if (value === true) return true;
+  if (!value || typeof value !== 'object') return false;
+  return value.selected === true || value.enabled === true || value.value === true;
+}
+
 function inferCategoriesFromEngineInputs(estData = {}) {
   const inputs = estData?.inputs || estData?.engineInputs || {};
   const services = inputs.services || {};
   return [
-    services.pest || inputs.svcPest ? 'pest_control' : null,
-    services.lawn || services.lawnCare || inputs.svcLawn ? 'lawn_care' : null,
+    services.pest || inputs.svcPest || engineCommercialServiceSelected(services.commercialPest) ? 'pest_control' : null,
+    services.lawn || services.lawnCare || inputs.svcLawn || engineCommercialServiceSelected(services.commercialLawn) ? 'lawn_care' : null,
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,

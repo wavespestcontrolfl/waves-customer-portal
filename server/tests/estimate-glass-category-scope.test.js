@@ -13,6 +13,12 @@
 //   service row) passed because collectServiceCategories silently drops the
 //   unknown row; unclassified real service rows now fail closed, while
 //   non-service rows (fees/adjustments/discounts) never block.
+// r4 — edge cases of r3's non-service set: a POSITIVE one_time_adjustment is
+//   the residual "Other one-time services" charge (real unclassified work →
+//   blocks), manual_discount/discount-kind rows never block, engine lawn
+//   specialty keys (top_dressing/dethatching/plugging) classify as lawn_care,
+//   and commercial pest/lawn engine-input flags (objects — selected semantics)
+//   infer their residential categories.
 const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
@@ -79,11 +85,44 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
   test('r3: fee/adjustment/discount rows are not services and never block', () => {
     const recurringPest = [{ service: 'pest_control' }];
     const feeRows = [
-      { service: 'waveguard_setup', name: 'WaveGuard Setup' },
-      { service: 'one_time_adjustment', name: 'Adjustment' },
-      { service: 'rodent_bundle_discount', name: 'Bundle Discount' },
+      { service: 'waveguard_setup', name: 'WaveGuard Setup', amount: 99, kind: 'charge' },
+      { service: 'one_time_adjustment', label: 'Other one-time services', amount: -25, kind: 'discount' },
+      { service: 'rodent_bundle_discount', name: 'Bundle Discount', amount: -50 },
     ];
     expect(glassCategoryEligible({}, recurringPest, feeRows, PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r4: a POSITIVE one_time_adjustment is real unclassified work and blocks', () => {
+    const recurringPest = [{ service: 'pest_control' }];
+    const otherCharge = [{ service: 'one_time_adjustment', label: 'Other one-time services', amount: 150, kind: 'charge' }];
+    expect(glassCategoryEligible({}, recurringPest, otherCharge, PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r4: manual_discount rows never block a discounted in-scope quote', () => {
+    const recurringPest = [{ service: 'pest_control' }];
+    const discount = [{ service: 'manual_discount', label: 'Discount', amount: -50, kind: 'discount' }];
+    expect(glassCategoryEligible({}, recurringPest, discount, PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r4: engine lawn specialty rows classify as lawn_care and stay in scope', () => {
+    const specialtyRows = [
+      { service: 'top_dressing', name: 'Top Dressing', amount: 480 },
+      { service: 'dethatching', name: 'Dethatching', amount: 320 },
+      { service: 'plugging', name: 'Plugging', amount: 260 },
+    ];
+    expect(glassCategoryEligible({}, [], specialtyRows, PEST_LAWN_SCOPE)).toBe(true);
+    expect(deriveServiceCategory({}, [], [specialtyRows[0]])).toBe('lawn_care');
+  });
+
+  test('r4: commercial pest/lawn engine inputs infer their categories (selected semantics)', () => {
+    const commercialPest = { engineInputs: { services: { commercialPest: { selected: true, commercialSubtype: 'office' } } } };
+    const commercialLawn = { engineInputs: { services: { commercialLawn: { selected: true } } } };
+    const deselected = { engineInputs: { services: { commercialPest: { selected: false } } } };
+    expect(glassCategoryEligible(commercialPest, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible(commercialLawn, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    // A deselected commercial object must not read as active — nothing
+    // classifies, so the scoped release fails closed.
+    expect(glassCategoryEligible(deselected, [], [], PEST_LAWN_SCOPE)).toBe(false);
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {
