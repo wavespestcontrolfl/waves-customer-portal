@@ -192,10 +192,13 @@ async function reserveSlot({
   }
   const { date, windowStart, techId } = parsed;
 
-  // Past-slot guard: the slot list is generated minutes before the customer
-  // taps it, and ASAP same-day slots can have already elapsed by confirm
-  // time. A reservation for an elapsed window books a visit no tech will
-  // ever make.
+  // Stale-slot guard: the slot list is generated minutes before the customer
+  // taps it, and a page left open can hold windows the generator would no
+  // longer offer. Enforce the same minimum booking lead the generator uses
+  // (estimate-slot-availability's minimumLeadMinutes default) — a window
+  // inside the lead can't be routed and dispatched, so reserving it books a
+  // visit no tech can make on time.
+  const MINIMUM_LEAD_MINUTES = 120;
   const todayEt = etDateString();
   if (date < todayEt) {
     const err = new Error('slot date has already passed');
@@ -206,8 +209,8 @@ async function reserveSlot({
   if (date === todayEt) {
     const nowEt = etParts(new Date());
     const [sh, sm] = String(windowStart).split(':').map(Number);
-    if (sh * 60 + sm <= nowEt.hour * 60 + nowEt.minute) {
-      const err = new Error('slot time has already passed today');
+    if (sh * 60 + sm <= nowEt.hour * 60 + nowEt.minute + MINIMUM_LEAD_MINUTES) {
+      const err = new Error('slot start is inside the booking lead window');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = slotId;
       throw err;
