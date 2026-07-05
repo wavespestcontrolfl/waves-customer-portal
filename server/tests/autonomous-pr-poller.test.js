@@ -34,6 +34,10 @@ jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
   planInternalLinksForTarget: jest.fn(),
   internalLinkPlanningDisabled: jest.fn(() => false),
+  // REAL routing helpers: deriveBlogRouteUrl must stay bound to the exact
+  // slug/category composition the publisher stamps, so the fallback tests
+  // exercise the genuine derivation rather than a hand-written copy.
+  _internals: jest.requireActual('../services/content-astro/astro-publisher')._internals,
 }));
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
@@ -307,6 +311,106 @@ describe('merged-by-human reconciliation', () => {
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'live_check_failed' });
     expect(runUpdates(updates)).toHaveLength(0);
     expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
+  // Stale-canonical fallback: pre-canonical-stamping June 2026 runs stored a
+  // canonical WITHOUT the /{category}/ prefix (live route is
+  // /{category}/{leaf}/), so the stored URL 404s forever on a post that IS
+  // live. finalizeMerged derives the category-route URL with the publisher's
+  // own helpers and adopts it iff IT responds.
+  describe('stale-canonical derived-route fallback', () => {
+    const STALE = 'https://www.wavespestcontrol.com/dangerous-ants-in-florida/';
+    const DERIVED = 'https://www.wavespestcontrol.com/pest-control/dangerous-ants-in-florida/';
+    const staleRun = (over = {}) => makeRun({
+      draft_payload: JSON.stringify({
+        type: 'draft',
+        frontmatter: {
+          canonical: STALE,
+          slug: 'dangerous-ants-in-florida',
+          category: 'Pest Library', // writer label — normalizeAutonomousCategory maps to pest-control
+          title: 'The Most Dangerous Ants in Florida',
+          primary_keyword: 'dangerous ants florida',
+        },
+      }),
+      ...over,
+    });
+
+    test('stored canonical 404s but derived category route is live -> finalizes on the derived URL', async () => {
+      const updates = setupDb({ pending: [staleRun()] });
+      gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-19T05:04:33Z' });
+      pagesPoll.liveUrlResponds.mockImplementation(async (u) => u === DERIVED);
+      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+      publisher.planInternalLinksForTarget.mockResolvedValue({ url: DERIVED, queued: 1, candidates: 1 });
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0].merged).toBe(true);
+      expect(pagesPoll.liveUrlResponds).toHaveBeenCalledWith(STALE);
+      expect(pagesPoll.liveUrlResponds).toHaveBeenCalledWith(DERIVED);
+      const claim = runUpdates(updates)[0];
+      expect(claim.updates).toMatchObject({ outcome: 'completed_published', published_url: DERIVED });
+      expect(indexNow.submit).toHaveBeenCalledWith(DERIVED);
+    });
+
+    test('NULL stored canonical (blank brief) with a live derived route -> finalizes instead of target_url_unresolved', async () => {
+      const run = staleRun();
+      const payload = JSON.parse(run.draft_payload);
+      delete payload.frontmatter.canonical;
+      const updates = setupDb({ pending: [{ ...run, draft_payload: JSON.stringify(payload) }] });
+      gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-14T19:21:05Z' });
+      pagesPoll.liveUrlResponds.mockImplementation(async (u) => u === DERIVED);
+      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+      publisher.planInternalLinksForTarget.mockResolvedValue({ url: DERIVED, queued: 0, candidates: 0 });
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0].merged).toBe(true);
+      const claim = runUpdates(updates)[0];
+      expect(claim.updates).toMatchObject({ outcome: 'completed_published', published_url: DERIVED });
+    });
+
+    test('neither stored nor derived URL responds -> stays parked awaiting_live_deploy (no finalize)', async () => {
+      const updates = setupDb({ pending: [staleRun()] });
+      gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-19T05:04:33Z' });
+      pagesPoll.liveUrlResponds.mockResolvedValue(false);
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_live_deploy', url: STALE });
+      expect(runUpdates(updates)).toHaveLength(0);
+      expect(indexNow.submit).not.toHaveBeenCalled();
+    });
+
+    test('non-blog lanes never derive: a 404 metadata target stays parked after ONE live check', async () => {
+      setupDb({
+        pending: [makeRun({
+          action_type: 'rewrite_title_meta',
+          skip_reason: 'metadata_pr_pending_merge',
+          draft_payload: JSON.stringify({ type: 'metadata', page_url: METADATA_PAGE_URL }),
+        })],
+      });
+      gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-19T05:04:33Z' });
+      pagesPoll.liveUrlResponds.mockResolvedValue(false);
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'awaiting_live_deploy', url: METADATA_PAGE_URL });
+      expect(pagesPoll.liveUrlResponds).toHaveBeenCalledTimes(1);
+      expect(pagesPoll.liveUrlResponds).toHaveBeenCalledWith(METADATA_PAGE_URL);
+    });
+
+    test('deriveBlogRouteUrl: real publisher helpers map the writer category label and keep the canonical origin', () => {
+      expect(poller._internals.deriveBlogRouteUrl(staleRun())).toBe(DERIVED);
+      // spoke self-canonical keeps its origin
+      const spoke = staleRun();
+      const p = JSON.parse(spoke.draft_payload);
+      p.frontmatter.canonical = 'https://sarasotaflpestcontrol.com/dangerous-ants-in-florida/';
+      spoke.draft_payload = JSON.stringify(p);
+      expect(poller._internals.deriveBlogRouteUrl(spoke))
+        .toBe('https://sarasotaflpestcontrol.com/pest-control/dangerous-ants-in-florida/');
+      // no safe slug -> null, never a guess
+      expect(poller._internals.deriveBlogRouteUrl(makeRun({ draft_payload: JSON.stringify({ frontmatter: {} }) }))).toBeNull();
+    });
   });
 
   test('merged with NO resolvable target URL (draft + brief blank): fails closed, never completed_published with null URL', async () => {

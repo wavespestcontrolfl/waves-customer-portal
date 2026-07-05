@@ -2589,5 +2589,6 @@ module.exports = {
     assertOpenPublishPrIsHubOnly,
     syncDraftPublishTarget,
     mdxBreakingToken,
+    normalizeAutonomousCategory,
   },
 };
