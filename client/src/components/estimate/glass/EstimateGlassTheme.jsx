@@ -89,6 +89,26 @@ function classify(revealIO, statIO) {
     const rad = parseFloat(cs.borderTopLeftRadius) || 0;
     if (PAGE_BG.includes(bg)) el.style.setProperty('background', 'transparent', 'important');
 
+    // Selection can change WITHOUT a remount (FrequencySlider / SlotPicker
+    // keyed buttons just get new inline background/color). Re-read the
+    // React-owned inline style each pass and flip the tag so a newly
+    // selected control goes gold and a deselected one returns to chip.
+    if ((el.tagName === 'BUTTON' || el.tagName === 'A') && (el.hasAttribute('data-glass') || el.hasAttribute('data-glass-accent'))) {
+      const inline = el.style.backgroundColor;
+      if (inline) {
+        const im = inline.match(/\d+(?:\.\d+)?/g);
+        const alpha = im && im.length >= 4 ? parseFloat(im[3]) : 1;
+        const dark = im && alpha > 0.5 && (0.2126 * im[0] + 0.7152 * im[1] + 0.0722 * im[2]) / 255 < 0.35;
+        if (dark && el.hasAttribute('data-glass')) {
+          el.removeAttribute('data-glass');
+          el.setAttribute('data-glass-accent', '');
+        } else if (!dark && el.hasAttribute('data-glass-accent') && (inline.startsWith('rgb(255') || TINT[inline] || inline === 'transparent' || alpha === 0)) {
+          el.removeAttribute('data-glass-accent');
+          el.setAttribute('data-glass', 'chip');
+        }
+      }
+    }
+
     // gold accent: solid dark CTAs (buttons only; height gate skips small pills)
     const m = bg.match(/\d+/g);
     if (el.tagName === 'BUTTON' && m && bg.indexOf('rgba') !== 0 && !el.hasAttribute('data-glass-accent')) {
@@ -253,18 +273,21 @@ export default function EstimateGlassTheme({ active }) {
     const run = () => classify(revealIO, statIO);
     run();
 
-    // re-tag after React re-renders (text-node edits don't fire childList)
-    let pending = false;
-    const mo = new MutationObserver((muts) => {
-      if (!muts.some((x) => x.addedNodes.length) || pending) return;
-      pending = true;
-      setTimeout(() => {
-        pending = false;
+    // Re-tag after React re-renders. childList covers mount/unmount;
+    // attributeFilter ['style'] covers in-place selection changes (Codex rd2).
+    // classify() itself writes styles/attributes, so after each run the
+    // records it produced are flushed with takeRecords() to avoid a loop.
+    let retagTimer = 0;
+    const mo = new MutationObserver(() => {
+      if (retagTimer) return;
+      retagTimer = window.setTimeout(() => {
+        retagTimer = 0;
         run();
+        mo.takeRecords();
       }, 150);
     });
     const rootEl = document.getElementById('root');
-    if (rootEl) mo.observe(rootEl, { childList: true, subtree: true });
+    if (rootEl) mo.observe(rootEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
 
     // cursor-follow specular + pointer/scroll parallax on the orbs
     let raf = 0;
@@ -305,6 +328,7 @@ export default function EstimateGlassTheme({ active }) {
       document.removeEventListener('pointermove', onMove);
       window.removeEventListener('scroll', onScroll);
       if (raf) cancelAnimationFrame(raf);
+      if (retagTimer) clearTimeout(retagTimer);
       mo.disconnect();
       revealIO.disconnect();
       statIO.disconnect();
