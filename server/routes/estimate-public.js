@@ -365,7 +365,11 @@ function shapeLinkedAppointment(row) {
     scheduledDate: dateOnly(row.scheduled_date),
     windowStart: hhmm(row.window_start),
     windowEnd: hhmm(row.window_end),
-    windowDisplay: row.window_display || customerArrivalWindowDisplay(row.window_start),
+    // Derived 2h arrival range FIRST: prod window_display values are only ever
+    // a bare start time ("9:00 AM" — the phone-booking writer) or NULL, never a
+    // range, so stored text can only lose information vs deriving from
+    // window_start. Stored text is the fallback for rows with no parseable start.
+    windowDisplay: customerArrivalWindowDisplay(row.window_start) || row.window_display || null,
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
   };

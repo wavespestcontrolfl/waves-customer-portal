@@ -1711,7 +1711,9 @@ describe('public estimate one-time breakdown', () => {
         scheduled_date: '2026-06-03',
         window_start: '09:00:00',
         window_end: '11:00:00',
-        window_display: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        // Prod window_display is only ever a bare start time (phone-booking
+        // writer) or NULL — the derived 2h arrival range must win over it.
+        window_display: '9:00 AM',
         service_type: 'Initial Pest Control',
         status: 'confirmed',
       },
@@ -1724,11 +1726,28 @@ describe('public estimate one-time breakdown', () => {
         scheduledDate: '2026-06-03',
         windowStart: '09:00',
         windowEnd: '11:00',
-        windowDisplay: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        windowDisplay: '9:00 AM - 11:00 AM',
         serviceType: 'Initial Pest Control',
         status: 'confirmed',
       },
     });
+  });
+
+  test('stored window_display is the fallback only when window_start is unparseable', () => {
+    const { appointment } = buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'svc-789',
+        scheduled_date: '2026-07-12',
+        window_start: null,
+        window_end: null,
+        window_display: 'Morning visit',
+        service_type: 'Quarterly Pest Control',
+        status: 'pending',
+      },
+    });
+
+    expect(appointment.windowDisplay).toBe('Morning visit');
   });
 
   test('missing window_display falls back to the 2h arrival window, never raw 24h window_start', () => {
