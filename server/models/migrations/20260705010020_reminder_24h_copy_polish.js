@@ -5,12 +5,17 @@
  *
  *  1. "Your tech will message you when they are about 15 minutes out." is
  *     wrong — we don't message ad hoc, the en-route automation sends a
- *     live tracking link. Say that.
+ *     live tracking link. Say that, channel-neutrally ("we will send
+ *     you"): this email is also the fallback when SMS can't be delivered
+ *     (landline/no-mobile customers), so "we will text you" would be a
+ *     false promise on exactly the sends where email is the only channel.
  *  2. "scheduled for tomorrow." now carries the day, date, and start time
- *     inline ("tomorrow, {{appointment_day}}, {{appointment_date}},
- *     starting at {{appointment_time}}") — appointment_day/date are new
- *     allowed variables for this template (the 72h template already has
- *     them; the sender now supplies them for 24h too).
+ *     inline via ONE composed optional variable ({{appointment_when}},
+ *     e.g. ", Tuesday, July 8, 2026, starting at 8:00 AM") supplied by
+ *     the sender. Composed sender-side so a fallback send with no
+ *     reconstructable appointment time degrades to the clean original
+ *     sentence ("…scheduled for tomorrow.") instead of "tomorrow, , ,
+ *     starting at ." — per-field inline variables cannot degrade.
  *  3. Signature tightened to "We look forward to servicing your home.
  *     — The Waves Team".
  *
@@ -22,17 +27,17 @@
 const TEMPLATE_KEY = 'appointment.reminder_24h';
 
 const OLD_TOMORROW = 'This is a reminder that your {{service_type}} appointment with Waves is scheduled for tomorrow.';
-const NEW_TOMORROW = 'This is a reminder that your {{service_type}} appointment with Waves is scheduled for tomorrow, {{appointment_day}}, {{appointment_date}}, starting at {{appointment_time}}.';
+const NEW_TOMORROW = 'This is a reminder that your {{service_type}} appointment with Waves is scheduled for tomorrow{{appointment_when}}.';
 
 const OLD_ARRIVAL = 'Expect your technician to arrive within a two-hour window of the scheduled start time. Your tech will message you when they are about 15 minutes out.';
-const NEW_ARRIVAL = 'Expect your technician to arrive within a two-hour window of the scheduled start time. When your technician is on the way, we will text you a live tracking link so you can follow along.';
+const NEW_ARRIVAL = 'Expect your technician to arrive within a two-hour window of the scheduled start time. When your technician is on the way, we will send you a live tracking link so you can follow along.';
 
 const OLD_SIGNATURE = 'Thank you, The Waves Team';
 const NEW_SIGNATURE = 'We look forward to servicing your home. — The Waves Team';
 
-const NEW_VARIABLES = ['appointment_day', 'appointment_date'];
+const NEW_VARIABLES = ['appointment_when'];
 
-const FIXTURE_SAMPLES = { appointment_day: 'Tuesday', appointment_date: 'July 8, 2026' };
+const FIXTURE_SAMPLES = { appointment_when: ', Tuesday, July 8, 2026, starting at 8:00 AM' };
 
 function asArray(value) {
   if (Array.isArray(value)) return value;

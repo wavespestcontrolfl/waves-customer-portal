@@ -243,6 +243,18 @@ function appFooterHtml(T) {
           </div>`;
 }
 
+/**
+ * Stripe trust line for invoice-family emails (owner ask 2026-07-05) —
+ * mirrors Stripe's own invoice-email convention. Styled-text wordmark
+ * (no hosted badge asset to maintain); the muted link follows the
+ * active theme. Consumed by BOTH invoice send paths: the invoice.*
+ * DB-template renderer (email-template-library.js — the path production
+ * actually takes) and the legacy SMTP fallback (invoice-email.js).
+ */
+function stripeFooterLine() {
+  return `<div style="margin-top:12px;font-size:12px;">Powered by <a href="https://stripe.com" style="color:#635BFF;font-weight:700;text-decoration:none;">stripe</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href="https://stripe.com/invoicing" style="color:${activeTheme().muted};text-decoration:underline;">Learn more about Stripe Invoicing</a></div>`;
+}
+
 function glassPillHeader(T) {
   return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
         <tr>
@@ -703,6 +715,7 @@ module.exports = {
   ensureLegalTextFooter,
   ctaButton,
   blockPalette,
+  stripeFooterLine,
   newsletterPalette,
   currency,
   formatDate,

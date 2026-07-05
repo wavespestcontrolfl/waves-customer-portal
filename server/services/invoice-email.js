@@ -13,7 +13,7 @@ const db = require('../models/db');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
-const { wrapEmail, ctaButton, currency, formatDate, plainText, colors } = require('./email-template');
+const { wrapEmail, ctaButton, currency, formatDate, plainText, colors, stripeFooterLine } = require('./email-template');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
@@ -43,14 +43,6 @@ function getTransporter() {
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
-}
-
-// Stripe trust line under the invoice footer (owner ask 2026-07-05) —
-// mirrors Stripe's own invoice-email convention. Wordmark is styled text
-// (no hosted badge asset to maintain); the muted link color follows the
-// active email theme.
-function stripeFooterLine() {
-  return `<div style="margin-top:12px;font-size:12px;">Powered by <a href="https://stripe.com" style="color:#635BFF;font-weight:700;text-decoration:none;">stripe</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href="https://stripe.com/invoicing" style="color:${colors.MUTED};text-decoration:underline;">Learn more about Stripe Invoicing</a></div>`;
 }
 
 function pdfAttachment(filename, buffer) {

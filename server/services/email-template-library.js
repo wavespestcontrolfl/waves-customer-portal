@@ -7,6 +7,7 @@ const {
   ensureLegalTextFooter,
   ctaButton,
   blockPalette,
+  stripeFooterLine,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
@@ -484,9 +485,14 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
     bodyText = [bodyText, defaultCta.bodyText].filter(Boolean).join('\n\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
+  // Invoice-family templates (invoice.sent / invoice.receipt /
+  // invoice.followup_*) carry the Stripe trust line — this renderer is
+  // the path production invoice sends actually take, so the line must
+  // live here, not only in invoice-email.js's SMTP fallback.
+  const isInvoiceTemplate = String(template.template_key || '').startsWith('invoice.');
   const footerNote = mode === 'marketing'
     ? null
-    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
+    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.${isInvoiceTemplate ? stripeFooterLine() : ''}`;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
