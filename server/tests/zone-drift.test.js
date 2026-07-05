@@ -77,7 +77,10 @@ test('small center move east shifts the rect WEST onto the same ground point', (
   expect(out.x).toBeCloseTo(0.4 + dx, 10);
   expect(out.y).toBeCloseTo(0.3, 10);
   expect(out.w).toBe(0.2);
-  expect(out.ref).toEqual(shape.ref); // ref rides along for future renders
+  // the shifted coordinates anchor to the CURRENT image — the ref must say
+  // so, or a preload round-trip would double-shift on the next render
+  expect(out.ref).toMatchObject({ lat: cur.lat, lng: cur.lng, zoom: ZOOM, width: WIDTH, height: HEIGHT });
+  expect(out.ref.capturedAt).toBe(shape.ref.capturedAt); // provenance untouched
 });
 
 test('small center move north shifts the circle DOWN (mercator y-down)', () => {
@@ -119,13 +122,40 @@ test('shape shifted entirely out of frame → dropped', () => {
   expect(resolveZoneImageShape(shape, context(cur))).toBeNull();
 });
 
-test('partial overhang at the edge is kept (still marks real ground)', () => {
+test('partial overhang at the edge is CLIPPED into the frame (coords stay 0-1)', () => {
+  // the viewer only treats geometry as normalized when every coordinate is
+  // 0-1, and sanitizeZoneShape rejects out-of-range values on a re-save —
+  // so the shifted rect must clip, never go negative
   const delta = (0.2 * WIDTH * 360) / (256 * (2 ** ZOOM));
   const cur = { lat: REF.lat, lng: REF.lng + delta };
   const shape = { type: 'rect', x: 0.1, y: 0.3, w: 0.2, h: 0.1, ref: ref() };
   const out = resolveZoneImageShape(shape, context(cur));
+  const { dx } = expectedShift(cur); // ≈ -0.2 → raw x ≈ -0.1
   expect(out).not.toBeNull();
-  expect(out.x).toBeCloseTo(0.1 + expectedShift(cur).dx, 10);
+  expect(out.x).toBe(0); // clipped at the left edge
+  expect(out.w).toBeCloseTo(0.1 + dx + 0.2, 10); // right edge minus the clip
+  expect(out.w).toBeGreaterThan(0);
+  expect(out.y).toBeCloseTo(0.3, 10);
+});
+
+test('rect reduced to a sliver by clipping is dropped', () => {
+  // raw x ≈ -0.19, right edge ≈ 0.01 → clipped width ≈ 0.01 < minimum
+  const delta = (0.2 * WIDTH * 360) / (256 * (2 ** ZOOM));
+  const cur = { lat: REF.lat, lng: REF.lng + delta };
+  const shape = { type: 'rect', x: 0.01, y: 0.3, w: 0.2, h: 0.1, ref: ref() };
+  expect(resolveZoneImageShape(shape, context(cur))).toBeNull();
+});
+
+test('circle whose center leaves the frame is dropped (never out-of-range coords)', () => {
+  const delta = (0.2 * WIDTH * 360) / (256 * (2 ** ZOOM));
+  const cur = { lat: REF.lat, lng: REF.lng + delta };
+  // cx 0.1 shifts to ≈ -0.1 → center out of frame
+  const gone = { type: 'circle', cx: 0.1, cy: 0.5, r: 0.08, ref: ref() };
+  expect(resolveZoneImageShape(gone, context(cur))).toBeNull();
+  // cx 0.5 shifts to ≈ 0.3 → still in frame, r untouched
+  const kept = resolveZoneImageShape({ type: 'circle', cx: 0.5, cy: 0.5, r: 0.08, ref: ref() }, context(cur));
+  expect(kept.cx).toBeCloseTo(0.5 + expectedShift(cur).dx, 10);
+  expect(kept.r).toBe(0.08);
 });
 
 test('rows helper: shifts marked rows, nulls untrusted marks, leaves the rest', () => {
@@ -142,4 +172,24 @@ test('rows helper: shifts marked rows, nulls untrusted marks, leaves the rest', 
   expect(out[2]).toBe(zones[2]); // unmarked row untouched
   expect(out[3]).toBe(zones[3]); // unparseable legacy value untouched
   expect(zones[0].geometry_image.x).toBe(0.4); // input rows never mutated
+});
+
+test('allOrNothing: one untrusted mark clears the whole set (report semantics)', () => {
+  // the satellite overlay goes image-only once ANY zone keeps a mark and
+  // drops the rest — a partial drop would publish a coverage map missing a
+  // treated zone, so the report path clears everything → schematic fallback
+  const cur = { lat: REF.lat, lng: REF.lng + SMALL_LNG_DELTA };
+  const zones = [
+    { id: 'a', label: 'Perimeter', geometry_image: { type: 'rect', x: 0.4, y: 0.3, w: 0.2, h: 0.2, ref: ref() } },
+    { id: 'b', label: 'Lawn', geometry_image: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.05, ref: ref({ zoom: 19 }) } },
+    { id: 'c', label: 'Entry', geometry_image: null },
+  ];
+  const out = resolveZoneRowsImageDrift(zones, context(cur), { allOrNothing: true });
+  expect(out[0].geometry_image).toBeNull(); // trusted mark cleared along with the set
+  expect(out[1].geometry_image).toBeNull();
+  expect(out[2]).toBe(zones[2]); // unmarked row untouched
+
+  // with every mark trustworthy, allOrNothing changes nothing
+  const healthy = resolveZoneRowsImageDrift([zones[0], zones[2]], context(cur), { allOrNothing: true });
+  expect(healthy[0].geometry_image.x).toBeCloseTo(0.4 + expectedShift(cur).dx, 10);
 });

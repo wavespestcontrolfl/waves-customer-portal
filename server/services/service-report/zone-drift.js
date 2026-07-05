@@ -26,6 +26,10 @@ const { latLngToWebMercatorPoint } = require('./map-projection');
 // more harm than good (the imagery framing has materially changed) — drop.
 const MAX_DRIFT_FRACTION = 0.25;
 
+// Clipped rects thinner than this are noise, not a mark (matches the capture
+// UI's minimum drag size).
+const MIN_CLIPPED_SIZE = 0.02;
+
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -43,18 +47,32 @@ function parseShape(value) {
   }
 }
 
+// Shifts a shape and CLIPS it to the 0-1 frame. Coordinates must stay in
+// range: the report viewer only treats geometry as normalized when every
+// coordinate is within 0-1, and the save path (sanitizeZoneShape) rejects
+// out-of-range values — an unclipped partial overhang would render at an
+// arbitrary extent and 400 on a preload confirm.
 function shiftedInFrame(shape, dx, dy) {
   if (shape.type === 'rect') {
     const x = num(shape.x) + dx;
     const y = num(shape.y) + dy;
-    // dropped only when the whole rect leaves the frame — partial overhang
-    // still marks the right ground area at the edge
-    if (x + num(shape.w) <= 0 || x >= 1 || y + num(shape.h) <= 0 || y >= 1) return null;
-    return { ...shape, x, y };
+    const w = num(shape.w);
+    const h = num(shape.h);
+    // fully in frame → pure shift, size untouched (no float churn)
+    if (x >= 0 && y >= 0 && x + w <= 1 && y + h <= 1) return { ...shape, x, y };
+    const clippedX = Math.max(0, x);
+    const clippedY = Math.max(0, y);
+    const clippedW = Math.min(1, x + w) - clippedX;
+    const clippedH = Math.min(1, y + h) - clippedY;
+    // a sliver left at the edge is noise, not a mark
+    if (clippedW < MIN_CLIPPED_SIZE || clippedH < MIN_CLIPPED_SIZE) return null;
+    return { ...shape, x: clippedX, y: clippedY, w: clippedW, h: clippedH };
   }
+  // circles keep their radius (it states the treated size) — once the CENTER
+  // leaves the frame the mark no longer points at ground in this image, drop
   const cx = num(shape.cx) + dx;
   const cy = num(shape.cy) + dy;
-  if (cx + num(shape.r) <= 0 || cx - num(shape.r) >= 1 || cy + num(shape.r) <= 0 || cy - num(shape.r) >= 1) return null;
+  if (cx < 0 || cx > 1 || cy < 0 || cy > 1) return null;
   return { ...shape, cx, cy };
 }
 
@@ -99,7 +117,24 @@ function resolveZoneImageShape(rawShape, { center, zoom, width = 640, height = 3
 
   if (dx === 0 && dy === 0) return shape;
   if (Math.abs(dx) > MAX_DRIFT_FRACTION || Math.abs(dy) > MAX_DRIFT_FRACTION) return null;
-  return shiftedInFrame(shape, dx, dy);
+  const shifted = shiftedInFrame(shape, dx, dy);
+  if (!shifted) return null;
+  // The shifted coordinates are anchored to the CURRENT image, so the ref
+  // must say so — otherwise a consumer that round-trips the shape back into
+  // the DB (preload → save without redraw) would store shifted coordinates
+  // with the stale ref, and the next render would apply the same correction
+  // again. capturedAt stays: it is provenance of the drawing, not the anchor.
+  return {
+    ...shifted,
+    ref: {
+      ...shifted.ref,
+      lat: curLat,
+      lng: curLng,
+      zoom: effZoom,
+      width,
+      height,
+    },
+  };
 }
 
 /**
@@ -107,15 +142,30 @@ function resolveZoneImageShape(rawShape, { center, zoom, width = 640, height = 3
  * the render-time image context. Returns row copies: shifted shapes replace
  * the stored ones; untrusted marks are removed (geometry_image: null) so
  * every consumer falls back the same way.
+ *
+ * options.allOrNothing — when true, ONE untrusted mark clears EVERY mark in
+ * the set. The report's satellite overlay switches to image-only mode the
+ * moment any zone carries geometry_image and drops the rest, so a partial
+ * drop would silently omit a treated zone from the coverage map; clearing
+ * the whole set sends the report to the schematic fallback instead. The
+ * capture-UI preload keeps the default per-zone behavior on purpose — there
+ * a dropped mark just asks the tech to redraw that one zone, and the
+ * completion submit's own all-marked gate handles completeness.
  */
-function resolveZoneRowsImageDrift(zones = [], imageContext = {}) {
-  return zones.map((zone) => {
+function resolveZoneRowsImageDrift(zones = [], imageContext = {}, { allOrNothing = false } = {}) {
+  let anyDropped = false;
+  const resolvedRows = zones.map((zone) => {
     const stored = parseShape(zone.geometry_image);
     if (!stored || Object.keys(stored).length === 0) return zone;
     const resolved = resolveZoneImageShape(stored, imageContext);
     if (resolved === stored) return zone;
+    if (resolved === null) anyDropped = true;
     return { ...zone, geometry_image: resolved };
   });
+  if (allOrNothing && anyDropped) {
+    return resolvedRows.map((zone) => (zone.geometry_image ? { ...zone, geometry_image: null } : zone));
+  }
+  return resolvedRows;
 }
 
 module.exports = {

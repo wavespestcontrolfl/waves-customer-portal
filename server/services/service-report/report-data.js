@@ -1957,7 +1957,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // here — every downstream consumer (coverage items, satellite overlay)
   // then sees one consistent answer. A re-geocoded property shifts marks to
   // the same ground point; untrusted marks (zoom change / large drift) drop
-  // to null so those zones fall back to the schematic paths.
+  // to null. allOrNothing: one untrusted mark clears the WHOLE set — the
+  // satellite overlay drops schematic-only zones once any zone keeps a mark,
+  // so a partial drop would publish a coverage map missing a treated zone;
+  // clearing the set sends the report to the schematic fallback instead.
   const driftLat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
   const driftLng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
   const resolvedDbZones = resolveZoneRowsImageDrift(supportedDbZones, {
@@ -1965,7 +1968,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     zoom: Number(geometryRow?.zoom) || 20,
     width: 640,
     height: 340,
-  });
+  }, { allOrNothing: true });
   const zones = resolvedDbZones.length ? resolvedDbZones : defaultZones(areaLabels, serviceLine);
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
