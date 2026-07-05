@@ -7685,6 +7685,12 @@ router.put('/:token/accept', async (req, res, next) => {
         entityType: 'estimates',
         entityId: estimate.id,
         customerId,
+        // Primarily rides the accept-flow SMS below (and doubles as the
+        // accept page's scheduling link). Tagged so the click-followup
+        // candidate scan — scoped to channel='sms' outbound links — keeps
+        // chasing accepted-but-never-booked clicks on this link.
+        channel: 'sms',
+        purpose: 'estimate_accept_booking',
       });
     }
     if (estimate.customer_phone && !billByInvoice && treatAsOneTime) {

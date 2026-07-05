@@ -6,6 +6,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const {
@@ -572,9 +573,29 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const nextExpiresAt = estimateExpiresAt(now);
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
-  const viewUrl = await shortenOrPassthrough(longUrl, {
+  // One tracked short code PER CHANNEL LEG (same rule as estimate-follow-up
+  // .js mintStageLinks): on sendMethod='both' either leg can fail alone
+  // (missing/disabled SMS template, policy-blocked SMS, provider error), and
+  // the click-followup candidate scan (services/click-followup.js) admits
+  // sc.channel='sms' links only — a single sms-tagged code reused in the
+  // email payload would let a click on an EMAIL-only delivery masquerade as
+  // an SMS click and queue a proactive SMS nudge. Minting per leg keeps
+  // every click attributable to the channel that actually carried it: a leg
+  // that never goes out just leaves an undelivered (hence unclickable) code
+  // behind, which is harmless. A leg without a contact handle skips the mint
+  // entirely — the long-URL fallback mirrors shortenOrPassthrough's own
+  // graceful degradation on shortener failure.
+  const linkMeta = {
     kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
-  });
+    leadId: await leadIdForEstimate(estimate),
+    purpose: 'estimate_send',
+  };
+  const smsViewUrl = (sendMethod !== 'email' && estimate.customer_phone)
+    ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'sms' })
+    : longUrl;
+  const emailViewUrl = (sendMethod !== 'sms' && estimate.customer_email)
+    ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'email' })
+    : longUrl;
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
   const monthlyTotal = parseFloat(estimate.monthly_total || 0);
   const annualTotal = parseFloat(estimate.annual_total || 0);
@@ -611,7 +632,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
-          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, {
+          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
             workflow: 'admin_estimate_send',
             entity_type: 'estimate',
             entity_id: estimate.id,
@@ -710,7 +731,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
-            viewUrl,
+            viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: proposalAttachments,
@@ -1527,6 +1548,8 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
       kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      leadId: await leadIdForEstimate(estimate),
+      channel: 'sms', purpose: 'estimate_followup_manual',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
@@ -1652,6 +1675,8 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
     const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
       kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      leadId: await leadIdForEstimate(estimate),
+      channel: 'sms', purpose: 'estimate_booking_link',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
@@ -1757,6 +1782,8 @@ router.post('/:id/extend', async (req, res, next) => {
       const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
       const viewUrl = await shortenOrPassthrough(longUrl, {
         kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+        leadId: await leadIdForEstimate(estimate),
+        channel: 'sms', purpose: 'estimate_extended',
       });
       const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
         month: 'long', day: 'numeric', timeZone: 'America/New_York',

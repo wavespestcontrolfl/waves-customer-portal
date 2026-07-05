@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { evaluateClickFollowupGate } = require('../services/click-followup-gate');
 const { isEnabled } = require('../config/feature-gates');
 const { CAMPAIGN_GATE } = require('../services/campaign-drafts');
 const {
@@ -88,6 +90,132 @@ async function releaseDraftClaim(draftId, fields = {}) {
     approved_at: null,
     ...fields,
   }).catch(() => {});
+}
+
+// Send-policy mapping for owner-approved drafts. Click-followup drafts are
+// PROACTIVE estimate nudges, so they must ride the same policy rails as
+// every other estimate follow-up SMS: purpose 'estimate_followup'
+// (transactional consent + quiet hours enforced by the messaging
+// validators), estimateId threaded, and the same consentBasis shape
+// estimate-follow-up.js passes for lead-only contacts. They carry no
+// message_drafts.purpose value, so the intent branch runs FIRST; every
+// other draft (campaign or legacy inbound-reply) rides
+// draftSendPolicyFields' purpose passthrough below.
+function sendPolicyForDraft(draft, recipient) {
+  if (draft.intent === 'click_followup') {
+    const flags = parseFlags(draft.flags);
+    return {
+      audience: recipient.customerId ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      estimateId: flags.estimate_id || undefined,
+      consentBasis: recipient.customerId ? undefined : {
+        status: 'transactional_allowed',
+        source: 'click_followup_draft',
+        capturedAt: draft.created_at || new Date().toISOString(),
+      },
+    };
+  }
+  return draftSendPolicyFields(draft, recipient);
+}
+
+// Terminal gate verdicts → retire the draft (it will never be sendable):
+// which flags.reason to stamp, what the linked action becomes, and the
+// operator-facing message.
+const GATE_RETIRE = {
+  converted: {
+    reason: 'converted_before_send',
+    actionStatus: 'converted',
+    message: 'Contact already converted - draft retired, no send needed',
+  },
+  estimate_terminal: {
+    reason: 'estimate_closed_before_send',
+    actionStatus: 'dismissed',
+    message: 'Estimate is no longer open (declined/expired/archived) - draft retired',
+  },
+  suppressed: {
+    reason: 'recipient_suppressed',
+    actionStatus: 'dismissed',
+    message: 'Recipient is suppressed (opt-out/landline) - draft retired',
+  },
+};
+
+// Transient gate verdicts → HOLD: block this send with a clear reason but
+// leave the draft pending so the owner can retry once the condition passes.
+const GATE_HOLD_MESSAGES = {
+  cadence_due: 'An automated estimate follow-up is due within 24h - draft left pending, retry after it goes out',
+  recent_outbound: 'Contact already received an SMS in the last 48h - draft left pending, retry later',
+  replied_recently: 'Contact replied by SMS recently - handle the conversation in Communications; draft left pending',
+};
+
+// Click-followup drafts (services/click-followup.js) are queued hours or days
+// before the owner approves them, and every guard the queue applied at draft
+// time can flip while the draft sits pending: the contact converts, the
+// estimate is declined/expires/archives, an opt-out lands, another SMS goes
+// out, they reply, or a cadence stage comes due. Re-run the SAME shared gate
+// (services/click-followup-gate.js) at approval time. Narrowly scoped to
+// intent='click_followup'; every other intent is untouched.
+//
+// Returns null (send may proceed), { transient: true } (a conversion lookup
+// failed — 503, claim released, retry re-checks), { hold: true, message }
+// (transient touch-guard — 409, draft stays pending), or
+// { blocked: true, message } after retiring the draft + updating the action.
+async function guardClickFollowupSend(draft) {
+  if (draft.intent !== 'click_followup') return null;
+  const flags = parseFlags(draft.flags);
+  let estimate = null;
+  if (flags.estimate_id) {
+    try {
+      estimate = (await db('estimates').where({ id: flags.estimate_id }).first()) || null;
+    } catch (err) {
+      // A transient estimate-read failure must not masquerade as a MISSING
+      // estimate: the gate would answer estimate_terminal and this route
+      // would PERMANENTLY retire a perfectly sendable draft. Same
+      // fail-closed contract as the gate's guard_error verdict — 503, claim
+      // released, draft stays pending for a retry. Only a read that
+      // SUCCEEDS and finds no row is truly terminal.
+      logger.warn(`[admin-drafts] click-followup estimate lookup failed - holding draft ${draft.id}: ${err.message}`);
+      return { transient: true };
+    }
+  }
+  const verdict = await evaluateClickFollowupGate({
+    estimate,
+    // Which link kind the click landed on decides the 'accepted' semantics
+    // (booking-kind clicks on accepted estimates stay live — see the gate).
+    // Missing on pre-kind drafts → default to the stricter 'estimate' rules.
+    kind: flags.kind || 'estimate',
+    customerId: draft.customer_id || (estimate && estimate.customer_id) || null,
+    leadId: flags.lead_id || null,
+    phone: flags.toPhone || null,
+    sinceTs: flags.clicked_at || draft.created_at,
+  });
+  if (verdict.ok) return null;
+  if (verdict.code === 'guard_error') return { transient: true };
+
+  const retire = GATE_RETIRE[verdict.code];
+  if (retire) {
+    // Draft retire + linked action transition commit or roll back TOGETHER
+    // (same atomicity rule as the send-success and reject paths): a failure
+    // between the two writes would retire the draft but strand the action
+    // in 'drafted' — an open claim for hasOpenAction and the partial unique
+    // indexes, blocking a fresh re-click from re-qualifying the contact
+    // until the 14-day sweep.
+    await db.transaction(async (trx) => {
+      await trx('message_drafts').where({ id: draft.id }).update({
+        status: 'rejected',
+        flags: JSON.stringify({ ...flags, reason: retire.reason }),
+      });
+      await trx('click_followup_actions')
+        .where({ draft_id: draft.id })
+        .update({
+          status: retire.actionStatus,
+          ...(retire.actionStatus === 'converted' ? { converted_at: new Date() } : {}),
+          updated_at: db.fn.now(),
+        });
+    });
+    return { blocked: true, message: retire.message };
+  }
+
+  return { hold: true, message: GATE_HOLD_MESSAGES[verdict.code] || 'Draft held by pre-send checks - retry later' };
 }
 
 // Purposes whose policy row requires marketing-grade consent
@@ -259,30 +387,54 @@ function suppressedSendSentinel(smsResult) {
 }
 
 /**
- * Finalize a draft after a REAL provider send. For an upsell campaign draft
- * whose source_ref names its upsell_opportunities row, flip that row to
- * 'pitched' in the SAME transaction as the draft finalization —
- * customer-intel metrics and UI derive pitched/accepted counts from
- * upsell_opportunities.status, so a sent pitch must move the row. Scoped to
- * status='identified' so an outcome set concurrently (accepted/declined via
- * the customer-intel route) is never regressed back to 'pitched'.
+ * Finalize a draft after a REAL provider send. A draft's linked row moves in
+ * the SAME transaction as the draft finalization:
+ *
+ *  - Upsell campaign drafts (source_ref names their upsell_opportunities
+ *    row): flip that row to 'pitched' — customer-intel metrics and UI derive
+ *    pitched/accepted counts from upsell_opportunities.status, so a sent
+ *    pitch must move the row. Scoped to status='identified' so an outcome
+ *    set concurrently (accepted/declined via the customer-intel route) is
+ *    never regressed back to 'pitched'.
+ *  - Click-followup drafts: release the linked click_followup_actions claim
+ *    to 'sent' (same atomicity rule as the reject path, the queue's
+ *    draft-insert + action-link pair, and the stale sweep). The send
+ *    SUCCEEDED, so the action's open claim ('drafted' — held open by
+ *    hasOpenAction and the partial unique indexes) must end here: 'sent' is
+ *    terminal for claim purposes, so a later click from the same
+ *    customer/lead/phone re-qualifies immediately instead of waiting out the
+ *    14-day sweep, while staying distinguishable from 'dismissed' in outcome
+ *    telemetry. Scoped to open statuses so a more specific outcome is never
+ *    overwritten.
+ *
+ * Drafts with neither linkage (legacy inbound-reply, reactivation campaigns)
+ * finalize with a plain update — no transaction.
  */
 async function finalizeDraftSend(draft, updates) {
   const oppId = draft.campaign_type === 'upsell' ? parseOpportunityRef(draft.source_ref) : null;
-  if (!oppId) {
+  const isClickFollowup = draft.intent === 'click_followup';
+  if (!oppId && !isClickFollowup) {
     await db('message_drafts').where({ id: draft.id }).update(updates);
     return;
   }
   await db.transaction(async (trx) => {
     await trx('message_drafts').where({ id: draft.id }).update(updates);
-    await trx('upsell_opportunities')
-      .where({ id: oppId, status: 'identified' })
-      .update({
-        status: 'pitched',
-        pitched_at: new Date(),
-        pitched_by: 'campaign_draft',
-        updated_at: new Date(),
-      });
+    if (isClickFollowup) {
+      await trx('click_followup_actions')
+        .where({ draft_id: draft.id })
+        .whereIn('status', ['pending', 'drafted'])
+        .update({ status: 'sent', updated_at: db.fn.now() });
+    }
+    if (oppId) {
+      await trx('upsell_opportunities')
+        .where({ id: oppId, status: 'identified' })
+        .update({
+          status: 'pitched',
+          pitched_at: new Date(),
+          pitched_by: 'campaign_draft',
+          updated_at: new Date(),
+        });
+    }
   });
 }
 
@@ -358,6 +510,21 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
+    // Shared pre-send gate recheck (click-followup drafts only).
+    const gateBlock = await guardClickFollowupSend(draft);
+    if (gateBlock) {
+      if (gateBlock.transient) {
+        await releaseDraftClaim(draft.id);
+        return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
+      }
+      if (gateBlock.hold) {
+        await releaseDraftClaim(draft.id);
+        return res.status(409).json({ error: gateBlock.message });
+      }
+      return res.status(409).json({ error: gateBlock.message });
+    }
+
+    // Shared pre-send gate recheck (campaign drafts only).
     const campaignGuard = await guardCampaignSend(draft, req, res);
     if (campaignGuard.blocked) return;
 
@@ -370,13 +537,20 @@ router.put('/:id/approve', async (req, res, next) => {
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
 
+    const sendPolicy = sendPolicyForDraft(draft, recipient);
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
         to: toPhone,
         body: draft.draft_response,
         channel: 'sms',
-        ...draftSendPolicyFields(draft, recipient),
+        // Unified policy passthrough: click-followup drafts ride the
+        // estimate rails (purpose 'estimate_followup' + estimateId +
+        // transactional consentBasis for lead-only); campaign drafts pass
+        // their real purpose through (marketing-grade purposes carry the
+        // stored-preference consentBasis); legacy null-purpose drafts keep
+        // the conversational shape exactly.
+        ...sendPolicy,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -417,6 +591,9 @@ router.put('/:id/approve', async (req, res, next) => {
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
+    // Draft finalization + linked-row release (click action → 'sent';
+    // upsell opportunity → 'pitched') commit or roll back TOGETHER — see
+    // finalizeDraftSend.
     await finalizeDraftSend(draft, {
       final_response: draft.draft_response,
       sent_at: new Date(),
@@ -454,6 +631,21 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
+    // Shared pre-send gate recheck (click-followup drafts only).
+    const gateBlock = await guardClickFollowupSend(draft);
+    if (gateBlock) {
+      if (gateBlock.transient) {
+        await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+        return res.status(503).json({ error: 'Pre-send check unavailable - draft left pending, try again' });
+      }
+      if (gateBlock.hold) {
+        await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+        return res.status(409).json({ error: gateBlock.message });
+      }
+      return res.status(409).json({ error: gateBlock.message });
+    }
+
+    // Shared pre-send gate recheck (campaign drafts only).
     const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
     if (campaignGuard.blocked) return;
 
@@ -466,13 +658,20 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
 
+    const sendPolicy = sendPolicyForDraft(draft, recipient);
     let smsResult;
     try {
       smsResult = await sendCustomerMessage({
         to: toPhone,
         body: revisedResponse,
         channel: 'sms',
-        ...draftSendPolicyFields(draft, recipient),
+        // Unified policy passthrough: click-followup drafts ride the
+        // estimate rails (purpose 'estimate_followup' + estimateId +
+        // transactional consentBasis for lead-only); campaign drafts pass
+        // their real purpose through (marketing-grade purposes carry the
+        // stored-preference consentBasis); legacy null-purpose drafts keep
+        // the conversational shape exactly.
+        ...sendPolicy,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
@@ -511,6 +710,8 @@ router.put('/:id/revise', async (req, res, next) => {
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
+    // Same atomic finalization + linked-row release as the approve route —
+    // see finalizeDraftSend.
     await finalizeDraftSend(draft, {
       sent_at: new Date(),
       response_time_seconds: responseTime,
@@ -523,8 +724,24 @@ router.put('/:id/revise', async (req, res, next) => {
 // PUT /api/admin/drafts/:id/reject
 router.put('/:id/reject', async (req, res, next) => {
   try {
-    await db('message_drafts').where({ id: req.params.id }).update({
-      status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+    // Draft rejection + linked click-followup action release commit or roll
+    // back TOGETHER (same atomicity rule as the queue's draft-insert +
+    // action-link pair and the stale sweep). 'drafted' is an OPEN status for
+    // hasOpenAction and the partial unique indexes, so leaving the action
+    // behind after an owner reject would block a fresh re-click from
+    // re-qualifying the contact until the 14-day sweep. 'dismissed' is
+    // terminal — outside both — so a re-click re-qualifies immediately.
+    // Scoped to open statuses: an action the approval gate already retired
+    // (converted/dismissed) keeps its more specific outcome. Non-click
+    // intents have no linked action row and the update is a no-op.
+    await db.transaction(async (trx) => {
+      await trx('message_drafts').where({ id: req.params.id }).update({
+        status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+      });
+      await trx('click_followup_actions')
+        .where({ draft_id: req.params.id })
+        .whereIn('status', ['pending', 'drafted'])
+        .update({ status: 'dismissed', updated_at: db.fn.now() });
     });
     res.json({ success: true });
   } catch (err) { next(err); }

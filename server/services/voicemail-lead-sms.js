@@ -275,6 +275,9 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
       kind: 'quote_prefill',
       entityType: 'leads',
       entityId: leadId,
+      leadId,
+      channel: 'sms',
+      purpose: 'voicemail_quote',
     }));
   } catch (shortErr) {
     await clearLeadClaim(leadId);

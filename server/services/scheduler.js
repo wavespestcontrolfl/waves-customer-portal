@@ -1928,6 +1928,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // EVERY 30 MIN — Click-followup action queue (clicked-but-didn't-book)
+  //
+  // Turns human short-link clicks on estimate/booking links (4h–72h old, not
+  // converted, fully suppression-guarded) into PENDING message_drafts for
+  // owner approval in /admin/drafts. DRAFTS ONLY — this job never sends;
+  // the owner's approval in /admin/drafts is the only send path. Gated by
+  // GATE_CLICK_FOLLOWUP (off → shadow-logs candidate counts, writes nothing).
+  // =========================================================================
+  cron.schedule('*/30 * * * *', async () => {
+    try {
+      await runExclusive('click-followup', async () => {
+        const ClickFollowup = require('./click-followup');
+        const result = await ClickFollowup.checkClicks();
+        if (result.drafted > 0) logger.info(`Click-followup: ${result.drafted} draft(s) queued for review`);
+      });
+    } catch (err) {
+      logger.error(`Click-followup job failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Estimate extensions are manual-only. Do not auto-renew expired estimates
   // from cron; staff can extend deliberately through the admin estimate route.
 
