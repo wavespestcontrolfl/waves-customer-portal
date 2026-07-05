@@ -311,9 +311,14 @@ export default function EstimateGlassTheme({ active }) {
         raf = 0;
         const t = lastEvt.target instanceof Element ? lastEvt.target.closest('[data-glass],[data-glass-accent]') : null;
         if (t) {
+          // The specular vars live on <html> — OUTSIDE the observed #root
+          // subtree — so per-frame pointer motion never feeds the retag
+          // observer (Codex rd3). var() resolution inherits from the root,
+          // and only the :hover element renders its ::before, so a single
+          // global pair positions the shine correctly.
           const r = t.getBoundingClientRect();
-          t.style.setProperty('--mx', `${((lastEvt.clientX - r.left) / r.width) * 100}%`);
-          t.style.setProperty('--my', `${((lastEvt.clientY - r.top) / r.height) * 100}%`);
+          html.style.setProperty('--mx', `${((lastEvt.clientX - r.left) / r.width) * 100}%`);
+          html.style.setProperty('--my', `${((lastEvt.clientY - r.top) / r.height) * 100}%`);
         }
         px = lastEvt.clientX / window.innerWidth - 0.5;
         py = lastEvt.clientY / window.innerHeight - 0.5;
@@ -334,6 +339,8 @@ export default function EstimateGlassTheme({ active }) {
       statIO.disconnect();
       orbs.remove();
       grain.remove();
+      html.style.removeProperty('--mx');
+      html.style.removeProperty('--my');
       html.removeAttribute('data-glass-theme');
       html.style.background = prevHtmlBg;
       document.body.style.background = prevBodyBg;

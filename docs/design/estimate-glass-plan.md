@@ -1,6 +1,6 @@
 # Estimate Glass Redesign — Implementation Plan
 
-Owner-approved 2026-07-04 (live preview session on estimate ce189fe…df2 / Aaron Bird).
+Owner-approved 2026-07-04 (live preview session against a real estimate; customer anonymized here).
 The complete approved behavior is codified in `estimate-glass-blueprint.js` (DOM-injection
 prototype run against prod data via dev proxy). This plan splits it into three PRs per the
 repo rule that visual and content changes never share a PR.
@@ -34,7 +34,7 @@ follow once approved for rollout). Zero behavior/copy changes.
 
 ## PR B — Copy repositioning (content only)
 
-Full map in blueprint `COPY` object. Highlights: hero "Aaron, your pest-free home plan is
+Full map in blueprint `COPY` object. Highlights: hero "{firstName}, your pest-free home plan is
 ready." + subline; offer-first headers (see blueprint); technical offer stack (7 bullets incl.
 premium non-repellent + repellent, unlimited callbacks 100% guaranteed, 90-day money-back,
 no contract, $99 setup waived w/ annual); "WaveGuard Bronze" displayed as "WaveGuard Home

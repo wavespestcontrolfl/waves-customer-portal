@@ -109,7 +109,7 @@ button:not([data-glass]):not([data-glass-accent]):not(.freq-btn):not(#mbb-btn):h
 @media (prefers-reduced-motion:reduce){.rm-track{animation:none}[data-glass],[data-glass-accent]{transition:none !important}[data-glass]:hover,[data-glass-accent]:hover{transform:none !important}}
 @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){[data-glass],[data-glass="soft"],[data-glass="chip"]{background:rgba(255,255,255,.93) !important}}`;
 
-  const HERO_H1 = 'Aaron, your pest-free home plan is ready.';
+  const HERO_H1 = '{firstName}, your pest-free home plan is ready.';
   const HERO_SUB = 'We can start protecting your home as soon as tomorrow — quarterly exterior protection, interior treatment when needed, unlimited free callbacks, and a 90-day money-back guarantee.';
   const PERDAY = 'That’s about $1.07/day — less than a gas-station drink for year-round protection.';
   const SAT_H2 = 'Your price was built from your home — not somebody else’s average';
@@ -138,8 +138,8 @@ button:not([data-glass]):not([data-glass-accent]):not(.freq-btn):not(#mbb-btn):h
   const B_SETUP = '$99 setup disappears with annual billing — waived instantly';
 
   const COPY = {
-    'Hello Aaron, your estimate is ready!': HERO_H1,
-    'Aaron, your custom protection plan is ready — book it in 60 seconds.': HERO_H1,
+    'Hello {firstName}, your estimate is ready!': HERO_H1,
+    '{firstName}, your custom protection plan is ready — book it in 60 seconds.': HERO_H1,
     'YOUR ESTIMATE': 'YOUR PEST-FREE HOME PLAN',
     '· QUARTERLY PEST CONTROL': '',
     'Waves AI reviewed your property before pricing this estimate': SAT_H2,
