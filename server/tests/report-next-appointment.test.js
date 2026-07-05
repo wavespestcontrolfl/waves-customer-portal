@@ -104,6 +104,27 @@ test('payload surfaces the next same-line appointment without window_end', async
   expect(data.nextAppointment.windowEnd).toBeUndefined();
 });
 
+test('an in-progress (en_route) same-line visit publishes as the next appointment', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // the customer opens an older report while today's visit is in progress —
+      // the active visit IS the next appointment (same disclosable statuses as
+      // findReportFollowupAppointment)
+      { id: 'scheduled-active', customer_id: 'customer-1', scheduled_date: '2999-01-01', status: 'en_route', service_type: 'Pest Control', window_start: '10:00:00' },
+      { id: 'scheduled-later', customer_id: 'customer-1', scheduled_date: '2999-03-01', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '09:00:00' },
+    ],
+  });
+
+  const data = await buildReportV1Data(BASE_SERVICE, 'token-next-appt-active', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Pest Control',
+    scheduledDate: '2999-01-01',
+    windowStart: '10:00:00',
+  });
+});
+
 test('payload nextAppointment is null when nothing upcoming matches the service line', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,

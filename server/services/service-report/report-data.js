@@ -2558,6 +2558,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let nextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // Same disclosable statuses as findReportFollowupAppointment: pending /
+    // confirmed / en_route / on_site — an in-progress visit IS the customer's
+    // next appointment when they open an older report on the service day.
     // NO 'rescheduled': those are phantom placeholders holding the OLD
     // date/window until the office rebooks (see report-followup-appointment.js
     // — publishing one presents a stale time as if it were still real).
@@ -2568,7 +2571,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     const upcomingRows = await knex('scheduled_services')
       .where('customer_id', service.customer_id)
       .andWhere('scheduled_date', '>=', reportTodayIso)
-      .whereIn('status', ['pending', 'confirmed'])
+      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
       .modify((qb) => {
         if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
       })
