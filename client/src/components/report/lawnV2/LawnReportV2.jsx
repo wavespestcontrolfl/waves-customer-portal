@@ -531,13 +531,13 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
-        <div style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
       {/* Watering after today, from the product label (or a safe default). */}
       {aftercare && aftercare.watering ? (
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
           {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 12.5, color: MUTED }}>{aftercare.reentry}</div> : null}
         </div>
@@ -549,12 +549,13 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           with a known rain status still shows the CTA; once a real schedule is
           added, scheduleOnFile flips true and this hides. */}
       {!water.scheduleOnFile && irrigationHref ? (
-        <div style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
+        <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
           <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
             We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.
           </div>
           <a
+            data-glass-accent=""
             href={irrigationHref}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 7,
