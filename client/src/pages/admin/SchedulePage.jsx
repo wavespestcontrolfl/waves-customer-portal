@@ -6636,6 +6636,10 @@ export function ZoneMarkingStep({
   };
 
   const resizeActiveCircle = (delta) => {
+    // disabled must freeze EVERY mutating control, not just the pointer
+    // handlers — an edit landing mid-submit is not in the payload already
+    // sent, so it would silently vanish behind a successful save
+    if (disabled) return;
     const mark = marks[activeLabel];
     if (!mark || mark.type !== "circle") return;
     const r = Math.min(0.4, Math.max(0.02, Number(mark.r) + delta));
@@ -6753,13 +6757,13 @@ export function ZoneMarkingStep({
         <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
         {activeMark && activeMark.type === "circle" ? (
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-            <button type="button" onClick={() => resizeActiveCircle(-0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: "pointer" }}>-</button>
-            <button type="button" onClick={() => resizeActiveCircle(0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: "pointer" }}>+</button>
+            <button type="button" disabled={disabled} onClick={() => resizeActiveCircle(-0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1 }}>-</button>
+            <button type="button" disabled={disabled} onClick={() => resizeActiveCircle(0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1 }}>+</button>
             <span style={{ fontSize: 11, color: mutedInk }}>size</span>
           </span>
         ) : null}
         {activeMark ? (
-          <button type="button" onClick={() => onClearMark(activeLabel)} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}` }}>Remove mark</button>
+          <button type="button" disabled={disabled} onClick={() => { if (!disabled) onClearMark(activeLabel); }} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}>Remove mark</button>
         ) : null}
       </div>
     </div>
