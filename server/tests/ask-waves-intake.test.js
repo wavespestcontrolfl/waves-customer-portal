@@ -200,6 +200,19 @@ describe('normalizeIntakeResult', () => {
     }, 'openai');
     expect(out.service_keys).toEqual(['treeShrub', 'palm', 'bedBug', 'plugging', 'lawnPestControl']);
   });
+
+  test('bed bug instant quote is qualified to standard prepped single-family jobs (codex rd2, 2026-07-05)', () => {
+    // The gate only collects a bedroom count; /calculate defaults severity
+    // 'moderate' / prepStatus 'ready' / occupancyType 'residential'. Severe,
+    // unprepped, or multi-unit jobs price higher or need manual review, so the
+    // prompt must keep them out of the instant-quote path.
+    const bedBug = QUOTABLE_SERVICES.find((s) => s.key === 'bedBug');
+    expect(bedBug.covers).toMatch(/single-family home/);
+    expect(bedBug.covers).toMatch(/NOT instantly quotable/);
+    expect(_internals.SYSTEM_PROMPT).toMatch(/severe or whole-home bed bug infestations/);
+    expect(_internals.SYSTEM_PROMPT).toMatch(/multi-unit building/);
+    expect(_internals.SYSTEM_PROMPT).toMatch(/cannot be prepped for bed bug treatment/);
+  });
 });
 
 describe('sanitizeHistory', () => {

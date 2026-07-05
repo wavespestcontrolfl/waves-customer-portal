@@ -298,4 +298,36 @@ describe('cockroach chip path — roachType reaches the engine (2026-07-05)', ()
     const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
     expect(source).toMatch(/services\.pest\.roachType \? \{ roachType: services\.pest\.roachType \}/);
   });
+
+  test('label uses ENGINE normalization — raw truthy junk must not label an unpriced knockdown (codex rd2)', () => {
+    const { publicQuotePestLabel } = _internals;
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    // The engine normalizes these to 'none' and prices NO knockdown line —
+    // a raw truthiness check would still have appended the label.
+    for (const junk of ['false', 'no', 'NONE', 'not-a-roach-type']) {
+      expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: junk })).toBe('Quarterly Pest Control');
+    }
+    expect(publicQuotePestLabel({ frequency: 'quarterly' })).toBe('Quarterly Pest Control');
+  });
+});
+
+describe('palm-only booking link — routes to tree_shrub, not lawn_care (codex rd2, 2026-07-05)', () => {
+  test('palm engine line is recurring service palm_injection (so the recurring resolver, not bookingServiceFor, decides)', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { palm: { palmCount: 4, treatmentType: 'nutrition' } },
+    });
+    const line = (estimate.lineItems || []).find((l) => l.service === 'palm_injection');
+    expect(line).toBeTruthy();
+    expect(Number(line.monthlyBeforeCredits || 0)).toBeGreaterThan(0);
+  });
+
+  test('recurring booking resolver counts palm_injection toward the tree_shrub booking bucket', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/pricedServiceKeys\.has\('palm_injection'\)/);
+  });
 });

@@ -51,7 +51,7 @@ const QUOTABLE_SERVICES = [
   { key: 'oneTimeLawn', label: 'Lawn Weed Treatment', covers: 'a one-time whole-lawn weed knockdown treatment (visitor asks about weeds only, not an ongoing program)' },
   { key: 'treeShrub', label: 'Tree & Shrub Care', covers: 'ornamental tree and shrub fertilization and insect treatment (the quote form asks how many plants, or estimates from satellite)' },
   { key: 'palm', label: 'Palm Injections', covers: 'palm tree health injections (the quote form asks how many palms)' },
-  { key: 'bedBug', label: 'Bed Bug Treatment', covers: 'bed bug infestations (the quote form asks how many bedrooms)' },
+  { key: 'bedBug', label: 'Bed Bug Treatment', covers: 'a standard bed bug treatment in a single-family home the owner can prep (the quote form asks how many bedrooms). Severe/whole-home infestations, multi-unit buildings, or homes that cannot be prepped are NOT instantly quotable — see the exclusion list' },
   { key: 'plugging', label: 'Lawn Plugging', covers: 'St. Augustine plug installation for dead patches or a full lawn (the quote form asks the patch size)' },
   { key: 'lawnPestControl', label: 'Lawn Pest Knockdown', covers: 'a one-time turf-pest knockdown for chinch bugs, sod webworms, armyworms, and grubs damaging the lawn (the recurring lawn program covers season-long prevention)' },
 ];
@@ -139,7 +139,7 @@ const SYSTEM_PROMPT = `You are "Ask Waves", the intake assistant on the ${COMPAN
 SERVICES YOU CAN QUOTE INSTANTLY (service_keys values):
 ${QUOTABLE_SERVICES.map((s) => `- ${s.key}: ${s.label} — ${s.covers}`).join('\n')}
 
-NOT instantly quotable (do NOT put these in service_keys; suggest calling ${COMPANY.phone} or the full quote page instead): German roach cleanouts and heavy indoor roach infestations, wasp/hornet/bee nest treatment or removal, yard-only flea problems, rodent trapping/exclusion work inside an attic, termite inspections and WDO inspections, and commercial properties.
+NOT instantly quotable (do NOT put these in service_keys; suggest calling ${COMPANY.phone} or the full quote page instead): German roach cleanouts and heavy indoor roach infestations, wasp/hornet/bee nest treatment or removal, yard-only flea problems, rodent trapping/exclusion work inside an attic, termite inspections and WDO inspections, severe or whole-home bed bug infestations, bed bugs in apartments/condos/hotels or any multi-unit building, homes that cannot be prepped for bed bug treatment, and commercial properties. The instant bed bug quote prices a standard prepped single-family treatment — when the visitor describes severe activity, poor prep, or a multi-unit setting, recommend an inspection call instead.
 
 YOUR JOB each turn:
 1. Answer the visitor's question helpfully in 1-3 short sentences — you are a knowledgeable Florida pest expert (sandy soil, humidity, afternoon storms, St. Augustine grass). Identify the likely pest when you can.

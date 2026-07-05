@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { generateEstimate } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -212,8 +212,10 @@ function publicQuotePestLabel(pest = {}) {
   const base = labels[frequency] || 'Quarterly Pest Control';
   // The engine prices a roach-knockdown modifier on the pest line when
   // roachType is set (the cockroach estimate/chip path) — reflect it in the
-  // lead's service-interest label so the office sees what was quoted.
-  return pest.roachType && pest.roachType !== 'none'
+  // lead's service-interest label so the office sees what was quoted. Same
+  // normalization as the engine: raw values like 'no'/'FALSE'/garbage
+  // normalize to 'none' and price no knockdown, so they must not label one.
+  return normalizeRoachType(pest.roachType || 'none').roachType !== 'none'
     ? `${base} + Roach Knockdown`
     : base;
 }
@@ -1162,7 +1164,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           );
           const wantsPest = pricedServiceKeys.has('pest_control');
           const wantsLawn = pricedServiceKeys.has('lawn_care') || pricedServiceKeys.has('commercial_lawn');
-          const wantsTreeShrub = pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub');
+          // palm_injection books under the tree_shrub visit — same bucket
+          // bookingServiceFor() collapses 'palm' labels into on the one-time
+          // path; without it a palm-only recurring quote falls to Lawn Care.
+          const wantsTreeShrub = pricedServiceKeys.has('tree_shrub')
+            || pricedServiceKeys.has('commercial_tree_shrub')
+            || pricedServiceKeys.has('palm_injection');
           if (wantsPest) {
             bookingServiceId = 'pest_control';
             bookingServiceLabel = wantsLawn ? 'Pest Control & Lawn Care' : 'Pest Control';
@@ -1173,7 +1180,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // Tree/shrub-only (incl. commercial_tree_shrub auto-priced) must not
             // fall back to the Lawn Care booking link.
             bookingServiceId = 'tree_shrub';
-            bookingServiceLabel = 'Tree & Shrub';
+            bookingServiceLabel = pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub')
+              ? 'Tree & Shrub'
+              : 'Palm Injections';
           } else {
             bookingServiceId = 'lawn_care';
             bookingServiceLabel = 'Lawn Care';
@@ -1500,6 +1509,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 module.exports = router;
 module.exports._internals = {
   isPublicCommercialQuote,
+  publicQuotePestLabel,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
