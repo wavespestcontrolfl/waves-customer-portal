@@ -16,10 +16,18 @@
  *
  * Candidate = a human click, 4h–72h old (fresher than 4h: they may still be
  * reading; older than 72h: the moment is gone), on a short link with
- * kind IN ('estimate','booking') that resolves to an estimates row. Booking
- * links minted from booking_intents are deliberately excluded — the
- * booking-abandon-recovery lane already chases those and stacking a second
- * nudge on the same abandon would double-touch the prospect.
+ * kind IN ('estimate','booking') AND channel='sms' that resolves to an
+ * estimates row. The channel filter is what keeps this lane honest about its
+ * own premise ("they saw our text and went quiet"): the repo also mints
+ * estimate links for staff/internal surfaces (Intelligence Bar estimate
+ * tools, agent lead-response tools) and tags email-only estimate sends
+ * channel='email' — those clicks are still LOGGED by ungated part A, but a
+ * staff preview or an email open must never queue a proactive SMS draft.
+ * Untagged (NULL-channel, e.g. pre-tagging legacy) links deliberately fail
+ * toward NOT texting. Booking links minted from booking_intents are also
+ * excluded — the booking-abandon-recovery lane already chases those and
+ * stacking a second nudge on the same abandon would double-touch the
+ * prospect.
  *
  * Suppression lives in the SHARED pre-send gate (click-followup-gate.js),
  * which this cron evaluates at draft time and admin-drafts re-evaluates at
@@ -184,6 +192,11 @@ async function runQueue(now = new Date()) {
     .join('short_codes as sc', 'scc.short_code_id', 'sc.id')
     .where('scc.is_bot', false)
     .whereIn('sc.kind', ['estimate', 'booking'])
+    // Only links that rode a customer-facing outbound SMS qualify. Staff/
+    // internal mints (IB estimate tools, lead-response tools) carry NULL
+    // channel and email-only estimate sends carry channel='email' — their
+    // clicks stay in part-A telemetry but must never seed an SMS nudge.
+    .where('sc.channel', 'sms')
     .where('sc.entity_type', 'estimates')
     .whereNotNull('sc.entity_id')
     .where('scc.clicked_at', '<', new Date(nowMs - MIN_AGE_H * 3600000))

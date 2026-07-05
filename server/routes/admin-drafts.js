@@ -411,8 +411,24 @@ router.put('/:id/revise', async (req, res, next) => {
 // PUT /api/admin/drafts/:id/reject
 router.put('/:id/reject', async (req, res, next) => {
   try {
-    await db('message_drafts').where({ id: req.params.id }).update({
-      status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+    // Draft rejection + linked click-followup action release commit or roll
+    // back TOGETHER (same atomicity rule as the queue's draft-insert +
+    // action-link pair and the stale sweep). 'drafted' is an OPEN status for
+    // hasOpenAction and the partial unique indexes, so leaving the action
+    // behind after an owner reject would block a fresh re-click from
+    // re-qualifying the contact until the 14-day sweep. 'dismissed' is
+    // terminal — outside both — so a re-click re-qualifies immediately.
+    // Scoped to open statuses: an action the approval gate already retired
+    // (converted/dismissed) keeps its more specific outcome. Non-click
+    // intents have no linked action row and the update is a no-op.
+    await db.transaction(async (trx) => {
+      await trx('message_drafts').where({ id: req.params.id }).update({
+        status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+      });
+      await trx('click_followup_actions')
+        .where({ draft_id: req.params.id })
+        .whereIn('status', ['pending', 'drafted'])
+        .update({ status: 'dismissed', updated_at: db.fn.now() });
     });
     res.json({ success: true });
   } catch (err) { next(err); }

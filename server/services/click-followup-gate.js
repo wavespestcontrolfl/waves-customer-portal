@@ -19,7 +19,11 @@
  * Codes and how callers are expected to map them:
  *   estimate_terminal — estimate missing/archived/declined/expired/void/
  *                       accepted. Queue: dismiss. Approval: retire the draft.
- *   converted         — customer / lead / phone-evidence conversion.
+ *   converted         — customer / lead / phone-evidence conversion. For
+ *                       ACCEPTED booking-kind clicks the evidence is
+ *                       booking-specific (paid invoice / live appointment /
+ *                       phone evidence) — never pipeline stage, which
+ *                       acceptance already set before the click.
  *                       Queue: mark converted. Approval: retire the draft +
  *                       flip the action to converted.
  *   suppressed        — opt-out / wrong number / DNC / known landline.
@@ -279,6 +283,44 @@ async function phoneConvertedSince(phone, sinceTs) {
   }
 }
 
+// Booking-specific conversion for ACCEPTED booking-kind clicks. Accepting a
+// one-time estimate already creates/links the customer and moves them into a
+// live pipeline stage BEFORE the /book URL is ever clicked, so
+// customerConvertedSince's stage evidence would mark every
+// accepted-but-not-yet-booked contact converted — starving the exact
+// booking-link case this lane exists to chase. Evidence here is what proves
+// they actually BOOKED (or were serviced): a paid invoice or a live
+// appointment created since the estimate — the same two query shapes
+// customerConvertedSince runs (estimate-conversion-guard.js), minus the
+// pipeline-stage read. Anchored at estimate creation, not the click, so a
+// booking made between acceptance and a later re-click still counts (they
+// booked; never nudge them). Fails CLOSED like the guard it mirrors.
+async function acceptedBookingConvertedSince(est) {
+  if (!est || !est.customer_id) return { converted: false };
+  const createdAt = new Date(est.created_at || 0);
+  try {
+    // status='paid' with null paid_at is a valid collected invoice whose pay
+    // time is unknown — fails toward suppression (same as the guard).
+    const paid = await db('invoices')
+      .where({ customer_id: est.customer_id, status: 'paid' })
+      .where((q) => q.whereNull('paid_at').orWhere('paid_at', '>=', createdAt))
+      .first('id');
+    if (paid) return { converted: true, reason: 'paid-invoice' };
+
+    const booked = await db('scheduled_services')
+      .where({ customer_id: est.customer_id })
+      .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+      .where('created_at', '>=', createdAt)
+      .first('id');
+    if (booked) return { converted: true, reason: 'appointment-booked' };
+
+    return { converted: false };
+  } catch (e) {
+    logger.warn(`[click-followup-gate] accepted-booking conversion check failed — failing closed: ${e.message}`);
+    return { converted: true, reason: 'guard-error' };
+  }
+}
+
 /**
  * The shared gate. See the module doc for inputs, codes, and caller mapping.
  *
@@ -315,9 +357,23 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
   }
 
   // 2. Conversion — customer evidence, then lead-side, then phone evidence.
-  let conv = await customerConvertedSince(estimate);
-  if (!conv.converted && !estimate.customer_id && leadId) {
-    conv = await leadConvertedSince(leadId, estimate);
+  //    ACCEPTED booking-kind clicks take a different first step: acceptance
+  //    already created/linked the customer, stamped a live pipeline stage,
+  //    and (for lead-only estimates) marked the lead won/converted BEFORE
+  //    the /book click, so stage- and lead-status evidence would call every
+  //    accepted-but-not-yet-booked contact converted. They get
+  //    booking-specific evidence instead (paid invoice / live appointment
+  //    since the estimate), then fall through to phone evidence — whose own
+  //    checks are click-anchored (customers row created since the click) or
+  //    booking-shaped, so they stay safe here.
+  let conv;
+  if (acceptedBookingClick) {
+    conv = await acceptedBookingConvertedSince(estimate);
+  } else {
+    conv = await customerConvertedSince(estimate);
+    if (!conv.converted && !estimate.customer_id && leadId) {
+      conv = await leadConvertedSince(leadId, estimate);
+    }
   }
   if (!conv.converted && phone) {
     conv = await phoneConvertedSince(phone, sinceTs || estimate.created_at);
@@ -356,6 +412,7 @@ module.exports = {
   cadenceStageDueSoon,
   depositStageDueSoon,
   leadConvertedSince,
+  acceptedBookingConvertedSince,
   phoneConvertedSince,
   hasRepliedRecently,
   hasRecentOutboundSms,

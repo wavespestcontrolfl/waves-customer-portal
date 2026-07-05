@@ -117,6 +117,10 @@ beforeEach(() => {
   updates.length = 0;
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  // Transaction proxy: route trx(table) through the same table queues (same
+  // shape as click-followup.test.js) so the reject route's draft + action
+  // writes record like any other call.
+  db.transaction = jest.fn(async (cb) => cb(db));
   sendCustomerMessage.mockResolvedValue({ sent: true });
   evaluateClickFollowupGate.mockResolvedValue({ ok: true });
 });
@@ -254,6 +258,56 @@ describe('approve — verdict mapping (shared-gate parity)', () => {
     expect(updates).toEqual(expect.arrayContaining([
       { table: 'message_drafts', payload: expect.objectContaining({ status: 'pending' }) },
     ]));
+  });
+});
+
+// Owner reject must RELEASE the linked click action (round 5): 'drafted' is
+// an open status for hasOpenAction and the partial unique indexes, so leaving
+// it behind would block a fresh re-click from re-qualifying the contact until
+// the 14-day stale sweep.
+describe('reject — releases the linked click action', () => {
+  async function reject(base, id = 'draft-1') {
+    return fetch(`${base}/admin/drafts/${id}/reject`, { method: 'PUT' });
+  }
+
+  test('reject retires the draft AND flips the linked action to a TERMINAL status, in ONE transaction', async () => {
+    enqueue('message_drafts', { update: 1 });
+    enqueue('click_followup_actions', { update: 1 });
+
+    await withServer(async (base) => {
+      expect((await reject(base)).status).toBe(200);
+    });
+
+    // Same atomicity rule as the queue's draft-insert + action-link pair and
+    // the stale sweep: both writes commit or roll back together.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updates).toEqual([
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected' }) },
+      // 'dismissed' sits OUTSIDE hasOpenAction's pending|drafted set and the
+      // partial unique indexes — a fresh re-click re-qualifies immediately
+      // instead of waiting out the 14-day sweep.
+      { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'dismissed' }) },
+    ]);
+
+    const idx = db.mock.calls.findIndex((c) => c[0] === 'click_followup_actions');
+    const actionBuilder = db.mock.results[idx].value;
+    // Keyed on the linked draft (non-click intents have no linked action —
+    // harmless no-op) and scoped to OPEN statuses so an action the approval
+    // gate already retired (converted/dismissed) keeps its outcome.
+    expect(actionBuilder.where).toHaveBeenCalledWith({ draft_id: 'draft-1' });
+    expect(actionBuilder.whereIn).toHaveBeenCalledWith('status', ['pending', 'drafted']);
+  });
+
+  test('reject NEVER sends and never touches the gate', async () => {
+    enqueue('message_drafts', { update: 1 });
+    enqueue('click_followup_actions', { update: 1 });
+
+    await withServer(async (base) => {
+      expect((await reject(base)).status).toBe(200);
+    });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(evaluateClickFollowupGate).not.toHaveBeenCalled();
   });
 });
 

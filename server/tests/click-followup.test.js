@@ -67,6 +67,7 @@ function makeBuilder(table, cfg = {}) {
   b.then = (resolve, reject) => {
     if (b._mode === 'insert' && cfg.insertError) return Promise.reject(cfg.insertError).then(resolve, reject);
     if (b._mode === 'update' && cfg.updateError) return Promise.reject(cfg.updateError).then(resolve, reject);
+    if (b._mode === 'first' && cfg.firstError) return Promise.reject(cfg.firstError).then(resolve, reject);
     const value = b._mode === 'insert' ? (cfg.insert ?? [{ id: 'row-1' }])
       : b._mode === 'update' ? (cfg.update ?? 1)
         : b._mode === 'del' ? (cfg.del ?? 1)
@@ -282,6 +283,40 @@ describe('runQueue — draft creation', () => {
 
     expect(counts.candidates).toBe(1); // phone key collapsed them
     expect(inserts.filter((i) => i.table === 'message_drafts')).toHaveLength(1);
+  });
+
+  test('candidate scan admits ONLY links that rode an outbound SMS (email + internal/staff mints excluded at the query)', async () => {
+    // Staff/internal mints (IB estimate tools, lead-response tools) carry
+    // NULL channel; email-only estimate sends carry channel='email'. Both
+    // must be filtered out IN SQL — part A still logs their clicks, but the
+    // followup scan never sees them. The mocked builder can't execute the
+    // filter, so pin the query shape: an equality on sc.channel='sms'
+    // excludes email AND NULL-channel rows alike.
+    enqueue('short_code_clicks as scc', { rows: [] });
+
+    await _internals.runQueue(NOW);
+
+    const idx = db.mock.calls.findIndex((c) => c[0] === 'short_code_clicks as scc');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const scan = db.mock.results[idx].value;
+    expect(scan.where).toHaveBeenCalledWith('sc.channel', 'sms');
+  });
+
+  test('terminal action statuses never hold the contact slot: the open-action pre-check matches pending|drafted only', async () => {
+    // An owner-rejected draft now releases its action to 'dismissed'
+    // (terminal). The pre-check — like the partial unique indexes — must
+    // only match OPEN statuses, so the released contact re-qualifies on a
+    // fresh click instead of waiting out the 14-day sweep.
+    enqueue('short_code_clicks as scc', { rows: [makeClick()] });
+    enqueue('estimates', { first: makeEstimate() });
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.drafted).toBe(1);
+    const idx = db.mock.calls.findIndex((c) => c[0] === 'click_followup_actions');
+    const preCheck = db.mock.results[idx].value;
+    expect(preCheck.whereIn).toHaveBeenCalledWith('status', ['pending', 'drafted']);
   });
 
   test('re-click eligibility: the candidate anti-join is per CLICK, not per code', () => {
@@ -575,6 +610,46 @@ describe('runQueue — gate + suppression', () => {
     expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
   });
 
+  test('accepted booking click: LIVE PIPELINE STAGE alone is NOT conversion evidence — the draft still queues', async () => {
+    // Acceptance creates/links the customer and stamps a live stage BEFORE
+    // the /book click, so stage evidence would suppress every
+    // accepted-but-not-yet-booked contact — the exact case this lane
+    // chases. The stage-reading guard must not even be consulted.
+    customerConvertedSince.mockResolvedValue({ converted: true, reason: 'customer-stage:active_customer' });
+    enqueue('short_code_clicks as scc', {
+      rows: [makeClick({ kind: 'booking', target_url: 'https://portal.wavespestcontrol.com/book?service=pest_control' })],
+    });
+    enqueue('estimates', { first: makeEstimate({ status: 'accepted' }) });
+    // No paid invoice, no live appointment → booking evidence says NOT booked.
+    enqueue('invoices', { first: null });
+    enqueue('scheduled_services', { first: null });
+    enqueueCleanChecks();
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.drafted).toBe(1);
+    expect(counts.converted).toBe(0);
+    expect(customerConvertedSince).not.toHaveBeenCalled();
+    const draft = inserts.find((i) => i.table === 'message_drafts');
+    expect(draft).toBeDefined();
+  });
+
+  test('accepted booking click CONVERTS on booking evidence: a live appointment created after the estimate', async () => {
+    enqueue('short_code_clicks as scc', {
+      rows: [makeClick({ kind: 'booking', target_url: 'https://portal.wavespestcontrol.com/book?service=pest_control' })],
+    });
+    enqueue('estimates', { first: makeEstimate({ status: 'accepted' }) });
+    enqueue('invoices', { first: null });
+    enqueue('scheduled_services', { first: { id: 'ss-1' } }); // they actually booked
+    enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] }); // converted outcome row
+
+    const counts = await _internals.runQueue(NOW);
+
+    expect(counts.converted).toBe(1);
+    expect(inserts.find((i) => i.table === 'click_followup_actions').payload).toMatchObject({ status: 'converted' });
+    expect(inserts.find((i) => i.table === 'message_drafts')).toBeUndefined();
+  });
+
   test('accepted ESTIMATE-kind click stays dismissed (cadence never nudges accepted quotes)', async () => {
     enqueue('short_code_clicks as scc', { rows: [makeClick({ kind: 'estimate' })] });
     enqueue('estimates', { first: makeEstimate({ status: 'accepted' }) });
@@ -737,6 +812,40 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     // booking evidence, comes out ok (draftable).
     expect((await gate.evaluateClickFollowupGate({ ...baseInput(), estimate: accepted, kind: 'booking' })).ok)
       .toBe(true);
+  });
+
+  test("accepted BOOKING click: stage-only conversion evidence is ignored — the stage-reading guard isn't consulted", async () => {
+    customerConvertedSince.mockResolvedValue({ converted: true, reason: 'customer-stage:active_customer' });
+    const v = await gate.evaluateClickFollowupGate({
+      ...baseInput(), estimate: makeEstimate({ status: 'accepted' }), kind: 'booking',
+    });
+    expect(v.ok).toBe(true);
+    expect(customerConvertedSince).not.toHaveBeenCalled();
+  });
+
+  test('accepted BOOKING click: converted on a live appointment created since the estimate', async () => {
+    enqueue('invoices', { first: null });
+    enqueue('scheduled_services', { first: { id: 'ss-1' } });
+    const v = await gate.evaluateClickFollowupGate({
+      ...baseInput(), estimate: makeEstimate({ status: 'accepted' }), kind: 'booking',
+    });
+    expect(v).toMatchObject({ ok: false, code: 'converted', reason: 'appointment-booked' });
+  });
+
+  test('accepted BOOKING click: converted on a paid invoice since the estimate', async () => {
+    enqueue('invoices', { first: { id: 'inv-1' } });
+    const v = await gate.evaluateClickFollowupGate({
+      ...baseInput(), estimate: makeEstimate({ status: 'accepted' }), kind: 'booking',
+    });
+    expect(v).toMatchObject({ ok: false, code: 'converted', reason: 'paid-invoice' });
+  });
+
+  test('accepted BOOKING click: booking-evidence lookup failure fails CLOSED (guard_error)', async () => {
+    enqueue('invoices', { firstError: new Error('db down') });
+    const v = await gate.evaluateClickFollowupGate({
+      ...baseInput(), estimate: makeEstimate({ status: 'accepted' }), kind: 'booking',
+    });
+    expect(v).toMatchObject({ ok: false, code: 'guard_error' });
   });
 
   test('converted: customer-guard evidence', async () => {
