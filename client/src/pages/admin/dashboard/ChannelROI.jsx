@@ -124,16 +124,17 @@ export default function ChannelROI({ data, loading, error }) {
 
       <FormulaNote>
         Rows are attribution rows + job costs (completed leads the ad pipeline
-        tracked, with their job-costed revenue and gross profit), not the raw
-        leads table — totals can differ from Leads by Source above. Ad spend is
-        true platform spend (ad_performance_daily); fixed cost prorates channel
+        tracked, with deleted and internal leads excluded), not the raw leads
+        table — totals can differ from Leads by Source above. Ad spend is true
+        platform spend (ad_performance_daily); fixed cost prorates channel
         retainers + referral rewards to this window. CAC = all-in spend ÷ unique
-        customers; cost / job = all-in spend ÷ completed jobs (the only rung
-        with recorded revenue — booked-not-yet-done jobs aren't counted); ROAS =
-        revenue ÷ all-in spend; LTV:CAC = 12-month gross-profit LTV ÷ all-in
-        spend (projected for recurring, realized for one-time — same basis as
-        the ad-dollars card above). "—" means spend that hasn't bought a win
-        yet, not free. Shaping: server/services/channel-attribution.js.
+        customers; cost / job = all-in spend ÷ completed visits credited to the
+        channel (the same job-costed visits the revenue is summed from, so a
+        repeat customer's fifth visit counts — booked-not-yet-done jobs don't);
+        ROAS = revenue ÷ all-in spend; LTV:CAC = 12-month gross-profit LTV ÷
+        all-in spend (projected for recurring, realized for one-time — same
+        basis as the ad-dollars card above). "—" means spend that hasn't bought
+        a win yet, not free. Shaping: server/services/channel-attribution.js.
       </FormulaNote>
     </div>
   );

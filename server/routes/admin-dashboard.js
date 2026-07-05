@@ -1775,7 +1775,12 @@ router.get('/channel-roi', dashboardCache, async (req, res, next) => {
     // ~1/30 of a retainer, never zero — using the same 30.44 avg-month-length
     // constant as the ads routes' periodWindow.
     const days = Math.max(1, Math.round((Date.parse(win.to) - Date.parse(win.from)) / 86400000) + 1);
-    res.json({ period: win, ...(await fetchChannelAttribution(win.from, days / 30.44)) });
+    // Parity with the sibling Growth cards (/lead-funnel above): soft-deleted
+    // leads and internal/test names are excluded HERE — the ads routes keep
+    // their pre-existing unfiltered behavior (aligning them is a separate
+    // owner decision).
+    const exclude = { deletedLeads: true, internalNames: INTERNAL_TEST_CUSTOMERS };
+    res.json({ period: win, ...(await fetchChannelAttribution(win.from, days / 30.44, exclude)) });
   } catch (err) { next(err); }
 });
 

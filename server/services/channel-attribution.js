@@ -15,28 +15,63 @@
  * for one-time customers (or recurring rows with no projection). Realized gross
  * profit is still reported separately.
  *
- * Jobs vs customers: `jobs` counts completed attribution rows (one per won job
- * the ad pipeline tracked), while `customers` de-dupes by customer_id — so
- * costPerJob and cac deliberately divide the same all-in spend by different
- * denominators (a repeat customer's second job lowers costPerJob, not cac).
+ * Jobs vs customers: `jobs` counts completed COSTED VISITS (the same job_costs ⨝
+ * completed scheduled_services set the realized revenue is summed from — see
+ * ad-attribution-sync's customerRealized), while `customers` de-dupes by
+ * customer_id — so costPerJob and cac deliberately divide the same all-in spend
+ * by different denominators (a repeat customer's 5th visit lowers costPerJob,
+ * not cac). Because the sync writes a customer's whole realized total onto ONE
+ * primary row (first-touch: earliest lead_date, then created_at), the visit
+ * count is credited to that same row — never row-counted (a 5-visit repeat
+ * customer is 5 jobs, not 1) and never double-credited when a customer has
+ * several attribution rows.
  *
  * @param {Array} completedRows  ad_service_attribution rows, funnel_stage=completed
- *   (each: { lead_source, completed_revenue, gross_profit, projected_ltv_12mo, is_recurring, customer_id })
+ *   (each: { lead_source, completed_revenue, gross_profit, projected_ltv_12mo, is_recurring,
+ *     customer_id, lead_date, created_at })
  * @param {Object} platformSpendBySource  { '<lead_source>': spend } from ad_performance_daily
  * @param {Object} fixedCostBySource  { '<lead_source>': fixed cost over the period }
  *   (SEO retainer, ad-management fees, etc. — the non-ad-platform side of all-in CAC).
  *   adSpend stays platform-only for display; ratios (roas/cac/ltvCac) divide by the
  *   ALL-IN spend (adSpend + fixedCost).
+ * @param {Object} jobsByCustomer  { '<customer_id>': completed costed visits in-window }
+ *   from job_costs ⨝ completed scheduled_services (fetchChannelAttribution).
  */
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function round1(n) { return Math.round((Number(n) || 0) * 10) / 10; }
 
-function buildChannelAttribution(completedRows = [], platformSpendBySource = {}, fixedCostBySource = {}) {
+// DATE columns arrive as JS Date objects at UTC midnight; normalize to
+// 'YYYY-MM-DD' so first-touch compares chronologically, not by weekday text
+// (same recovery ad-attribution-sync's toDateStr does). Undated rows sort last.
+function dateKey(v) {
+  if (!v) return '9999-99-99';
+  return v instanceof Date ? v.toISOString().split('T')[0] : String(v).split('T')[0];
+}
+function tsKey(v) {
+  if (!v) return '';
+  return v instanceof Date ? v.toISOString() : String(v);
+}
+function firstTouchKey(row) {
+  return `${dateKey(row.lead_date)}|${tsKey(row.created_at)}`;
+}
+
+function buildChannelAttribution(completedRows = [], platformSpendBySource = {}, fixedCostBySource = {}, jobsByCustomer = {}) {
   const bySource = {};
   const ensure = (src) => {
     if (!bySource[src]) bySource[src] = { revenue: 0, grossProfit: 0, lifetimeValue: 0, jobs: 0, customers: new Set() };
     return bySource[src];
   };
+
+  // Each customer's completed-visit count is credited exactly once — to their
+  // first-touch row (the same earliest lead_date → created_at pick as the
+  // sync's pickPrimaryAttributionRow, where the realized revenue was written)
+  // — so jobs and revenue always describe the same set of visits.
+  const primaryRowByCustomer = new Map();
+  for (const a of completedRows) {
+    if (!a.customer_id) continue;
+    const prev = primaryRowByCustomer.get(a.customer_id);
+    if (!prev || firstTouchKey(a) < firstTouchKey(prev)) primaryRowByCustomer.set(a.customer_id, a);
+  }
 
   for (const a of completedRows) {
     const s = ensure(a.lead_source || 'unknown');
@@ -44,7 +79,9 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
     const proj = Number(a.projected_ltv_12mo) || 0;
     s.revenue += Number(a.completed_revenue) || 0;
     s.grossProfit += gp;
-    s.jobs += 1; // one completed attribution row = one won job
+    if (a.customer_id && primaryRowByCustomer.get(a.customer_id) === a) {
+      s.jobs += Number(jobsByCustomer[a.customer_id]) || 0;
+    }
     // Recurring → projected 12-mo gross profit; otherwise realized gross profit.
     s.lifetimeValue += (a.is_recurring && proj > 0) ? proj : gp;
     if (a.customer_id) s.customers.add(a.customer_id);
@@ -72,7 +109,7 @@ function buildChannelAttribution(completedRows = [], platformSpendBySource = {},
       fixedCost,
       allInSpend,
       customers,
-      jobs, // completed attribution rows — repeat jobs count, unlike `customers`
+      jobs, // completed costed visits credited to the channel — repeat visits count, unlike `customers`
       roas: allInSpend > 0 ? round1(revenue / allInSpend) : null,
       // Lifetime gross-profit LTV:CAC at the channel level (all-in cost).
       ltvCac: allInSpend > 0 ? round1(lifetimeValue / allInSpend) : null,
