@@ -10138,11 +10138,32 @@ function serviceLabelForCategory(category, fallback = null) {
   }
 }
 
-function serviceCategoryForOneTimeItem(item = {}) {
+// Fee/adjustment/discount rows (and blank rows) are not services: they never
+// classify to a category, and a scoped glass release must not treat them as
+// unclassified services either.
+function isNonServiceOneTimeItem(item = {}) {
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
-  if (!name && !service) return null;
-  if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
+  if (!name && !service) return true;
+  // Discount rows (manual_discount, negative adjustments) take money off —
+  // they can't be an out-of-scope service.
+  if (item?.kind === 'discount' || service === 'manual_discount') return true;
+  // Label-based WaveGuard check too: legacy saved rows carry only a
+  // "WaveGuard Setup" label without service: 'waveguard_setup'.
+  if (service === 'waveguard_setup' || service === 'rodent_bundle_discount' || isWaveGuardSetupOneTimeItem(item)) return true;
+  // A POSITIVE one_time_adjustment is the residual "Other one-time services"
+  // charge normalizeOneTimeBreakdown mints when the saved one-time total
+  // exceeds the classified rows — that's real unclassified work, so it stays
+  // a service row and a scoped release fails closed on it. Zero/negative
+  // adjustments are discounts/rounding and never block.
+  if (service === 'one_time_adjustment') return !(Number(item?.amount) > 0);
+  return false;
+}
+
+function serviceCategoryForOneTimeItem(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return null;
+  const name = item?.name || item?.label || item?.service || '';
+  const service = String(item?.service || '').toLowerCase();
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -10152,13 +10173,20 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
+  // One-time lawn specialty rows from the pricing engine (priceTopDressing /
+  // priceDethatching / pricePlugging) carry keys with no 'lawn' substring, so
+  // the generic lawn heuristic below never sees them.
+  if (
+    service.includes('top_dress') || service.includes('dethatch') || service.includes('plugging')
+    || /top[ -_]?dress|dethatch|\bplugging\b/i.test(name)
+  ) return 'lawn_care';
   if (isTreeShrubServiceName(name) || service.includes('tree') || service.includes('shrub') || service.includes('palm')) return 'tree_shrub';
   if (isMosquitoServiceName(name) || service.includes('mosquito')) return 'mosquito';
   if (isLawnServiceName(name) || service.includes('lawn')) return 'lawn_care';
   return null;
 }
 
-function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
   const categories = new Set();
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   recurring.forEach((svc) => {
@@ -10172,14 +10200,79 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     if (category) categories.add(category);
   });
 
+  return categories;
+}
+
+// Optional service-category scope for the glass release: CSV env, e.g.
+// GATE_ESTIMATE_GLASS_CATEGORIES=pest_control,lawn_care. Unset/empty = all
+// categories. An estimate qualifies only when EVERY category on it is in
+// scope, so a pest+lawn bundle releases but pest+mosquito stays on the old
+// page until mosquito's pack ships.
+const GLASS_RELEASE_CATEGORIES = (process.env.GATE_ESTIMATE_GLASS_CATEGORIES || '')
+  .split(',').map((c) => c.trim()).filter(Boolean);
+
+function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowedList = GLASS_RELEASE_CATEGORIES) {
+  if (!allowedList.length) return true;
+  const allowed = new Set(allowedList);
+  const recurring = Array.isArray(recurringServices) ? recurringServices : [];
+  // Rows classify through the scope-aware item classifier, NOT the copy one:
+  // stinging/wasp rows read as pest_control by name for copy purposes, which
+  // must not place them in the pest scope (Codex rd8).
+  const categories = new Set();
+  recurring.forEach((svc) => {
+    const category = categoryForRecurringServiceKey(recurringServiceKey(svc));
+    if (category) categories.add(category);
+  });
+  const items = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  items.forEach((item) => {
+    const category = scopeCategoryForOneTimeItem(item);
+    if (category) categories.add(category);
+  });
+  // Row categories under-count: a generated one-time add-on (e.g.
+  // pest_initial_roach from roach activity) classifies alone while the engine
+  // inputs still carry the other selected services, and recurring rows only
+  // vouch for the recurring services — an out-of-scope one-time flag (e.g.
+  // services.stinging beside a recurring pest row) produces a row whose NAME
+  // classifies in-scope. Engine inputs are therefore ALWAYS unioned in; the
+  // scope inference is fail-closed by construction (Codex rd7).
+  inferScopeCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
+  // Fail closed on service rows the classifiers DROP, not just on estimates
+  // that classify to nothing: a recurring key or real one-time service line
+  // that maps to no category (e.g. a WDO inspection alongside recurring pest)
+  // is an out-of-scope service, not an absent one. Fee/adjustment rows
+  // (waveguard_setup, one_time_adjustment, rodent_bundle_discount) are not
+  // services and never block.
+  const hasUnclassifiedService = recurring.some((svc) => !categoryForRecurringServiceKey(recurringServiceKey(svc)))
+    || items.some((item) => !isNonServiceOneTimeItem(item) && !scopeCategoryForOneTimeItem(item));
+  if (hasUnclassifiedService) return false;
+  return categories.size > 0 && [...categories].every((c) => allowed.has(c));
+}
+
+function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+  const categories = collectServiceCategories(recurringServices, oneTimeItems);
+
   if (categories.size > 1) return 'bundle';
   if (categories.size === 1) return Array.from(categories)[0];
 
+  const inferred = inferCategoriesFromEngineInputs(estData);
+  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
+}
+
+// Mirrors the pricing engine's serviceSelected(): commercial engine-input
+// flags are OBJECTS ({selected, commercialSubtype, ...}), so plain truthiness
+// would read a deselected {selected:false} as an active service.
+function engineCommercialServiceSelected(value) {
+  if (value === true) return true;
+  if (!value || typeof value !== 'object') return false;
+  return value.selected === true || value.enabled === true || value.value === true;
+}
+
+function inferCategoriesFromEngineInputs(estData = {}) {
   const inputs = estData?.inputs || estData?.engineInputs || {};
   const services = inputs.services || {};
-  const inferred = [
-    services.pest || inputs.svcPest ? 'pest_control' : null,
-    services.lawn || services.lawnCare || inputs.svcLawn ? 'lawn_care' : null,
+  return [
+    services.pest || inputs.svcPest || engineCommercialServiceSelected(services.commercialPest) ? 'pest_control' : null,
+    services.lawn || services.lawnCare || inputs.svcLawn || engineCommercialServiceSelected(services.commercialLawn) ? 'lawn_care' : null,
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
@@ -10192,7 +10285,126 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     // the 'pest_control' default and the public page mislabels it as Pest Control.
     services.foamRecurring || inputs.svcFoamRecurring ? 'foam_recurring' : null,
   ].filter(Boolean);
-  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
+}
+
+// Scope-only superset of inferCategoriesFromEngineInputs, used ONLY by
+// glassCategoryEligible. deriveServiceCategory keeps the narrow list above so
+// page copy is unchanged; the scope check must instead see EVERY selectable
+// engine service flag, because recurring-capable lanes persist no one-time
+// rows for the fail-closed row check to catch (Codex rd6: services.rodentBait
+// made a pest+rodent-bait estimate look pest-only). Categories here only need
+// to be right about in-scope-vs-not — specialty lanes map to keys that are
+// never in a release CSV, which fails closed.
+//
+// Predicate asymmetry is deliberate and fail-closed on both sides:
+// in-scope flags (pest/lawn pairs in the base list + the specialty pest/lawn
+// flags below) use STRICT selected semantics — under-detecting one just keeps
+// the old page. Out-of-scope flags use LOOSE truthiness — a vestigial
+// {selected:false} object blocks glass, which is the safe direction.
+const SCOPE_IN_SCOPE_ENGINE_FLAGS = [
+  ['oneTimePest', 'pest_control'], ['pestInitialRoach', 'pest_control'],
+  ['germanRoach', 'pest_control'], ['germanRoachInitial', 'pest_control'],
+  ['bedBug', 'pest_control'], ['flea', 'pest_control'], ['fleaExterior', 'pest_control'],
+  // Quote-wizard flag; its priced rows key as lawn_pest_* which
+  // recurringServiceKey resolves to pest_control (the 'pest' substring wins),
+  // so the flag maps consistently with the rows it generates.
+  ['lawnPestControl', 'pest_control'],
+  ['oneTimeLawn', 'lawn_care'], ['topDressing', 'lawn_care'],
+  ['dethatching', 'lawn_care'], ['plugging', 'lawn_care'],
+];
+const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
+  ['palm', 'tree_shrub'], ['palmInjection', 'tree_shrub'],
+  ['rodentBait', 'rodent'], ['rodentBaitSetupForce', 'rodent'], ['rodentTrapping', 'rodent'],
+  ['rodentTrappingFollowups', 'rodent'], ['rodentGuarantee', 'rodent'],
+  ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
+  ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
+  ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV2', 'rodent'],
+  ['sanitation', 'rodent'],
+  ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
+  ['termiteFoam', 'termite_foam'],
+  ['termite_bait', 'termite_bait'],
+  ['preSlabTermidor', 'pre_slab_termiticide'], ['pre_slab_termidor', 'pre_slab_termiticide'],
+  ['stinging', 'stinging'], ['stingingV2', 'stinging'],
+  ['wdo', 'wdo'],
+];
+// Legacy admin estimates persist the selection as TOP-LEVEL inputs.svc* form
+// flags (see selectedServiceKeysFromInputs in estimate-service-lines.js), not
+// under inputs.services. The base inference reads the recurring-capable ones
+// (svcPest/svcLawn/...); these cover the rest of the form with the same
+// strict-in / loose-out asymmetry (Codex rd7: standalone svcWasp quotes
+// classified pest_control off the row name alone).
+const SCOPE_IN_SCOPE_LEGACY_FLAGS = [
+  ['svcOnetimePest', 'pest_control'], ['svcRoach', 'pest_control'],
+  ['svcBedbug', 'pest_control'], ['svcFlea', 'pest_control'],
+  ['svcFleaExterior', 'pest_control'],
+  ['svcOnetimeLawn', 'lawn_care'], ['svcTopdress', 'lawn_care'],
+  ['svcDethatch', 'lawn_care'], ['svcPlugging', 'lawn_care'],
+  ['svcOverseed', 'lawn_care'],
+];
+const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
+  ['svcWasp', 'stinging'],
+  ['svcTs', 'tree_shrub'], ['svcInjection', 'tree_shrub'],
+  ['svcRodentBait', 'rodent'], ['svcRodentTrap', 'rodent'],
+  ['svcRodentSanitation', 'rodent'], ['svcRodentGuarantee', 'rodent'],
+  ['svcRodentWireMesh', 'rodent'], ['svcRodentBirdBox', 'rodent'],
+  ['svcTrapOnlyRetainer', 'rodent'], ['svcExclusion', 'rodent'],
+  ['svcFoam', 'termite_foam'],
+  ['svcWdo', 'wdo'],
+];
+
+// Scope classification for one-time rows. Stinging/wasp rows classify as
+// pest_control by NAME through oneTimeItemLooksPestSpecialty — right for page
+// copy (the pest sections render them), wrong for the release scope: a
+// row-only wasp quote with no surviving source flags walked into the pest
+// scope (Codex rd8). serviceCategoryForOneTimeItem (copy) is untouched.
+function scopeCategoryForOneTimeItem(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return null;
+  const service = String(item?.service || '').toLowerCase();
+  const text = oneTimeItemSearchText(item);
+  if (service.includes('stinging') || /\b(wasp|bee|hornet|stinging)\b/.test(text)) return 'stinging';
+  return serviceCategoryForOneTimeItem(item);
+}
+
+function inferScopeCategoriesFromEngineInputs(estData = {}) {
+  // The input shapes COEXIST (Codex rd8): admin persistence can carry
+  // engineInputs beside an empty legacy inputs {} (the rest of the route
+  // treats engineInputs as authoritative — see extractEngineInputs), and
+  // quote-wizard estimates persist the selection at TOP-LEVEL
+  // estimate_data.services. `inputs || engineInputs` hid whole sources, so
+  // every present source is scanned and unioned instead.
+  const inputSources = [estData?.inputs, estData?.engineInputs]
+    .filter((source) => source && typeof source === 'object');
+  const serviceSources = [
+    ...inputSources.map((source) => source.services),
+    estData?.services,
+  ].filter((source) => source && typeof source === 'object');
+  const categories = new Set();
+  inputSources.forEach((source) => {
+    inferCategoriesFromEngineInputs({ inputs: source }).forEach((c) => categories.add(c));
+  });
+  if (estData?.services && typeof estData.services === 'object') {
+    inferCategoriesFromEngineInputs({ inputs: { services: estData.services } })
+      .forEach((c) => categories.add(c));
+  }
+  serviceSources.forEach((services) => {
+    SCOPE_IN_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+      const value = services[flag];
+      if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+    });
+    SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+      if (services[flag]) categories.add(category);
+    });
+  });
+  inputSources.forEach((source) => {
+    SCOPE_IN_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+      const value = source[flag];
+      if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+    });
+    SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+      if (source[flag]) categories.add(category);
+    });
+  });
+  return [...categories];
 }
 
 function chipsForServiceCategory(category) {
@@ -12691,8 +12903,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // Glass release flag: when on, the React view renders the liquid-glass
       // experience without needing ?glass=1. Absent (not false) while the
-      // gate is off so pre-release responses stay byte-identical.
-      ...(featureGates.isEnabled('estimateGlassTheme') ? { glassDefault: true } : {}),
+      // gate is off so pre-release responses stay byte-identical. The
+      // optional category scope releases service-by-service (owner call
+      // 2026-07-05: pest + lawn first; other categories keep the old page
+      // until their glass copy packs are approved).
+      ...(featureGates.isEnabled('estimateGlassTheme')
+        // The scope decision sees the RAW normalized rows unioned with the
+        // bundle items: alignOneTimeChoiceBreakdown (show_one_time_option)
+        // replaces raw rows with the synthetic choice + preserved pest/Bora
+        // add-ons, which would drop an out-of-scope row (e.g. WDO) before the
+        // fail-closed check could catch it. Union keeps both the dropped raw
+        // rows and any bundle-only generated add-ons in view.
+        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, [
+          ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+          ...(pricingBundle?.oneTimeBreakdown?.items || []),
+        ])
+        ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,
@@ -12855,6 +13081,7 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
