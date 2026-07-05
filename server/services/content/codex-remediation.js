@@ -280,6 +280,39 @@ function envBool(key, defaultValue = false) {
   return defaultValue;
 }
 
+// Same semantics as autonomous-runner's envInt (negative values → default).
+function envInt(key, defaultValue = null) {
+  const raw = process.env[key];
+  if (raw == null || raw === '') return defaultValue;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
+/**
+ * Frontmatter schema is FROZEN during remediation (body-only fixes), but the
+ * publisher derives schema_types FROM the body (astro-publisher
+ * schemaTypesForContent — e.g. FAQPage appears iff the body has a visible FAQ
+ * section). A body fix that adds/removes a FAQ therefore strands the frozen
+ * frontmatter describing content that no longer exists (P0-class structured-
+ * data mismatch on the live page). Returns true when the fix changes the
+ * derived schema-type set — the caller parks (restamping frontmatter is a
+ * human call). Fails closed (true) when the derivation is unavailable.
+ */
+function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
+  let derive = deps.schemaTypesForContent;
+  if (!derive) {
+    // Exposed on the publisher's _internals (same derivation buildFrontmatter uses).
+    try { derive = require('../content-astro/astro-publisher')._internals.schemaTypesForContent; } catch (_) { return true; }
+  }
+  if (typeof derive !== 'function') return true;
+  let a; let b;
+  try {
+    a = derive(String((fm.parse(originalMd) || {}).content || ''));
+    b = derive(String((fm.parse(fixedMd) || {}).content || ''));
+  } catch (_) { return true; }
+  return canonValue([...(a || [])].sort()) !== canonValue([...(b || [])].sort());
+}
+
 /**
  * Re-run the AUTONOMOUS runner's publish gates on a remediated .mdx before
  * committing — the runner's uniqueness / quality / SEO-completion /
@@ -302,7 +335,10 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     if (run.action_type !== 'new_supporting_blog') {
       return { ok: false, reason: `remediation gates only cover new_supporting_blog runs (got ${run.action_type || 'unknown'})` };
     }
+    const db = deps.db || dbDefault;
     const runner = deps.autonomousRunner || require('./autonomous-runner');
+    const guardrailsMod = deps.contentGuardrails || contentGuardrails;
+    const comparisonMod = deps.comparisonTableGate || comparisonTableGate;
     const uniquenessGate = deps.uniquenessGate || require('./uniqueness-gate');
     const qualityGate = deps.qualityGate || require('./content-quality-gate');
     const seoCompletionGate = deps.seoCompletionGate || require('./seo-completion-gate');
@@ -317,6 +353,38 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
+
+    // 0. Content-policy gates with the RUN's context. validateFixedBlogFile
+    //    already ran them with frontmatter-derived context, but the runner's
+    //    context is stricter and lives off the opportunity + brief: FAQ-blocked
+    //    topics ride voice_constraints.operator_brief.faq_blocked_topic /
+    //    opp.service (frontmatter omits them), and the comparison gate needs
+    //    operatorBriefText so an operator-authorized competitor mention doesn't
+    //    depend on it while an UNauthorized one gets flagged. Missing
+    //    opportunity row fails closed.
+    const opp = run.opportunity_id ? await db('opportunity_queue').where({ id: run.opportunity_id }).first() : null;
+    if (!opp) return { ok: false, reason: 'opportunity row unavailable for guardrail context' };
+    const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
+    const guardResult = guardrailsMod.evaluate(draft, guardOptions);
+    if (!guardResult || guardResult.pass !== true) {
+      const codes = (((guardResult && guardResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => `${f.severity} ${f.code}`);
+      return { ok: false, reason: `run-context guardrails: ${codes.join('; ') || 'no result'}` };
+    }
+    let namedCompetitorEnabled = false;
+    try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
+    // _internals is absent on injected test runners → null operatorBriefText,
+    // which only makes the gate STRICTER (authorized mentions park for a human).
+    const opText = (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
+      ? runner._internals.operatorBriefTextForComparisonGate(opp, brief)
+      : null;
+    const comparisonResult = comparisonMod.evaluate(draft, { namedCompetitorEnabled, operatorBriefText: opText });
+    if (!comparisonResult || comparisonResult.pass !== true) {
+      const codes = (((comparisonResult && comparisonResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => f.code);
+      return { ok: false, reason: `run-context comparison gate: ${codes.join(',') || 'no result'}` };
+    }
+    if (comparisonResult.requiresHumanReview === true) {
+      return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+    }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless
     //    explicitly disabled). Corpus load is required — fail closed.
@@ -354,6 +422,24 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     if (!seoResult || seoResult.skipped || seoResult.passed !== true) {
       const p0 = ((seoResult && seoResult.findings) || []).filter((f) => f.severity === 'P0').map((f) => f.code);
       return { ok: false, reason: `seo-completion gate: ${(seoResult && (seoResult.error || p0.join(','))) || 'no result'}` };
+    }
+
+    // 3b. SEO canary limits — the content-relevant subset of the runner's
+    //     _evaluatePublishingGuards, same env semantics (enable flag defaults
+    //     true for new_supporting_blog). The gate can pass with P1 findings a
+    //     rewrite introduced (dropped CTA / service link / city link); the
+    //     runner would refuse to open a PR for that body, so remediation must
+    //     refuse to commit it. Publish-rate caps and infra-availability guards
+    //     are deliberately NOT mirrored: they gate publish timing, not body
+    //     content, and the poller enforces its own daily merge cap.
+    if (envBool('AUTONOMOUS_CONTENT_ENABLE_CANARY_GUARDS', true)) {
+      if (envBool('AUTONOMOUS_CONTENT_REQUIRE_ZERO_P0', false) && Number(seoResult?.summary?.p0 || 0) > 0) {
+        return { ok: false, reason: `seo canary: ${seoResult.summary.p0} P0 finding(s) with zero-P0 required` };
+      }
+      const maxP1 = envInt('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS', null);
+      if (maxP1 != null && Number(seoResult?.summary?.p1 || 0) > maxP1) {
+        return { ok: false, reason: `seo canary: ${seoResult.summary.p1} P1 finding(s), above max ${maxP1}` };
+      }
     }
 
     // 4. Pre-publish visibility static checks on the rewritten body.
@@ -471,6 +557,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // portal columns written before the fix that nothing restamps.
   if (immutableFrontmatterChanged(file.content, fixed)) {
     return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark);
+  }
+  // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
+  // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
+  // body fix that adds/removes a FAQ section would ship structured data for
+  // content that isn't there. Park — restamping schema is a human call.
+  const schemaChanged = deps.schemaShapeChanged || schemaShapeChanged;
+  if (schemaChanged(file.content, fixed, deps)) {
+    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
@@ -604,6 +698,7 @@ module.exports = {
   validateFixedBlogFile,
   validateAutonomousRunGates,
   immutableFrontmatterChanged,
+  schemaShapeChanged,
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,

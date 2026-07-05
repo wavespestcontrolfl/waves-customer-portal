@@ -430,16 +430,21 @@ describe('validateAutonomousRunGates', () => {
   const RUN = {
     id: 'run-1',
     action_type: 'new_supporting_blog',
+    opportunity_id: 'opp-1',
     draft_payload: JSON.stringify({ body: 'original body', url: 'https://hub/blog/x/', title: 'T' }),
   };
   const goodDeps = () => ({
+    db: makeDb({ opportunity_queue: [{ id: 'opp-1', bucket: 'standard', service: 'pest' }] }),
     autonomousRunner: {
       _loadReviewedBrief: async () => ({ page_type: 'supporting-blog', action_type: 'new_supporting_blog' }),
       _loadBlogCorpus: async () => [],
+      _deriveGuardrailOptions: async () => ({ service: 'pest', domains: null, primaryKeyword: null }),
     },
+    contentGuardrails: { evaluate: () => ({ pass: true, findings: [] }) },
+    comparisonTableGate: { evaluate: () => ({ pass: true, findings: [], requiresHumanReview: false }) },
     uniquenessGate: { evaluateBlog: () => ({ ok: true }) },
     qualityGate: { evaluate: () => ({ ok: true }) },
-    seoCompletionGate: { evaluate: () => ({ passed: true, findings: [] }) },
+    seoCompletionGate: { evaluate: () => ({ passed: true, findings: [], summary: { p0: 0, p1: 0 } }) },
     aiVisibilityGate: { evaluateStatic: () => ({ passed: true }) },
   });
 
@@ -482,5 +487,85 @@ describe('validateAutonomousRunGates', () => {
     expect(seen.uniq).toBe('Fixed body text');
     expect(seen.html).toBe('Fixed body text');
     expect(seen.url).toBe('https://hub/blog/x/');
+  });
+
+  // r7: content-policy gates re-run with the RUN's context, not just the four
+  // quality gates — brief-derived FAQ-blocked topics and operatorBriefText.
+  test('run-context guardrails failure -> fail with codes; guard options come from the runner derivation', async () => {
+    const deps = goodDeps();
+    let optionsSeen = null;
+    deps.autonomousRunner._deriveGuardrailOptions = async () => ({ service: ['pest', 'Rodents'], domains: null });
+    deps.contentGuardrails.evaluate = (draft, options) => { optionsSeen = options; return { pass: false, findings: [{ severity: 'P0', code: 'FAQ_BLOCKED_SERVICE' }] }; };
+    const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/run-context guardrails/);
+    expect(r.reason).toMatch(/FAQ_BLOCKED_SERVICE/);
+    expect(optionsSeen.service).toEqual(['pest', 'Rodents']);
+  });
+
+  test('run-context comparison requiresHumanReview -> fail (named-competitor sign-off)', async () => {
+    const deps = goodDeps();
+    deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
+    const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/named-competitor/);
+  });
+
+  test('missing opportunity row -> fail closed (no guardrail context)', async () => {
+    const deps = goodDeps();
+    deps.db = makeDb({ opportunity_queue: [] });
+    const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/opportunity row unavailable/);
+  });
+
+  // r7: the SEO P1 canary limit applies to remediated bodies too — the gate
+  // can pass with P1s (dropped CTA / service link) the runner would refuse.
+  test('AUTONOMOUS_CONTENT_MAX_P1_FINDINGS caps P1s on the rewritten body', async () => {
+    const prevMax = process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
+    process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS = '0';
+    try {
+      const deps = goodDeps();
+      deps.seoCompletionGate.evaluate = () => ({ passed: true, findings: [{ severity: 'P1', code: 'P1_MISSING_CONVERSION_CTA' }], summary: { p0: 0, p1: 1 } });
+      const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/seo canary/);
+      // and with the limit unset it passes (gate itself passed)
+      delete process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
+      expect((await rem.validateAutonomousRunGates(MD, RUN, deps)).ok).toBe(true);
+    } finally {
+      if (prevMax === undefined) delete process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
+      else process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS = prevMax;
+    }
+  });
+});
+
+describe('schema-shape consistency (r7)', () => {
+  const FAQ_BODY = 'Intro paragraph.\n\n## Frequently Asked Questions\n\n### Do roaches bite people?\n\nRarely.\n';
+  const PLAIN_BODY = 'Intro paragraph, no FAQ section here.\n';
+
+  test('schemaShapeChanged: FAQ section removed or added -> true; body edit without schema impact -> false', () => {
+    const withFaq = `---\ntitle: T\n---\n${FAQ_BODY}`;
+    const noFaq = `---\ntitle: T\n---\n${PLAIN_BODY}`;
+    expect(rem.schemaShapeChanged(withFaq, noFaq)).toBe(true);
+    expect(rem.schemaShapeChanged(noFaq, withFaq)).toBe(true);
+    expect(rem.schemaShapeChanged(withFaq, withFaq.replace('Rarely.', 'Almost never.'))).toBe(false);
+    expect(rem.schemaShapeChanged(noFaq, noFaq.replace('Intro', 'Opening'))).toBe(false);
+  });
+
+  test('fix that changes the derived schema set -> park (frontmatter schema is frozen)', async () => {
+    const gh = makeGh({ fileContent: `---\ntitle: T\n---\n${FAQ_BODY}` });
+    const r = await runRemediationForPr(CTX, {
+      db: makeDb(), gh, callAnthropic: makeCall(`---\ntitle: T\n---\n${PLAIN_BODY}`), validateFixedBlogFile: PASS,
+    });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/schema types/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('schema derivation unavailable -> fails closed (treated as changed)', () => {
+    expect(rem.schemaShapeChanged('---\nt: 1\n---\nbody', '---\nt: 1\n---\nbody2', { schemaTypesForContent: null })).toBe(false);
+    // explicit injectable that throws → changed
+    expect(rem.schemaShapeChanged('a', 'b', { schemaTypesForContent: () => { throw new Error('boom'); } })).toBe(true);
   });
 });
