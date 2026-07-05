@@ -44,49 +44,6 @@ function dateColumnKey(value) {
   return match ? match[1] : text;
 }
 
-function slugify(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .slice(0, 80);
-}
-
-function imageExtFromMime(mime) {
-  if (mime === 'image/png') return 'png';
-  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
-  if (mime === 'image/webp') return 'webp';
-  return null;
-}
-
-function imageExtFromSource(value) {
-  const dataMatch = String(value || '').match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
-  return imageExtFromMime(dataMatch?.[1]?.toLowerCase()) || 'webp';
-}
-
-function blogSlug(post) {
-  return String(post.slug || slugify(post.title)).replace(/^\/+|\/+$/g, '');
-}
-
-function hasPublishedAstroHero(post) {
-  return post.astro_status === 'live';
-}
-
-function publicBlogImageUrl(blog) {
-  for (const raw of [blog.featured_image_url, blog.image_url, blog.og_image]) {
-    if (!raw) continue;
-    if (/^https?:\/\//i.test(raw)) return raw;
-    if (raw.startsWith('/')) return `https://www.wavespestcontrol.com${raw}`;
-    if (/^data:image\//i.test(raw) && hasPublishedAstroHero(blog)) {
-      const slug = blogSlug(blog);
-      if (slug) return `https://www.wavespestcontrol.com/images/blog/${slug}/hero.${imageExtFromSource(raw)}`;
-    }
-  }
-  return undefined;
-}
-
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
 
@@ -109,9 +66,10 @@ async function sharePublishedBlog(blog) {
       link,
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
-      imageUrl: publicBlogImageUrl(blog),
-      // Autonomous: use the blog's own image, else the brand card — never an AI
-      // image (publishToAll renders the card when no imageUrl resolves).
+      // No imageUrl: publishToAll's blog-hero branch resolves the live page's
+      // og:image and re-hosts it as JPEG (Instagram rejects the raw .webp hero
+      // the old publicBlogImageUrl handed it), falling back to the brand card
+      // on a miss — never an AI image.
       noAiImage: true,
     });
     if (result?.dryRun) {
