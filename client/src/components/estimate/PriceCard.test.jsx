@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import PriceCard, { priceCardSavingsInfo } from './PriceCard';
+import PriceCard from './PriceCard';
 
 afterEach(() => cleanup());
 
@@ -162,7 +162,9 @@ describe('PriceCard — WaveGuard savings display', () => {
       />,
     );
 
-    expect(screen.getByText(/You save/)).toHaveTextContent('You save $10/quarter with WaveGuard Silver');
+    // The "You save" line was removed globally (anchor-vs-cadence delta
+    // misattributed to the tier) — the struck anchor is the discount signal.
+    expect(screen.queryByText(/You save/)).toBeNull();
     expect(screen.getByText('$100/quarter')).toBeInTheDocument();
   });
 
@@ -177,7 +179,7 @@ describe('PriceCard — WaveGuard savings display', () => {
     );
 
     expect(screen.getByText('$83/mo')).toBeInTheDocument();
-    expect(screen.getByText(/You save/)).toHaveTextContent('You save $8.30/mo with WaveGuard Silver');
+    expect(screen.queryByText(/You save/)).toBeNull();
   });
 
   it('shows no anchor or savings when monthlyBase equals the billed monthly (0% tier)', () => {
@@ -194,46 +196,6 @@ describe('PriceCard — WaveGuard savings display', () => {
   });
 });
 
-describe('priceCardSavingsInfo — bundle save lines below the boxes', () => {
-  it('reports savings for a non-pest row via the monthlyBase anchor', () => {
-    const info = priceCardSavingsInfo({ key: 'enhanced', label: '9 visits / yr', monthly: 46.58, monthlyBase: 51.75, visitsPerYear: 9 });
-    expect(info).toEqual({ savings: 5.17, periodLabel: '/mo' });
-  });
-
-  it('still prefers the per-visit anchor for pest cadence rows', () => {
-    const info = priceCardSavingsInfo({ key: 'quarterly', monthly: 43.5, monthlyBase: 48.33, perVisit: 145 });
-    // Quarterly cadence price 130.50 vs $145/visit anchor.
-    expect(info).toEqual({ savings: 14.5, periodLabel: '/quarter' });
-  });
-
-  it('returns null when there is no discount to report', () => {
-    expect(priceCardSavingsInfo({ key: 'monthly', monthly: 52, monthlyBase: 52 })).toBeNull();
-    expect(priceCardSavingsInfo({ key: 'monthly', monthly: 52 })).toBeNull();
-  });
-
-  it('never reports a manual discount as WaveGuard savings', () => {
-    // Single-service lawn ladder with a $120/yr promo: monthly is already net
-    // of the manual discount (83 - 10 = 73) and the card shows the promo as
-    // its own row — the monthlyBase gap must NOT become a "You save" line.
-    expect(priceCardSavingsInfo({
-      key: 'premium',
-      monthly: 73,
-      monthlyBase: 83,
-      manualDiscount: { amount: 120, recurringAmount: 120, label: 'Promo' },
-    })).toBeNull();
-  });
-
-  it('reports only the tier slice when manual and tier discounts stack', () => {
-    // $100/mo base, 10% tier (→90) plus a $60/yr ($5/mo) manual promo (→85).
-    const info = priceCardSavingsInfo({
-      key: 'enhanced',
-      monthly: 85,
-      monthlyBase: 100,
-      manualDiscount: { amount: 60, recurringAmount: 60, label: 'Promo' },
-    });
-    expect(info).toEqual({ savings: 10, periodLabel: '/mo' });
-  });
-});
 
 describe('PriceCard — manual discount is not double-reported in-card', () => {
   it('shows the promo row but no anchor/savings when the gap is the manual discount alone', () => {

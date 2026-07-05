@@ -125,24 +125,6 @@ function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
   return Math.round((recurringAnnual / 12) * intervalMonths * 100) / 100;
 }
 
-// Savings + period for a frequency entry — shared with the bundle layout,
-// which renders the "You save …" lines BELOW all service boxes instead of
-// inside each card. Mirrors the in-card math exactly (incl. the
-// rounding-noise floor).
-export function priceCardSavingsInfo(frequency = {}) {
-  if (frequency.quoteRequired === true || frequency.monthly == null) return null;
-  const billingKey = billingKeyForFrequency(frequency);
-  const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
-  const periodLabel = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
-  const cadencePrice = Math.round(Number(frequency.monthly) * intervalMonths * 100) / 100;
-  const anchorPrice = anchorPeriodPrice(frequency, intervalMonths);
-  const raw = anchorPrice > cadencePrice
-    ? Math.round((anchorPrice - cadencePrice - manualDiscountPerInterval(frequency, intervalMonths)) * 100) / 100
-    : 0;
-  const savings = raw >= 0.05 ? raw : 0;
-  return savings > 0 ? { savings, periodLabel } : null;
-}
-
 export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
   if (!frequency) return null;
 
@@ -164,7 +146,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   // quarterly visit → $31.33/mo → $93.99/quarter), so a 0%-discount tier
   // (WaveGuard Bronze) can land a phantom cent or two under the per-visit
   // anchor. Anything below this threshold is rounding noise, not a member
-  // discount — show no anchor strike-through and no save line for it.
+  // discount — show no anchor strike-through for it.
   const SAVINGS_ROUNDING_NOISE = 0.05;
   const rawSavings = cadencePrice != null && anchorPrice > cadencePrice
     ? Math.round((anchorPrice - cadencePrice - manualDiscountPerInterval(frequency, intervalMonths)) * 100) / 100
@@ -277,15 +259,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         <div style={{ marginTop: 10, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
           <span aria-hidden="true" style={{ color: W.green, marginRight: 6 }}>&#10003;</span>
           {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
-        </div>
-      ) : null}
-
-      {/* Glass drops the save line: the figure is the anchor-vs-cadence
-          delta misattributed to the tier (owner directive). The struck
-          anchor above still evidences the member discount. */}
-      {showSavings && savings > 0 && waveGuardTier && !showLowConfidenceRange && !glass ? (
-        <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
-          You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
         </div>
       ) : null}
 

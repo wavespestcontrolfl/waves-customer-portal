@@ -1651,11 +1651,10 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                 WaveGuard {waveGuardTier}
               </span>
             </div>
-            {intervalSavings > 0 && (
-              <div className="text-14 text-[#16A34A] font-bold mt-2">
-                You save {fmt(intervalSavings)}{cadence.period} with WaveGuard {waveGuardTier}
-              </div>
-            )}
+            {/* The "You save" line is intentionally absent: intervalBase −
+                intervalTotal is the anchor-vs-cadence delta, not a tier
+                discount (owner directive; matches the customer page). The
+                struck anchor above still shows a discount was applied. */}
             {dayPrice > 0 && (
               <div className="text-14 text-[#6B7280] mt-2">
                 That's just {fmt(dayPrice)}/day for complete home protection.
