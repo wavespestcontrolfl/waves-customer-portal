@@ -13180,6 +13180,7 @@ module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVi
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
+module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;

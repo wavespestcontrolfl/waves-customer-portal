@@ -1962,6 +1962,21 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+// Annual prepay supports exactly ONE recurring coverage unit — the same math
+// as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
+// guard (recurring.services lines + any supplemental companion a solo primary
+// absorbs into one combo visit). Shared with the public /deposit-intent mirror
+// so a deposit is never collected for a prepay the converter will 422.
+module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUnitCount(estimateData = {}) {
+  const recurring = recurringServicesFromEstimateData(estimateData);
+  const companions = supplementalCompanionLines(estimateData);
+  const soloKey = recurring.length === 1 ? recurringServiceKey(recurring[0]) : null;
+  const absorbed = soloKey
+    ? companions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
+      soloKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
+    : [];
+  return recurring.length + absorbed.length;
+};
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
 module.exports.reservedRowComboRewrites = reservedRowComboRewrites;

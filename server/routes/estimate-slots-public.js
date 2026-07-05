@@ -39,6 +39,8 @@ const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
   buildPricingBundle,
+  commercialAcceptDepositExempt,
+  isCommercialAutoAcceptEstimate,
   estimateTrenchingReviewRequired,
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
@@ -509,6 +511,15 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       if (!annualPrepayEligibleForEstimateData(estData)) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
+      // Mirror the converter's fail-closed multi-service block
+      // (ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED, thrown INSIDE the accept
+      // transaction): a bundled recurring estimate can pass the eligibility
+      // mix yet 422 at conversion — the deposit must not be collected for a
+      // prepay that cannot complete.
+      const prepayUnitCount = require('../services/estimate-converter').annualPrepayRecurringUnitCount(estData);
+      if (prepayUnitCount > 1) {
+        return res.status(400).json({ error: 'annual prepay is not available for multi-service plans — choose pay per application' });
+      }
     }
     // Mirror accept's invoice-mode customer gate BEFORE collecting money:
     // accept rejects an invoice-mode estimate (admin flag OR derived
@@ -532,16 +543,23 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       oneTimeUninvoiced: oneTime && !resolveEstimateInvoiceMode(estimate, estData),
       noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
-    // A narrow low-confidence commercial RECURRING accept is held for on-site
-    // price confirmation — whatever the billing mode, no money moves at accept
-    // (invoice-mode holds the first-invoice mint; non-invoice bills per
-    // application after the confirmed visit), so there's nothing to credit a
-    // deposit against. Exempt it here too (matches the accept handler + the
-    // /data deposit policy), so a "no payment now" estimate never collects a
-    // deposit at the confirm step.
-    if (!oneTime) {
+    // Commercial deposit exemption — the SAME predicate the accept gate runs
+    // (commercialAcceptDepositExempt): commercial auto-priced programs and
+    // site-confirmation-held recurring estimates mint nothing at accept (the
+    // team invoices manually after confirmation), so there is nothing to
+    // credit a deposit against; an uninvoiced one-time commercial accept has
+    // no completed-visit roll-forward either. Only the one-time INVOICE-MODE
+    // accept keeps its deposit (minted + credited inside the accept
+    // transaction). Exempting here keeps every "no payment now" estimate from
+    // collecting a deposit at the confirm step — matches accept + /data.
+    {
       const lc = commercialLowConfidenceRange(estData);
-      if (lc.hasLowConfidence && !lc.forceSiteQuote) {
+      if (commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
+        treatAsOneTime: oneTime,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      })) {
         return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'commercial_manual_billing' });
       }
     }
