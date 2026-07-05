@@ -397,6 +397,13 @@ const gates = {
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
 
+  // Liquid-glass estimate experience (docs/design/estimate-glass-plan.md) —
+  // makes glass the DEFAULT render for the React estimate view. Off = the
+  // pre-glass page (glass still reachable per-link via ?glass=1); on = glass
+  // for every customer (?glass=0 stays as the per-link escape hatch).
+  // Kill switch: unset GATE_ESTIMATE_GLASS.
+  estimateGlassTheme: isProd ? process.env.GATE_ESTIMATE_GLASS === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in

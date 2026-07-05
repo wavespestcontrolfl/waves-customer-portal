@@ -12655,6 +12655,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
+      // Glass release flag: when on, the React view renders the liquid-glass
+      // experience without needing ?glass=1. Absent (not false) while the
+      // gate is off so pre-release responses stay byte-identical.
+      ...(featureGates.isEnabled('estimateGlassTheme') ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,

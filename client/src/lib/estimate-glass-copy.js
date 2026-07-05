@@ -13,11 +13,24 @@
  */
 import { etDateString } from './timezone';
 
+// Server-driven release state (GATE_ESTIMATE_GLASS → /data glassDefault).
+// Module-level on purpose: dozens of components consult glassCopyActive()
+// without prop threading, and the flag flips at most once per page load —
+// EstimateViewPage sets it from the payload before the loaded UI renders.
+let glassDefaultReleased = false;
+
+export function setGlassDefault(on) {
+  glassDefaultReleased = on === true;
+}
+
 export function glassCopyActive() {
   try {
-    return new URLSearchParams(window.location.search).get('glass') === '1';
+    const param = new URLSearchParams(window.location.search).get('glass');
+    if (param === '1') return true; // pre-release preview / force-on
+    if (param === '0') return false; // per-link escape hatch back to the old page
+    return glassDefaultReleased;
   } catch {
-    return false;
+    return glassDefaultReleased;
   }
 }
 

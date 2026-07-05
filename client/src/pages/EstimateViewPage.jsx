@@ -50,6 +50,7 @@ import {
   glassCopyActive,
   glassEstimateCopyFor,
   glassTierDisplay,
+  setGlassDefault,
   GLASS_COPY,
   GLASS_DAY_LINES,
 } from '../lib/estimate-glass-copy';
@@ -417,20 +418,13 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
   return !!left && !!right && (left.includes(right) || right.includes(left));
 }
 
-// Liquid-glass theme dark launch (docs/design/estimate-glass-plan.md, PR A).
-// Read once per mount; module-level so the shared Page wrapper below can gate
-// the theme for EVERY estimate state (loading, not-found, terminal, success,
-// review) — not just the main configure branch.
-function glassThemeRequested() {
-  try {
-    return new URLSearchParams(window.location.search).get('glass') === '1';
-  } catch {
-    return false;
-  }
-}
-
+// Liquid-glass theme gate (docs/design/estimate-glass-plan.md). Re-evaluated
+// per render — released estimates learn glassDefault from the /data payload
+// (setGlassDefault), which lands after the first loading render, so the
+// wrapper must pick the flip up rather than read once at mount. The URL
+// param still forces either way (?glass=1 / ?glass=0).
 function Page({ children }) {
-  const [glassActive] = useState(glassThemeRequested);
+  const glassActive = glassCopyActive();
   return (
     <div style={{
       minHeight: '100vh', background: ESTIMATE_BG,
@@ -2539,6 +2533,10 @@ export default function EstimateViewPage() {
     if (!r.ok) throw new Error(`estimate fetch failed: ${r.status}`);
     initialViewCountedRef.current = true;
     const body = await r.json();
+    // Glass release flag (GATE_ESTIMATE_GLASS): set the module state BEFORE
+    // setData so every glassCopyActive() consumer sees it on the render that
+    // paints the loaded page. URL ?glass=1/?glass=0 still override.
+    setGlassDefault(body.glassDefault === true);
     setData(body);
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
