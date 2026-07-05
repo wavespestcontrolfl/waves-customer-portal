@@ -420,11 +420,15 @@ const gates = {
 
   // Liquid-glass email chrome (glass rollout Phase 3) — switches every
   // email wrapper in services/email-template.js (transactional, service,
-  // newsletter) from the warm sand palette to the glass language: cool
-  // gradient wash, #04395E ink, system font stack, gold gradient CTA.
+  // newsletter) from the warm sand chrome to the glass LAYOUT (orb
+  // scene, floating pill header, hero on scene, frosted cards).
+  // Explicit opt-in in EVERY environment (unlike estimateGlassTheme's
+  // dev-open default): glass is a different DOM, so a dev-open gate
+  // would make jest and local [TEST] sends render glass while prod
+  // renders classic — the suite must exercise what prod sends.
   // Off = the pre-glass chrome, byte-for-byte. Kill switch: unset
   // GATE_EMAIL_GLASS.
-  emailGlassTheme: isProd ? process.env.GATE_EMAIL_GLASS === 'true' : true,
+  emailGlassTheme: process.env.GATE_EMAIL_GLASS === 'true',
 
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default

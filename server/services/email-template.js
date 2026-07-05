@@ -41,6 +41,10 @@ const CLASSIC_THEME = {
   pageBg: '#FAF8F3', // SAND
   pageBgImage: '', // no gradient
   card: '#FFFFFF',
+  cardGlassBg: '', // no frosted overlay pre-glass
+  cardBorder: '#E7E2D7', // same value as rule — byte-identical gate-off
+  headerBand: '#FFFFFF', // same value as card
+  footerBand: '#FAF8F3', // same value as pageBg
   rule: '#E7E2D7',
   font: 'Inter,Arial,sans-serif',
   headingFont: "'Source Serif 4',Georgia,serif",
@@ -90,16 +94,32 @@ const GLASS_THEME = {
   link: '#0A7EC2', // glass accent blue (--accent)
   body: '#555B69', // rgba(12,21,40,.7) over white
   muted: '#81858F', // rgba(12,21,40,.52) over white
-  pageBg: '#E8F0F8',
-  pageBgImage: 'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
+  // The scene — the glass-engine orb language, tuned to how the live
+  // estimate/report pages actually READ (their orbs render through
+  // heavy blur + grain, so the result is far softer than the raw
+  // engine stops): dreamy blue blob left, soft sky top-right, faint
+  // deep-blue lower-right, creamy gold low-left, pale airy base.
+  pageBg: '#EDF4FA',
+  pageBgImage: 'radial-gradient(1200px 800px at -8% 12%,rgba(10,126,194,.22),transparent 60%),radial-gradient(1000px 700px at 108% 0%,rgba(56,170,225,.16),transparent 60%),radial-gradient(900px 700px at 96% 90%,rgba(6,90,140,.13),transparent 62%),radial-gradient(800px 600px at -6% 100%,rgba(240,165,0,.15),transparent 58%),linear-gradient(180deg,#EAF3FB 0%,#F6FAFE 48%,#EAF2F9 100%)',
+  // Barely-there frosted card, like the estimate page's price/summary
+  // cards: a whisper of white over the scene. card stays the solid
+  // fallback — glass surfaces emit background:<card>;background:
+  // <cardGlassBg> so Outlook and other rgba-less clients degrade to
+  // clean flat white.
   card: '#FFFFFF',
+  cardGlassBg: 'rgba(255,255,255,0.42)',
+  cardBorder: '#EFF6FC', // glass edge highlight (solid — rgba borders go black in Outlook)
+  headerBand: 'rgba(255,255,255,0.25)', // legacy-layout bands (unused by the glass layout)
+  footerBand: 'rgba(233,243,251,0.5)',
   rule: '#D8E4EF',
   font: "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Inter,Arial,sans-serif",
   headingFont: "-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',Inter,Arial,sans-serif",
   headingWeight: '700',
   headingTracking: '-0.02em',
   cardRadius: '20px',
-  cardShadow: '0 18px 44px rgba(4,57,94,0.12)',
+  // Soft float + inset white top highlight — the estimate cards are
+  // quiet; the deep [data-glass] shadow reads too heavy on email cards.
+  cardShadow: '0 18px 60px rgba(4,57,94,0.12),inset 0 1px 0 rgba(255,255,255,0.6)',
   ctaBg: '#F5B520',
   ctaBgImage: 'linear-gradient(135deg,#FFDE78 0%,#F4B014 100%)',
   ctaBorder: '#FFEEB4',
@@ -107,7 +127,8 @@ const GLASS_THEME = {
   // [data-glass-accent] in glass-theme.css, which pins #1B2C5B.
   ctaText: '#1B2C5B',
   ctaRadius: '12px',
-  ctaShadow: '0 10px 26px rgba(180,110,0,0.25)',
+  // Mirrors [data-glass-accent]: warm float + gold glow + inset shine.
+  ctaShadow: '0 12px 32px rgba(180,110,0,0.28),0 0 36px rgba(240,165,0,0.46),inset 0 1px 0 rgba(255,255,255,0.65)',
   // Under glass the block palette converges on the chrome palette — the
   // slate/gold clash between DB-template bodies and the wrapper is the
   // thing this theme layer removes. Callout keeps a gold identity but on
@@ -164,7 +185,10 @@ function pageBgStyle(T) {
   return `background:${T.pageBg};${T.pageBgImage ? `background-image:${T.pageBgImage};` : ''}`;
 }
 function cardStyle(T, maxWidth) {
-  return `max-width:${maxWidth};background:${T.card};border-radius:${T.cardRadius};overflow:hidden;border:1px solid ${T.rule};box-shadow:${T.cardShadow};`;
+  // Two background declarations when the theme carries a frosted overlay:
+  // rgba-capable clients composite the translucent card over the wash,
+  // everything else keeps the solid fallback.
+  return `max-width:${maxWidth};background:${T.card};${T.cardGlassBg ? `background:${T.cardGlassBg};` : ''}border-radius:${T.cardRadius};overflow:hidden;border:1px solid ${T.cardBorder};box-shadow:${T.cardShadow};`;
 }
 
 function currency(n) {
@@ -191,6 +215,169 @@ function ctaButton(href, label) {
   `;
 }
 
+// ---------- glass layout ----------
+// The glass chrome is a different LAYOUT, not a reskin — mirroring the
+// estimate/report glass pages: phone + logo float in a translucent pill,
+// the hero (heading/intro) sits DIRECTLY on the orb scene, content lives
+// in barely-there frosted cards, and the gold CTA floats between them.
+// Classic rendering below is untouched, so the gate-off path stays
+// byte-identical to the pre-theme markup.
+
+const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
+
+function glassPillHeader(T) {
+  return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="background:#FFFFFF;background:rgba(255,255,255,0.55);border:1px solid ${T.cardBorder};border-radius:999px;padding:9px 22px;box-shadow:0 10px 30px rgba(4,57,94,0.10),inset 0 1px 0 rgba(255,255,255,0.6);">
+            <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;vertical-align:middle;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
+            <a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="34" height="34" style="display:inline-block;width:34px;height:34px;border:0;vertical-align:middle;margin-left:14px;" /></a>
+          </td>
+        </tr>
+      </table>`;
+}
+
+function glassCard(T, innerHtml, padding = '22px 26px') {
+  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${T.card};background:${T.cardGlassBg};border:1px solid ${T.cardBorder};border-radius:${T.cardRadius};box-shadow:${T.cardShadow};">
+            <tr><td style="padding:${padding};">${innerHtml}</td></tr>
+          </table>`;
+}
+
+function glassFinePrint(T, extra = '') {
+  return `${extra}<div style="font-family:${T.font};font-size:11px;letter-spacing:0.02em;color:${T.muted};line-height:1.7;text-align:center;">
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
+          </div>`;
+}
+
+function glassPage(T, { preheader, title, contentHtml }) {
+  // The <style> block is a safety net for operator/DB-authored body HTML
+  // that carries bare headings: without it they'd inherit the body grey.
+  // Inline styles always beat these rules, so themed markup is unaffected;
+  // clients that strip <style> just show grey headings (readable, not wrong).
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="color-scheme" content="light" />
+<meta name="supported-color-schemes" content="light" />
+<title>${title || 'Waves Pest Control'}</title>
+<style>
+  h1, h2, h3, h4 { color: ${T.ink}; font-family: ${T.headingFont}; }
+</style>
+</head>
+<body style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
+  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}</div>` : ''}
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
+    <tr><td align="center" style="padding:26px 18px 44px 18px;">
+      ${contentHtml}
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote }) {
+  const T = GLASS_THEME;
+  const linesHtml = (lines || []).map(([label, value, emphasis]) => `
+    <tr>
+      <td style="padding:7px 0;font-family:${T.font};font-size:14px;color:${T.muted};">${label}</td>
+      <td align="right" style="padding:7px 0;font-family:${T.font};font-size:14px;color:${T.ink};font-weight:${emphasis ? '700' : '500'};">${value}</td>
+    </tr>
+  `).join('');
+
+  const contentHtml = `${glassPillHeader(T)}
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;">
+        <tr><td align="left" style="padding:30px 4px 0 4px;">
+          <h1 style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
+          <div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
+            ${intro}
+          </div>
+        </td></tr>
+        ${linesHtml ? `
+        <tr><td style="padding:26px 0 0 0;">
+          ${glassCard(T, `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">${linesHtml}</table>`, '14px 24px')}
+        </td></tr>` : ''}
+        ${ctaHref && ctaLabel ? `
+        <tr><td align="center" style="padding:30px 0 0 0;">
+          ${ctaButton(ctaHref, ctaLabel)}
+        </td></tr>` : ''}
+        <tr><td align="center" style="padding:28px 4px 0 4px;">
+          <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+          </div>
+        </td></tr>
+        <tr><td align="center" style="padding:20px 4px 0 4px;">
+          ${glassFinePrint(T)}
+        </td></tr>
+      </table>`;
+
+  return glassPage(T, { preheader, contentHtml });
+}
+
+function glassServiceEmail({ preheader, body, footerNote } = {}) {
+  const T = GLASS_THEME;
+  const contentHtml = `${glassPillHeader(T)}
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;">
+        <tr><td style="padding:28px 0 0 0;">
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px')}
+        </td></tr>
+        <tr><td align="center" style="padding:24px 4px 0 4px;">
+          <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+          </div>
+        </td></tr>
+        <tr><td align="center" style="padding:18px 4px 0 4px;">
+          ${glassFinePrint(T)}
+        </td></tr>
+      </table>`;
+  return glassPage(T, { preheader, contentHtml });
+}
+
+function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
+  const T = GLASS_THEME;
+  const isLocalGuide = newsletterType === 'local-weekly-fresh-events';
+  const unsubLine = unsubscribeUrl
+    ? `<a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a> · `
+    : '';
+  const preferredSourcesLine = preferredSourcesCta
+    ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:12px;line-height:1.6;color:${T.body};text-align:center;">
+            Like what we send? <a href="https://www.google.com/preferences/source?q=${WAVES_WEBSITE_HOST}" style="color:${T.link};text-decoration:underline;font-weight:600;">Make Waves a preferred source on Google</a> — one tap, and you'll see more of us in your searches.
+          </div>`
+    : '';
+
+  // Newsletter identity sits directly on the scene like the page heroes.
+  const heroBlock = isLocalGuide
+    ? `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;border:0;" /></a>
+          <div style="margin-top:12px;font-family:${T.headingFont};font-size:26px;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">Fresh This Week</div>
+          <div style="margin-top:4px;font-family:${T.font};font-size:11px;letter-spacing:0.11em;text-transform:uppercase;color:${T.muted};font-weight:700;">A local weekend guide from the Waves crew</div>`
+    : `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;border:0;" /></a>
+          <div style="margin-top:10px;font-family:${T.font};font-size:11px;letter-spacing:0.11em;text-transform:uppercase;color:${T.ink};font-weight:700;">The Waves Newsletter</div>`;
+
+  const contentHtml = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;">
+        <tr><td align="center" style="padding:6px 4px 0 4px;">
+          ${heroBlock}
+        </td></tr>
+        <tr><td style="padding:24px 0 0 0;">
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px')}
+        </td></tr>
+        <tr><td align="center" style="padding:24px 4px 0 4px;">
+          ${preferredSourcesLine}<div style="font-family:${T.font};font-size:12px;line-height:1.6;color:${T.muted};text-align:center;">
+            ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
+          </div>
+          ${footerNote ? `<div style="margin-top:8px;font-family:${T.font};font-size:11px;color:${T.muted};text-align:center;">${footerNote}</div>` : ''}
+        </td></tr>
+        <tr><td align="center" style="padding:16px 4px 0 4px;">
+          ${glassFinePrint(T)}
+        </td></tr>
+      </table>`;
+
+  return glassPage(T, {
+    preheader,
+    title: isLocalGuide ? 'Fresh This Week — Waves' : 'Waves Pest Control',
+    contentHtml,
+  });
+}
+
 /**
  * @param {{
  *   preheader?: string,
@@ -203,6 +390,9 @@ function ctaButton(href, label) {
  * }} opts
  */
 function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote }) {
+  if (isEnabled('emailGlassTheme')) {
+    return glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote });
+  }
   const T = activeTheme();
   const linesHtml = (lines || []).map(([label, value, emphasis]) => `
     <tr>
@@ -223,7 +413,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="${cardStyle(T, '560px')}">
-        <tr><td style="background:${T.card};padding:18px 24px;border-bottom:1px solid ${T.rule};">
+        <tr><td style="background:${T.headerBand};padding:18px 24px;border-bottom:1px solid ${T.rule};">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
             <tr>
               <td align="left">
@@ -256,7 +446,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
             ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
           </div>
         </td></tr>
-        <tr><td align="center" style="background:${T.pageBg};padding:20px 32px;border-top:1px solid ${T.rule};">
+        <tr><td align="center" style="background:${T.footerBand};padding:20px 32px;border-top:1px solid ${T.rule};">
           <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
             ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
@@ -286,6 +476,9 @@ function plainText(lines) {
  * }} opts
  */
 function wrapServiceEmail({ preheader, body, footerNote } = {}) {
+  if (isEnabled('emailGlassTheme')) {
+    return glassServiceEmail({ preheader, body, footerNote });
+  }
   const T = activeTheme();
   const safeBody = body || '';
   return `<!DOCTYPE html>
@@ -300,7 +493,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
     <tr><td align="center" style="padding:28px 12px;">
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="${cardStyle(T, '620px')}">
-        <tr><td style="background:${T.card};padding:16px 24px;text-align:left;border-bottom:1px solid ${T.rule};">
+        <tr><td style="background:${T.headerBand};padding:16px 24px;text-align:left;border-bottom:1px solid ${T.rule};">
           <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-flex;align-items:center;">
             <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;vertical-align:middle;" />
           </a>
@@ -313,7 +506,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
             ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
           </div>
         </td></tr>
-        <tr><td align="center" style="background:${T.pageBg};padding:18px 24px;border-top:1px solid ${T.rule};">
+        <tr><td align="center" style="background:${T.footerBand};padding:18px 24px;border-top:1px solid ${T.rule};">
           <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
             ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
@@ -355,6 +548,9 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  * }} opts
  */
 function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
+  if (isEnabled('emailGlassTheme')) {
+    return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta });
+  }
   const T = activeTheme();
   const safeBody = body || '';
   const unsubLine = unsubscribeUrl
@@ -402,13 +598,13 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslette
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
     <tr><td align="center" style="padding:24px 12px;">
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="${cardStyle(T, '640px')}">
-        <tr><td style="background:${T.card};padding:18px 24px;text-align:center;border-bottom:1px solid ${T.rule};">
+        <tr><td style="background:${T.headerBand};padding:18px 24px;text-align:center;border-bottom:1px solid ${T.rule};">
           ${headerBlock}
         </td></tr>
         <tr><td style="padding:28px 28px 8px 28px;font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
           ${safeBody}
         </td></tr>
-        <tr><td align="center" style="background:${T.pageBg};padding:18px 24px 22px 24px;border-top:1px solid ${T.rule};">
+        <tr><td align="center" style="background:${T.footerBand};padding:18px 24px 22px 24px;border-top:1px solid ${T.rule};">
           ${preferredSourcesLine}<div style="font-family:${T.font};font-size:12px;line-height:1.6;color:${T.muted};text-align:center;">
             ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
           </div>
@@ -502,5 +698,12 @@ module.exports = {
     get SAND() { return activeTheme().pageBg; },
     get CARD() { return activeTheme().card; },
     get RULE() { return activeTheme().rule; },
+    // Typography tokens for consumers that build heading/body HTML
+    // inline (email.js h1, invoice-email.js notes) — classic values
+    // match the strings those call sites used to hardcode.
+    get FONT() { return activeTheme().font; },
+    get HEADING_FONT() { return activeTheme().headingFont; },
+    get HEADING_WEIGHT() { return activeTheme().headingWeight; },
+    get HEADING_TRACKING() { return activeTheme().headingTracking; },
   },
 };
