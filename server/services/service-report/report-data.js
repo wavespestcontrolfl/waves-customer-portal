@@ -2609,14 +2609,25 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
   // completion recap through the same grounded-narrative pattern the lawn
   // report uses, folding in the Pest Pressure trend, the visit's findings,
-  // and the next appointment computed above. Recurring pest line only —
-  // typed specialty reports (cockroach cleanout etc.) keep the plain recap,
-  // matching the Pest Pressure gate. Best-effort: never blocks the report.
+  // and the next appointment computed above.
+  //  - LIVE VIEWS ONLY (opts.mode === 'live', set by the response wrapper —
+  //    an explicit opt-in, never a default): queued PDFs, email copies,
+  //    static renders, and helper callers like map.svg either fossilize a
+  //    reschedulable appointment into a stored document or throw the summary
+  //    away entirely — they all keep the plain recap and spend nothing.
+  //  - pestPressure non-null = the "recurring pest" gate the pressure card
+  //    already computes (showOnCustomerReport / line allow-list /
+  //    requireRecurringFrequency) — one-time treatments keep the plain recap.
+  //  - typed specialty reports (cockroach cleanout etc.) keep the plain
+  //    recap, same as the pressure card.
+  // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   if (
     serviceLine === 'pest'
     && !typedSnapshot
+    && pestPressure
     && visitSummary
+    && opts.mode === 'live'
     && process.env.PEST_VISIT_SUMMARY_NARRATIVE === 'true'
   ) {
     visitSummary = await applyVisitSummaryNarrative({
@@ -2625,10 +2636,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       areasServiced: areaLabels,
       pestPressure,
       findings,
-      // nextAppointment is LIVE-VIEW ONLY (the response wrapper strips the
-      // payload field for pdf/static) — the summary text must not fossilize
-      // an appointment time into a downloadable document either.
-      nextAppointment: (opts.mode || 'live') === 'live' ? nextAppointment : null,
+      nextAppointment,
     }).catch(() => structured.customerRecap || '');
   }
 

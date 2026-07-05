@@ -40,6 +40,7 @@ const EXTRA_FORBIDDEN = [
   /\btoxic\b/i,
   /\bpoison(?:ous)?\b/i,
   /\bsafe\b/i,
+  /\bsolved\b/i, // the prompt bans "solved forever"; bare "solved" is the same overpromise
 ];
 
 function stableStringify(value) {

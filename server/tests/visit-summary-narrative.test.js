@@ -110,7 +110,7 @@ test('banned copy in model output falls back to the deterministic summary', asyn
 test('prompt-only banned words are enforced too, not just the shared guard', async () => {
   // findBannedCustomerCopy catches "no infestation" but not bare
   // "infestation" — the module's extra list must catch what the prompt bans
-  for (const word of ['infestation', 'toxic', 'poison', 'dangerous', 'safe']) {
+  for (const word of ['infestation', 'toxic', 'poison', 'dangerous', 'safe', 'solved']) {
     const args = input();
     const callModel = jest.fn().mockResolvedValue({ ok: true, json: { summary: `We looked closely at the ${word} conditions around your home today and refreshed all treated areas so everything stays in good shape between visits.` } });
     const out = await applyVisitSummaryNarrative(args, { callModel });
