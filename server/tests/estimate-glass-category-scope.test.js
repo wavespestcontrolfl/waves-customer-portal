@@ -37,6 +37,14 @@
 //   engine's snake_case termite_bait alias was missing, and legacy admin
 //   estimates carrying TOP-LEVEL inputs.svc* form flags (svcWasp et al.) were
 //   never scanned. Union now always runs + legacy flag lists added.
+// r8 — three more paths to the same wasp leak: quote-wizard estimates persist
+//   the selection at TOP-LEVEL estimate_data.services (never scanned);
+//   `inputs || engineInputs` short-circuited, so an empty legacy inputs {}
+//   hid engineInputs flags entirely; and row-ONLY wasp quotes (no source
+//   flags at all) classify pest_control by name through the pest-specialty
+//   matcher. Every input source is now scanned and unioned, and the scope
+//   path classifies rows through scopeCategoryForOneTimeItem (stinging split
+//   out; copy classification untouched).
 const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
@@ -248,6 +256,45 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
   test('r6: deriveServiceCategory (page copy) is unchanged by the scope-only inference', () => {
     const rodentBaitOnly = { engineInputs: { services: { rodentBait: true } } };
     expect(deriveServiceCategory(rodentBaitOnly, [], [])).toBe('pest_control');
+  });
+
+  test('r8: quote-wizard TOP-LEVEL estimate_data.services flags are scanned', () => {
+    // The wizard persists the raw selection at estData.services (values are
+    // labels/objects, not just booleans — loose out-of-scope semantics).
+    const waspWizard = { services: { pest: 'general', stinging: true } };
+    const termiteWizard = { services: { pest: 'general', termite: { plan: 'monitoring' } } };
+    const pestLawnWizard = { services: { pest: 'general', lawn: true } };
+    expect(glassCategoryEligible(waspWizard, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    expect(glassCategoryEligible(termiteWizard, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    expect(glassCategoryEligible(pestLawnWizard, [], [], PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r8: wizard lawn-pest-control quotes are in scope (rows key as pest_control)', () => {
+    // The flag value is an empty object in the wizard payload, so the strict
+    // flag predicate misses it — the priced lawn_pest rows carry eligibility.
+    const estData = { services: { lawnPestControl: {} } };
+    const rows = [{ service: 'lawn_pest_control', name: 'Lawn Pest Control' }];
+    expect(glassCategoryEligible(estData, [{ service: 'lawn_pest_control', name: 'Lawn Pest Control' }], [], PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible(estData, [], rows, PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r8: engineInputs flags are not hidden by a coexisting empty legacy inputs object', () => {
+    const hidden = { inputs: {}, engineInputs: { services: { pest: true, stingingV2: true } } };
+    const bothShapes = { inputs: { svcWasp: true }, engineInputs: { services: { pest: true } } };
+    const cleanBoth = { inputs: { svcPest: true }, engineInputs: { services: { lawn: true } } };
+    expect(glassCategoryEligible(hidden, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    expect(glassCategoryEligible(bothShapes, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    // Both sources scanned means both can CONTRIBUTE in-scope categories too.
+    expect(glassCategoryEligible(cleanBoth, [], [], PEST_LAWN_SCOPE)).toBe(true);
+  });
+
+  test('r8: row-only wasp/stinging quotes fail closed with no source flags at all', () => {
+    const stingingRow = [{ service: 'stinging_insect', name: 'Stinging Insect Treatment', amount: 245 }];
+    const waspLabelRow = [{ name: 'Wasp & Bee Nest Removal', amount: 195 }];
+    expect(glassCategoryEligible({}, [], stingingRow, PEST_LAWN_SCOPE)).toBe(false);
+    expect(glassCategoryEligible({}, [], waspLabelRow, PEST_LAWN_SCOPE)).toBe(false);
+    // Copy classification is untouched: the pest sections still render these.
+    expect(deriveServiceCategory({}, [], stingingRow)).toBe('pest_control');
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {

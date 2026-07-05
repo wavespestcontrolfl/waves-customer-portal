@@ -10181,7 +10181,19 @@ function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowed
   if (!allowedList.length) return true;
   const allowed = new Set(allowedList);
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
-  const categories = collectServiceCategories(recurring, oneTimeItems);
+  // Rows classify through the scope-aware item classifier, NOT the copy one:
+  // stinging/wasp rows read as pest_control by name for copy purposes, which
+  // must not place them in the pest scope (Codex rd8).
+  const categories = new Set();
+  recurring.forEach((svc) => {
+    const category = categoryForRecurringServiceKey(recurringServiceKey(svc));
+    if (category) categories.add(category);
+  });
+  const items = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  items.forEach((item) => {
+    const category = scopeCategoryForOneTimeItem(item);
+    if (category) categories.add(category);
+  });
   // Row categories under-count: a generated one-time add-on (e.g.
   // pest_initial_roach from roach activity) classifies alone while the engine
   // inputs still carry the other selected services, and recurring rows only
@@ -10196,9 +10208,8 @@ function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowed
   // is an out-of-scope service, not an absent one. Fee/adjustment rows
   // (waveguard_setup, one_time_adjustment, rodent_bundle_discount) are not
   // services and never block.
-  const items = Array.isArray(oneTimeItems) ? oneTimeItems : [];
   const hasUnclassifiedService = recurring.some((svc) => !categoryForRecurringServiceKey(recurringServiceKey(svc)))
-    || items.some((item) => !isNonServiceOneTimeItem(item) && !serviceCategoryForOneTimeItem(item));
+    || items.some((item) => !isNonServiceOneTimeItem(item) && !scopeCategoryForOneTimeItem(item));
   if (hasUnclassifiedService) return false;
   return categories.size > 0 && [...categories].every((c) => allowed.has(c));
 }
@@ -10260,6 +10271,10 @@ const SCOPE_IN_SCOPE_ENGINE_FLAGS = [
   ['oneTimePest', 'pest_control'], ['pestInitialRoach', 'pest_control'],
   ['germanRoach', 'pest_control'], ['germanRoachInitial', 'pest_control'],
   ['bedBug', 'pest_control'], ['flea', 'pest_control'], ['fleaExterior', 'pest_control'],
+  // Quote-wizard flag; its priced rows key as lawn_pest_* which
+  // recurringServiceKey resolves to pest_control (the 'pest' substring wins),
+  // so the flag maps consistently with the rows it generates.
+  ['lawnPestControl', 'pest_control'],
   ['oneTimeLawn', 'lawn_care'], ['topDressing', 'lawn_care'],
   ['dethatching', 'lawn_care'], ['plugging', 'lawn_care'],
 ];
@@ -10303,23 +10318,57 @@ const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
   ['svcWdo', 'wdo'],
 ];
 
+// Scope classification for one-time rows. Stinging/wasp rows classify as
+// pest_control by NAME through oneTimeItemLooksPestSpecialty — right for page
+// copy (the pest sections render them), wrong for the release scope: a
+// row-only wasp quote with no surviving source flags walked into the pest
+// scope (Codex rd8). serviceCategoryForOneTimeItem (copy) is untouched.
+function scopeCategoryForOneTimeItem(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return null;
+  const service = String(item?.service || '').toLowerCase();
+  const text = oneTimeItemSearchText(item);
+  if (service.includes('stinging') || /\b(wasp|bee|hornet|stinging)\b/.test(text)) return 'stinging';
+  return serviceCategoryForOneTimeItem(item);
+}
+
 function inferScopeCategoriesFromEngineInputs(estData = {}) {
-  const inputs = estData?.inputs || estData?.engineInputs || {};
-  const services = inputs.services || {};
-  const categories = new Set(inferCategoriesFromEngineInputs(estData));
-  SCOPE_IN_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
-    const value = services[flag];
-    if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+  // The input shapes COEXIST (Codex rd8): admin persistence can carry
+  // engineInputs beside an empty legacy inputs {} (the rest of the route
+  // treats engineInputs as authoritative — see extractEngineInputs), and
+  // quote-wizard estimates persist the selection at TOP-LEVEL
+  // estimate_data.services. `inputs || engineInputs` hid whole sources, so
+  // every present source is scanned and unioned instead.
+  const inputSources = [estData?.inputs, estData?.engineInputs]
+    .filter((source) => source && typeof source === 'object');
+  const serviceSources = [
+    ...inputSources.map((source) => source.services),
+    estData?.services,
+  ].filter((source) => source && typeof source === 'object');
+  const categories = new Set();
+  inputSources.forEach((source) => {
+    inferCategoriesFromEngineInputs({ inputs: source }).forEach((c) => categories.add(c));
   });
-  SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
-    if (services[flag]) categories.add(category);
+  if (estData?.services && typeof estData.services === 'object') {
+    inferCategoriesFromEngineInputs({ inputs: { services: estData.services } })
+      .forEach((c) => categories.add(c));
+  }
+  serviceSources.forEach((services) => {
+    SCOPE_IN_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+      const value = services[flag];
+      if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+    });
+    SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+      if (services[flag]) categories.add(category);
+    });
   });
-  SCOPE_IN_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
-    const value = inputs[flag];
-    if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
-  });
-  SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
-    if (inputs[flag]) categories.add(category);
+  inputSources.forEach((source) => {
+    SCOPE_IN_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+      const value = source[flag];
+      if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+    });
+    SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+      if (source[flag]) categories.add(category);
+    });
   });
   return [...categories];
 }
