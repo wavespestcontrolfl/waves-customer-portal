@@ -146,18 +146,29 @@ async function renderSms(vars) {
 // held-back person gets NEITHER touch: both stage flags are claimed so the
 // intent never re-surfaces. Fails open to "send" (today's behavior) on any
 // miss — gate off, no phone, GrowthBook unreachable, feature absent.
-async function heldBackByExperiment(intent) {
+async function heldBackByExperiment(intent, maxActivityBefore) {
   try {
     const assignment = await Experiments.assignBookingRecoveryExperiment(last10(intent.phone), intent.id);
     if (!(assignment.inExperiment && assignment.value === false)) return false;
     // followup_sms_sent_at intentionally NOT stamped — nothing was sent, and
     // that timestamp only exists to pace the email touch after a real SMS.
-    await db('booking_intents').where({ id: intent.id }).update({
+    // Claim under the SAME eligibility predicates as claimStage: if the
+    // visitor converted, got suppressed, or resumed the form (fresh
+    // last_activity_at) between the candidate SELECT and this UPDATE, the
+    // claim loses and the row is left alone — a later re-abandon re-claims
+    // under sticky control. The person is control-arm either way, so this
+    // tick still sends nothing.
+    const claimQuery = db('booking_intents')
+      .where({ id: intent.id })
+      .whereNull('converted_at')
+      .where('suppressed', false);
+    if (maxActivityBefore) claimQuery.where('last_activity_at', '<', maxActivityBefore);
+    const affected = await claimQuery.update({
       followup_sms_sent: true,
       followup_email_sent: true,
       updated_at: db.fn.now(),
     });
-    logger.info(`[booking-recovery] intent ${intent.id} held back (experiment control) — no touches`);
+    logger.info(`[booking-recovery] intent ${intent.id} held back (experiment control) — no touches${affected === 1 ? '' : ' (claim lost — converted/suppressed/resumed since select)'}`);
     return true;
   } catch (e) {
     logger.warn(`[booking-recovery] holdback check failed for intent ${intent.id} — sending as usual: ${e.message}`);
@@ -287,7 +298,7 @@ async function runSmsStage(now, sentPhones) {
   for (const intent of candidates) {
     const ten = last10(intent.phone);
     if (ten && sentPhones.has(ten)) continue; // one touch per phone per run
-    if (await heldBackByExperiment(intent)) continue;
+    if (await heldBackByExperiment(intent, new Date(nowMs - SMS_MIN_AGE_H * 3600000))) continue;
     let claimed = false;
     try {
       if (isQuietHours(now)) continue;
@@ -393,7 +404,7 @@ async function runEmailStage(now, sentPhones) {
     // Email-stage holdback check too: an intent can reach this stage without
     // ever passing through the SMS loop (e.g. SMS window already aged out at
     // gate-flip time), and sticky replay keeps the arm consistent either way.
-    if (await heldBackByExperiment(intent)) continue;
+    if (await heldBackByExperiment(intent, new Date(nowMs - EMAIL_MIN_AGE_H * 3600000))) continue;
     let claimed = false;
     try {
       if (await customerEmailDisabled(intent.customer_id)) {

@@ -71,6 +71,13 @@ function createGrowthBook() {
       clientKey: CLIENT_KEY,
       attributes: { id: anonId() },
       trackingCallback: reportExposure,
+      // Feature-flag experiments ONLY. Visual Editor / URL Redirect
+      // experiments in the payload must never mutate or navigate this SPA —
+      // anyone with GrowthBook access could otherwise ship arbitrary DOM
+      // changes or redirects to every visitor without a code review.
+      disableVisualExperiments: true,
+      disableUrlRedirectExperiments: true,
+      disableCrossOriginUrlRedirectExperiments: true,
     });
     // MASTER GATE: GATE_GROWTHBOOK off must roll back CLIENT experiments too,
     // not just the exposure endpoint — otherwise unsetting the documented

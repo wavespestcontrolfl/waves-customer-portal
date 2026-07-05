@@ -44,27 +44,39 @@ const VARIATION_KEY_RE = /^[A-Za-z0-9._-]{1,100}$/;
 // A page load evaluates each live client experiment at most once, so real
 // traffic is a handful of posts per visitor. Tight cap; the unique constraint
 // makes anything past the first post per (experiment, unit) a no-op anyway.
-router.use(rateLimit({
+// Scoped to gate-ON /exposure posts ONLY (below): GET /status stays limiter-
+// free (every page load probes it — an exposure burst must never starve the
+// kill-switch probe), and gate-off probes always see the documented 404, not
+// a 429.
+const exposureLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests.' },
-}));
+});
 
 // Master-gate probe for the client SDK: the browser only fetches GrowthBook
 // feature definitions after this says enabled, so unsetting GATE_GROWTHBOOK
-// rolls back CLIENT experiments too (not just exposure intake). Returns only
-// the boolean — no keys, no experiment names. Mirrors ask-waves GET /status.
+// rolls back CLIENT experiments too (not just exposure intake). Also requires
+// the server-side feature cache to be warm — while it's cold, /exposure can't
+// validate tracking keys and would silently drop every post, so the client
+// must not start experiments either. Returns only the boolean — no keys, no
+// experiment names. Mirrors ask-waves GET /status.
 router.get('/status', (req, res) => {
-  res.json({ enabled: featureGates.isEnabled('growthbookExperiments') });
+  res.json({
+    enabled: featureGates.isEnabled('growthbookExperiments') && Experiments.hasFeatureCache(),
+  });
 });
 
-router.post('/exposure', (req, res) => {
+router.post('/exposure', (req, res, next) => {
+  // Gate check BEFORE the limiter: dark-surface probes must always get the
+  // documented 404 and never spend (or trip) the rate limit.
   if (!featureGates.isEnabled('growthbookExperiments')) {
     return res.status(404).json({ error: 'Not found' });
   }
-
+  return exposureLimiter(req, res, next);
+}, (req, res) => {
   const body = req.body || {};
   const experimentKey = typeof body.experimentKey === 'string' ? body.experimentKey : '';
   const unitId = typeof body.unitId === 'string' ? body.unitId : '';

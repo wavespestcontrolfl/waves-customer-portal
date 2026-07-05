@@ -400,10 +400,14 @@ finding and warns on P1. Reviewers must return JSON matching
   `unit_type='anon'` + `metadata.source='client'` are forced server-side; the
   response is 204 for stored AND dropped posts (no experiment-enumeration
   oracle); the first-exposure-wins unique constraint dedups repeats. No PII —
-  anonymous visitor id only. `GET /status` returns only `{enabled}` (boolean
-  master-gate probe, never 404s): the client SDK fetches feature definitions
+  anonymous visitor id only. The rate limit is scoped to gate-ON /exposure
+  posts — gate-off probes always see the 404 without spending it, and
+  `GET /status` is limiter-free (kill-switch probe must never starve).
+  `GET /status` returns only `{enabled}` (boolean, never 404s) = master gate
+  AND server feature-cache warm — the client SDK fetches feature definitions
   only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
-  real rollback for client experiments too).
+  real rollback for client experiments too (and keeps clients dark while the
+  server can't validate exposure keys)).
   `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
   token, public `Cache-Control`. Consumed by the Astro build and the admin blog
   UI; no PII).

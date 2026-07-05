@@ -93,6 +93,21 @@ function getFeaturesNonBlocking() {
   return cachedFeatures; // may be stale or null; null → caller gets control
 }
 
+// True once a feature payload is cached. The public /status probe advertises
+// this alongside the gate: while the cache is cold (missing server key, first
+// fetch failed) the exposure intake can't validate tracking keys and would
+// silently drop every client post — so the client SDK must not start either.
+function hasFeatureCache() {
+  return !!getFeaturesNonBlocking();
+}
+
+// unit_id can be PII (booking-recovery units are phone last-10) — warnings go
+// to Railway logs, so never print it raw; a 4-char tail is enough to correlate.
+function maskUnit(unitId) {
+  const s = String(unitId == null ? '' : unitId);
+  return s.length <= 4 ? '****' : `…${s.slice(-4)}`;
+}
+
 async function logExposure({ experimentKey, variationId, variationKey, unitId, unitType, metadata }) {
   try {
     await db('experiment_exposures')
@@ -109,7 +124,7 @@ async function logExposure({ experimentKey, variationId, variationKey, unitId, u
       .onConflict(['experiment_key', 'unit_id'])
       .ignore();
   } catch (e) {
-    logger.warn(`[growthbook] exposure log failed (${experimentKey}/${unitId}): ${e.message}`);
+    logger.warn(`[growthbook] exposure log failed (${experimentKey}/${maskUnit(unitId)}): ${e.message}`);
   }
 }
 
@@ -134,7 +149,7 @@ async function getPriorAssignment(experimentKey, unitId) {
       .where({ experiment_key: experimentKey, unit_id: String(unitId) })
       .first()) || null;
   } catch (e) {
-    logger.warn(`[growthbook] prior-assignment lookup failed (${experimentKey}/${unitId}): ${e.message}`);
+    logger.warn(`[growthbook] prior-assignment lookup failed (${experimentKey}/${maskUnit(unitId)}): ${e.message}`);
     return null;
   }
 }
@@ -256,10 +271,13 @@ async function assignBookingRecoveryExperiment(phoneLast10, intentId) {
 function isKnownTrackingKey(key) {
   const features = getFeaturesNonBlocking();
   if (!features) return false;
-  for (const feature of Object.values(features)) {
+  for (const [featureId, feature] of Object.entries(features)) {
     for (const rule of (feature && feature.rules) || []) {
-      // Experiment rules carry `variations` + a tracking `key`.
-      if (rule && Array.isArray(rule.variations) && rule.key === key) return true;
+      // Experiment rules carry `variations` + a tracking `key` — but
+      // GrowthBook DEFAULTS the tracking key to the FEATURE id when the rule
+      // doesn't set one, and the SDK reports that defaulted key in
+      // trackingCallback. Both spellings must count as live.
+      if (rule && Array.isArray(rule.variations) && (rule.key || featureId) === key) return true;
     }
   }
   return false;
@@ -274,6 +292,7 @@ module.exports = {
   assignEstimateViewExperiment,
   assignBookingRecoveryExperiment,
   isKnownTrackingKey,
+  hasFeatureCache,
   logExposure,
   experimentsEnabled,
   ESTIMATE_VIEW_EXPERIMENT,

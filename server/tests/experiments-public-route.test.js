@@ -16,6 +16,7 @@ jest.mock('../services/experimentation/growthbook', () => ({
   ESTIMATE_VIEW_EXPERIMENT: 'estimate-view',
   BOOKING_RECOVERY_EXPERIMENT: 'booking-abandon-recovery',
   isKnownTrackingKey: jest.fn(() => true),
+  hasFeatureCache: jest.fn(() => true),
   logExposure: jest.fn(async () => {}),
 }));
 
@@ -67,6 +68,23 @@ describe('GET /status — master-gate probe', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ enabled: true });
   });
+
+  test('reports disabled while the server feature cache is cold (exposure intake could not validate keys)', async () => {
+    isEnabled.mockReturnValue(true);
+    Experiments.hasFeatureCache.mockReturnValue(false);
+    const res = await get('/api/public/experiments/status');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ enabled: false });
+    Experiments.hasFeatureCache.mockReturnValue(true);
+  });
+
+  test('is NOT rate-limited (kill-switch probe must survive exposure bursts)', async () => {
+    isEnabled.mockReturnValue(true);
+    for (let i = 0; i < 40; i += 1) {
+      const res = await get('/api/public/experiments/status');
+      expect(res.status).toBe(200);
+    }
+  });
 });
 
 describe('POST /exposure', () => {
@@ -82,6 +100,15 @@ describe('POST /exposure', () => {
     isEnabled.mockReturnValue(false);
     const res = await post('/api/public/experiments/exposure', good);
     expect(res.status).toBe(404);
+    expect(Experiments.logExposure).not.toHaveBeenCalled();
+  });
+
+  test('gate-off probes NEVER see 429 — the dark-surface 404 wins even under a burst', async () => {
+    isEnabled.mockReturnValue(false);
+    for (let i = 0; i < 40; i += 1) {
+      const res = await post('/api/public/experiments/exposure', good);
+      expect(res.status).toBe(404);
+    }
     expect(Experiments.logExposure).not.toHaveBeenCalled();
   });
 
