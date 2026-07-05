@@ -224,6 +224,36 @@ function publicQuoteCompactPestLabel(pest = {}) {
   return publicQuotePestLabel(pest).replace(' Pest Control', ' Pest');
 }
 
+// priceBedBugTreatment assertEnum-throws on any unknown key, so a public
+// caller must never reach it with a label-ish value — the old 'residential'
+// default was itself invalid (the engine key is singleFamily) and 500'd every
+// chat-gate bed bug quote. Unknown/absent values collapse to the chat gate's
+// product: a standard prepped single-family CHEMICAL treatment. Method is
+// deliberately CHEMICAL-only here — HEAT/HYBRID carry extra required inputs
+// (heat scope/footprint) no public surface collects.
+function publicQuoteBedBugInput(bedBug = {}) {
+  const pick = (value, allowed, fallback) => {
+    const raw = String(value == null ? '' : value).trim().toLowerCase();
+    return allowed.find((k) => k.toLowerCase() === raw) || fallback;
+  };
+  return {
+    method: 'CHEMICAL',
+    rooms: Number(bedBug.rooms) || 2,
+    severity: pick(bedBug.severity, ['light', 'moderate', 'heavy', 'severe'], 'moderate'),
+    prepStatus: pick(bedBug.prepStatus, ['ready', 'partial', 'poor'], 'ready'),
+    occupancyType: pick(bedBug.occupancyType, ['singleFamily', 'apartment', 'hotel', 'studentHousing'], 'singleFamily'),
+  };
+}
+
+// /booking/confirm prices a quote→book handoff's visits from the recurring
+// annual only (annual_total / 4) — a one-time add-on line the engine attached
+// (pest_initial_roach from the roach chip path) would silently vanish from
+// the booked series' billing. Those quotes get NO handoff token and book
+// through the office instead.
+function estimateBlocksBookingHandoff(estimate) {
+  return (estimate?.lineItems || []).some((l) => l && l.service === 'pest_initial_roach');
+}
+
 function compactServiceInterestPart(value) {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -669,13 +699,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.lawnPestControl = {};
     }
     if (services.bedBug) {
-      engineInput.services.bedBug = {
-        method: services.bedBug.method || 'CHEMICAL',
-        rooms: Number(services.bedBug.rooms) || 2,
-        severity: services.bedBug.severity || 'moderate',
-        prepStatus: services.bedBug.prepStatus || 'ready',
-        occupancyType: services.bedBug.occupancyType || 'residential',
-      };
+      engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
 
     const estimate = generateEstimate(engineInput);
@@ -1080,8 +1104,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // mint-time and confirm-time agree by construction. Lawn/tree/mosquito
       // quotes get NO token rather than one that silently prices nothing;
       // widening the handoff means extending confirm's cadence support first.
+      // A roach-chip quote also gets NO token: its one-time pest_initial_roach
+      // add-on is outside what confirm bills (see estimateBlocksBookingHandoff).
       const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
-      handoffPriceable = !!resolveBookingVisitPrice({
+      handoffPriceable = !estimateBlocksBookingHandoff(estimate) && !!resolveBookingVisitPrice({
         estimate: { estimate_data: estimateDataObj, annual_total: annual || null, monthly_total: monthly || null },
         serviceKey: 'pest_control',
         bookingVisits: 4,
@@ -1510,6 +1536,8 @@ module.exports = router;
 module.exports._internals = {
   isPublicCommercialQuote,
   publicQuotePestLabel,
+  publicQuoteBedBugInput,
+  estimateBlocksBookingHandoff,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,

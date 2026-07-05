@@ -53,6 +53,32 @@ describe('shared service-line inference (utils/service-line-infer)', () => {
     expect(inferServiceBucket('Lawn Pest Control')).toBe('one_time_entry');
   });
 
+  test('palmetto bugs are a PEST term, not a palm match (codex rd3)', () => {
+    for (const interest of ['Palmetto Bugs', 'palmetto bug treatment']) {
+      expect(inferServiceLine(interest)).toBe('pest');
+      expect(inferSpecificService(interest)).toBe('quarterly_pest');
+      expect(inferServiceBucket(interest)).toBe('recurring');
+    }
+    // Real palm phrasings still classify as palm.
+    expect(inferSpecificService('palm tree injections')).toBe('palm_injection');
+    expect(inferServiceLine('palms looking sick')).toBe('tree_shrub');
+  });
+
+  test("'+ Roach Knockdown' add-on suffix never reclassifies a recurring pest quote (codex rd3)", () => {
+    for (const interest of [
+      'Quarterly Pest Control + Roach Knockdown',
+      'Quarterly Pest + Roach Knockdown', // compact label
+      'Bi-Monthly Pest Control + Roach Knockdown',
+    ]) {
+      expect(inferServiceLine(interest)).toBe('pest');
+      expect(inferSpecificService(interest)).toBe('quarterly_pest');
+      expect(inferServiceBucket(interest)).toBe('recurring');
+    }
+    // A PRIMARY roach interest still classifies as cockroach.
+    expect(inferSpecificService('Cockroach Treatment')).toBe('cockroach');
+    expect(inferSpecificService('german roach cleanout')).toBe('cockroach');
+  });
+
   test('unknown/empty interest falls back to the same defaults as web leads', () => {
     expect(inferServiceLine('')).toBe('pest');
     expect(inferSpecificService('')).toBe('quarterly_pest');

@@ -331,3 +331,55 @@ describe('palm-only booking link — routes to tree_shrub, not lawn_care (codex 
     expect(source).toMatch(/pricedServiceKeys\.has\('palm_injection'\)/);
   });
 });
+
+describe('bed bug public mapping — engine enum keys only, never a public 500 (codex rd3, 2026-07-05)', () => {
+  const { publicQuoteBedBugInput } = _internals;
+
+  test('defaults are the chat-gate product AND valid engine keys (old residential default threw)', () => {
+    expect(publicQuoteBedBugInput({})).toEqual({
+      method: 'CHEMICAL', rooms: 2, severity: 'moderate', prepStatus: 'ready', occupancyType: 'singleFamily',
+    });
+    // Junk/label-ish values collapse to the defaults instead of reaching assertEnum.
+    expect(publicQuoteBedBugInput({ occupancyType: 'residential', severity: 'bad', prepStatus: 'nope', method: 'HEAT' }))
+      .toEqual({ method: 'CHEMICAL', rooms: 2, severity: 'moderate', prepStatus: 'ready', occupancyType: 'singleFamily' });
+  });
+
+  test('valid keys pass through case-insensitively', () => {
+    const out = publicQuoteBedBugInput({ occupancyType: 'HOTEL', severity: 'heavy', prepStatus: 'partial', rooms: 5 });
+    expect(out).toEqual({ method: 'CHEMICAL', rooms: 5, severity: 'heavy', prepStatus: 'partial', occupancyType: 'hotel' });
+  });
+
+  test('mapped default shape actually prices through the engine without throwing', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { bedBug: publicQuoteBedBugInput({}) },
+    });
+    const line = (estimate.lineItems || []).find((l) => l.service === 'bed_bug');
+    expect(line).toBeTruthy();
+    expect(Number(line.price || line.total || 0)).toBeGreaterThan(0);
+  });
+});
+
+describe('roach knockdown blocks the quote→book handoff (codex rd3 P1, 2026-07-05)', () => {
+  const { estimateBlocksBookingHandoff } = _internals;
+
+  test('estimate with an auto-added pest_initial_roach line blocks handoff; plain pest does not', () => {
+    const plain = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const roach = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    expect(estimateBlocksBookingHandoff(plain)).toBe(false);
+    expect(estimateBlocksBookingHandoff(roach)).toBe(true);
+  });
+
+  test('handoffPriceable mint site consults the blocker (confirm bills annual/4 only — the one-time roach fee would vanish)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/handoffPriceable = !estimateBlocksBookingHandoff\(estimate\) && !!resolveBookingVisitPrice\(/);
+  });
+});

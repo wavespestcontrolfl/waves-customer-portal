@@ -5,19 +5,29 @@
  * specific_service / service_bucket identically — otherwise /admin/ads
  * service-line ROI buckets phone leads differently from web leads.
  */
+// 'palmetto bugs' is the everyday SWFL word for roaches — a bare
+// includes('palm') would bucket those pest leads under tree_shrub /
+// palm_injection. Negative lookahead keeps palm/palms/palm tree matching
+// while palmetto stays a pest term.
+const PALM_NOT_PALMETTO_RE = /palm(?!etto)/;
+
 function inferServiceLine(interest) {
   const t = (interest || '').toLowerCase();
   if (t.includes('lawn') || t.includes('grass') || t.includes('turf')) return 'lawn';
   if (t.includes('mosquito')) return 'mosquito';
   if (t.includes('termite')) return 'termite';
   if (t.includes('rodent') || t.includes('rat') || t.includes('mouse')) return 'rodent';
-  if (t.includes('tree') || t.includes('shrub') || t.includes('palm')) return 'tree_shrub';
+  if (t.includes('tree') || t.includes('shrub') || PALM_NOT_PALMETTO_RE.test(t)) return 'tree_shrub';
   if (t.includes('bed bug') || t.includes('exclusion') || t.includes('bora')) return 'specialty';
   return 'pest';
 }
 
 function inferSpecificService(interest) {
-  const t = (interest || '').toLowerCase();
+  // ' + Roach Knockdown' is an ADD-ON marker publicQuotePestLabel appends to
+  // a recurring pest label — strip it so the PRIMARY service drives
+  // classification. Left in place, 'roach' matches the cockroach case and a
+  // recurring pest quote misbuckets as one_time_entry.
+  const t = (interest || '').toLowerCase().replace(/\s*\+\s*roach knockdown/g, '');
   if (t.includes('rodent exclusion') || t.includes('rat exclusion')) return 'rodent_exclusion';
   if (t.includes('bed bug')) return 'bed_bug';
   if (t.includes('termite trench')) return 'termite_trenching';
@@ -34,7 +44,7 @@ function inferSpecificService(interest) {
   if (t.includes('top dress')) return 'top_dressing';
   // palm_injection is already bucketed high_ticket_specialty below; without
   // this case 'Palm Injections' fell through to quarterly_pest.
-  if (t.includes('palm')) return 'palm_injection';
+  if (PALM_NOT_PALMETTO_RE.test(t)) return 'palm_injection';
   if (t.includes('tree') || t.includes('shrub')) return 'tree_shrub_spray';
   if (t.includes('one-time') || t.includes('one time')) return 'one_time_pest';
   return 'quarterly_pest';
