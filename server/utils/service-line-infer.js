@@ -11,7 +11,7 @@ function inferServiceLine(interest) {
   if (t.includes('mosquito')) return 'mosquito';
   if (t.includes('termite')) return 'termite';
   if (t.includes('rodent') || t.includes('rat') || t.includes('mouse')) return 'rodent';
-  if (t.includes('tree') || t.includes('shrub')) return 'tree_shrub';
+  if (t.includes('tree') || t.includes('shrub') || t.includes('palm')) return 'tree_shrub';
   if (t.includes('bed bug') || t.includes('exclusion') || t.includes('bora')) return 'specialty';
   return 'pest';
 }
@@ -28,7 +28,13 @@ function inferSpecificService(interest) {
   if (t.includes('cockroach') || t.includes('roach')) return 'cockroach';
   if (t.includes('wasp') || t.includes('bee')) return 'wasp_bee';
   if (t.includes('lawn plug')) return 'lawn_plugging';
+  // 'Lawn Pest Control' (the one-time turf-pest knockdown) must not fall
+  // through to quarterly_pest — it's a lawn-line one-time product.
+  if (t.includes('lawn pest')) return 'lawn_pest_control';
   if (t.includes('top dress')) return 'top_dressing';
+  // palm_injection is already bucketed high_ticket_specialty below; without
+  // this case 'Palm Injections' fell through to quarterly_pest.
+  if (t.includes('palm')) return 'palm_injection';
   if (t.includes('tree') || t.includes('shrub')) return 'tree_shrub_spray';
   if (t.includes('one-time') || t.includes('one time')) return 'one_time_pest';
   return 'quarterly_pest';

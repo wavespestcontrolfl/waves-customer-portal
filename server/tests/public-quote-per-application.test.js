@@ -249,6 +249,9 @@ describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-
     });
     const line = (estimate.lineItems || []).find((l) => l.service === 'one_time_lawn' && l.treatmentType === 'pest');
     expect(line).toBeTruthy();
+    // Persistence compacts lines to service + name — without the distinct
+    // name a lawn-pest row renders as generic one_time_lawn downstream.
+    expect(line.name).toBe('Lawn Pest Knockdown');
     // ONE_TIME.lawn floor ($115) is the engine's owner-set minimum.
     expect(line.price).toBeGreaterThanOrEqual(115);
     expect(Number(estimate.summary?.oneTimeTotal || 0)).toBeGreaterThanOrEqual(line.price);
@@ -264,5 +267,35 @@ describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-
       .map((l) => l.treatmentType)
       .sort();
     expect(types).toEqual(['pest', 'weed']);
+  });
+});
+
+describe('cockroach chip path — roachType reaches the engine (2026-07-05)', () => {
+  test('roachType regular auto-adds the one-time Initial Roach Knockdown line', () => {
+    // The engine deliberately does NOT raise the recurring price for roach
+    // activity (the multiplicative roachModifier is zeroed) — it recovers the
+    // heavier visit-1 cost via an auto-added one-time pest_initial_roach line.
+    const plain = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const roach = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    expect((plain.lineItems || []).find((l) => l.service === 'pest_initial_roach')).toBeUndefined();
+    const knockdown = (roach.lineItems || []).find((l) => l.service === 'pest_initial_roach');
+    expect(knockdown).toBeTruthy();
+    expect(knockdown.autoFiredFromRecurringPest).toBe(true);
+    expect(knockdown.price).toBeGreaterThan(0);
+    const oneTime = (e) => Number(e.summary?.oneTimeTotal || 0);
+    expect(oneTime(roach)).toBeGreaterThanOrEqual(oneTime(plain) + knockdown.price);
+  });
+
+  test('route mapping forwards roachType (the label must never outrun the price)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/services\.pest\.roachType \? \{ roachType: services\.pest\.roachType \}/);
   });
 });

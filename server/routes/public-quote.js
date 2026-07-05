@@ -551,7 +551,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (palms !== undefined) engineInput.palmCount = palms;
     }
     if (services.pest) {
-      engineInput.services.pest = { frequency: services.pest.frequency || 'quarterly' };
+      engineInput.services.pest = {
+        frequency: services.pest.frequency || 'quarterly',
+        // Forward the roach type (the cockroach chip path) so the engine
+        // actually prices the knockdown modifier the label advertises. The
+        // engine normalizes aliases and defaults invalid values to 'none'
+        // with a warning.
+        ...(services.pest.roachType ? { roachType: services.pest.roachType } : {}),
+      };
     }
     if (services.lawn) {
       engineInput.services.lawn = {

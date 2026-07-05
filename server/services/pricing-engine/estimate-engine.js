@@ -930,7 +930,10 @@ function generateEstimate(input) {
         tier: services.lawnPestControl.tier || services.lawn?.tier || 'enhanced',
         lawnFreq: services.lawnPestControl.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
       });
-      lineItems.push(result);
+      // Distinct display name: persistence compacts lines to service + name,
+      // so without this a lawn-pest row renders as generic one_time_lawn (and
+      // a mixed weed + pest quote loses which row is which).
+      lineItems.push({ ...result, name: 'Lawn Pest Knockdown' });
     }
   }
 
@@ -1661,6 +1664,7 @@ function generateEstimate(input) {
   const turfPricedServicesSelected = !!(
     services.lawn ||
     services.oneTimeLawn ||
+    services.lawnPestControl ||
     services.topDressing ||
     services.dethatching ||
     services.plugging
