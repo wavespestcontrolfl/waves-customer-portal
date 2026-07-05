@@ -7118,11 +7118,23 @@ router.put('/:token/accept', async (req, res, next) => {
     // (shapeFromV1's totalAnnAfter), which re-imports the cents drift the
     // anchor removes (392.04 for the quarterly $392 plan) — and from here it
     // flows into annual_total on accept, the prepay invoice base, and the
-    // billing cadence amount. A derived annual is exactly round(monthly * 12);
-    // re-anchor that case to the engine annual. An explicit engine annual
-    // that differs from the derivation is already exact and is kept.
-    const effectiveAnnualTotal = effectiveAnnualTotalRaw > 0
+    // billing cadence amount. Re-anchor ONLY when the selection IS the plan
+    // the engine pair describes (selected monthly === engine monthly): then
+    // the anchor returns totals.year2 exactly and never extrapolates. Combo
+    // annuals (summed from exact per-service annuals) and non-default cadence
+    // selections keep their own value — extrapolating the default plan's
+    // rounding residue into a different plan's price would bill an unquoted
+    // figure (e.g. a $1,026.00 combo persisted as $1,025.94).
+    const acceptAnchorRoot = estData?.result && typeof estData.result === 'object' ? estData.result : estData;
+    const acceptEngineMonthly = firstPositiveNumber(
+      acceptAnchorRoot?.totals?.year2mo,
+      acceptAnchorRoot?.recurring?.grandTotal,
+      acceptAnchorRoot?.recurring?.monthlyTotal,
+    );
+    const effectiveAnnualTotal = selectedCombo?.annual == null
+      && effectiveAnnualTotalRaw > 0
       && effectiveAnnualTotalRaw === Math.round(effectiveMonthlyTotal * 12 * 100) / 100
+      && acceptEngineMonthly === effectiveMonthlyTotal
       ? anchoredAnnualTotal(estData, effectiveMonthlyTotal)
       : effectiveAnnualTotalRaw;
     const annualPrepayInvoiceAmount = annualPrepaySelected
