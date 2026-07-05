@@ -332,10 +332,17 @@ function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
 async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
   try {
     if (!run || !run.id) return { ok: false, reason: 'autonomous run row unavailable' };
+    const db = deps.db || dbDefault;
+    // Re-fetch the FULL run row — callers pass whatever their poll SELECT
+    // happened to include (pollPending omits facts_sufficiency, which would
+    // silently un-gate the claims-ledger re-run below). The gate set must
+    // never depend on a caller's column list; same pattern as the scheduler
+    // lane's blog_posts re-fetch. Missing row fails closed.
+    run = await db('autonomous_runs').where({ id: run.id }).first();
+    if (!run) return { ok: false, reason: 'autonomous run row not found' };
     if (run.action_type !== 'new_supporting_blog') {
       return { ok: false, reason: `remediation gates only cover new_supporting_blog runs (got ${run.action_type || 'unknown'})` };
     }
-    const db = deps.db || dbDefault;
     const runner = deps.autonomousRunner || require('./autonomous-runner');
     const guardrailsMod = deps.contentGuardrails || contentGuardrails;
     const comparisonMod = deps.comparisonTableGate || comparisonTableGate;
@@ -684,9 +691,19 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // frontmatter is immutable during remediation, so the body is the whole
     // delta — without this, a later republish or social share rebuilds from
     // the pre-fix content and resurrects the issue Codex flagged.
+    // Compare-and-set on the publishing claim + tracked PR/branch: the LLM
+    // call, gates, and GitHub write above take real time, and the stale-
+    // publishing sweep or an admin republish can move the row (or repoint it
+    // at a NEW PR) mid-flight — an id-only update would overwrite the current
+    // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
     onRemediated: async ({ body }) => {
-      const updated = await db('blog_posts').where({ id: row.id }).update({ content: body, updated_at: new Date() });
-      if (!updated) throw new Error(`blog_posts row ${row.id} not found for content sync`);
+      const updated = await db('blog_posts').where({
+        id: row.id,
+        publish_status: 'publishing',
+        astro_pr_number: row.astro_pr_number,
+        astro_branch_name: row.astro_branch_name,
+      }).update({ content: body, updated_at: new Date() });
+      if (!updated) throw new Error(`blog_posts row ${row.id} no longer matches the publishing claim / tracked PR (state moved during remediation)`);
     },
     onPark: async (reason) => {
       // Disarm the scheduler's publishing claim (guarded on it) so the

@@ -307,7 +307,7 @@ describe('round-4 hardening', () => {
   test('maybeRemediateBlogPost re-fetches the row (PR number + topic) from db', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     let captured = null;
-    const db = makeDb({ blog_posts: [{ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'Roof Rats', city: 'Sarasota', keyword: 'roof rats' }] });
+    const db = makeDb({ blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'Roof Rats', city: 'Sarasota', keyword: 'roof rats' }] });
     const gh = makeGh();
     const capturingValidate = (md, opts) => { captured = opts; return { ok: true }; };
     const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: capturingValidate });
@@ -404,12 +404,30 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     const orig = '---\ntitle: T\n---\nOLD BODY';
     const fixedMd = '---\ntitle: T\n---\nNEW FIXED BODY';
     const db = makeDb({
-      blog_posts: [{ id: 1, astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'OLD BODY' }],
+      blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'OLD BODY' }],
     });
     const gh = makeGh({ fileContent: orig });
     const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
     expect(db._tables.blog_posts[0].content).toBe('NEW FIXED BODY');
+  });
+
+  // r9: the sync is a compare-and-set on the publishing claim + tracked PR —
+  // a row the sweep or an admin moved mid-flight must NOT be overwritten.
+  test('row moved out of the publishing claim mid-flight -> CAS miss -> park, content untouched', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\n---\nOLD BODY';
+    const fixedMd = '---\ntitle: T\n---\nNEW FIXED BODY';
+    // publish_status already moved to pending_review (stale-publishing sweep).
+    const db = makeDb({
+      blog_posts: [{ id: 1, publish_status: 'pending_review', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'CURRENT BODY' }],
+    });
+    const gh = makeGh({ fileContent: orig });
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/no longer matches the publishing claim/);
+    expect(db._tables.blog_posts[0].content).toBe('CURRENT BODY'); // untouched
+    expect(gh._calls.comments).toHaveLength(0); // no re-review request
   });
 
   test('row sync failure AFTER the commit -> park, review NOT re-requested', async () => {
@@ -433,8 +451,14 @@ describe('validateAutonomousRunGates', () => {
     opportunity_id: 'opp-1',
     draft_payload: JSON.stringify({ body: 'original body', url: 'https://hub/blog/x/', title: 'T' }),
   };
-  const goodDeps = () => ({
-    db: makeDb({ opportunity_queue: [{ id: 'opp-1', bucket: 'standard', service: 'pest' }] }),
+  // Callers pass whatever their poll SELECT included — the validator must
+  // re-fetch the full row, so tests pass a bare {id} ref and stub the table.
+  const RUN_REF = { id: 'run-1' };
+  const goodDeps = (runRow = RUN) => ({
+    db: makeDb({
+      opportunity_queue: [{ id: 'opp-1', bucket: 'standard', service: 'pest' }],
+      autonomous_runs: [runRow],
+    }),
     autonomousRunner: {
       _loadReviewedBrief: async () => ({ page_type: 'supporting-blog', action_type: 'new_supporting_blog' }),
       _loadBlogCorpus: async () => [],
@@ -449,33 +473,34 @@ describe('validateAutonomousRunGates', () => {
   });
 
   test('all gates pass -> ok', async () => {
-    expect((await rem.validateAutonomousRunGates(MD, RUN, goodDeps())).ok).toBe(true);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);
   });
 
-  test('fail closed: missing run / non-blog action / empty stored draft / missing brief', async () => {
+  test('fail closed: missing run / row not in db / non-blog action / empty stored draft / missing brief', async () => {
     expect((await rem.validateAutonomousRunGates(MD, null, goodDeps())).ok).toBe(false);
-    expect((await rem.validateAutonomousRunGates(MD, { id: 'r', action_type: 'refresh_existing_page' }, goodDeps())).ok).toBe(false);
-    expect((await rem.validateAutonomousRunGates(MD, { id: 'r', action_type: 'new_supporting_blog', draft_payload: '{}' }, goodDeps())).ok).toBe(false);
+    expect((await rem.validateAutonomousRunGates(MD, { id: 'ghost' }, goodDeps())).reason).toMatch(/not found/);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps({ ...RUN, action_type: 'refresh_existing_page' }))).ok).toBe(false);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps({ ...RUN, draft_payload: '{}' }))).ok).toBe(false);
     const noBrief = goodDeps(); noBrief.autonomousRunner._loadReviewedBrief = async () => null;
-    expect((await rem.validateAutonomousRunGates(MD, RUN, noBrief)).ok).toBe(false);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, noBrief)).ok).toBe(false);
   });
 
   test('each failing gate fails the re-run with a named reason', async () => {
     const d1 = goodDeps(); d1.uniquenessGate.evaluateBlog = () => ({ ok: false, error: 'near-duplicate of published post' });
-    expect((await rem.validateAutonomousRunGates(MD, RUN, d1)).reason).toMatch(/uniqueness/);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d1)).reason).toMatch(/uniqueness/);
     const d2 = goodDeps(); d2.qualityGate.evaluate = () => ({ ok: false, failures: ['cta_above_fold'] });
-    expect((await rem.validateAutonomousRunGates(MD, RUN, d2)).reason).toMatch(/quality/);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d2)).reason).toMatch(/quality/);
     const d3 = goodDeps(); d3.seoCompletionGate.evaluate = () => ({ passed: false, findings: [{ severity: 'P0', code: 'P0_MISSING_BODY' }] });
-    expect((await rem.validateAutonomousRunGates(MD, RUN, d3)).reason).toMatch(/seo-completion/);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d3)).reason).toMatch(/seo-completion/);
     const d4 = goodDeps(); d4.aiVisibilityGate.evaluateStatic = () => ({ passed: false, findings: [{ code: 'P0_NOINDEX' }] });
-    expect((await rem.validateAutonomousRunGates(MD, RUN, d4)).reason).toMatch(/visibility/);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d4)).reason).toMatch(/visibility/);
     const d5 = goodDeps(); d5.autonomousRunner._loadBlogCorpus = async () => { throw new Error('corpus unavailable'); };
-    expect((await rem.validateAutonomousRunGates(MD, RUN, d5)).reason).toMatch(/corpus unavailable/);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d5)).reason).toMatch(/corpus unavailable/);
   });
 
   test('a skipped SEO verdict on a supporting blog is a failure, not a pass', async () => {
     const d = goodDeps(); d.seoCompletionGate.evaluate = () => ({ passed: true, skipped: 'not_supporting_blog' });
-    expect((await rem.validateAutonomousRunGates(MD, RUN, d)).ok).toBe(false);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d)).ok).toBe(false);
   });
 
   test('gates evaluate the FIXED body swapped into the stored draft', async () => {
@@ -483,7 +508,7 @@ describe('validateAutonomousRunGates', () => {
     const seen = {};
     deps.uniquenessGate.evaluateBlog = (draft) => { seen.uniq = draft.body; return { ok: true }; };
     deps.aiVisibilityGate.evaluateStatic = ({ url, html }) => { seen.url = url; seen.html = html; return { passed: true }; };
-    expect((await rem.validateAutonomousRunGates(MD, RUN, deps)).ok).toBe(true);
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, deps)).ok).toBe(true);
     expect(seen.uniq).toBe('Fixed body text');
     expect(seen.html).toBe('Fixed body text');
     expect(seen.url).toBe('https://hub/blog/x/');
@@ -496,7 +521,7 @@ describe('validateAutonomousRunGates', () => {
     let optionsSeen = null;
     deps.autonomousRunner._deriveGuardrailOptions = async () => ({ service: ['pest', 'Rodents'], domains: null });
     deps.contentGuardrails.evaluate = (draft, options) => { optionsSeen = options; return { pass: false, findings: [{ severity: 'P0', code: 'FAQ_BLOCKED_SERVICE' }] }; };
-    const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+    const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/run-context guardrails/);
     expect(r.reason).toMatch(/FAQ_BLOCKED_SERVICE/);
@@ -506,15 +531,15 @@ describe('validateAutonomousRunGates', () => {
   test('run-context comparison requiresHumanReview -> fail (named-competitor sign-off)', async () => {
     const deps = goodDeps();
     deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
-    const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+    const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/named-competitor/);
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {
     const deps = goodDeps();
-    deps.db = makeDb({ opportunity_queue: [] });
-    const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+    deps.db = makeDb({ opportunity_queue: [], autonomous_runs: [RUN] });
+    const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/opportunity row unavailable/);
   });
@@ -527,7 +552,7 @@ describe('validateAutonomousRunGates', () => {
     };
 
     test('validator failure -> fail with P0/P1 codes; inputs mirror the runner call', async () => {
-      const deps = goodDeps();
+      const deps = goodDeps(FACTS_RUN);
       let seen = null;
       deps.claimsLedgerValidator = {
         validate: async (draft, ctx, opts) => {
@@ -535,7 +560,7 @@ describe('validateAutonomousRunGates', () => {
           return { pass: false, findings: [{ severity: 'P0', code: 'CLAIM_UNSUPPORTED_BY_FACT' }] };
         },
       };
-      const r = await rem.validateAutonomousRunGates(MD, FACTS_RUN, deps);
+      const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(false);
       expect(r.reason).toMatch(/claims-ledger/);
       expect(r.reason).toMatch(/CLAIM_UNSUPPORTED_BY_FACT/);
@@ -545,23 +570,35 @@ describe('validateAutonomousRunGates', () => {
     });
 
     test('validator pass -> continues to the remaining gates (ok)', async () => {
-      const deps = goodDeps();
+      const deps = goodDeps(FACTS_RUN);
       deps.claimsLedgerValidator = { validate: async () => ({ pass: true, findings: [] }) };
-      expect((await rem.validateAutonomousRunGates(MD, FACTS_RUN, deps)).ok).toBe(true);
+      expect((await rem.validateAutonomousRunGates(MD, RUN_REF, deps)).ok).toBe(true);
     });
 
     test('validator throwing or unavailable -> fail closed', async () => {
-      const d1 = goodDeps();
+      const d1 = goodDeps(FACTS_RUN);
       d1.claimsLedgerValidator = { validate: async () => { throw new Error('facts db down'); } };
-      expect((await rem.validateAutonomousRunGates(MD, FACTS_RUN, d1)).reason).toMatch(/facts db down/);
-      const d2 = goodDeps();
+      expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d1)).reason).toMatch(/facts db down/);
+      const d2 = goodDeps(FACTS_RUN);
       d2.claimsLedgerValidator = {}; // no validate fn
-      expect((await rem.validateAutonomousRunGates(MD, FACTS_RUN, d2)).reason).toMatch(/validator unavailable/);
+      expect((await rem.validateAutonomousRunGates(MD, RUN_REF, d2)).reason).toMatch(/validator unavailable/);
     });
 
     test('non-facts-gated run skips the gate (no validator needed)', async () => {
       const deps = goodDeps(); // RUN has no facts_sufficiency; no validator injected
-      expect((await rem.validateAutonomousRunGates(MD, RUN, deps)).ok).toBe(true);
+      expect((await rem.validateAutonomousRunGates(MD, RUN_REF, deps)).ok).toBe(true);
+    });
+
+    // r9 P1: pollPending's SELECT omits facts_sufficiency — the validator must
+    // re-fetch the full row so a partial poller row can't un-gate the check.
+    test('partial poller row (facts_sufficiency not selected) still triggers the gate', async () => {
+      const deps = goodDeps(FACTS_RUN);
+      let invoked = false;
+      deps.claimsLedgerValidator = { validate: async () => { invoked = true; return { pass: true, findings: [] }; } };
+      const partialPollerRow = { id: 'run-1', action_type: 'new_supporting_blog', draft_payload: FACTS_RUN.draft_payload };
+      const r = await rem.validateAutonomousRunGates(MD, partialPollerRow, deps);
+      expect(r.ok).toBe(true);
+      expect(invoked).toBe(true);
     });
   });
 
@@ -573,12 +610,12 @@ describe('validateAutonomousRunGates', () => {
     try {
       const deps = goodDeps();
       deps.seoCompletionGate.evaluate = () => ({ passed: true, findings: [{ severity: 'P1', code: 'P1_MISSING_CONVERSION_CTA' }], summary: { p0: 0, p1: 1 } });
-      const r = await rem.validateAutonomousRunGates(MD, RUN, deps);
+      const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(false);
       expect(r.reason).toMatch(/seo canary/);
       // and with the limit unset it passes (gate itself passed)
       delete process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
-      expect((await rem.validateAutonomousRunGates(MD, RUN, deps)).ok).toBe(true);
+      expect((await rem.validateAutonomousRunGates(MD, RUN_REF, deps)).ok).toBe(true);
     } finally {
       if (prevMax === undefined) delete process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS;
       else process.env.AUTONOMOUS_CONTENT_MAX_P1_FINDINGS = prevMax;
