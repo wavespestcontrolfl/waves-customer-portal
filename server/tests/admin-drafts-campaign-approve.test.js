@@ -11,6 +11,15 @@
  *    bypasses them as 'conversational')
  *  - a QUIET_HOURS_HOLD block surfaces code + held + nextAllowedAt in the API
  *    response (instead of swallowing them) and releases the draft claim
+ *  - the SHARED pre-send gate (campaign-drafts-gate.js) re-runs at send time
+ *    with the draft's own row excluded from the cooldown; terminal verdicts
+ *    retire the draft (rejected + flags.campaign_rejected_reason), cooldown
+ *    holds 409 + release, guard errors 503 + release
+ *  - suppression sentinels (sent:true, providerMessageId 'template-disabled'
+ *    etc.) are NOT finalized as sent for campaign drafts — 422 SEND_SUPPRESSED
+ *    + claim released
+ *  - a REAL upsell campaign send flips the linked upsell_opportunities row to
+ *    'pitched' in the same transaction as draft finalization
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -41,14 +50,21 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../services/campaign-drafts', () => ({
   CAMPAIGN_GATE: 'campaignDrafts',
-  campaignApprovalState: jest.fn(),
+}));
+// The shared pre-send gate is mocked for route isolation (its verdicts are
+// pinned by campaign-drafts-gate.test.js); the code sets + parseOpportunityRef
+// stay REAL so the route's terminal/hold/transient mapping and the pitched
+// flip are exercised against the true contract.
+jest.mock('../services/campaign-drafts-gate', () => ({
+  ...jest.requireActual('../services/campaign-drafts-gate'),
+  evaluateCampaignSendGate: jest.fn(),
 }));
 
 const express = require('express');
 const db = require('../models/db');
 const draftsRouter = require('../routes/admin-drafts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { campaignApprovalState } = require('../services/campaign-drafts');
+const { evaluateCampaignSendGate } = require('../services/campaign-drafts-gate');
 
 // ---------------------------------------------------------------------------
 // Table-keyed queue of chainable builders (house pattern — see
@@ -120,10 +136,13 @@ beforeEach(() => {
   updates.length = 0;
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
-  sendCustomerMessage.mockResolvedValue({ sent: true });
+  // Draft finalization may run in a transaction (upsell pitched flip) — the
+  // trx handle reuses the same table-keyed queue machinery.
+  db.transaction = jest.fn(async (fn) => fn(db));
+  sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_real_sid' });
   mockGates.campaignDrafts = true;
-  campaignApprovalState.mockResolvedValue({
-    blockReason: null,
+  evaluateCampaignSendGate.mockResolvedValue({
+    ok: true,
     customer: { id: 'cust-1', nearest_location_id: 'loc-9' },
   });
 });
@@ -200,8 +219,8 @@ describe('PUT /admin/drafts/:id/approve', () => {
     // Legacy provenance value + no campaign-only metadata.
     expect(input.metadata.original_message_type).toBe('ai_approved');
     expect(input.metadata.customerLocationId).toBeUndefined();
-    // Legacy drafts never consult the campaign eligibility recheck.
-    expect(campaignApprovalState).not.toHaveBeenCalled();
+    // Legacy drafts never consult the campaign pre-send gate.
+    expect(evaluateCampaignSendGate).not.toHaveBeenCalled();
   });
 
   test('marketing campaign draft sends under purpose=marketing with consentBasis + customer audience', async () => {
@@ -226,6 +245,15 @@ describe('PUT /admin/drafts/:id/approve', () => {
     // Originates from the customer's local office number (legacy workflow
     // behavior) via the approval-time customer lookup.
     expect(input.metadata.customerLocationId).toBe('loc-9');
+
+    // The SHARED gate is re-run at send time with the draft's own row
+    // excluded from the cooldown — parity with the generators by construction.
+    expect(evaluateCampaignSendGate).toHaveBeenCalledWith({
+      campaignType: 'upsell',
+      customerId: 'cust-1',
+      sourceRef: 'upsell_opportunities:opp-1',
+      excludeDraftId: 'draft-1',
+    });
   });
 
   test('gate off is a full kill switch: existing campaign drafts cannot be approve-sent, draft stays pending', async () => {
@@ -260,10 +288,12 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test('approval-time eligibility recheck: ineligible customer rejects the draft instead of sending', async () => {
-    const draft = campaignDraft();
+  test('terminal gate verdict retires the draft instead of sending (reactivation target rebooked)', async () => {
+    const draft = campaignDraft({ campaign_type: 'reactivation', source_ref: 'customers:cust-1' });
     enqueue('message_drafts', { returning: [draft] });
-    campaignApprovalState.mockResolvedValue({ blockReason: 'customer_deleted', customer: { id: 'cust-1', deleted_at: new Date() } });
+    evaluateCampaignSendGate.mockResolvedValue({
+      ok: false, code: 'not_lapsed', customer: { id: 'cust-1', pipeline_stage: 'active_customer' },
+    });
 
     let body;
     await withServer(async (baseUrl) => {
@@ -273,15 +303,78 @@ describe('PUT /admin/drafts/:id/approve', () => {
     });
 
     expect(body.code).toBe('CAMPAIGN_INELIGIBLE');
-    expect(body.reason).toBe('customer_deleted');
+    expect(body.reason).toBe('not_lapsed');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
 
     // Draft marked rejected with a clear reason in flags — not released back
-    // to pending, not sent.
+    // to pending, not sent. The next weekly run writes a FRESH draft if the
+    // customer lapses again.
     const rejection = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'rejected');
     expect(rejection).toBeTruthy();
-    expect(JSON.parse(rejection.payload.flags)).toMatchObject({ campaign_rejected_reason: 'customer_deleted' });
+    expect(JSON.parse(rejection.payload.flags)).toMatchObject({ campaign_rejected_reason: 'not_lapsed' });
     expect(rejection.payload.approved_by).toBe('admin-1');
+  });
+
+  test('opportunity pitched elsewhere while pending → draft retired with the closing status in flags', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    evaluateCampaignSendGate.mockResolvedValue({ ok: false, code: 'opportunity_closed', reason: 'accepted' });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(422);
+      body = await res.json();
+    });
+
+    expect(body).toMatchObject({ code: 'CAMPAIGN_INELIGIBLE', reason: 'opportunity_closed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const rejection = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'rejected');
+    expect(JSON.parse(rejection.payload.flags)).toMatchObject({
+      campaign_rejected_reason: 'opportunity_closed',
+      campaign_rejected_detail: 'accepted',
+    });
+  });
+
+  test('cooldown hit at send time (live auto lane sent while pending) → 409 hold, draft stays pending', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    evaluateCampaignSendGate.mockResolvedValue({
+      ok: false, code: 'cooldown_active', reason: 'recent_campaign_sms',
+    });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(409);
+      body = await res.json();
+    });
+
+    expect(body.code).toBe('CAMPAIGN_COOLDOWN_HOLD');
+    expect(body.reason).toBe('recent_campaign_sms');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Claim released — the condition passes with time, so the draft is NOT
+    // retired.
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+    expect(release.payload.approved_by).toBeNull();
+    expect(updates.find((u) => u.payload.status === 'rejected')).toBeUndefined();
+  });
+
+  test('gate lookup failure fails closed: 503, claim released, draft stays pending', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    evaluateCampaignSendGate.mockResolvedValue({ ok: false, code: 'guard_error', reason: 'connection refused' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe('CAMPAIGN_GUARD_ERROR');
+    });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending')).toBeTruthy();
+    expect(updates.find((u) => u.payload.status === 'rejected')).toBeUndefined();
   });
 
   test('QUIET_HOURS_HOLD surfaces code + held + nextAllowedAt and releases the claim', async () => {
@@ -336,6 +429,78 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(body.held).toBeUndefined();
     expect(body.nextAllowedAt).toBeUndefined();
   });
+
+  test('template-disabled sentinel is NOT a send: 422, claim released, draft not finalized, no pitched flip', async () => {
+    const draft = campaignDraft();
+    enqueueApproveHappyPath(draft);
+    // TwilioService.sendSMS returns success:true with sid 'template-disabled'
+    // (no SMS sent) when the mapped template is inactive; the wrapper
+    // surfaces it as sent:true + sentinel providerMessageId.
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'template-disabled' });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(422);
+      body = await res.json();
+    });
+
+    expect(body.code).toBe('SEND_SUPPRESSED');
+    expect(body.reason).toBe('template-disabled');
+    // Draft NOT marked sent — claim released so it stays actionable once the
+    // template is re-enabled.
+    expect(updates.find((u) => u.table === 'message_drafts' && u.payload.sent_at)).toBeUndefined();
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+    // And the linked opportunity is NOT flipped to pitched — nothing was sent.
+    expect(updates.find((u) => u.table === 'upsell_opportunities')).toBeUndefined();
+  });
+
+  test('legacy null-campaign drafts keep the pre-existing sentinel behavior (scope: campaign drafts only)', async () => {
+    const draft = campaignDraft({ purpose: null, campaign_type: null, source_ref: null });
+    enqueueApproveHappyPath(draft);
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'owner-silence' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  test('real upsell send flips the linked opportunity to pitched atomically with finalization', async () => {
+    const draft = campaignDraft();
+    enqueueApproveHappyPath(draft);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+
+    // Same transaction: draft finalized + opportunity moved to 'pitched' so
+    // customer-intel pitched/accepted metrics see the campaign pitch.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    const finalized = updates.find((u) => u.table === 'message_drafts' && u.payload.sent_at);
+    expect(finalized).toBeTruthy();
+    expect(finalized.payload.final_response).toBe(draft.draft_response);
+    const pitched = updates.find((u) => u.table === 'upsell_opportunities');
+    expect(pitched).toBeTruthy();
+    expect(pitched.payload).toMatchObject({ status: 'pitched', pitched_by: 'campaign_draft' });
+    expect(pitched.payload.pitched_at).toBeInstanceOf(Date);
+  });
+
+  test('reactivation sends never touch upsell_opportunities', async () => {
+    const draft = campaignDraft({ campaign_type: 'reactivation', source_ref: 'customers:cust-1' });
+    enqueueApproveHappyPath(draft);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+
+    expect(updates.find((u) => u.table === 'message_drafts' && u.payload.sent_at)).toBeTruthy();
+    expect(updates.find((u) => u.table === 'upsell_opportunities')).toBeUndefined();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
 });
 
 describe('PUT /admin/drafts/:id/revise', () => {
@@ -384,6 +549,73 @@ describe('PUT /admin/drafts/:id/revise', () => {
     expect(release).toBeTruthy();
     expect(release.payload.revised_response).toBeNull();
     expect(release.payload.final_response).toBeNull();
+  });
+
+  test('gate hold on revise releases the claim with the revise fields cleared', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    evaluateCampaignSendGate.mockResolvedValue({ ok: false, code: 'cooldown_active', reason: 'recent_prepay_notice' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy.' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('CAMPAIGN_COOLDOWN_HOLD');
+    });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+    expect(release.payload.revised_response).toBeNull();
+    expect(release.payload.final_response).toBeNull();
+  });
+
+  test('template-disabled sentinel on revise: 422 SEND_SUPPRESSED, draft restored to pending, no pitched flip', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'template-disabled' });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy. Reply here for a quote.' }),
+      });
+      expect(res.status).toBe(422);
+      body = await res.json();
+    });
+
+    expect(body).toMatchObject({ code: 'SEND_SUPPRESSED', reason: 'template-disabled' });
+    expect(updates.find((u) => u.table === 'message_drafts' && u.payload.sent_at)).toBeUndefined();
+    expect(updates.find((u) => u.table === 'upsell_opportunities')).toBeUndefined();
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+    expect(release.payload.revised_response).toBeNull();
+    expect(release.payload.final_response).toBeNull();
+  });
+
+  test('real send on revise flips the linked upsell opportunity to pitched', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy. Reply here for a quote.' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    const pitched = updates.find((u) => u.table === 'upsell_opportunities');
+    expect(pitched).toBeTruthy();
+    expect(pitched.payload).toMatchObject({ status: 'pitched', pitched_by: 'campaign_draft' });
   });
 });
 

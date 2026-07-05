@@ -75,6 +75,12 @@ function lapsedCustomer(overrides = {}) {
     phone: '+19415550101',
     location_id: 'loc-1',
     address: '123 Palm Ave',
+    // Columns the audience query selects and injects into the shared
+    // pre-send gate (dormant = the stage alone; see the branched predicate).
+    active: true,
+    pipeline_stage: 'dormant',
+    churned_at: null,
+    deleted_at: null,
     ...overrides,
   };
 }

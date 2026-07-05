@@ -12,7 +12,12 @@
  *                  'customers:456') — used for never-re-pitch dedupe.
  *
  * Index on (campaign_type, status) serves the campaign approval queue and the
- * generator's cooldown lookups.
+ * generator's cooldown lookups. The partial index on source_ref serves the
+ * per-opportunity never-re-pitch dedupe (the daily upsell run probes
+ * message_drafts once per identified opportunity); partial because legacy
+ * inbound-reply drafts — the bulk of the table — carry NULL source_ref. NOT
+ * unique: reactivation drafts reuse 'customers:<id>' when a customer lapses
+ * again months later.
  */
 exports.up = async function (knex) {
   const cols = await knex('message_drafts').columnInfo();
@@ -25,9 +30,13 @@ exports.up = async function (knex) {
   await knex.raw(
     'CREATE INDEX IF NOT EXISTS message_drafts_campaign_status_idx ON message_drafts (campaign_type, status)'
   );
+  await knex.raw(
+    'CREATE INDEX IF NOT EXISTS message_drafts_source_ref_idx ON message_drafts (source_ref) WHERE source_ref IS NOT NULL'
+  );
 };
 
 exports.down = async function (knex) {
+  await knex.raw('DROP INDEX IF EXISTS message_drafts_source_ref_idx');
   await knex.raw('DROP INDEX IF EXISTS message_drafts_campaign_status_idx');
 
   const cols = await knex('message_drafts').columnInfo();

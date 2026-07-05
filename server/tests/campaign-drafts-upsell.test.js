@@ -67,6 +67,12 @@ function opportunity(overrides = {}) {
     recommended_service: 'lawn_care',
     reason: 'Has pest but no lawn - bundling saves 15% with WaveGuard Gold',
     first_name: 'Dana',
+    // Customer columns the source query selects and injects into the shared
+    // pre-send gate (the join already filtered on live-customer values).
+    customer_active: true,
+    customer_pipeline_stage: 'active_customer',
+    customer_deleted_at: null,
+    customer_churned_at: null,
     ...overrides,
   };
 }

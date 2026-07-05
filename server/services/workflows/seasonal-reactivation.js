@@ -3,12 +3,8 @@ const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const logger = require('../logger');
 const { isEnabled } = require('../../config/feature-gates');
 const { renderSmsTemplate } = require('../sms-template-renderer');
-const {
-  CAMPAIGN_GATE,
-  toGsm7Safe,
-  prefsAllowMarketingSms,
-  campaignCooldownReason,
-} = require('../campaign-drafts');
+const { CAMPAIGN_GATE, toGsm7Safe } = require('../campaign-drafts');
+const { evaluateCampaignSendGate } = require('../campaign-drafts-gate');
 
 const SEASONAL_HOOKS = {
   // month index (0-based) → hooks (plain hyphens/apostrophes — GSM-7 safe)
@@ -74,17 +70,34 @@ class SeasonalReactivation {
         this.where('last_contact_date', '<', db.raw("NOW() - INTERVAL '30 days'"))
           .orWhereNull('last_contact_date');
       })
-      .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address_line1 as address');
+      .select(
+        'id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address_line1 as address',
+        // Injected into the shared gate below so it revalidates THIS row
+        // instead of re-reading what the audience query just returned.
+        'active', 'pipeline_stage', 'churned_at', 'deleted_at'
+      );
 
-    // Guards shared with the upsell generator: opted-out prefs and the unified
-    // 30-day campaign cooldown (campaign drafts + campaign-grade sms_log +
-    // prepay renewal notices). The draft cooldown also keeps this weekly cron
-    // from re-drafting the same lapsed customer every Monday — drafting no
-    // longer stamps last_contact_date (nothing was sent yet).
+    // Shared pre-send gate (campaign-drafts-gate.js) — the SAME stack the
+    // approve/revise route re-runs at send time, so draft-time and send-time
+    // guards cannot drift: opted-out prefs and the unified 30-day campaign
+    // cooldown (campaign drafts + campaign-grade sms_log + prepay renewal
+    // notices). The draft cooldown also keeps this weekly cron from
+    // re-drafting the same lapsed customer every Monday — drafting no longer
+    // stamps last_contact_date (nothing was sent yet).
     const candidates = [];
     for (const customer of customers) {
-      if (!(await prefsAllowMarketingSms(customer.id))) continue;
-      if (await campaignCooldownReason(customer.id)) continue;
+      const verdict = await evaluateCampaignSendGate({
+        campaignType: 'reactivation',
+        customerId: customer.id,
+        customer: {
+          id: customer.id,
+          active: customer.active,
+          pipeline_stage: customer.pipeline_stage,
+          deleted_at: customer.deleted_at,
+          churned_at: customer.churned_at,
+        },
+      });
+      if (!verdict.ok) continue;
       candidates.push(customer);
     }
 

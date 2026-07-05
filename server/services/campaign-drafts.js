@@ -1,7 +1,5 @@
 /**
- * Existing-customer campaign drafts V1 — the upsell draft generator plus the
- * shared guards the reactivation campaign (workflows/seasonal-reactivation.js)
- * reuses.
+ * Existing-customer campaign drafts V1 — the upsell draft generator.
  *
  * HARD CONTRACT: this lane NEVER sends a customer message. Every path ends in
  * a message_drafts row with status='pending' (campaign_type + purpose set) for
@@ -14,28 +12,28 @@
  * default OFF everywhere. Gate off = shadow mode: the generator computes the
  * guarded candidate list and logs the COUNT only — zero drafts written.
  *
- * Cross-lane dedupe: four existing senders can already hit the same customer
- * (retention agent weekly, seasonal-reactivation Monday, renewal-reminder
- * daily, upsell-trigger post-service). The unified 30-day cooldown checks BOTH
- * message_drafts campaign rows AND sms_log rows carrying those senders'
- * message_type values, so a customer is never stacked with a campaign draft on
- * top of a recent campaign-grade SMS from any lane.
+ * Guard stack: the eligibility/cooldown/prefs guards live in the SHARED
+ * pre-send gate (services/campaign-drafts-gate.js) — the same module the
+ * approve/revise route re-runs at send time, so a draft that sits pending
+ * while the world changes (customer rebooks, another lane sends, the
+ * opportunity gets pitched elsewhere) is re-checked with the exact same
+ * predicates. This file only owns draft-time-only concerns: candidate
+ * sourcing, never-re-pitch dedupe, copy, and the run cap.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
+const {
+  evaluateCampaignSendGate,
+  prefsAllowMarketingSms,
+  campaignCooldownReason,
+  CAMPAIGN_SMS_TYPES,
+  COOLDOWN_DAYS,
+} = require('./campaign-drafts-gate');
 
 const CAMPAIGN_GATE = 'campaignDrafts';
-const COOLDOWN_DAYS = 30;
-const COOLDOWN_INTERVAL = `NOW() - INTERVAL '${COOLDOWN_DAYS} days'`;
-
-// message_type values written by the four existing campaign-grade senders:
-// upsell-trigger ('upsell'), renewal-reminder ('renewal'), the legacy
-// seasonal-reactivation sends ('reactivation'), retention agent
-// ('retention_outreach').
-const CAMPAIGN_SMS_TYPES = ['upsell', 'renewal', 'reactivation', 'retention_outreach'];
 
 // Keep any single run from flooding the owner's approval queue — the daily
 // cadence picks up the remainder on subsequent runs.
@@ -54,89 +52,6 @@ function toGsm7Safe(text) {
     .replace(/[‒–—―]/g, '-')
     .replace(/…/g, '...')
     .replace(/ /g, ' ');
-}
-
-/**
- * sms_enabled / seasonal_tips must not be explicitly false. A missing
- * notification_prefs row passes here (both columns default true, and the
- * default-row backfill covers existing customers) — the consent validator
- * re-checks at approve time and fails closed regardless.
- */
-async function prefsAllowMarketingSms(customerId) {
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customerId })
-    .first('sms_enabled', 'seasonal_tips');
-  if (!prefs) return true;
-  return prefs.sms_enabled !== false && prefs.seasonal_tips !== false;
-}
-
-/**
- * Unified 30-day campaign cooldown. Returns a skip-reason string when the
- * customer was already touched by any campaign lane, else null:
- *   - a campaign draft (any campaign_type, any status) written in the window
- *   - a campaign-grade SMS (CAMPAIGN_SMS_TYPES) logged in the window
- *   - an annual-prepay renewal notice (notice_30/15/7_sent_at) fired in the
- *     window — those customers are mid-renewal-conversation, leave them be.
- */
-async function campaignCooldownReason(customerId) {
-  const recentDraft = await db('message_drafts')
-    .where({ customer_id: customerId })
-    .whereNotNull('campaign_type')
-    .where('created_at', '>', db.raw(COOLDOWN_INTERVAL))
-    .first('id');
-  if (recentDraft) return 'recent_campaign_draft';
-
-  const recentCampaignSms = await db('sms_log')
-    .where({ customer_id: customerId })
-    .whereIn('message_type', CAMPAIGN_SMS_TYPES)
-    .where('created_at', '>', db.raw(COOLDOWN_INTERVAL))
-    .first('id');
-  if (recentCampaignSms) return 'recent_campaign_sms';
-
-  const recentPrepayNotice = await db('annual_prepay_terms')
-    .where({ customer_id: customerId })
-    .where(function () {
-      this.where('notice_30_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        .orWhere('notice_15_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        .orWhere('notice_7_sent_at', '>', db.raw(COOLDOWN_INTERVAL));
-    })
-    .first('id');
-  if (recentPrepayNotice) return 'recent_prepay_notice';
-
-  return null;
-}
-
-/**
- * Approval-time eligibility recheck for a campaign draft. A draft can sit
- * pending for days; the customer can be soft-deleted, deactivated/churned, or
- * flip their prefs between generation and the owner's approve click — and the
- * messaging validators do not reject customers.deleted_at or non-live upsell
- * targets. Re-runs the generator's guards against the CURRENT customer row:
- *   - customer exists and is not soft-deleted (both campaign types)
- *   - upsell only: still live (active + pipeline_stage in CUSTOMER_STAGES) —
- *     reactivation targets are lapsed by design, so no live-stage check
- *   - sms_enabled / seasonal_tips prefs not explicitly false
- * Returns { blockReason, customer } — customer carries nearest_location_id so
- * the approve route can originate the SMS from the customer's local office
- * number, the way the legacy workflows did.
- */
-async function campaignApprovalState(draft) {
-  if (!draft.customer_id) return { blockReason: 'customer_not_found', customer: null };
-  const customer = await db('customers')
-    .where({ id: draft.customer_id })
-    .first('id', 'deleted_at', 'active', 'pipeline_stage', 'nearest_location_id');
-  if (!customer) return { blockReason: 'customer_not_found', customer: null };
-  if (customer.deleted_at) return { blockReason: 'customer_deleted', customer };
-  if (
-    draft.campaign_type === 'upsell' &&
-    (customer.active !== true || !CUSTOMER_STAGES.includes(customer.pipeline_stage))
-  ) {
-    return { blockReason: 'customer_not_live', customer };
-  }
-  if (!(await prefsAllowMarketingSms(draft.customer_id))) {
-    return { blockReason: 'prefs_opted_out', customer };
-  }
-  return { blockReason: null, customer };
 }
 
 /**
@@ -204,7 +119,13 @@ async function generateUpsellDrafts() {
       'uo.customer_id',
       'uo.recommended_service',
       'uo.reason',
-      'c.first_name'
+      'c.first_name',
+      // Injected into the shared gate below so it revalidates THIS row
+      // instead of re-reading what the join just returned.
+      'c.active as customer_active',
+      'c.pipeline_stage as customer_pipeline_stage',
+      'c.deleted_at as customer_deleted_at',
+      'c.churned_at as customer_churned_at'
     );
 
   const candidates = [];
@@ -227,10 +148,30 @@ async function generateUpsellDrafts() {
       .first('id');
     if (alreadyPitched) { skip('already_pitched'); continue; }
 
-    if (!(await prefsAllowMarketingSms(opp.customer_id))) { skip('prefs_opted_out'); continue; }
-
-    const cooldown = await campaignCooldownReason(opp.customer_id);
-    if (cooldown) { skip(cooldown); continue; }
+    // Shared pre-send gate — the SAME stack the approve/revise route re-runs
+    // at send time (campaign-drafts-gate.js), so draft-time and send-time
+    // guards cannot drift. Customer + opportunity rows are injected from the
+    // source query (the joins above already enforce live + identified);
+    // the gate adds the prefs and unified-cooldown checks on top.
+    const verdict = await evaluateCampaignSendGate({
+      campaignType: 'upsell',
+      customerId: opp.customer_id,
+      sourceRef: `upsell_opportunities:${opp.opportunity_id}`,
+      customer: {
+        id: opp.customer_id,
+        active: opp.customer_active,
+        pipeline_stage: opp.customer_pipeline_stage,
+        deleted_at: opp.customer_deleted_at,
+        churned_at: opp.customer_churned_at,
+      },
+      opportunity: { id: opp.opportunity_id, status: 'identified' },
+    });
+    if (!verdict.ok) {
+      // Keep the historical shadow-log keys: cooldown verdicts carry the
+      // specific trigger in `reason` (recent_campaign_draft / _sms / prepay).
+      skip(verdict.code === 'cooldown_active' ? verdict.reason : verdict.code);
+      continue;
+    }
 
     candidates.push(opp);
     draftedCustomers.add(opp.customer_id);
@@ -272,13 +213,14 @@ async function generateUpsellDrafts() {
 
 module.exports = {
   CAMPAIGN_GATE,
+  // Re-exported from campaign-drafts-gate.js for existing importers — the
+  // gate module is the single source of truth for the shared guards.
   CAMPAIGN_SMS_TYPES,
   COOLDOWN_DAYS,
-  MAX_DRAFTS_PER_RUN,
-  toGsm7Safe,
   prefsAllowMarketingSms,
   campaignCooldownReason,
-  campaignApprovalState,
+  MAX_DRAFTS_PER_RUN,
+  toGsm7Safe,
   generateUpsellDrafts,
   _internals: {
     UPSELL_COPY,
