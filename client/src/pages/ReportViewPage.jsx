@@ -7359,9 +7359,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
-        {/* V2: a review ask up top, location-synced to the closest GBP (ReviewRequestCard
-            picks the office review URL). Self-gates on eligibility / already-reviewed. */}
-        {data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
+        {/* V2 + pest: a review ask up top, location-synced to the closest GBP
+            (ReviewRequestCard picks the office review URL). Self-gates on
+            eligibility / already-reviewed. Pest gets the top placement like
+            lawn V2 (owner 2026-07-05); the bottom card below is suppressed
+            for pest to match. */}
+        {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard typedReport={data.typedReport} />
 
@@ -7622,8 +7625,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {/* V2 shows the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
-        {!data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
+        {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
