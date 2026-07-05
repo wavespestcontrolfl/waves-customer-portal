@@ -2347,11 +2347,16 @@ function PropertyZonesPanel({ customerId }) {
   }, [customerId]);
 
   useEffect(() => {
-    if (!open || map || loading) return;
+    if (!open || map || loading) return undefined;
+    // cancelled guards the resolve against a customer switch mid-flight —
+    // without it, customer A's response would repopulate the panel after the
+    // customerId reset, and a later save would post A's zones to B's id
+    let cancelled = false;
     setLoading(true);
     setErr("");
     adminFetch(`/admin/dispatch/customers/${customerId}/property-map`)
       .then((res) => {
+        if (cancelled) return;
         setMap(res || { available: false, reason: "empty_response" });
         const preload = {};
         const norm01 = (v) =>
@@ -2379,12 +2384,18 @@ function PropertyZonesPanel({ customerId }) {
         if (tagged.size && !tagged.has("pest")) setLine([...tagged][0]);
       })
       .catch((e) => {
+        if (cancelled) return;
         // map must go non-null or this effect refires and loops the failed
         // request forever; the render shows the error with a manual Retry
         setErr(e.message || "Failed to load the property map");
         setMap({ available: false, reason: "load_failed" });
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open, map, loading, customerId]);
 
   const zones = map?.zones || [];
@@ -2415,9 +2426,18 @@ function PropertyZonesPanel({ customerId }) {
   const dirtyCount = [...dirtyRef.current].filter((label) =>
     areas.includes(label),
   ).length;
+  const staleOnLine = areas.filter((label) =>
+    staleKeys.has(normalizeZoneKey(label)),
+  ).length;
+  // A fully-drifted property shows nothing to remove, so there is no dirty
+  // action an operator could take — Save doubles as "clear the stale marks"
+  // (composeZoneShapeEntries emits the tombstones on all-cleared saves).
+  const clearingStaleOnly =
+    dirtyCount === 0 && markedCount === 0 && staleOnLine > 0;
   // Server end-state gate: all marked, or all cleared. Anything else is 400.
   const saveable =
-    dirtyCount > 0 && (markedCount === areas.length || markedCount === 0);
+    (dirtyCount > 0 && (markedCount === areas.length || markedCount === 0)) ||
+    clearingStaleOnly;
 
   const setZoneMark = (label, shape) => {
     dirtyRef.current.add(label);
@@ -2578,7 +2598,11 @@ function PropertyZonesPanel({ customerId }) {
               />
               <div className="flex items-center gap-3 mt-2">
                 <Button size="sm" onClick={save} disabled={!saveable || saving}>
-                  {saving ? "Saving…" : "Save zone marks"}
+                  {saving
+                    ? "Saving…"
+                    : clearingStaleOnly
+                      ? "Clear stale marks"
+                      : "Save zone marks"}
                 </Button>
                 {!saveable && dirtyCount > 0 && (
                   <span className="text-12 text-ink-secondary">
@@ -4580,7 +4604,9 @@ export default function Customer360ProfileV2({
           {activeTab === "overview" && (
             <div>
               <CustomerRequestsPanel customerId={customerId} />
-              <PropertyZonesPanel customerId={customerId} />
+              {/* both customer-scoped zone endpoints are requireAdmin — a
+                  technician session would only 403 on expand */}
+              {isAdmin && <PropertyZonesPanel customerId={customerId} />}
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}
