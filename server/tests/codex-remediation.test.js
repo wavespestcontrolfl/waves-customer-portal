@@ -443,6 +443,43 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
   });
 });
 
+describe('round-10 hardening (Codex findings on 82ec5608)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  // P2: frontmatter-only output with a dropped body must be rejected by the
+  // SHARED gate path — downstream gates scan nothing on an empty body.
+  test('validateFixedBlogFile rejects an empty remediated body', async () => {
+    const r = await rem.validateFixedBlogFile('---\ntitle: T\n---\n');
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/empty body/);
+  });
+
+  // P2: the park-path disarm uses the same CAS as the content sync — a row
+  // swept + republished against a NEW PR mid-remediation is a fresh claim
+  // this stale round must not disarm.
+  test('park after the row was repointed at a new PR leaves the fresh publishing claim armed', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'remediating' }],
+      blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k' }],
+    });
+    const gh = makeGh();
+    // Simulate the sweep + republish landing AFTER maybeRemediateBlogPost's
+    // row re-fetch: the first GitHub call mutates the row to a new PR/branch.
+    gh.getPr = async () => {
+      db._tables.blog_posts[0].astro_pr_number = 9;
+      db._tables.blog_posts[0].astro_branch_name = 'content/blog-x-v2';
+      return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+    };
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true); // the round-limit park itself still happens
+    const row = db._tables.blog_posts[0];
+    expect(row.publish_status).toBe('publishing'); // fresh claim NOT disarmed
+    expect(row.astro_publish_error).toBeUndefined(); // no stale error stamped
+  });
+});
+
 describe('validateAutonomousRunGates', () => {
   const MD = '---\ntitle: T\n---\nFixed body text';
   const RUN = {

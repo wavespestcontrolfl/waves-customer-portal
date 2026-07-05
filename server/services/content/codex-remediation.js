@@ -192,6 +192,10 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   const data = parsed && parsed.data;
   const body = String((parsed && parsed.content) || '').trim();
   if (!data || Object.keys(data).length === 0) return { ok: false, reason: 'missing frontmatter' };
+  // A fix that keeps the frontmatter but drops the article body would sail
+  // through every downstream gate (guardrails/comparison scan nothing, the
+  // fact-check skips short bodies) and publish a blank post — reject here.
+  if (!body) return { ok: false, reason: 'empty body' };
 
   try { assertValidBlogFrontmatter(data); } catch (e) { return { ok: false, reason: `frontmatter: ${e.message}` }; }
 
@@ -708,8 +712,16 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     onPark: async (reason) => {
       // Disarm the scheduler's publishing claim (guarded on it) so the
       // stale-publishing sweep moves the row to human review instead of it
-      // sitting in the auto-merge loop for the full stale window.
-      await db('blog_posts').where({ id: row.id, publish_status: 'publishing' }).update({
+      // sitting in the auto-merge loop for the full stale window. Same CAS
+      // as the content sync: a row swept and REPUBLISHED against a new PR/
+      // branch mid-remediation is a fresh claim this stale round must not
+      // disarm (or stamp with its stale error).
+      await db('blog_posts').where({
+        id: row.id,
+        publish_status: 'publishing',
+        astro_pr_number: row.astro_pr_number,
+        astro_branch_name: row.astro_branch_name,
+      }).update({
         publish_status: 'pending_review',
         astro_publish_error: `codex remediation parked: ${reason}`.slice(0, 1000),
         updated_at: new Date(),
