@@ -196,6 +196,54 @@ function spokeMergeBlockedByKillSwitch(run) {
  * outlives the run via brief_id). Returns target.url === null when neither
  * source resolves — callers fail closed on that.
  */
+/**
+ * The category-route URL the publisher would stamp for this blog draft TODAY:
+ * /{category}/{leaf-slug}/ derived with astro-publisher's own routing helpers
+ * (slugPathFromFrontmatter + normalizeAutonomousCategory + categoryRouteSlug +
+ * canonicalUrlForSlug — the exact composition publishOrUpdatePage binds), so
+ * this can never drift from the real route. `brief` must be the run's
+ * content_briefs row (or {} when the run has none): the publisher passes the
+ * brief into normalizeAutonomousCategory, whose brief.service /
+ * brief.target_keyword signals decide the category when the frontmatter
+ * omits or uses a non-canonical label — dropping them would derive the
+ * default /pest-control/ route for a post the publisher stamped under
+ * /lawn-care/, /termite/, etc. Origin comes from the stored canonical when
+ * present (spoke self-canonicals keep their spoke origin), hub otherwise.
+ * Returns null when the frontmatter can't produce a safe slug or the
+ * helpers are unavailable — never guess.
+ */
+function deriveBlogRouteUrl(run, brief = {}) {
+  let internals;
+  try { internals = require('../content-astro/astro-publisher')._internals || {}; } catch (_) { return null; }
+  const { categoryRouteSlug, slugPathFromFrontmatter, canonicalUrlForSlug, normalizeAutonomousCategory } = internals;
+  if ([categoryRouteSlug, slugPathFromFrontmatter, canonicalUrlForSlug, normalizeAutonomousCategory].some((f) => typeof f !== 'function')) return null;
+  const draft = parseJsonObject(run.draft_payload);
+  const frontmatter = draft.frontmatter || {};
+  let slugPath;
+  try { slugPath = slugPathFromFrontmatter(frontmatter); } catch (_) { return null; }
+  const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, brief || {}));
+  if (!routeSlug) return null;
+  let origin = null;
+  try { origin = frontmatter.canonical ? new URL(String(frontmatter.canonical)).origin : null; } catch (_) { origin = null; }
+  return origin ? canonicalUrlForSlug(routeSlug, origin) : canonicalUrlForSlug(routeSlug);
+}
+
+/**
+ * The category signals deriveBlogRouteUrl needs from the run's brief
+ * (normalizeAutonomousCategory reads brief.service + brief.target_keyword).
+ * {} when the run has no brief. A lookup blip THROWS — callers inside
+ * finalizeMerged's live-check try ride the existing transient park
+ * (live_check_failed, retried next tick) rather than deriving from partial
+ * signals, which could probe (and adopt) the wrong category route.
+ */
+async function briefCategorySignalsForRun(run) {
+  if (!run.brief_id) return {};
+  const brief = await db('content_briefs')
+    .where('id', run.brief_id)
+    .first('service', 'target_keyword');
+  return brief || {};
+}
+
 async function resolveTargetForRun(run) {
   const target = targetForRun(run);
   if (target.url || !run.brief_id) return target;
@@ -378,18 +426,41 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   if (!parked) return { ...(await supersedeRun(run, queueRow)), autoMerged };
 
   const target = await resolveTargetForRun(run);
-  if (!target.url) {
-    logger.warn(`[autonomous-pr-poller] run ${run.id} (PR #${prNumber} merged) has no resolvable target URL (draft + brief blank); leaving parked`);
-    return { pending: true, reason: 'target_url_unresolved', autoMerged };
-  }
+  // Live-URL gate with a derived-route fallback for blog runs. Pre-canonical-
+  // stamping runs (June 2026) stored a canonical WITHOUT the /{category}/
+  // prefix — the live blog route is /{category}/{leaf}/ — so the stored URL
+  // 404s forever on a post that IS live (runs for astro PRs #246/#263/#269
+  // sat merged-but-unfinalized for 3 weeks: no IndexNow, no link planning,
+  // queue rows never completed, poll slots burned every tick). When the
+  // stored URL is absent or not responding on a new_supporting_blog run,
+  // derive the category-route URL with the publisher's own routing helpers
+  // and adopt it ONLY if it actually responds; planLinks is recomputed from
+  // the adopted URL. Non-blog lanes never derive (their target is an
+  // arbitrary existing page, not a blog route), and a thrown HEAD check
+  // keeps the original transient behavior (park, retry next tick).
   try {
     const { liveUrlResponds } = require('../content-astro/pages-poll');
-    if (!(await liveUrlResponds(target.url))) {
+    let liveOk = false;
+    if (target.url) liveOk = !!(await liveUrlResponds(target.url));
+    if (!liveOk && String(run.action_type || '') === 'new_supporting_blog') {
+      const derived = deriveBlogRouteUrl(run, await briefCategorySignalsForRun(run));
+      if (derived && derived !== target.url && (await liveUrlResponds(derived))) {
+        logger.info(`[autonomous-pr-poller] run ${run.id}: stored target ${target.url || '(none)'} not live; adopting derived blog route ${derived}`);
+        target.url = derived;
+        target.planLinks = !canonicalIsOffHub(derived);
+        liveOk = true;
+      }
+    }
+    if (!target.url) {
+      logger.warn(`[autonomous-pr-poller] run ${run.id} (PR #${prNumber} merged) has no resolvable target URL (draft + brief blank); leaving parked`);
+      return { pending: true, reason: 'target_url_unresolved', autoMerged };
+    }
+    if (!liveOk) {
       return { pending: true, reason: 'awaiting_live_deploy', url: target.url, autoMerged };
     }
   } catch (err) {
     // Network blip on the HEAD check — transient, retry next tick.
-    logger.warn(`[autonomous-pr-poller] live check failed for ${target.url} (run ${run.id}): ${err.message}`);
+    logger.warn(`[autonomous-pr-poller] live check failed for ${target.url || '(unresolved)'} (run ${run.id}): ${err.message}`);
     return { pending: true, reason: 'live_check_failed', url: target.url, autoMerged };
   }
 
@@ -864,6 +935,7 @@ module.exports = {
     targetForRun,
     spokeMergeBlockedByKillSwitch,
     resolveTargetForRun,
+    deriveBlogRouteUrl,
     queueRowStillParked,
     finalizeMerged,
     finalizeClosed,
