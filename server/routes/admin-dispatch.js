@@ -23,7 +23,7 @@ const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('.
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -1222,6 +1222,43 @@ router.put('/customers/:customerId/property-zones', requireAdmin, async (req, re
     const serviceLine = typeof req.body?.serviceLine === 'string'
       ? req.body.serviceLine.trim().toLowerCase() || null
       : null;
+    if (serviceLine && !SERVICE_LINE_IDS.includes(serviceLine)) {
+      return res.status(400).json({
+        error: `serviceLine must be one of: ${SERVICE_LINE_IDS.join(', ')}`,
+        code: 'service_line_invalid',
+      });
+    }
+
+    const existingZones = await db('property_zones')
+      .where({ customer_id: customer.id, is_active: true })
+      .select('label', 'geometry_image', 'service_lines');
+
+    // A shape for a label with no existing row CREATES that row — without a
+    // scoped service line it lands with service_lines: [], which matches
+    // EVERY report line (a pest-only mark would leak onto lawn/tree reports).
+    const knownKeys = new Set(existingZones.map((zone) => PropertyZones.normalizeZoneLabel(zone.label)));
+    const createsRows = zoneShapes.some((entry) => entry?.clear !== true
+      && !knownKeys.has(PropertyZones.normalizeZoneLabel(entry?.areaLabel)));
+    if (createsRows && !serviceLine) {
+      return res.status(400).json({
+        error: 'serviceLine is required when the payload introduces a new zone label',
+        code: 'service_line_required',
+      });
+    }
+
+    // Partial saves are rejected: the report's satellite overlay goes
+    // image-only once ANY zone carries a mark and drops the rest, so a save
+    // that leaves some zones unmarked while others end marked would silently
+    // omit treated zones from the customer's coverage map. All-marked or
+    // all-cleared are both acceptable end states.
+    const gaps = PropertyZones.zoneShapeCoverageGaps(existingZones, zoneShapes);
+    if (gaps) {
+      return res.status(400).json({
+        error: `every zone needs a mark (or an explicit clear) before saving — missing: ${gaps.join(', ')}`,
+        code: 'zone_shapes_incomplete',
+        missing: gaps,
+      });
+    }
 
     const summary = await db.transaction((trx) => PropertyZones.upsertZonesForCompletion(trx, {
       customerId: customer.id,

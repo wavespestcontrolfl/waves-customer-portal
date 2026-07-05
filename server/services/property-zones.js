@@ -293,9 +293,42 @@ function validateZoneShapesBody(zoneShapes) {
   return null;
 }
 
+// End-state coverage check for STANDALONE saves (the desk-backfill PUT).
+// Simulates applying zoneShapes to the customer's active rows and returns the
+// labels of zones that would end UNMARKED while at least one other zone ends
+// marked — the partial state the report must never see: the satellite overlay
+// goes image-only once any zone carries geometry_image and drops the rest, so
+// a partial save silently omits treated zones from the coverage map. All
+// marked or all unmarked are both fine; anything in between is 400 material.
+// (The completion flow doesn't need this — its client gate posts shapes only
+// when every selected area is marked.)
+function zoneShapeCoverageGaps(existingZones = [], zoneShapes = []) {
+  const endMarked = new Map();
+  for (const zone of Array.isArray(existingZones) ? existingZones : []) {
+    const key = normalizeZoneLabel(zone.label);
+    if (!key) continue;
+    endMarked.set(key, { label: zone.label, marked: Boolean(zone.geometry_image) });
+  }
+  for (const entry of Array.isArray(zoneShapes) ? zoneShapes : []) {
+    const key = normalizeZoneLabel(entry?.areaLabel);
+    if (!key || NON_SPATIAL_CHIP_KEYS.has(key)) continue;
+    if (entry?.clear === true) {
+      const existing = endMarked.get(key);
+      if (existing) existing.marked = false;
+      continue; // a clear for an unknown label is a no-op, not a new row
+    }
+    endMarked.set(key, { label: String(entry.areaLabel).trim(), marked: true });
+  }
+  const rows = [...endMarked.values()];
+  const marked = rows.filter((row) => row.marked);
+  if (!marked.length || marked.length === rows.length) return null;
+  return rows.filter((row) => !row.marked).map((row) => row.label);
+}
+
 module.exports = {
   upsertZonesForCompletion,
   validateZoneShapesBody,
+  zoneShapeCoverageGaps,
   sanitizeZoneShape,
   categoryForLabel,
   normalizeZoneLabel,
