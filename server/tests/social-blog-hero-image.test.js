@@ -106,4 +106,21 @@ describe('blogHeroSocialImageUrl', () => {
     expect(social.BLOG_HERO_SOURCES.has('scheduled')).toBe(false);
     expect(social.BLOG_HERO_SOURCES.has('manual')).toBe(false);
   });
+
+  test('scheduler blog share passes NO imageUrl — a raw .webp hero would bypass the hero branch and fail Instagram (Codex round 1)', () => {
+    // publishToAll seeds generatedImageUrl from a caller-passed imageUrl, and
+    // the hero branch only runs when generatedImageUrl is empty — so the
+    // blog_scheduled caller must let publishToAll own image resolution.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/content-scheduler.js'), 'utf8');
+    const sourceIdx = src.indexOf("source: 'blog_scheduled'");
+    expect(sourceIdx).toBeGreaterThan(-1);
+    const callStart = src.lastIndexOf('publishToAll({', sourceIdx);
+    const callEnd = src.indexOf('});', sourceIdx);
+    expect(callStart).toBeGreaterThan(-1);
+    const call = src.slice(callStart, callEnd);
+    // Property position only — the explanatory comment inside the call
+    // legitimately mentions "imageUrl:".
+    expect(call).not.toMatch(/^\s*imageUrl\s*:/m);
+  });
 });
