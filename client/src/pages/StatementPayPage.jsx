@@ -18,6 +18,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useGlassProGate } from '../components/estimate/glass/EstimateGlassTheme';
 import { useParams } from "react-router-dom";
 import { COLORS, FONTS } from "../theme-brand";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
@@ -268,6 +269,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 }
 
 export default function StatementPayPage() {
+  // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
+  useGlassProGate();
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

@@ -13,6 +13,13 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import WavesAIScheduleSearch from '../booking/WavesAIScheduleSearch';
 import { estimateCard, ESTIMATE_INNER_SHADOW } from './cardStyles';
+import {
+  glassCopyActive,
+  glassRewriteSlotSummary,
+  glassSchedQualifier,
+  glassSchedTitle,
+  GLASS_COPY,
+} from '../../lib/estimate-glass-copy';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -105,6 +112,8 @@ export default function SlotPicker({
   const [pickedDateFocused, setPickedDateFocused] = useState(false);
   const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
+  // Glass copy pack (?glass=1, PR B) — availability-first phrasing.
+  const glass = glassCopyActive();
 
   useEffect(() => {
     let cancelled = false;
@@ -164,6 +173,7 @@ export default function SlotPicker({
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
+    if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
     setPickedDate(null);
     onSelect(null);
     setSearchData(body);
@@ -229,7 +239,7 @@ export default function SlotPicker({
     const nearby = payload?.nearby ?? list.some((s) => s.routeOptimal);
     return (
       <>
-        {!nearby ? <SoftRouteBanner /> : null}
+        {!nearby && !glass ? <SoftRouteBanner /> : null}
         {list.map((slot) => (
           <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />
         ))}
@@ -341,6 +351,10 @@ export default function SlotPicker({
   const expander = data?.expander || [];
   const allSlots = [...primary, ...expander];
 
+  // Glass heading claims a soonest-opening window only from the REAL first
+  // slot (today/tomorrow/this week); with nothing inside a week it falls
+  // back to the standard heading rather than overpromise.
+  const glassHeading = glass ? glassSchedTitle(glassSchedQualifier(allSlots[0]?.date)) : null;
   const heading = (
     <>
       <div style={{
@@ -358,10 +372,12 @@ export default function SlotPicker({
         lineHeight: 1.2,
         marginBottom: 8,
       }}>
-        Find a date & time that works for you
+        {glassHeading || 'Find a date & time that works for you'}
       </div>
       <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.55, marginBottom: 16 }}>
-        These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.
+        {glass
+          ? GLASS_COPY.schedExcerpt
+          : 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.'}
       </div>
     </>
   );

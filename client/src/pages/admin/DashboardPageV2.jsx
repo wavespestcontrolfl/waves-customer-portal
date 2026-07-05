@@ -81,6 +81,7 @@ export default function DashboardPageV2() {
   const [leadsBySource, setLeadsBySource] = useState(null);
   const [channelMix, setChannelMix] = useState(null);
   const [leadFunnel, setLeadFunnel] = useState(null); // /admin/dashboard/lead-funnel (period-driven)
+  const [channelRoi, setChannelRoi] = useState(null); // /admin/dashboard/channel-roi (period-driven)
   const [mix, setMix] = useState(null);
   const [revenueByCity, setRevenueByCity] = useState(null);
   const [reviewTrend, setReviewTrend] = useState(null);
@@ -428,6 +429,7 @@ export default function DashboardPageV2() {
       setLeadsBySource(null);
       setChannelMix(null);
       setLeadFunnel(null);
+      setChannelRoi(null);
       setAttributionError(null);
       setAttributionLoading(true);
     }
@@ -450,13 +452,21 @@ export default function DashboardPageV2() {
         if (e?.name !== "AbortError") console.error("[dashboard-v2] /lead-funnel", e);
         return null;
       }),
+      // Same fail-soft rule for the optional Channel ROI card.
+      adminFetch(`/admin/dashboard/channel-roi?${periodQS}`, {
+        signal: ctrl.signal,
+      }).catch((e) => {
+        if (e?.name !== "AbortError") console.error("[dashboard-v2] /channel-roi", e);
+        return null;
+      }),
     ])
-      .then(([calls, leads, channels, funnelBySrc]) => {
+      .then(([calls, leads, channels, funnelBySrc, roi]) => {
         setCallsBySource(calls);
         setLeadsBySource(leads);
         setChannelMix(channels);
         // Preserve-on-fail like the loadAll panels (blanked on period switch above).
         setLeadFunnel((prev) => funnelBySrc ?? prev);
+        setChannelRoi((prev) => roi ?? prev);
         setAttributionError(null);
       })
       .catch((e) => {
@@ -622,6 +632,7 @@ export default function DashboardPageV2() {
           leadsBySource={leadsBySource}
           channelMix={channelMix}
           leadFunnel={leadFunnel}
+          channelRoi={channelRoi}
           attributionLoading={attributionLoading}
           attributionError={attributionError}
           onDrillSource={drillToSource}

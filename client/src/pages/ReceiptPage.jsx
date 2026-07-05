@@ -33,6 +33,7 @@
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
 import { FONTS } from '../theme-brand';
+import { useGlassProGate } from '../components/estimate/glass/EstimateGlassTheme';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -195,6 +196,8 @@ function SuccessCheck({ size = 56 }) {
 }
 
 export default function ReceiptPage() {
+  // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
+  useGlassProGate();
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
