@@ -261,8 +261,11 @@ function classify(revealIO, statIO, pro) {
  * No-ops unless the glass theme is mounted or the user prefers reduced motion.
  */
 export function fireGlassConfetti(cx, cy) {
+  // Purely decorative: feature-detect and fail silent — callers sit inside
+  // booking-success paths and must never see a visual error.
   if (!document.documentElement.hasAttribute('data-glass-theme')) return;
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (typeof Element.prototype.animate !== 'function') return;
+  if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const colors = ['#F0A500', '#FFD666', '#0A7EC2', '#04395E', '#7CC7F0'];
   for (let i = 0; i < 30; i += 1) {
     const b = document.createElement('div');

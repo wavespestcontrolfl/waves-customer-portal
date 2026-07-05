@@ -2776,9 +2776,12 @@ export default function EstimateViewPage() {
       setAcceptResult(body);
       setCtaPhase('success');
       setReservation(null);
-      // Booking-confirmed celebration — no-op unless the glass theme is
-      // mounted (?glass=1) or when the user prefers reduced motion.
-      fireGlassConfetti(window.innerWidth / 2, window.innerHeight * 0.35);
+      // Booking-confirmed celebration — visual-only and isolated: the accept
+      // has already succeeded, so an animation failure (e.g. a WebView
+      // without Element.animate) must never surface as a booking error.
+      try {
+        fireGlassConfetti(window.innerWidth / 2, window.innerHeight * 0.35);
+      } catch { /* visual only */ }
     } catch (err) {
       setError(err.message);
       setCtaPhase('review');
