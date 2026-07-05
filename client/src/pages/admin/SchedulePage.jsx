@@ -6538,6 +6538,234 @@ function readVideoDurationMs(file) {
 
 // Tech capture — record a clip (native camera) → tag the action → upload direct to
 // S3 (presigned PUT) → it lands in the recap. All optional; flag-gated, pest only.
+
+// ── Zone marking (satellite coverage PR 2, flag: zone-marking-v1) ────────────
+// The tech marks WHERE each chipped area actually is on the property's
+// satellite image. Shapes post as completion `zoneShapes` and persist into
+// property_zones.geometry_image (the PR 1 write path), which lights up the
+// satellite coverage map on the customer report. Coordinates are normalized
+// 0-1 against the 640x340 image; circle radius normalizes against the SHORT
+// side (r = px/340) to match the server contract. Existing marks preload for
+// confirm/adjust, but only TOUCHED labels resubmit — resubmitting an
+// untouched mark would restamp its drift `ref` with today's image params
+// even though the shape was drawn against older imagery.
+const ZONE_MARK_DEFAULT_R = 0.07;
+const ZONE_MARK_MIN_RECT = 0.02;
+
+function normalizeZoneMarkLabel(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+export function ZoneMarkingStep({
+  map,
+  areas,
+  marks,
+  onSetMark,
+  onClearMark,
+  dark = false,
+  disabled = false,
+}) {
+  const [activeLabel, setActiveLabel] = useState(null);
+  const [tool, setTool] = useState("circle");
+  const [rectDraft, setRectDraft] = useState(null);
+  const svgRef = useRef(null);
+
+  // keep the active row valid as chips toggle
+  useEffect(() => {
+    if (!areas.length) { setActiveLabel(null); return; }
+    if (!activeLabel || !areas.includes(activeLabel)) setActiveLabel(areas[0]);
+  }, [areas, activeLabel]);
+
+  if (!map?.available || !map.image?.url || !areas.length) return null;
+
+  const ink = dark ? "#e2e8f0" : "#1a1a1a";
+  const mutedInk = dark ? "#94a3b8" : "#6b6b6b";
+  const cardBg = dark ? "#1e293b" : "#ffffff";
+  const hairline = dark ? "#334155" : "#e4e4e4";
+  const accent = "#0ea5e9";
+
+  const svgPointFromEvent = (evt) => {
+    const el = svgRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const commitCircle = (pt) => {
+    onSetMark(activeLabel, { type: "circle", cx: pt.x, cy: pt.y, r: ZONE_MARK_DEFAULT_R });
+  };
+
+  const handlePointerDown = (evt) => {
+    if (disabled || !activeLabel) return;
+    const pt = svgPointFromEvent(evt);
+    if (!pt) return;
+    if (tool === "rect") {
+      evt.currentTarget.setPointerCapture?.(evt.pointerId);
+      setRectDraft({ x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y });
+    }
+  };
+  const handlePointerMove = (evt) => {
+    if (!rectDraft) return;
+    const pt = svgPointFromEvent(evt);
+    if (!pt) return;
+    setRectDraft((prev) => (prev ? { ...prev, x1: pt.x, y1: pt.y } : prev));
+  };
+  const handlePointerUp = (evt) => {
+    if (disabled || !activeLabel) { setRectDraft(null); return; }
+    if (tool === "rect" && rectDraft) {
+      // Close the box at the RELEASE point, not the last pointermove — a fast
+      // drag can release with zero/stale move events, and committing the
+      // draft alone would shrink the box to the down point and drop the mark.
+      const end = svgPointFromEvent(evt) || { x: rectDraft.x1, y: rectDraft.y1 };
+      const x = Math.min(rectDraft.x0, end.x);
+      const y = Math.min(rectDraft.y0, end.y);
+      const w = Math.abs(end.x - rectDraft.x0);
+      const h = Math.abs(end.y - rectDraft.y0);
+      setRectDraft(null);
+      if (w >= ZONE_MARK_MIN_RECT && h >= ZONE_MARK_MIN_RECT) {
+        onSetMark(activeLabel, { type: "rect", x, y, w, h });
+      }
+      return;
+    }
+    const pt = svgPointFromEvent(evt);
+    if (pt) commitCircle(pt);
+  };
+
+  const resizeActiveCircle = (delta) => {
+    const mark = marks[activeLabel];
+    if (!mark || mark.type !== "circle") return;
+    const r = Math.min(0.4, Math.max(0.02, Number(mark.r) + delta));
+    onSetMark(activeLabel, { ...mark, r });
+  };
+
+  const markedCount = areas.filter((a) => marks[a]).length;
+  const activeMark = activeLabel ? marks[activeLabel] : null;
+
+  const renderMark = (label, mark, isActive) => {
+    const stroke = isActive ? accent : "rgba(255,255,255,0.9)";
+    const fill = isActive ? "rgba(14,165,233,0.25)" : "rgba(255,255,255,0.16)";
+    const letter = String(areas.indexOf(label) + 1);
+    if (mark.type === "rect") {
+      const cx = (mark.x + mark.w / 2) * 640;
+      const cy = (mark.y + mark.h / 2) * 340;
+      return (
+        <g key={label}>
+          <rect x={mark.x * 640} y={mark.y * 340} width={mark.w * 640} height={mark.h * 340} rx={8} fill={fill} stroke={stroke} strokeWidth={2.5} />
+          <circle cx={cx} cy={cy} r={11} fill="rgba(2,20,35,0.75)" />
+          <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">{letter}</text>
+        </g>
+      );
+    }
+    const cx = mark.cx * 640;
+    const cy = mark.cy * 340;
+    return (
+      <g key={label}>
+        <circle cx={cx} cy={cy} r={mark.r * 340} fill={fill} stroke={stroke} strokeWidth={2.5} />
+        <circle cx={cx} cy={cy} r={11} fill="rgba(2,20,35,0.75)" />
+        <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">{letter}</text>
+      </g>
+    );
+  };
+
+  return (
+    <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: ink }}>Mark treated areas on the map</div>
+        <div style={{ fontSize: 11, color: markedCount === areas.length ? "#10b981" : mutedInk, fontWeight: 600 }}>
+          {markedCount} of {areas.length} marked
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: mutedInk, margin: "2px 0 8px" }}>
+        Pick an area, then tap the photo to drop a circle (or switch to box and drag).
+        Mark every area to unlock the satellite map on the customer report.
+      </div>
+      {markedCount > 0 && markedCount < areas.length ? (
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 600, margin: "0 0 8px" }}>
+          Marks only save when every area is marked — finish the remaining {areas.length - markedCount} or they will be discarded.
+        </div>
+      ) : null}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+        {areas.map((label) => {
+          const isActive = label === activeLabel;
+          const isMarked = Boolean(marks[label]);
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={() => setActiveLabel(label)}
+              style={{
+                padding: "5px 12px",
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                background: isActive ? accent : "transparent",
+                color: isActive ? "#fff" : ink,
+                border: `1px solid ${isActive ? accent : hairline}`,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: isMarked ? "#10b981" : (isActive ? "rgba(255,255,255,0.6)" : hairline) }} />
+              {areas.indexOf(label) + 1}. {label}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${hairline}` }}>
+        <svg
+          ref={svgRef}
+          viewBox="0 0 640 340"
+          style={{ display: "block", width: "100%", touchAction: "none", cursor: disabled ? "default" : "crosshair" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+        >
+          <image href={map.image.url} x="0" y="0" width="640" height="340" preserveAspectRatio="xMidYMid slice" />
+          {areas.filter((label) => marks[label] && label !== activeLabel).map((label) => renderMark(label, marks[label], false))}
+          {activeMark ? renderMark(activeLabel, activeMark, true) : null}
+          {rectDraft ? (
+            <rect
+              x={Math.min(rectDraft.x0, rectDraft.x1) * 640}
+              y={Math.min(rectDraft.y0, rectDraft.y1) * 340}
+              width={Math.abs(rectDraft.x1 - rectDraft.x0) * 640}
+              height={Math.abs(rectDraft.y1 - rectDraft.y0) * 340}
+              fill="rgba(14,165,233,0.2)"
+              stroke="#38bdf8"
+              strokeWidth={2}
+              strokeDasharray="6 4"
+            />
+          ) : null}
+        </svg>
+        {map.image.attributionText ? (
+          <div style={{ position: "absolute", right: 6, bottom: 4, fontSize: 10, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.9)", pointerEvents: "none" }}>
+            {map.image.attributionText}
+          </div>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => setTool("circle")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "circle" ? accent : "transparent", color: tool === "circle" ? "#fff" : ink, border: `1px solid ${tool === "circle" ? accent : hairline}` }}>Circle</button>
+        <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
+        {activeMark && activeMark.type === "circle" ? (
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <button type="button" onClick={() => resizeActiveCircle(-0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: "pointer" }}>-</button>
+            <button type="button" onClick={() => resizeActiveCircle(0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: "pointer" }}>+</button>
+            <span style={{ fontSize: 11, color: mutedInk }}>size</span>
+          </span>
+        ) : null}
+        {activeMark ? (
+          <button type="button" onClick={() => onClearMark(activeLabel)} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}` }}>Remove mark</button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function RecapCapture({ serviceId }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
@@ -6839,8 +7067,84 @@ export function CompletionPanel({
     defaultTreeShrubCloseout(service),
   );
   const [areasServiced, setAreasServiced] = useState([]);
+  // Zone marking (satellite coverage, flag zone-marking-v1). zoneMarks keys
+  // by chip label and holds THIS session's edits (null = tech cleared it);
+  // zonePreloads keys by normalized label and holds the property's existing
+  // geometry_image shapes for confirm/adjust. Only labels in zoneDirtyRef
+  // resubmit — resubmitting an untouched preload would restamp its drift
+  // `ref` with today's image params.
+  const { enabled: zoneMarkingFlag } = useFeatureFlagReady("zone-marking-v1");
+  const [zoneMarks, setZoneMarks] = useState({});
+  const [zonePreloads, setZonePreloads] = useState({});
+  const [propertyMap, setPropertyMap] = useState(null);
+  // Image params restored from a saved draft (checkout detour) — lets submit
+  // stamp the drift ref for marks drawn pre-detour even if the live
+  // /property-map refetch hasn't resolved yet.
+  const [zoneMapImageFallback, setZoneMapImageFallback] = useState(null);
+  const zoneDirtyRef = useRef(new Set());
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
+
+  // Satellite basemap + the property's existing zone marks. Preloads land in
+  // zonePreloads (normalized-label keyed) so visit N+1 is confirm/adjust,
+  // never a redraw — and never dirty unless the tech actually touches one.
+  useEffect(() => {
+    if (!zoneMarkingFlag || !service?.id) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/dispatch/${service.id}/property-map`)
+      .then((res) => {
+        if (cancelled) return;
+        setPropertyMap(res || null);
+        if (!res?.available) return;
+        const preload = {};
+        const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
+        (res.zones || []).forEach((zone) => {
+          const shape = zone.geometryImage;
+          if (!shape || typeof shape !== "object") return;
+          if (shape.type === "rect" || shape.type === "circle") {
+            preload[normalizeZoneMarkLabel(zone.label)] = shape;
+          } else if (shape.type == null && [shape.x, shape.y, shape.w, shape.h].every(norm01)) {
+            // The report renderer treats a typeless {x,y,w,h} as a rect
+            // (satellite-treatment-map normalizeRectGeometry) — preload those
+            // legacy marks too, or the step would show them as unmarked and
+            // invite an accidental overwrite. Normalized coords only; the
+            // renderer's pixel-space branch has no meaning on this 0-1 canvas.
+            preload[normalizeZoneMarkLabel(zone.label)] = { ...shape, type: "rect" };
+          }
+        });
+        setZonePreloads(preload);
+      })
+      .catch(() => { if (!cancelled) setPropertyMap(null); });
+    return () => { cancelled = true; };
+  }, [zoneMarkingFlag, service?.id]);
+
+  // What the marking step renders: this session's edit if present (null =
+  // cleared), else the property's preloaded shape.
+  const zoneSpatialAreas = zoneMarkingFlag
+    ? areasServiced.filter((a) => !AREAS_BY_SERVICE.universal.includes(a))
+    : [];
+  const zoneMarksForDisplay = {};
+  zoneSpatialAreas.forEach((label) => {
+    const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
+    const mark = local !== undefined ? local : zonePreloads[normalizeZoneMarkLabel(label)];
+    if (mark) zoneMarksForDisplay[label] = mark;
+  });
+  const setZoneMark = (label, shape) => {
+    zoneDirtyRef.current.add(label);
+    setZoneMarks((prev) => ({ ...prev, [label]: shape }));
+  };
+  const clearZoneMark = (label) => {
+    // Removing a mark drawn THIS session is local-only. Removing a PRELOADED
+    // mark must stay dirty so submit sends a clear tombstone — otherwise the
+    // step shows the area unmarked while property_zones.geometry_image keeps
+    // the stale shape and the report goes on painting it.
+    if (zonePreloads[normalizeZoneMarkLabel(label)]) {
+      zoneDirtyRef.current.add(label);
+    } else {
+      zoneDirtyRef.current.delete(label);
+    }
+    setZoneMarks((prev) => ({ ...prev, [label]: null }));
+  };
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -7701,6 +8005,22 @@ export function CompletionPanel({
         customerRecap,
         recapSource,
         areasServiced,
+        // Zone marks survive the billing-409 checkout detour like everything
+        // else; the dirty list rides along so restore keeps resubmit intent.
+        // The image params the marks were drawn against ride too (center/zoom
+        // /size only — never the live-display-only image URL), so a restored
+        // draft can submit with the CORRECT drift ref even before the
+        // /property-map refetch resolves.
+        zoneMarks,
+        zoneDirty: [...zoneDirtyRef.current],
+        zoneMapImage: propertyMap?.available && propertyMap.image
+          ? {
+            center: propertyMap.image.center || null,
+            zoom: propertyMap.image.zoom,
+            width: propertyMap.image.width || 640,
+            height: propertyMap.image.height || 340,
+          }
+          : null,
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
@@ -7761,6 +8081,7 @@ export function CompletionPanel({
     customerRecap,
     recapSource,
     areasServiced,
+    zoneMarks,
     customerInteraction,
     customerConcern,
     selectedProtocolActionLabels,
@@ -7825,6 +8146,19 @@ export function CompletionPanel({
       Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
         : [],
+    );
+    setZoneMarks(
+      savedDraft.zoneMarks && typeof savedDraft.zoneMarks === "object"
+        ? savedDraft.zoneMarks
+        : {},
+    );
+    zoneDirtyRef.current = new Set(
+      Array.isArray(savedDraft.zoneDirty) ? savedDraft.zoneDirty : [],
+    );
+    setZoneMapImageFallback(
+      savedDraft.zoneMapImage && typeof savedDraft.zoneMapImage === "object"
+        ? savedDraft.zoneMapImage
+        : null,
     );
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -8753,6 +9087,49 @@ export function CompletionPanel({
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
         areasServiced,
+        // Satellite zone marks: only labels the tech TOUCHED this session,
+        // stamped with the image params they were drawn against (drift ref).
+        // Shape WRITES post only when EVERY selected spatial area is marked —
+        // the report switches to satellite mode the moment any zone carries
+        // geometry_image and drops schematic-only zones, so a partial post
+        // would publish a coverage map missing treated areas. CLEARS (tech
+        // removed a preloaded mark) always post: suppressing one would keep
+        // painting a mark the tech just said is wrong. Image params fall back
+        // to the draft-saved copy so a restore after the checkout detour can
+        // submit before the /property-map refetch resolves.
+        ...(zoneMarkingFlag
+          ? (() => {
+            const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
+            if (!image) return {};
+            const ref = {
+              lat: image.center?.lat,
+              lng: image.center?.lng,
+              zoom: image.zoom,
+              width: image.width || 640,
+              height: image.height || 340,
+              capturedAt: new Date().toISOString(),
+            };
+            const effectiveMark = (label) => {
+              const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
+              return local !== undefined ? local : (zonePreloads[normalizeZoneMarkLabel(label)] || null);
+            };
+            const allMarked = zoneSpatialAreas.length > 0
+              && zoneSpatialAreas.every((label) => effectiveMark(label));
+            const dirty = [...zoneDirtyRef.current].filter((label) => areasServiced.includes(label));
+            const writes = allMarked
+              ? dirty
+                .filter((label) => zoneMarks[label])
+                .map((label) => ({ areaLabel: label, shape: { ...zoneMarks[label], ref } }))
+              : [];
+            const clears = dirty
+              .filter((label) => Object.prototype.hasOwnProperty.call(zoneMarks, label)
+                && zoneMarks[label] == null
+                && zonePreloads[normalizeZoneMarkLabel(label)])
+              .map((label) => ({ areaLabel: label, clear: true }));
+            const shapes = [...writes, ...clears];
+            return shapes.length ? { zoneShapes: shapes } : {};
+          })()
+          : {}),
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
@@ -10766,6 +11143,14 @@ export function CompletionPanel({
                     );
                   })}
                 </div>{" "}
+                <ZoneMarkingStep
+                  map={propertyMap}
+                  areas={zoneSpatialAreas}
+                  marks={zoneMarksForDisplay}
+                  onSetMark={setZoneMark}
+                  onClearMark={clearZoneMark}
+                  disabled={generating || success}
+                />
               </Field>
             )}
             {/* The customer-facing report summary is now auto-generated from the
@@ -12628,7 +13013,16 @@ export function CompletionPanel({
                     </button>
                   );
                 })}
-              </div>{" "}
+              </div>
+              <ZoneMarkingStep
+                map={propertyMap}
+                areas={zoneSpatialAreas}
+                marks={zoneMarksForDisplay}
+                onSetMark={setZoneMark}
+                onClearMark={clearZoneMark}
+                dark
+                disabled={generating || success}
+              />
             </div>
           )}
           {/* Customer recap + SMS preview removed (desktop) — the report summary is

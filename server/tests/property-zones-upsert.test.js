@@ -144,3 +144,40 @@ test('validateZoneShapesBody rejects the malformed payloads a stale client could
   expect(validateZoneShapesBody([{ areaLabel: 'Yard', shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.05 } }])).toBeNull();
   expect(validateZoneShapesBody(new Array(31).fill({ areaLabel: 'Yard', shape: {} }))).toMatch(/at most/);
 });
+
+test('clear tombstone nulls the stored mark on an existing row', async () => {
+  const { trx, writes } = makeFakeTrx([
+    { id: 'z-a', customer_id: CUSTOMER, letter: 'A', label: 'Perimeter', service_lines: ['pest'], is_active: true, geometry_image: '{"type":"rect","x":0.1,"y":0.1,"w":0.4,"h":0.2}' },
+    { id: 'z-b', customer_id: CUSTOMER, letter: 'B', label: 'Yard', service_lines: ['pest'], is_active: true },
+  ]);
+  const summary = await upsertZonesForCompletion(trx, {
+    customerId: CUSTOMER,
+    serviceLine: 'pest',
+    areaLabels: ['Perimeter', 'Yard'],
+    zoneShapes: [{ areaLabel: 'Perimeter', clear: true }],
+  });
+  expect(writes.inserts).toHaveLength(0);
+  const clearUpdate = writes.updates.find((u) => 'geometry_image' in u.patch);
+  expect(clearUpdate).toMatchObject({ id: 'z-a', patch: { geometry_image: null } });
+  expect(summary).toMatchObject({ cleared: 1, shapesApplied: 0, created: 0 });
+});
+
+test('clear-only payload on a no-row property stays inside the prod guard (zero writes)', async () => {
+  const { trx, writes } = makeFakeTrx([]);
+  const summary = await upsertZonesForCompletion(trx, {
+    customerId: CUSTOMER,
+    serviceLine: 'pest',
+    areaLabels: ['Perimeter'],
+    zoneShapes: [{ areaLabel: 'Perimeter', clear: true }],
+  });
+  // clears never create rows and never count as shapes — the property keeps
+  // the report builder's schematic defaultZones path untouched
+  expect(writes.inserts).toHaveLength(0);
+  expect(writes.updates).toHaveLength(0);
+  expect(summary).toMatchObject({ created: 0, cleared: 0, shapesApplied: 0 });
+});
+
+test('validateZoneShapesBody accepts clear tombstones but rejects clear+shape', () => {
+  expect(validateZoneShapesBody([{ areaLabel: 'Perimeter', clear: true }])).toBeNull();
+  expect(validateZoneShapesBody([{ areaLabel: 'Perimeter', clear: true, shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.05 } }])).toMatch(/one or the other/);
+});
