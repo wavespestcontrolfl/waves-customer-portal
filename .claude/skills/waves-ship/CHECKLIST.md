@@ -18,11 +18,11 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 ## Codex clean gate (all four, on the FINAL commit)
 - [ ] Issue comment exists with Reviewed-commit SHA == final HEAD
 - [ ] PR reviews + inline comments polled with `--paginate`; count stable for ~90s
-- [ ] Zero unresolved findings on current head (`original_commit_id` checked for staleness) — including P2s
-- [ ] Any rebutted finding answered inline with file:line evidence
+- [ ] Every finding on the current head (`original_commit_id` checked for staleness) — including P2s — is either fixed or rebutted inline with file:line evidence; nothing self-downgraded to a follow-up
+- [ ] No finding left silently unaddressed
 
 ## Post-merge
-- [ ] `git merge-base --is-ancestor <final-sha> <merge-sha>` returns success
+- [ ] Final commit landed: `gh pr view <n> --json headRefOid` == final push SHA (squash rewrites SHAs — ancestry check only valid for true merge commits)
 - [ ] Railway deploy green (portal) / Pages builds green (astro)
 - [ ] Stacked children retargeted to main (should have happened BEFORE merge)
 - [ ] Gate/kill-switch documented; prod behavior spot-checked if a gate was flipped
