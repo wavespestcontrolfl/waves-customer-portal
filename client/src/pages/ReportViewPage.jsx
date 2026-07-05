@@ -1756,9 +1756,9 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
         {pdfUrl
           ? <a data-glass-accent="" href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
           : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
-        <button data-glass="chip" type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
-        <button data-glass="chip" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
-        <a data-glass="chip" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
+        <button data-glass-accent="" type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
     </section>
   );
@@ -7289,10 +7289,43 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        /* glass layout drops the uppercase eyebrow labels (owner ask 2026-07-05);
+           the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
+           ("Overall Lawn Status") without touching their inner list labels */
+        html[data-glass-theme] .service-report-v1 .section-eyebrow,
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1) { display: none; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
           border-radius: 12px;
+        }
+        /* inner fact grids + weather panel: the navy hairline wash / solid-white
+           panels read legacy on the scene — go whisper-white (owner ask 2026-07-05) */
+        html[data-glass-theme] .service-report-v1 .service-status-grid,
+        html[data-glass-theme] .service-report-v1 .hero-condition-row,
+        html[data-glass-theme] .service-report-v1 .readiness-facts {
+          background: rgba(255, 255, 255, 0.6);
+          border-color: rgba(255, 255, 255, 0.7);
+        }
+        html[data-glass-theme] .service-report-v1 .hero-conditions {
+          background: rgba(255, 255, 255, 0.42);
+          border-color: rgba(255, 255, 255, 0.65);
+        }
+        html[data-glass-theme] .service-report-v1 .hero-condition-cell {
+          background: rgba(255, 255, 255, 0.5);
+        }
+        /* lawn V2 water callouts carry inline legacy surfaces — glass overrides
+           ride the class hooks (inert outside the theme) */
+        html[data-glass-theme] .service-report-v1 .lawn-callout-watch {
+          background: rgba(255, 236, 190, 0.55) !important;
+          border-color: rgba(240, 165, 0, 0.6) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-callout-after {
+          border-top-color: rgba(4, 57, 94, 0.16) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-water-cta {
+          background: rgba(255, 255, 255, 0.42) !important;
+          border-color: rgba(255, 255, 255, 0.65) !important;
         }
         /* chip CTAs sit on translucent glass — their inline white text would wash out */
         html[data-glass-theme] .service-report-v1 [data-glass="chip"],
