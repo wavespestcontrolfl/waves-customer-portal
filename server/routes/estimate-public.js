@@ -10190,7 +10190,7 @@ function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowed
   // are authoritative (every selected recurring service has a row), so they
   // skip the union.
   if (!recurring.length) {
-    inferCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
+    inferScopeCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
   }
   // Fail closed on service rows the classifiers DROP, not just on estimates
   // that classify to nothing: a recurring key or real one-time service line
@@ -10242,6 +10242,56 @@ function inferCategoriesFromEngineInputs(estData = {}) {
     // the 'pest_control' default and the public page mislabels it as Pest Control.
     services.foamRecurring || inputs.svcFoamRecurring ? 'foam_recurring' : null,
   ].filter(Boolean);
+}
+
+// Scope-only superset of inferCategoriesFromEngineInputs, used ONLY by
+// glassCategoryEligible. deriveServiceCategory keeps the narrow list above so
+// page copy is unchanged; the scope check must instead see EVERY selectable
+// engine service flag, because recurring-capable lanes persist no one-time
+// rows for the fail-closed row check to catch (Codex rd6: services.rodentBait
+// made a pest+rodent-bait estimate look pest-only). Categories here only need
+// to be right about in-scope-vs-not — specialty lanes map to keys that are
+// never in a release CSV, which fails closed.
+//
+// Predicate asymmetry is deliberate and fail-closed on both sides:
+// in-scope flags (pest/lawn pairs in the base list + the specialty pest/lawn
+// flags below) use STRICT selected semantics — under-detecting one just keeps
+// the old page. Out-of-scope flags use LOOSE truthiness — a vestigial
+// {selected:false} object blocks glass, which is the safe direction.
+const SCOPE_IN_SCOPE_ENGINE_FLAGS = [
+  ['oneTimePest', 'pest_control'], ['pestInitialRoach', 'pest_control'],
+  ['germanRoach', 'pest_control'], ['germanRoachInitial', 'pest_control'],
+  ['bedBug', 'pest_control'], ['flea', 'pest_control'], ['fleaExterior', 'pest_control'],
+  ['oneTimeLawn', 'lawn_care'], ['topDressing', 'lawn_care'],
+  ['dethatching', 'lawn_care'], ['plugging', 'lawn_care'],
+];
+const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
+  ['palm', 'tree_shrub'], ['palmInjection', 'tree_shrub'],
+  ['rodentBait', 'rodent'], ['rodentBaitSetupForce', 'rodent'], ['rodentTrapping', 'rodent'],
+  ['rodentTrappingFollowups', 'rodent'], ['rodentGuarantee', 'rodent'],
+  ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
+  ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
+  ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV', 'rodent'],
+  ['sanitation', 'rodent'],
+  ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
+  ['termiteFoam', 'termite_foam'],
+  ['preSlabTermidor', 'pre_slab_termiticide'], ['pre_slab_termidor', 'pre_slab_termiticide'],
+  ['stinging', 'stinging'], ['stingingV', 'stinging'],
+  ['wdo', 'wdo'],
+];
+
+function inferScopeCategoriesFromEngineInputs(estData = {}) {
+  const inputs = estData?.inputs || estData?.engineInputs || {};
+  const services = inputs.services || {};
+  const categories = new Set(inferCategoriesFromEngineInputs(estData));
+  SCOPE_IN_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+    const value = services[flag];
+    if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+  });
+  SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+    if (services[flag]) categories.add(category);
+  });
+  return [...categories];
 }
 
 function chipsForServiceCategory(category) {

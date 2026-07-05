@@ -24,6 +24,12 @@
 //   normalized rows unioned with the (possibly choice-aligned) bundle items,
 //   because alignOneTimeChoiceBreakdown drops raw out-of-scope rows — the
 //   union test here locks the semantics the call site relies on.
+// r6 — recurring-capable engine flags (services.rodentBait et al.) persist no
+//   one-time rows for the row check to catch, so the scope check uses a
+//   dedicated inference covering EVERY selectable engine service flag:
+//   in-scope pest/lawn specialty flags map strictly, out-of-scope lanes map
+//   loosely (a vestigial truthy object blocks — the safe direction), and
+//   deriveServiceCategory's narrow list (page copy) is untouched.
 const { glassCategoryEligible, deriveServiceCategory } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
@@ -148,6 +154,41 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
     ];
     expect(glassCategoryEligible({}, recurringPest, alignedOnly, PEST_LAWN_SCOPE)).toBe(true);
     expect(glassCategoryEligible({}, recurringPest, unionWithRaw, PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r6: rodent-bait engine input blocks a pest+rodent-bait estimate (the rd6 leak)', () => {
+    const estData = { engineInputs: { services: { pest: true, rodentBait: true } } };
+    expect(glassCategoryEligible(estData, [], [], PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r6: every out-of-scope recurring-capable lane blocks, even as a vestigial truthy object', () => {
+    const lanes = [
+      { rodentTrapping: true }, { rodentGuarantee: true }, { trapOnlyRetainer: true },
+      { exclusion: true }, { sanitation: true }, { stinging: true }, { wdo: true },
+      { termiteFoam: true }, { foam: true }, { palmInjection: true },
+      { rodentTrapping: { selected: false } }, // loose predicate: object presence blocks
+    ];
+    lanes.forEach((extra) => {
+      const estData = { engineInputs: { services: { pest: true, ...extra } } };
+      expect(glassCategoryEligible(estData, [], [], PEST_LAWN_SCOPE)).toBe(false);
+    });
+  });
+
+  test('r6: in-scope pest/lawn specialty engine flags release (strict selected semantics)', () => {
+    const bedBugPest = { engineInputs: { services: { pest: true, bedBug: true } } };
+    const fleaOnly = { engineInputs: { services: { flea: true } } };
+    const oneTimeLawn = { engineInputs: { services: { oneTimeLawn: true } } };
+    const deselectedFlea = { engineInputs: { services: { flea: { selected: false } } } };
+    expect(glassCategoryEligible(bedBugPest, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible(fleaOnly, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    expect(glassCategoryEligible(oneTimeLawn, [], [], PEST_LAWN_SCOPE)).toBe(true);
+    // Strict side: a deselected in-scope object infers nothing → fail closed.
+    expect(glassCategoryEligible(deselectedFlea, [], [], PEST_LAWN_SCOPE)).toBe(false);
+  });
+
+  test('r6: deriveServiceCategory (page copy) is unchanged by the scope-only inference', () => {
+    const rodentBaitOnly = { engineInputs: { services: { rodentBait: true } } };
+    expect(deriveServiceCategory(rodentBaitOnly, [], [])).toBe('pest_control');
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {
