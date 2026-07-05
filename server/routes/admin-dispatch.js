@@ -12,6 +12,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
+const PropertyZones = require('../services/property-zones');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
@@ -1097,6 +1098,80 @@ router.get('/:serviceId/completion-profile', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/property-map — satellite basemap + the
+// customer's existing zones for the completion flow's zone-marking step. The
+// image params (center / zoom / 640x340) are built through the SAME provider
+// call the customer report uses, so what the tech draws on is pixel-identical
+// to what the report renders. The Google image URL is returned for LIVE
+// display only — never proxied or stored (provider ToS).
+router.get('/:serviceId/property-map', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services as ss')
+      .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+      .where('ss.id', req.params.serviceId)
+      .select('ss.id', 'ss.customer_id', 'c.latitude', 'c.longitude')
+      .first();
+    if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
+
+    const { getBasemapProvider, isSatelliteTreatmentMapEnabled } = require('../services/maps/basemap-provider');
+    if (!isSatelliteTreatmentMapEnabled()) {
+      return res.json({ available: false, reason: 'disabled' });
+    }
+    const provider = getBasemapProvider();
+    if (!provider?.capabilities?.canDisplayLive) {
+      return res.json({ available: false, reason: 'provider_unavailable' });
+    }
+    const lat = Number(svc.latitude);
+    const lng = Number(svc.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.json({ available: false, reason: 'missing_coordinates' });
+    }
+
+    const geometryRow = await db('property_geometries')
+      .where({ customer_id: svc.customer_id })
+      .orderBy('version', 'desc')
+      .first()
+      .catch(() => null);
+    const zoom = Number(geometryRow?.zoom) || 20;
+    const center = { lat, lng };
+    const liveConfig = await provider.getLiveMapConfig({
+      center,
+      zoom,
+      width: 640,
+      height: 340,
+      mapType: 'satellite',
+    });
+    if (!liveConfig?.imageUrl) {
+      return res.json({ available: false, reason: 'provider_config_unavailable' });
+    }
+
+    const zones = await db('property_zones')
+      .where({ customer_id: svc.customer_id, is_active: true })
+      .orderBy('letter')
+      .catch(() => []);
+
+    return res.json({
+      available: true,
+      image: {
+        url: liveConfig.imageUrl,
+        width: liveConfig.width || 640,
+        height: liveConfig.height || 340,
+        center: liveConfig.center || center,
+        zoom,
+        attributionText: liveConfig.attributionText || '',
+      },
+      zones: zones.map((zone) => ({
+        id: zone.id,
+        letter: zone.letter,
+        label: zone.label,
+        category: zone.category,
+        serviceLines: Array.isArray(zone.service_lines) ? zone.service_lines : [],
+        geometryImage: zone.geometry_image || null,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/recap-preview
 router.post('/recap-preview', async (req, res, next) => {
   try {
@@ -1906,6 +1981,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       nextStepChips = null,
       completionTelemetry = null,
       typedPhotoSummary = null,
+      zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -1932,6 +2008,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'client_pest_rating_invalid',
         });
       }
+    }
+    const zoneShapesError = PropertyZones.validateZoneShapesBody(zoneShapes);
+    if (zoneShapesError) {
+      return res.status(400).json({ error: zoneShapesError, code: 'zone_shapes_invalid' });
     }
     if (completionPhotos != null && !Array.isArray(completionPhotos)) {
       return res.status(400).json({
@@ -3895,6 +3975,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         actorId: req.technicianId,
         error: e,
       });
+    }
+
+    // Property-zone sync (satellite coverage lane): persist any tech-marked
+    // satellite shapes and keep the customer's zone rows label-synced with the
+    // chipped areas. Post-commit + fail-soft on purpose: zones are report
+    // presentation data — a pg error here must neither abort the completion
+    // txn nor poison later statements in it. The service itself no-ops for
+    // customers with no zone rows and no incoming shapes, so prod reports
+    // stay on the schematic defaults until a map is actually marked.
+    try {
+      const zoneSync = await PropertyZones.upsertZonesForCompletion(db, {
+        customerId: svc.customer_id,
+        serviceLine: reportServiceLine,
+        areaLabels: completionAreas,
+        zoneShapes: Array.isArray(zoneShapes) ? zoneShapes : [],
+      });
+      if (zoneSync.created || zoneSync.updated || zoneSync.shapesApplied || zoneSync.skipped.length) {
+        logger.info('[completion] property zones synced', { serviceId: svc.id, ...zoneSync });
+      }
+    } catch (zoneErr) {
+      logger.warn(`[completion] property-zone sync failed (non-blocking): ${zoneErr.message}`);
     }
 
     // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
