@@ -1573,8 +1573,20 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
     const row = await db('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
       .first('status', 'last_touch_at', 'next_touch_at');
-    if (!row || row.status !== 'active') return false;
+    if (!row) return false;
+    // A REAL recent send suppresses regardless of status — the FINAL step of
+    // a sequence stamps last_touch_at and flips the row to 'completed' in the
+    // same shared 10 AM hour (invoice followups are registered ahead of the
+    // renewal cron), so an active-only check would double-text that morning.
     if (row.last_touch_at && (now - new Date(row.last_touch_at)) < PAYMENT_REMINDER_DUNNING_SUPPRESS_MS) return true;
+    // Deliberate dunning controls: a paused / autopay-held / stopped sequence
+    // means "no automated payment texts right now" (owner pause, autopay in
+    // flight, stop/waive) — the pre-visit reminder honors them too.
+    if (['paused', 'autopay_hold', 'stopped'].includes(row.status)) return true;
+    // 'completed' (sequence exhausted) falls through: the visit-anchored
+    // reminder is the only nudge left, so only the recent-touch window above
+    // suppresses it.
+    if (row.status !== 'active') return false;
     if (row.next_touch_at) {
       // A due touch only suppresses on a day the follow-up cron can actually
       // fire (Tue–Fri per config.sendWindow). A touch that came due over the
@@ -1783,22 +1795,34 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
     }
 
-    const sentAt = new Date();
-    await db('annual_prepay_terms')
-      .where({ id: claimedTerm.id })
-      .whereNull(sentCol)
-      .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
+    // Touch DELIVERED — everything past this point is bookkeeping and must
+    // never undo the customer-visible send: the text already quoted the
+    // post-credit balance, so reversing would make the link charge more than
+    // the reminder said, and re-claiming would re-text. Stamp failures log
+    // loudly and still report sent; the claim stays held (stale-claim TTL
+    // owns the rare retry).
+    try {
+      const sentAt = new Date();
+      await db('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .whereNull(sentCol)
+        .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
 
-    await db('customer_interactions').insert({
-      customer_id: customer.id,
-      interaction_type: 'sms_outbound',
-      channel: 'sms',
-      subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
-      body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start)`,
-    }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+      await db('customer_interactions').insert({
+        customer_id: customer.id,
+        interaction_type: 'sms_outbound',
+        channel: 'sms',
+        subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
+        body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start)`,
+      }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+    } catch (bookkeepingErr) {
+      logger.error(`[annual-prepay] payment reminder SENT but sent-stamp failed for term ${claimedTerm.id} — credit kept, claim held: ${bookkeepingErr.message}`);
+    }
 
     return { sent: true, termId: claimedTerm.id };
   } catch (err) {
+    // Only failures BEFORE any channel delivered reach here (the delivered
+    // path swallows its bookkeeping errors above).
     await reverseReminderCredit();
     await releaseClaim();
     throw err;

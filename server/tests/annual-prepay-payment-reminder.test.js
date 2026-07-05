@@ -236,6 +236,55 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a recent FINAL dunning touch suppresses even after the sequence flips to completed (shared 10 AM hour)', async () => {
+    setDbQueues({
+      invoice_followup_sequences: [query({
+        first: { status: 'completed', last_touch_at: new Date(Date.now() - 5 * 60 * 1000), next_touch_at: null },
+      })],
+    });
+    await expect(_private.invoiceDunningActiveToday('inv-1', {})).resolves.toBe(true);
+  });
+
+  test('paused / autopay-held / stopped sequences suppress (deliberate dunning controls); completed alone does not', async () => {
+    for (const status of ['paused', 'autopay_hold', 'stopped']) {
+      setDbQueues({
+        invoice_followup_sequences: [query({ first: { status, last_touch_at: null, next_touch_at: null } })],
+      });
+      await expect(_private.invoiceDunningActiveToday('inv-1', {})).resolves.toBe(status === 'completed' ? false : true);
+    }
+    setDbQueues({
+      invoice_followup_sequences: [query({ first: { status: 'completed', last_touch_at: null, next_touch_at: null } })],
+    });
+    await expect(_private.invoiceDunningActiveToday('inv-1', {})).resolves.toBe(false);
+  });
+
+  test('post-delivery bookkeeping failure keeps the credit and still reports sent (never reverse a delivered touch)', async () => {
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    const claimQ = query({ returning: [{ ...BASE_TERM }] });
+    const failingStampQ = query();
+    failingStampQ.update = jest.fn(() => { throw new Error('db down'); });
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        claimQ,
+        failingStampQ,
+      ],
+      invoices: [
+        query({ first: { ...UNPAID_INVOICE } }),
+        query({ first: { ...UNPAID_INVOICE, credit_applied: '50.00' } }),
+      ],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+    });
+    renderSmsTemplate.mockResolvedValue('pay reminder body');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(result).toEqual({ sent: true, termId: 'term-1' });
+    expect(reverseAppliedCredit).not.toHaveBeenCalled();
+  });
+
   test('a DUE dunning touch suppresses only on days the follow-up cron runs (Tue–Fri)', async () => {
     const dueRow = { status: 'active', last_touch_at: null, next_touch_at: new Date('2026-07-06T14:00:00Z') };
     // Wednesday 2026-07-08: cron fires → suppress.
