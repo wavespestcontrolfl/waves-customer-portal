@@ -197,7 +197,9 @@ async function reserveSlot({
   // longer offer. Enforce the same minimum booking lead the generator uses
   // (estimate-slot-availability's minimumLeadMinutes default) — a window
   // inside the lead can't be routed and dispatched, so reserving it books a
-  // visit no tech can make on time.
+  // visit no tech can make on time. STRICTLY inside: the generator offers
+  // starts AT the boundary (startMin >= earliest), so equality must pass
+  // here too or a just-fetched boundary slot 409s on the first tap.
   const MINIMUM_LEAD_MINUTES = 120;
   const todayEt = etDateString();
   if (date < todayEt) {
@@ -209,7 +211,7 @@ async function reserveSlot({
   if (date === todayEt) {
     const nowEt = etParts(new Date());
     const [sh, sm] = String(windowStart).split(':').map(Number);
-    if (sh * 60 + sm <= nowEt.hour * 60 + nowEt.minute + MINIMUM_LEAD_MINUTES) {
+    if (sh * 60 + sm < nowEt.hour * 60 + nowEt.minute + MINIMUM_LEAD_MINUTES) {
       const err = new Error('slot start is inside the booking lead window');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = slotId;

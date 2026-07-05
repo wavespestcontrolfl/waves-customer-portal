@@ -13,11 +13,16 @@ const NOW = new Date('2026-07-05T15:00:00Z');
 afterEach(() => vi.useRealTimers());
 
 describe('glassSlotIsStale', () => {
-  it('marks a same-day slot inside the 2-hour lead stale, matching the server guard', () => {
+  it('marks a same-day slot strictly inside the 2-hour lead stale, matching the server guard', () => {
     expect(glassSlotIsStale({ date: '2026-07-05', windowStart: '12:30' }, NOW)).toBe(true);
     expect(glassSlotIsStale({ date: '2026-07-05', windowStart: '13:30' }, NOW)).toBe(false);
     expect(glassSlotIsStale({ date: '2026-07-04', windowStart: '09:00' }, NOW)).toBe(true);
     expect(glassSlotIsStale({ date: '2026-07-06', windowStart: '08:00' }, NOW)).toBe(false);
+  });
+
+  it('keeps a slot exactly at the lead boundary bookable — the generator offers it', () => {
+    // 11:00 ET now, 13:00 ET start = exactly 120 minutes: NOT stale.
+    expect(glassSlotIsStale({ date: '2026-07-05', windowStart: '13:00' }, NOW)).toBe(false);
   });
 });
 
@@ -29,7 +34,11 @@ describe('glassSlotMeta', () => {
       windowStart: '09:00',
       dow: 'Tue',
       time: '9:00 AM',
+      techFirstName: null,
     });
+    // Real technician carries through for the chip — never default to the
+    // wrong name for a valid slot.
+    expect(glassSlotMeta({ slotId: 's3', date: '2026-07-07', windowStart: '09:00', techFirstName: 'Jose' }).techFirstName).toBe('Jose');
     expect(glassSlotMeta({ slotId: 's2', date: '2026-07-07', windowStart: '13:30' }).time).toBe('1:30 PM');
     expect(glassSlotMeta(null)).toBe(null);
   });

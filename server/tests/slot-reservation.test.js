@@ -367,6 +367,23 @@ describe('slot reservation helpers', () => {
       jest.useRealTimers();
     }
   });
+
+  test('reserveSlot accepts a slot exactly at the lead boundary — the generator still offers it', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-07-14T15:00:00Z'));
+    db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
+    try {
+      // 13:00 ET start = exactly 120 minutes out; the generator's
+      // startMin >= earliest offers it, so the guard must not 409 it.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-07-14_13-00_tech-1',
+      })).rejects.toThrow('REACHED_DB');
+      expect(db.transaction).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('scheduled service reservation hold migration', () => {

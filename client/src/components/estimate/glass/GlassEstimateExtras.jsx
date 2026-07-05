@@ -12,6 +12,18 @@ import './glass-components.css';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 /**
+ * The featured-reviews endpoint returns star_rating >= 4 — every glass
+ * proof surface renders five gold stars, so anything below a true 5 must
+ * be filtered out before display. One shared filter so the proof strip,
+ * the marquee, and the carousel-fallback gate can never disagree.
+ */
+export function fiveStarReviews(reviews) {
+  return (Array.isArray(reviews) ? reviews : []).filter(
+    (r) => r?.text && !r.fallback && Number(r.starRating) === 5,
+  );
+}
+
+/**
  * Frequency selector as glass pills (gold when active, "Recommended" chip
  * on quarterly) — same {frequencies, selected, onChange, disabled} contract
  * as FrequencySlider, driving the existing selection state.
@@ -70,9 +82,9 @@ export function useFeaturedReviews(enabled, limit = 12) {
 }
 
 // One short pull-quote per review — first sentence if it stays punchy,
-// otherwise skip. Real quotes only, never truncated mid-thought.
+// otherwise skip. Real 5-star quotes only, never truncated mid-thought.
 function tickerQuotes(reviews) {
-  return reviews
+  return fiveStarReviews(reviews)
     .map((r) => {
       const first = String(r.text).split(/(?<=[.!?])\s/)[0].trim();
       return first.length >= 20 && first.length <= 90 ? { quote: first, name: r.reviewerName } : null;
@@ -128,7 +140,7 @@ const G_MARK = (
  * continuous scroll, pause on hover. 5★ reviews only.
  */
 export function GlassReviewMarquee({ reviews }) {
-  const fiveStar = (reviews || []).filter((r) => Math.round(Number(r.starRating || 5)) === 5);
+  const fiveStar = fiveStarReviews(reviews);
   if (fiveStar.length < 3) return null;
   const card = (r, keyPrefix, hidden) => (
     <div key={`${keyPrefix}-${r.reviewerName}-${r.text.slice(0, 24)}`} className="gc-rm-card" {...(hidden ? { 'aria-hidden': true } : {})}>
@@ -181,12 +193,15 @@ export function GlassStickyBookBar({ priceLabel, periodLabel, slotMeta, onApprov
  */
 export function GlassTechChip({ slotMeta, techName = 'Adam', licenseNumber }) {
   if (!slotMeta) return null;
+  // The availability payload names the slot's real technician — the default
+  // only covers legacy slots with no tech attached.
+  const name = slotMeta.techFirstName || techName;
   return (
     <div className="gc-tech-chip">
-      <span className="gc-tc-avatar" aria-hidden="true">{techName.charAt(0)}</span>
+      <span className="gc-tc-avatar" aria-hidden="true">{name.charAt(0)}</span>
       <span>
         <strong style={{ color: '#04395E' }}>
-          Your technician: {techName} — {slotMeta.dow} {slotMeta.time}
+          Your technician: {name} — {slotMeta.dow} {slotMeta.time}
         </strong>
         {licenseNumber ? <> · Licensed &amp; insured, FL {licenseNumber}</> : null}
       </span>

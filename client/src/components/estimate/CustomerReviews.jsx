@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
-import { GlassReviewMarquee, GlassSectionCta } from './glass/GlassEstimateExtras';
+import { fiveStarReviews, GlassReviewMarquee, GlassSectionCta } from './glass/GlassEstimateExtras';
 
 const W = {
   blueDeeper: '#1B2C5B', yellow: '#FFD700',
@@ -125,12 +125,15 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
 
   if (!reviews) return null;
 
-  // Glass (PR C): real reviews render as the continuous GBP-native marquee;
-  // the paged carousel stays for the non-glass control and for the GBP
-  // profile fallbacks (a marquee of fallback links reads as fake reviews).
-  const realReviews = reviews.filter((r) => !r.fallback);
-  const glassMarquee = glassCopyActive() && realReviews.length >= 3
-    ? <GlassReviewMarquee reviews={realReviews} />
+  // Glass (PR C): real 5-star reviews render as the continuous GBP-native
+  // marquee; the paged carousel stays for the non-glass control, for the
+  // GBP profile fallbacks (a marquee of fallback links reads as fake
+  // reviews), and when fewer than three TRUE 5-star reviews exist — the
+  // gate uses the same filter the marquee applies, so it can never render
+  // an empty section.
+  const marqueeReviews = fiveStarReviews(reviews);
+  const glassMarquee = glassCopyActive() && marqueeReviews.length >= 3
+    ? <GlassReviewMarquee reviews={marqueeReviews} />
     : null;
 
   const start = page * pageSize;

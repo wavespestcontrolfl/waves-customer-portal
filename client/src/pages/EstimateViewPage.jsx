@@ -3069,11 +3069,17 @@ export default function EstimateViewPage() {
   const isLockedMirrorSection = (section) => (
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
-  // Live price for the glass sticky book bar — combined total for bundles,
-  // the primary section's cadence price otherwise (same rounding PriceCard
-  // renders, so the bar never disagrees with the card).
+  // Live price for the glass sticky book bar — it must quote exactly what
+  // the cards quote. Bundles: combinedFrequency.monthly IS the monthly
+  // total CombinedRecurringPriceCard renders as /mo — no cadence multiply.
+  // Single service: the cadence price PriceCard renders.
   const stickyBarPrice = (() => {
-    const src = services.length > 1 ? combinedFrequency : currentFrequency;
+    if (services.length > 1) {
+      const monthly = combinedFrequency?.monthly;
+      if (combinedFrequency?.quoteRequired === true || monthly == null) return { label: null, period: null };
+      return { label: fmtMoney(Math.round(Number(monthly) * 100) / 100), period: '/mo' };
+    }
+    const src = currentFrequency;
     if (!src || src.quoteRequired === true || src.monthly == null) return { label: null, period: null };
     const billingKey = src.billingFrequencyKey || src.key;
     const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;

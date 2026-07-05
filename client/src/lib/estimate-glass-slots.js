@@ -39,8 +39,10 @@ export function glassSlotWeekday(dateYmd) {
 }
 
 /**
- * A slot is stale once its window start is inside the booking lead window
- * (or past). Mirrors reserveSlot's guard: ET date compare + ET minutes.
+ * A slot is stale once its window start is STRICTLY inside the booking lead
+ * window (or past). Mirrors both the generator (which offers starts AT the
+ * lead boundary: startMin >= earliest) and reserveSlot's guard — a slot
+ * exactly two hours out is bookable everywhere.
  */
 export function glassSlotIsStale(slot, now = new Date()) {
   if (!slot?.date) return false;
@@ -50,7 +52,7 @@ export function glassSlotIsStale(slot, now = new Date()) {
   const startMins = windowStartMinutes(slot.windowStart);
   if (startMins == null) return false;
   const nowEt = etParts(now);
-  return startMins <= nowEt.hour * 60 + nowEt.minute + GLASS_SLOT_LEAD_MINUTES;
+  return startMins < nowEt.hour * 60 + nowEt.minute + GLASS_SLOT_LEAD_MINUTES;
 }
 
 /**
@@ -66,6 +68,9 @@ export function glassSlotMeta(slot) {
     windowStart: slot.windowStart,
     dow: weekday.slice(0, 3),
     time: formatWindowStart(slot.windowStart),
+    // Real technician from the availability payload — the chip must never
+    // default to the wrong name for a valid slot.
+    techFirstName: slot.techFirstName || null,
   };
 }
 
