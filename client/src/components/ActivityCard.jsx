@@ -35,6 +35,7 @@ export default function ActivityCard({ data, sectionId = 'activity' }) {
     <section
       id={sectionId}
       data-section="activity"
+      data-glass="card"
       style={{
         background: '#FFFFFF',
         border: '1px solid #E7E2D7',

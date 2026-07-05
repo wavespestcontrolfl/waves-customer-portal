@@ -27,6 +27,7 @@ import {
   FONTS,
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
+import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import ActivityCard from '../components/ActivityCard';
 
@@ -1255,7 +1256,7 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
   })();
   const Root = embedded ? 'div' : 'section';
   return (
-    <Root className={`${embedded ? 'pressure-trend-card pressure-trend-card-embedded' : 'report-card pressure-trend-card'}`} data-section="pressure-trend">
+    <Root data-glass={embedded ? undefined : 'card'} className={`${embedded ? 'pressure-trend-card pressure-trend-card-embedded' : 'report-card pressure-trend-card'}`} data-section="pressure-trend">
       <div className="pressure-trend-layout">
         <div>
           {!embedded && <h2>{pressureHeadline}</h2>}
@@ -1448,7 +1449,7 @@ function LawnProtocolCard({ protocol }) {
       : 'Seasonal protocol';
 
   return (
-    <section className="sr-section lawn-protocol-section" id="lawn-protocol">
+    <section data-glass="card" className="sr-section lawn-protocol-section" id="lawn-protocol">
       <h2>Seasonal lawn protocol</h2>
       <p>{window.goal || 'Today’s lawn visit followed the current St. Augustine seasonal protocol for this property.'}</p>
       <div className="sr-grid-3">
@@ -1629,7 +1630,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
         {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
       </div>
-      <div className="service-status-card">
+      <div data-glass="card" className="service-status-card">
         <div className="service-status-main">
           <div>
             <div className="section-eyebrow">Today&apos;s result</div>
@@ -1672,7 +1673,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
 // never reach this page for suppressed reports (the server 404s them).
 function InternalReviewBar() {
   return (
-    <section className="report-action-bar" aria-label="Internal review notice">
+    <section data-glass="card" className="report-action-bar" aria-label="Internal review notice">
       <div className="section-eyebrow">Internal Review</div>
       <h2 className="report-action-title">Not sent to the customer</h2>
       <p className="report-action-copy">
@@ -1685,17 +1686,17 @@ function InternalReviewBar() {
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
   return (
-    <section className="report-action-bar" aria-label="Report tools">
+    <section data-glass="card" className="report-action-bar" aria-label="Report tools">
       <div className="section-eyebrow">Report Tools</div>
       <h2 className="report-action-title">Download, share, or print</h2>
       <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
         {pdfUrl
-          ? <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
-          : <span style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
-        <button type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
-        <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
-        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
+          ? <a data-glass-accent="" href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
+          : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
+        <button data-glass="chip" type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button data-glass="chip" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        <a data-glass="chip" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
     </section>
   );
@@ -1714,7 +1715,7 @@ function ReentryReadinessCard({ context, mode, token }) {
 
   if (!context) return null;
   return (
-    <section className={`sr-section readiness-card ${readiness.allReady ? 'is-ready' : ''}`} id="re-entry">
+    <section data-glass="card" className={`sr-section readiness-card ${readiness.allReady ? 'is-ready' : ''}`} id="re-entry">
       <div className="readiness-card-header">
         <div>
           <div className="section-eyebrow">Re-entry / readiness</div>
@@ -1880,13 +1881,13 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
           placeholder={placeholder}
           aria-label="Ask Waves about this service report"
         />
-        <button type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+        <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
           {asking ? 'Checking...' : 'Submit'}
         </button>
       </div>
       <div className="report-ask-actions" aria-label="Example questions">
         {prompts.map((prompt) => (
-          <button type="button" key={prompt} onClick={() => ask(prompt)} disabled={asking}>
+          <button data-glass="chip" type="button" key={prompt} onClick={() => ask(prompt)} disabled={asking}>
             {prompt}
           </button>
         ))}
@@ -1915,7 +1916,7 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
   const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
 
   return (
-    <section className="sr-section quick-report-tools" id="quick-navigation">
+    <section data-glass="card" className="sr-section quick-report-tools" id="quick-navigation">
       <div className="coverage-section-header">
         <div>
           <h2>Need help with this report?</h2>
@@ -1942,7 +1943,7 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   return (
-    <section className="report-card" data-section="todays-result" id={sectionId}>
+    <section data-glass="card" className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">
         {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
       </div>
@@ -1969,7 +1970,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   const items = typedReport?.findings;
   if (!Array.isArray(items) || !items.length) return null;
   return (
-    <section className="sr-section" id={sectionId} data-section="typed-findings">
+    <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found & did</h2>
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
@@ -2000,7 +2001,7 @@ function CompanionSectionHeader({ companion }) {
   const title = companion.typeLabel || companion.reportTypeLabel || 'Additional service';
   if (companion.internalOnly) {
     return (
-      <section className="report-action-bar" aria-label="Internal review notice">
+      <section data-glass="card" className="report-action-bar" aria-label="Internal review notice">
         <div className="section-eyebrow">Internal Review</div>
         <h2 className="report-action-title">{title}</h2>
         <p className="report-action-copy">
@@ -2011,7 +2012,7 @@ function CompanionSectionHeader({ companion }) {
     );
   }
   return (
-    <section className="sr-section" data-section="companion-heading">
+    <section data-glass="card" className="sr-section" data-section="companion-heading">
       <div className="section-eyebrow">Also completed this visit</div>
       <h2 style={{ margin: 0 }}>{title}</h2>
     </section>
@@ -2040,7 +2041,7 @@ function WavesAiSummary({ context = {}, mode, token, pressureTrend, neighborhood
   const body = isLawn ? lawnAssessmentBody(lawnAssessment) : context.body;
 
   return (
-    <section className="report-card ai-summary-card" data-section="waves-ai-summary">
+    <section data-glass="card" className="report-card ai-summary-card" data-section="waves-ai-summary">
       {isLawn && <div className="section-eyebrow">Lawn intelligence</div>}
       <h2>{headline}</h2>
       {isLawn ? <LawnMethodologyDropdown /> : <PressureMethodologyDropdown />}
@@ -2127,7 +2128,7 @@ function WavesAiPersonalitySummary({ context, mode, token, pressureTrend, neighb
   const headline = pressureProgressHeadline(pressureTrend, active.headline || 'Service is complete.');
 
   return (
-    <section className="report-card ai-summary-card premium-ai-summary" data-section="waves-ai-summary">
+    <section data-glass="card" className="report-card ai-summary-card premium-ai-summary" data-section="waves-ai-summary">
       <div className="premium-section-header">
         <div>
           <h2>{headline}</h2>
@@ -2158,7 +2159,7 @@ function WavesAiPersonalitySummary({ context, mode, token, pressureTrend, neighb
 function TheOneThing({ move }) {
   if (!move?.title) return null;
   return (
-    <section className="report-card the-one-thing" data-section="the-one-thing">
+    <section data-glass="card" className="report-card the-one-thing" data-section="the-one-thing">
       <div className="section-eyebrow">The one thing</div>
       <h2>{move.title}</h2>
       {(move.why || move.impact) && (
@@ -2196,7 +2197,7 @@ function statusLabel(value) {
 function PropertyDefenseStatus({ context }) {
   if (!context?.items?.length) return null;
   return (
-    <section className="report-card property-defense-status" data-section="property-defense-status">
+    <section data-glass="card" className="report-card property-defense-status" data-section="property-defense-status">
       <div className="section-eyebrow">Property defense status</div>
       <h2>{context.summary}</h2>
       <div className="defense-status-grid">
@@ -2297,7 +2298,7 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   const location = reviewLocationForReport(data);
   const copy = reviewRequestCopy(placement);
   return (
-    <section className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
+    <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
         <h2>{copy.title}</h2>
       </div>
@@ -2356,7 +2357,7 @@ function SinceLastVisit({ context }) {
   ].filter(Boolean);
   if (!rows.length) return null;
   return (
-    <section className="sr-section since-last-visit">
+    <section data-glass="card" className="sr-section since-last-visit">
       <h2>Since last visit</h2>
       <div className="sr-list">
         {rows.map(([label, value]) => (
@@ -2378,7 +2379,7 @@ function RecommendedActionCard({ findings = [], aiSummary, primaryMove }) {
   const text = primaryMove?.title || aiAction || finding?.recommendation;
   if (!text) return null;
   return (
-    <section className="sr-section recommended-action-card">
+    <section data-glass="card" className="sr-section recommended-action-card">
       <h2>Recommended next step</h2>
       <p className="recommended-action-text">{text}</p>
     </section>
@@ -2443,7 +2444,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   );
 
   return (
-    <section className="sr-section applied-products-section" id="products-applied">
+    <section data-glass="card" className="sr-section applied-products-section" id="products-applied">
       <div className="applied-products-header">
         <div>
           <h2>Products Applied</h2>
@@ -2566,7 +2567,7 @@ function LawnProgramOverviewCard({ context }) {
   ].filter(Boolean);
 
   return (
-    <section className="report-card lawn-program-overview-card" data-section="lawn-program-overview">
+    <section data-glass="card" className="report-card lawn-program-overview-card" data-section="lawn-program-overview">
       <div className="lawn-program-heading">
         <div className="lawn-program-icon" aria-hidden="true">
           <FileCheck2 size={20} />
@@ -3508,7 +3509,7 @@ function ServiceCoverageCard({
 
   if (!showList && !showMap) {
     return (
-      <section className="sr-section service-coverage-section" id="service-coverage">
+      <section data-glass="card" className="sr-section service-coverage-section" id="service-coverage">
         <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
         <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
         <h2>{coverage.title || 'Service Area Map'}</h2>
@@ -3518,7 +3519,7 @@ function ServiceCoverageCard({
   }
 
   return (
-    <section className="sr-section service-coverage-section unified-service-coverage" id="service-coverage">
+    <section data-glass="card" className="sr-section service-coverage-section unified-service-coverage" id="service-coverage">
       <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
       <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
       <div className="coverage-section-header">
@@ -4088,7 +4089,7 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
 
   if (loading) {
     return (
-      <section className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
+      <section data-glass="card" className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
         <h2>Visit Timeline</h2>
         <div className="workflow-skeleton-list">
           <span />
@@ -4102,7 +4103,7 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
   if (!timeline.enabled) return null;
 
   return (
-    <section className="sr-section service-workflow-section" id="service-timeline">
+    <section data-glass="card" className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
           <h2>{timeline.title || 'Visit Timeline'}</h2>
@@ -4524,6 +4525,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
   const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
+
+  // Liquid-glass dark launch: ?glass=1 on the live view only. PDF / static /
+  // sms_preview renders never mount the scene, so the Playwright print
+  // pipeline and cached artifacts stay byte-identical.
+  const glassActive = mode === 'live' && glassParamRequested();
+  useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
     if (mode !== 'live') return;
@@ -7199,6 +7206,50 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .pressure-trend-chart { justify-self: stretch; max-width: none; }
           .review-request-card { grid-template-columns: 1fr; }
         }
+        /* ---------- liquid glass (?glass=1, live mode only) ----------
+           useGlassSurface sets html[data-glass-theme]; every rule below is
+           scoped under it so the un-gated report stays pixel-identical.
+           Card material comes from glass-theme.css via data-glass attrs —
+           this block only remaps the page's own tokens + inner surfaces. */
+        html[data-glass-theme] .service-report-v1 {
+          --text: #04395E;
+          --muted: rgba(12, 21, 40, 0.7);
+          --soft: rgba(12, 21, 40, 0.7);
+          --line: rgba(4, 57, 94, 0.16);
+          --line-strong: rgba(4, 57, 94, 0.24);
+          --page: transparent;
+          --wash: rgba(255, 255, 255, 0.38);
+          --soft-blue: rgba(255, 255, 255, 0.38);
+          --soft-blue-border: rgba(255, 255, 255, 0.6);
+          --report-action: #04395E;
+          background: transparent;
+        }
+        /* the glass ::before/::after specular layers position against the card */
+        html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        html[data-glass-theme] .service-report-v1 .sr-cell,
+        html[data-glass-theme] .service-report-v1 .sr-metric {
+          background: rgba(255, 255, 255, 0.42);
+          border-radius: 12px;
+        }
+        /* chip CTAs sit on translucent glass — their inline white text would wash out */
+        html[data-glass-theme] .service-report-v1 [data-glass="chip"],
+        html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
+          color: #04395E !important;
+        }
+        @media print {
+          /* a customer printing a ?glass=1 view still gets the paper document */
+          html[data-glass-theme] .service-report-v1 { background: #fff; }
+          html[data-glass-theme] .service-report-v1 [data-glass],
+          html[data-glass-theme] .service-report-v1 [data-glass-accent] {
+            background: #fff !important;
+            border-color: #d4d4d4 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          html[data-glass-theme] .glass-scene-orbs,
+          html[data-glass-theme] .glass-scene-grain { display: none !important; }
+        }
         @media print {
           .sr-top { position: static; }
           .sr-actions,
@@ -7225,7 +7276,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
       `}</style>
 
-      <header className="sr-top">
+      <header data-glass="soft" className="sr-top">
         <div className="sr-top-inner">
           <a className="sr-top-phone" href={`tel:${WAVES_PHONE_TEL}`}>{WAVES_PHONE_DISPLAY}</a>
           <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
@@ -7283,7 +7334,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             carries the id="visit-summary" anchor), so the legacy Visit Summary
             paragraph is suppressed for pest V2 to avoid showing the report twice. */}
         {!data.pestReportV2 && (
-          <section className="sr-section visit-summary-section" id="visit-summary">
+          <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
             {/* Lawn Report V2 visual dashboard slots in here (right after Re-entry),
@@ -7431,7 +7482,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         {orderedProofMoments.length > 0 && (
-          <section className="sr-section" id="service-highlights">
+          <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
             <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, margin: '0 0 14px' }}>
               {visualProofMomentIntro(orderedProofMoments)}
@@ -7473,7 +7524,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             (which can over-diagnose). When reportV2 is present, the V2 photo strip
             above replaces this with a horizontal gallery + ONE consolidated analysis. */}
         {(data.photos || []).length > 0 && !data.reportV2 && (
-          <section className="sr-section" id="photos">
+          <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
               <p style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>

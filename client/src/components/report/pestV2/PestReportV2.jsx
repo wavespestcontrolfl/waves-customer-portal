@@ -92,8 +92,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
   if (!status) return null;
   const t = tone(status.tone);
   return (
-    <section style={{ ...card, background: t.wash, border: `1px solid ${t.border}` }}>
-      <div style={eyebrow}>Today’s protection status</div>
+    <section data-glass="card" style={{ ...card, background: t.wash, border: `1px solid ${t.border}` }}>
+      <div data-gt="eyebrow" style={eyebrow}>Today’s protection status</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ width: 12, height: 12, borderRadius: '50%', background: t.color, flexShrink: 0, boxShadow: `0 0 0 4px ${t.color}22` }} />
         <h2 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 24, color: TEXT, margin: 0 }}>{status.label}</h2>
@@ -188,8 +188,8 @@ export function PestProtectionMap({ defense, print = false }) {
   ];
 
   return (
-    <section style={card}>
-      <div style={eyebrow}>Where we protected</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Where we protected</div>
       <h3 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 17, color: TEXT, margin: '0 0 2px' }}>
         {perimeterActive ? 'A protective barrier is active around your home' : 'We’re building protection around your home'}
       </h3>
@@ -259,8 +259,8 @@ export function PestProtectionMap({ defense, print = false }) {
 export function PestPrimaryMove({ primaryMove }) {
   if (!primaryMove?.title) return null;
   return (
-    <section style={{ ...card, borderLeft: `4px solid ${COLORS.wavesBlue}` }}>
-      <div style={eyebrow}>Your next step</div>
+    <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.wavesBlue}` }}>
+      <div data-gt="eyebrow" style={eyebrow}>Your next step</div>
       <h3 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 17, color: TEXT, margin: '0 0 6px' }}>{primaryMove.title}</h3>
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
       {primaryMove.impact ? <p style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
@@ -275,8 +275,8 @@ export function PestPrimaryMove({ primaryMove }) {
 export function PestReceipt({ receipt }) {
   if (!receipt?.stats?.length) return null;
   return (
-    <section style={card}>
-      <div style={eyebrow}>{receipt.headline || 'Your service record'}</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>{receipt.headline || 'Your service record'}</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
         {receipt.stats.map((stat) => (
           <div key={stat.label} style={{ background: '#F8FAFC', border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 12px' }}>
@@ -294,8 +294,8 @@ export function PestReceipt({ receipt }) {
 export function PestBugFiles({ bugFiles = [], print = false }) {
   if (!bugFiles.length) return null;
   return (
-    <section style={card}>
-      <div style={eyebrow}>Pests we’re watching</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Pests we’re watching</div>
       <div style={{ display: 'grid', gap: 10 }}>
         {bugFiles.map((bug) => (
           <div key={bug.pestKey || bug.suspectLabel} style={{ border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 14px' }}>
@@ -337,8 +337,8 @@ export function PestSeasonForecast({ forecast }) {
   if (!forecast?.pests?.length) return null;
   const title = forecast.monthName ? `What to expect in ${forecast.monthName}` : 'What to expect this season';
   return (
-    <section style={card}>
-      <div style={eyebrow}>Seasonal outlook</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Seasonal outlook</div>
       <h3 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 17, color: TEXT, margin: '0 0 4px' }}>{title}</h3>
       {forecast.headline ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{forecast.headline}</p> : null}
       {forecast.weatherSummary ? <div style={{ fontSize: 12, color: MUTED, marginBottom: 10 }}>{forecast.weatherSummary}{forecast.locationLabel ? ` · ${forecast.locationLabel}` : ''}</div> : null}
