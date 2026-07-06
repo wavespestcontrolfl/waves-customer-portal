@@ -169,10 +169,11 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText('Sunday, July 12')).not.toBeInTheDocument();
     expect(screen.getByText('Two openings Tuesday afternoon.')).toBeInTheDocument();
 
-    // …and the reset restores the full window.
+    // …and the reset restores the full window AND clears the stale AI recap.
     fireEvent.click(screen.getByRole('button', { name: 'Show all open times' }));
     expect(await screen.findByText('Sunday, July 12')).toBeInTheDocument();
     expect(screen.queryByText('Tuesday, July 14')).not.toBeInTheDocument();
+    expect(screen.queryByText('Two openings Tuesday afternoon.')).not.toBeInTheDocument();
   });
 
   it('keeps the filtered list AND the reset link when the full-window refetch fails', async () => {

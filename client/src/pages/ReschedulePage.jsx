@@ -270,6 +270,10 @@ export default function ReschedulePage() {
   // True while the day list shows an AI search's results instead of the full
   // window — gates the "Show all open times" reset.
   const [aiFiltered, setAiFiltered] = useState(false);
+  // Bumped on a successful reset; keys the search bar so its internal
+  // query/summary recap clears with the filter — a stale "Two openings
+  // Tuesday afternoon" line must not sit above the unfiltered day list.
+  const [aiSession, setAiSession] = useState(0);
 
   // Glass release (GATE_PORTAL_GLASS): cached server default resolves
   // synchronously, the ui-flags fetch keeps it fresh, ?glass=1 / ?glass=0
@@ -330,6 +334,7 @@ export default function ReschedulePage() {
       if (!res.ok) return;
       setData(await res.json());
       setAiFiltered(false);
+      setAiSession((n) => n + 1); // remount the bar → clears its recap/query
     } catch { /* keep the filtered list + reset link */ }
   };
 
@@ -411,6 +416,7 @@ export default function ReschedulePage() {
 
         <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
           <WavesAIScheduleSearch
+            key={aiSession}
             theme={{ accent: COLORS.blueDeeper, accentText: COLORS.white, text: S.text, muted: S.muted, border: S.softBorder, surface: S.surface, inputBg: S.soft }}
             onSearch={runAiSearch}
           />
