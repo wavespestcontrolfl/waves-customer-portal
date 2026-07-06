@@ -1,6 +1,5 @@
 import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import NewsletterSignup from './NewsletterSignup';
 import { WAVES_ADDRESS_LINE } from '../constants/business';
 import { glassCopyActive, GLASS_FOOTER_CITY_LINKS } from '../lib/estimate-glass-copy';
 
@@ -34,6 +33,12 @@ function ServiceAreaLinks({ color }) {
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const CONTACT_PHONE_DISPLAY = '(941) 297-5749';
 const CONTACT_PHONE_TEL = '+19412975749';
+
+// Glass type-system colors (glass-theme.css tokens, mirrored here because
+// the footer renders identically whether or not the theme is mounted).
+const GLASS_INK = '#04395E';
+const GLASS_BODY = 'rgba(12, 21, 40, 0.7)';
+const GLASS_MUTED = 'rgba(12, 21, 40, 0.52)';
 
 const SOCIAL_ICON_PATHS = [
   { name: 'Facebook', url: 'https://facebook.com/wavespestcontrol', path: 'M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z' },
@@ -120,14 +125,18 @@ export default function BrandFooter({ borderColor, variant }) {
     );
   }
 
+  // Quiet identity footer (owner spec 2026-07-06): wordmark block + GBP city
+  // links + socials only — no newsletter signup, no tagline. Colors mirror
+  // the glass type system (glass-theme.css: --brand #04395E ink,
+  // rgba(12,21,40,.7) body, rgba(12,21,40,.52) muted); the dark variant
+  // keeps its light-on-dark equivalents.
   const onDark = variant === 'dark';
-  const headingColor = onDark ? '#fff' : B.navy;
-  const accentColor = onDark ? B.yellow : B.wavesBlue;
-  const bodyColor = onDark ? 'rgba(255,255,255,0.78)' : B.grayDark;
-  const mutedColor = onDark ? 'rgba(255,255,255,0.55)' : B.grayMid;
+  const headingColor = onDark ? '#fff' : GLASS_INK;
+  const bodyColor = onDark ? 'rgba(255,255,255,0.78)' : GLASS_BODY;
+  const mutedColor = onDark ? 'rgba(255,255,255,0.55)' : GLASS_MUTED;
   const logoOpacity = onDark ? 0.85 : 0.6;
   const defaultBorder = onDark ? 'rgba(255,255,255,0.2)' : B.grayLight;
-  const socialBg = onDark ? 'rgba(255,255,255,0.15)' : B.wavesBlue;
+  const socialBg = onDark ? 'rgba(255,255,255,0.15)' : GLASS_INK;
   const socialFg = onDark ? B.yellow : '#fff';
 
   const socials = SOCIAL_ICON_PATHS;
@@ -137,18 +146,6 @@ export default function BrandFooter({ borderColor, variant }) {
       textAlign: 'center', marginTop: 32, paddingTop: 20,
       borderTop: `1px solid ${borderColor || defaultBorder}`,
     }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, marginBottom: 10 }}>🌊 Stay in the loop</div>
-
-      <div style={{ marginBottom: 16 }}>
-        <NewsletterSignup
-          variant={onDark ? 'dark' : 'light'}
-          source="footer"
-          heading={null}
-          blurb={null}
-          compact
-        />
-      </div>
-
       <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 12 }}>
         {socials.map(s => (
           <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
@@ -161,10 +158,9 @@ export default function BrandFooter({ borderColor, variant }) {
           </a>
         ))}
       </div>
-      <div style={{ fontSize: 15, color: accentColor, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 10 }}>Wave Goodbye to Pests!</div>
       <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity, marginBottom: 6 }} />
       <div style={{ fontSize: 13, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
-      <div style={{ fontSize: 12, color: bodyColor, marginTop: 4, lineHeight: 1.6 }}>Family-owned pest control &amp; lawn care · Southwest Florida</div>
+      <div style={{ fontSize: 12, color: bodyColor, marginTop: 4, lineHeight: 1.6 }}>Family-owned pest control &amp; lawn care</div>
       <div style={{ fontSize: 12, color: bodyColor, marginTop: 6, lineHeight: 1.6 }}>
         <ServiceAreaLinks color={bodyColor} />
       </div>
