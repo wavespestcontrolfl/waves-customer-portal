@@ -367,6 +367,37 @@ describe('post-merge contradiction recheck', () => {
       expect.objectContaining({ status: 'flagged', active: false }),
     ]));
   });
+
+  test('inherited contradiction flags persist even when the page is already red for another reason', async () => {
+    // 3 outcomes → low confidence → the canonical page is red/pending_review
+    // BEFORE the merge recheck. The inherited contradiction changes neither
+    // tier nor status — but its identity must still enter risk_flags, or a
+    // later approval's sticky snapshot silently absorbs it.
+    const CANON_SLUG = 'product/lesco-high-manganese-combo';
+    const state = useDb({
+      products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
+      product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
+      treatment_outcomes: Array.from({ length: 3 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] })),
+      knowledge_entries: (rec) => {
+        const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
+        return [];
+      },
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_bridge: [],
+      knowledge_base: [],
+    });
+
+    const entry = await wiki.updateProductPage('LESCO HMC Variant');
+
+    expect(entry.review_status).toBe('pending_review'); // unchanged by the recheck
+    const flagPatch = (state.updates.knowledge_entries || [])
+      .map((u) => u.risk_flags && JSON.parse(u.risk_flags))
+      .filter(Boolean)
+      .find((f) => f.includes('contradiction:kc-1'));
+    expect(flagPatch).toBeTruthy();
+    expect(flagPatch).toEqual(expect.arrayContaining(['low_confidence', 'open_contradiction', 'contradiction:kc-1']));
+  });
 });
 
 describe('skip-path reclassification', () => {
@@ -517,6 +548,56 @@ describe('contradiction gate recompute', () => {
     expect(patch.review_status).toBe('auto');
     expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
       expect.objectContaining({ status: 'active', active: true }),
+    ]));
+  });
+
+  test('approval survives a risk SHRINK — resolving one of two reasons keeps it approved', async () => {
+    // Approved red page with two risk reasons; the contradiction is resolved,
+    // low confidence remains. The new flag set is a SUBSET of the approved
+    // one — no unapproved risk appeared, so the approval holds and the
+    // mirror stays trusted.
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'low',
+        review_tier: 'red', review_status: 'approved',
+        risk_flags: ['low_confidence', 'open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: [],
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_status).toBe('approved'); // flags shrank → still approved
+    expect(JSON.parse(patch.risk_flags)).toEqual(['low_confidence']);
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'active', active: true }),
+    ]));
+  });
+
+  test('a placeholder stub stays gated through recomputes — clearing its contradiction cannot trust it', async () => {
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/talstar-p',
+        content: '# Product: Talstar P\n\n*Pending AI generation — 30 data points available.*',
+        confidence: 'high',
+        review_tier: 'red', review_status: 'pending_review',
+        risk_flags: ['generation_stub', 'open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: [], // last blocker cleared
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_tier).toBe('red');
+    expect(patch.review_status).toBe('pending_review');
+    expect(JSON.parse(patch.risk_flags)).toContain('generation_stub');
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
     ]));
   });
 

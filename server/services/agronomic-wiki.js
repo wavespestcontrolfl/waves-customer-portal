@@ -126,6 +126,11 @@ function classifyReviewTier({ confidence, content, hasOpenContradiction = false,
     for (const id of [...openContradictionIds].sort()) flags.push(`contradiction:${id}`);
   }
   if (COMPLIANCE_PATTERNS.some((p) => p.test(content || ''))) flags.push('compliance_content');
+  // A placeholder is never trusted, whatever its data-point confidence —
+  // gate recomputes (contradiction cleared, review actions) reach this
+  // classifier directly, with no generation-path special case in front of
+  // them, so the stub check has to live here too.
+  if ((content || '').includes('*Pending AI generation')) flags.push('generation_stub');
   if (confidence === 'low') flags.push('low_confidence');
   else if (confidence === 'moderate') flags.push('moderate_confidence');
 
@@ -135,7 +140,8 @@ function classifyReviewTier({ confidence, content, hasOpenContradiction = false,
     flags.includes('low_confidence') ||
     flags.includes('compliance_content') ||
     flags.includes('open_contradiction') ||
-    flags.includes('external_source')
+    flags.includes('external_source') ||
+    flags.includes('generation_stub')
   ) tier = 'red';
 
   return { tier, flags };
@@ -156,10 +162,11 @@ function sameFlagSets(a, b) {
 }
 
 // Resolve a page's review fields from fresh inputs, honoring the state
-// machine: manual pins survive, human blocks hold, approval is sticky only
-// while the risk reasons are unchanged. Used by BOTH the write path and the
-// unchanged-data skip path — a new contradiction must re-gate a page even
-// when its outcome data didn't change.
+// machine: manual pins survive, human blocks hold, approval is sticky while
+// the risk reasons don't GROW (shrinking risks keep the approval; any new
+// reason re-gates). Used by BOTH the write path and the unchanged-data skip
+// path — a new contradiction must re-gate a page even when its outcome data
+// didn't change.
 function resolveReviewFields(existing, { confidence, content, hasOpenContradiction, openContradictionIds }) {
   const existingFlags = parseFlags(existing?.risk_flags);
   if (existingFlags.includes('manual_override')) {
@@ -172,9 +179,16 @@ function resolveReviewFields(existing, { confidence, content, hasOpenContradicti
   const { tier, flags } = classifyReviewTier({ confidence, content, hasOpenContradiction, openContradictionIds });
   let reviewStatus = 'auto';
   if (tier === 'red') {
-    const stickyApproval = existing?.review_status === 'approved' && sameFlagSets(existing.risk_flags, flags);
+    // Sticky while no UNAPPROVED risk appears: a subset of the approved flag
+    // set means risks only shrank (e.g. one of two contradictions resolved) —
+    // re-review is needed only when a new reason arrives, not when an
+    // already-reviewed one goes away.
+    const approvedFlags = new Set(parseFlags(existing?.risk_flags));
+    const stickyApproval = existing?.review_status === 'approved' && flags.every((f) => approvedFlags.has(f));
     reviewStatus = stickyApproval ? 'approved' : 'pending_review';
   }
+  // Approval never sticks to a placeholder — real content must exist first.
+  if (flags.includes('generation_stub') && reviewStatus === 'approved') reviewStatus = 'pending_review';
   if (existing?.review_status === 'blocked') reviewStatus = 'blocked';
   return { tier, flags, reviewStatus };
 }
@@ -538,7 +552,15 @@ const AgronomicWiki = {
             content: entry.content,
             openContradictionIds: inheritedContradictionIds,
           });
-          if (review.reviewStatus !== entry.review_status || review.tier !== entry.review_tier) {
+          // Flag-set changes must persist even when tier/status don't move
+          // (page already red/pending for another reason): the inherited
+          // contradiction's identity has to be part of any later approval's
+          // sticky snapshot.
+          if (
+            review.reviewStatus !== entry.review_status ||
+            review.tier !== entry.review_tier ||
+            !sameFlagSets(entry.risk_flags, review.flags)
+          ) {
             await db('knowledge_entries')
               .where({ id: entry.id })
               .update({
