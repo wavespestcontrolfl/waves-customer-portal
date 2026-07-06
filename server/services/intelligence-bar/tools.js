@@ -28,6 +28,18 @@ const {
 const TOOLS = [
   // ── READ TOOLS ──────────────────────────────────────────────
   {
+    name: 'search_field_intelligence',
+    description: `Search the trusted agronomic knowledge brain — the AI-maintained field-outcome wiki plus the curated knowledge base — and return matching pages with summaries, confidence, data-point counts and any OPEN contradictions. Unreviewed (red-tier) wiki pages are excluded automatically. Synthesize an answer from the returned material and cite the source slugs; mention confidence levels and surface any open contradictions explicitly.
+Use for: "what do we know about large patch on zoysia", "how has K-Flow performed", "field results for Talstar P", "what works for chinch bugs in peak season".`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Topic, product, condition, or grass track to look up' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'query_customers',
     description: `Search/filter the customer database. Returns matching customers with key fields.
 Use for: finding customers by attribute, missing data, filtering by city/tier/stage/tags/service type.
@@ -294,6 +306,7 @@ time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
 async function executeTool(toolName, input) {
   try {
     switch (toolName) {
+      case 'search_field_intelligence': return await searchFieldIntelligence(input);
       case 'query_customers': return await queryCustomers(input);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
@@ -1308,5 +1321,83 @@ async function draftSms(input) {
   };
 }
 
+
+// ── search_field_intelligence ───────────────────────────────────
+// Read-only. Trusted tiers only (review_status auto/approved) — the
+// exception-based review gate decides what agents may read.
+async function searchFieldIntelligence(input) {
+  const query = String(input?.query || '').trim();
+  if (!query) return { error: 'query is required' };
+
+  const KnowledgeBridge = require('../knowledge-bridge');
+  const { claudeopedia, wiki, bridged } = await KnowledgeBridge.unifiedSearch(query, { limit: 6, trustedOnly: true });
+
+  // Attach summaries/snippets — unifiedSearch returns metadata only.
+  let wikiRows = wiki || [];
+  try {
+    const ids = wikiRows.map((w) => w.id).filter(Boolean);
+    if (ids.length) {
+      const summaries = await db('knowledge_entries').whereIn('id', ids).select('id', 'summary');
+      const byId = Object.fromEntries(summaries.map((r) => [r.id, r.summary]));
+      wikiRows = wikiRows.map((w) => ({ ...w, summary: byId[w.id] || null }));
+    }
+  } catch { /* summaries optional */ }
+
+  let kbRows = claudeopedia || [];
+  try {
+    const kbIds = kbRows.map((k) => k.id).filter(Boolean);
+    if (kbIds.length) {
+      const contents = await db('knowledge_base').whereIn('id', kbIds).select('id', 'content', 'wiki_entry_id');
+      const byId = Object.fromEntries(contents.map((r) => [r.id, r]));
+      kbRows = kbRows.map((k) => ({
+        ...k,
+        snippet: (byId[k.id]?.content || '').substring(0, 500) || null,
+        wiki_entry_id: byId[k.id]?.wiki_entry_id ?? null,
+      }));
+    }
+  } catch { /* snippets optional */ }
+
+  // Open contradictions against EVERY returned hit — wiki pages, KB rows
+  // (contradictions also link by kb_entry_id), and the wiki pages that KB
+  // hits mirror/link. A KB-only hit must still carry its warning.
+  let openContradictions = [];
+  try {
+    const wikiIds = new Set(wikiRows.map((w) => w.id).filter(Boolean));
+    for (const k of kbRows) if (k.wiki_entry_id) wikiIds.add(k.wiki_entry_id);
+    const kbIds = kbRows.map((k) => k.id).filter(Boolean);
+    if (wikiIds.size || kbIds.length) {
+      openContradictions = await db('knowledge_contradictions')
+        .where(function () {
+          if (wikiIds.size) this.orWhereIn('wiki_entry_id', [...wikiIds]);
+          if (kbIds.length) this.orWhereIn('kb_entry_id', kbIds);
+        })
+        .whereNotIn('status', ['resolved', 'dismissed'])
+        .select('contradiction_type', 'description', 'severity', 'status');
+    }
+  } catch { /* table may not exist */ }
+
+  return {
+    query,
+    fieldIntelligence: wikiRows.map((w) => ({
+      slug: w.slug,
+      title: w.title,
+      category: w.category,
+      confidence: w.confidence,
+      dataPoints: w.data_point_count,
+      tier: w.review_tier,
+      summary: w.summary,
+    })),
+    knowledgeBase: kbRows.map((k) => ({
+      slug: k.slug,
+      title: k.title,
+      category: k.category,
+      confidence: k.confidence,
+      snippet: k.snippet,
+    })),
+    bridgedPairs: (bridged || []).length,
+    openContradictions,
+    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge. Cite slugs, state confidence, and surface open contradictions.',
+  };
+}
 
 module.exports = { TOOLS, executeTool };

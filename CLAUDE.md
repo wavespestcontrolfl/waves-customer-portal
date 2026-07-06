@@ -28,10 +28,8 @@ Three interfaces:
 
 ## Key Team Members
 
-- **Waves** — Owner/operator, primary admin user
+- **Adam Benetti** — Owner-operator: primary admin user AND the only field technician (uses both admin and Tech portals). Fleet-style multi-tech metrics are legacy.
 - **Virginia** — Office manager/CSR; uses CommunicationsPage and LeadsPage daily
-- **Adam** — Lead field technician; uses Tech portal
-- **Jose Alvarado, Jacob Heaton** — Field technicians
 
 ## Rules
 

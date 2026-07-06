@@ -12,6 +12,7 @@ const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { attributionForSourceType, backfillCallLeadAttribution } = require('../services/ads/call-attribution');
+const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -770,6 +771,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
     const fbc = attr?.fbc ? String(attr.fbc).slice(0, 255) : null;
     const fbp = attr?.fbp ? String(attr.fbp).slice(0, 255) : null;
+    // Anonymous experiment unit id (waves_exp_uid) — joins this lead to any
+    // A/B assignments in experiment_exposures. First-class column like the
+    // click ids so extracted_data replacement can't drop it.
+    const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
     const entryChannel = resolveEntryChannel(attr);
 
@@ -842,6 +847,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbclid) updateFields.fbclid = fbclid;
       if (fbc) updateFields.fbc = fbc;
       if (fbp) updateFields.fbp = fbp;
+      if (anonId) updateFields.anon_id = anonId;
       const rows = await db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
@@ -874,6 +880,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbclid,
         fbc,
         fbp,
+        anon_id: anonId,
         extracted_data: extractedData,
       }).returning(['id']);
       lead = rows[0];

@@ -180,6 +180,7 @@ export default function NewsletterSignup({
         <button
           type="submit"
           disabled={state === 'loading' || locked}
+          data-glass-accent=""
           style={{
             minHeight: 44,
             padding: '0 20px',

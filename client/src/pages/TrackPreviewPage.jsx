@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -19,15 +20,8 @@ import {
 
 const FONT_BODY = FONTS.body;
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
-const TRACK_SURFACE = {
-  surface: '#FFFFFF',
-  border: '#E7E2D7',
-  soft: '#F8FCFE',
-  softBorder: '#CFE7F5',
-  text: '#1B2C5B',
-  body: '#3F4A65',
-  muted: '#6B7280',
-};
+// Values from the shared customer palette (muted was drifted gray-500).
+const TRACK_SURFACE = { ...CUSTOMER_SURFACE, surface: '#FFFFFF' };
 
 const TRACK_PRIMARY_CTA = {
   display: 'flex',

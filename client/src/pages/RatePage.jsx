@@ -1,4 +1,5 @@
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
@@ -11,7 +12,7 @@ const INPUT_BORDER = '#CFE7F5';
 const INPUT_BG = '#F8FCFE';
 const TEXT = COLORS.blueDeeper;
 const BODY = '#3F4A65';
-const MUTED = '#6B7280';
+const MUTED = CUSTOMER_SURFACE.muted;
 
 const primaryActionStyle = {
   minHeight: 46,

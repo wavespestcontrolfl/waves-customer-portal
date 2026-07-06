@@ -11,7 +11,9 @@ const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
+const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
+const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
@@ -554,7 +556,7 @@ function defaultZones(labels, serviceLine) {
   }));
 }
 
-function matchZoneIds(product, zones) {
+function matchZoneIds(product, zones, areaLabels = []) {
   const explicit = parseJsonArray(product.zone_ids);
   if (explicit.length) return explicit.map(String);
   const area = String(product.application_area || product.area || '').toLowerCase();
@@ -564,6 +566,18 @@ function matchZoneIds(product, zones) {
         || area.includes(String(zone.label || '').toLowerCase());
     });
     if (matched.length) return matched.map((zone) => String(zone.id));
+  }
+  // Unscoped product (no explicit ids, no usable area): fan out to THIS
+  // visit's chipped areas, not the whole property. With fabricated
+  // defaultZones the two sets are identical (zones are built from the
+  // chips), but persisted property_zones outlive the visit — fanning out to
+  // all of them would mark zones as serviced on reports for visits that
+  // never touched them. Falls back to every zone only when no chip matches
+  // any zone label (legacy shape, zones from findings, label drift).
+  const chipKeys = new Set((areaLabels || []).map((label) => normalizeCoverageLabel(label)).filter(Boolean));
+  if (chipKeys.size) {
+    const chipped = zones.filter((zone) => chipKeys.has(normalizeCoverageLabel(zone.label)));
+    if (chipped.length) return chipped.map((zone) => String(zone.id));
   }
   return zones.map((zone) => String(zone.id));
 }
@@ -1940,7 +1954,23 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ...parseJsonArray(structured.areasTreated),
   ]);
   const supportedDbZones = dbZones.filter((zone) => zoneSupportsServiceLine(zone, serviceLine));
-  const zones = supportedDbZones.length ? supportedDbZones : defaultZones(areaLabels, serviceLine);
+  // Re-anchor technician satellite marks against the render-time image ONCE,
+  // here — every downstream consumer (coverage items, satellite overlay)
+  // then sees one consistent answer. A re-geocoded property shifts marks to
+  // the same ground point; untrusted marks (zoom change / large drift) drop
+  // to null. allOrNothing: one untrusted mark clears the WHOLE set — the
+  // satellite overlay drops schematic-only zones once any zone keeps a mark,
+  // so a partial drop would publish a coverage map missing a treated zone;
+  // clearing the set sends the report to the schematic fallback instead.
+  const driftLat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
+  const driftLng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
+  const resolvedDbZones = resolveZoneRowsImageDrift(supportedDbZones, {
+    center: driftLat != null && driftLng != null ? { lat: driftLat, lng: driftLng } : null,
+    zoom: Number(geometryRow?.zoom) || 20,
+    width: 640,
+    height: 340,
+  }, { allOrNothing: true });
+  const zones = resolvedDbZones.length ? resolvedDbZones : defaultZones(areaLabels, serviceLine);
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -2102,7 +2132,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       },
       method,
       methodLabel: METHOD_LABELS[method] || method.replace(/_/g, ' '),
-      zone_ids: matchZoneIds(product, zones),
+      zone_ids: matchZoneIds(product, zones, areaLabels),
       rate: product.application_rate,
       rateUnit: product.rate_unit,
       totalAmount: product.total_amount,
@@ -2547,6 +2577,86 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // Next upcoming appointment for this customer (owner ask 2026-07-05: every
+  // report shows the next visit, like the estimate documents) — and it must be
+  // the next visit OF THIS REPORT'S SERVICE LINE (owner 2026-07-05: a pest
+  // report shows the next pest visit, a lawn report the next lawn visit), so
+  // candidates are classified with the same detectServiceLine the report
+  // itself uses. The visit this report covers is excluded by id so a same-day
+  // report never shows its own just-completed slot. Best-effort: never blocks
+  // the report.
+  let nextAppointment = null;
+  try {
+    const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // Same disclosable statuses as findReportFollowupAppointment: pending /
+    // confirmed / en_route / on_site — an in-progress visit IS the customer's
+    // next appointment when they open an older report on the service day.
+    // NO 'rescheduled': those are phantom placeholders holding the OLD
+    // date/window until the office rebooks (see report-followup-appointment.js
+    // — publishing one presents a stale time as if it were still real).
+    // The service-line match happens in JS (detectServiceLine's rules are
+    // regex-heavy and live in one place), so the candidate window must be
+    // wide enough that nearer OTHER-line visits can't crowd out the next
+    // same-line row — 200 covers ~4 years of weekly visits.
+    const upcomingRows = await knex('scheduled_services')
+      .where('customer_id', service.customer_id)
+      .andWhere('scheduled_date', '>=', reportTodayIso)
+      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .modify((qb) => {
+        if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+      })
+      .orderBy('scheduled_date', 'asc')
+      .orderBy('window_start', 'asc')
+      .limit(200)
+      .catch(() => []);
+    const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
+      .find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
+    if (nextApptRow && nextApptRow.scheduled_date) {
+      const rawDate = nextApptRow.scheduled_date;
+      nextAppointment = {
+        serviceType: nextApptRow.service_type || null,
+        scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
+        // window_start only — the customer-facing arrival window is always
+        // window_start + 2 hours (window_end is the internal job block).
+        windowStart: nextApptRow.window_start || null,
+      };
+    }
+  } catch { /* best-effort */ }
+
+  // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
+  // completion recap through the same grounded-narrative pattern the lawn
+  // report uses, folding in the Pest Pressure trend, the visit's findings,
+  // and the next appointment computed above.
+  //  - LIVE VIEWS ONLY (opts.mode === 'live', set by the response wrapper —
+  //    an explicit opt-in, never a default): queued PDFs, email copies,
+  //    static renders, and helper callers like map.svg either fossilize a
+  //    reschedulable appointment into a stored document or throw the summary
+  //    away entirely — they all keep the plain recap and spend nothing.
+  //  - pestPressure non-null = the "recurring pest" gate the pressure card
+  //    already computes (showOnCustomerReport / line allow-list /
+  //    requireRecurringFrequency) — one-time treatments keep the plain recap.
+  //  - typed specialty reports (cockroach cleanout etc.) keep the plain
+  //    recap, same as the pressure card.
+  // Best-effort: never blocks the report.
+  let visitSummary = structured.customerRecap || '';
+  if (
+    serviceLine === 'pest'
+    && !typedSnapshot
+    && pestPressure
+    && visitSummary
+    && opts.mode === 'live'
+    && process.env.PEST_VISIT_SUMMARY_NARRATIVE === 'true'
+  ) {
+    visitSummary = await applyVisitSummaryNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: serviceDisplayName(service),
+      areasServiced: areaLabels,
+      pestPressure,
+      findings,
+      nextAppointment,
+    }).catch(() => structured.customerRecap || '');
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -2567,9 +2677,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    // customerPhone/customerEmail intentionally NOT in the public report payload —
-    // the report token is a shareable, non-expiring bearer credential, so contact
-    // PII must not ride it. (Recap SMS loads the phone server-side via its own query.)
+    // Owner directive 2026-07-05: the report mirrors the estimate document and
+    // shows the customer's own email/phone with the service address. Like the
+    // estimate, the report token is a shareable bearer link the customer owns —
+    // these are the reader's own contact details, same exposure model as the
+    // address that already prints here.
+    // Callers alias the customer join differently (the public routes select
+    // email/phone; email delivery selects customer_email/customer_phone) —
+    // read both so every render path carries the contact block.
+    customerEmail: service.email || service.customer_email || null,
+    customerPhone: service.phone || service.customer_phone || null,
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while
@@ -2593,7 +2710,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       exitedAt: completionTime,
       onSiteMinutes: onSiteMin,
     },
-    summary: structured.customerRecap || '',
+    summary: visitSummary,
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {
@@ -2635,6 +2752,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     serviceCoverage,
+    nextAppointment,
     visitTimeline,
     serviceLocations,
     workflowEvents,

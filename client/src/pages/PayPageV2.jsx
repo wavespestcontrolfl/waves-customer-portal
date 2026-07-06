@@ -77,7 +77,8 @@
 // - Dispute webhook (dispute.created): must flag the customer for
 //   the operator to review before any further charges fire.
 import { COLORS, FONTS } from '../theme-brand';
-import { useGlassProGate } from '../components/estimate/glass/EstimateGlassTheme';
+import { CUSTOMER_SURFACE } from '../theme-customer';
+import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -202,8 +203,8 @@ function annualPrepayCalloutText(prepay) {
 }
 
 const subtlePanel = {
-  background: '#FAF8F3',
-  border: '1px solid #E7E2D7',
+  background: CUSTOMER_SURFACE.page,
+  border: `1px solid ${CUSTOMER_SURFACE.border}`,
   borderRadius: 8,
 };
 
@@ -226,14 +227,15 @@ function cityStateZip(customer = {}) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
     due: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
     overdue: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
     secure: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
   };
   const t = tones[tone] || tones.neutral;
+  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
   return (
-    <span style={{
+    <span {...glassClear} style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 6,
@@ -547,7 +549,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 padding: '12px 14px',
               },
               '.Input:focus': {
-                border: '1px solid #1B2C5B',
+                border: `1px solid ${CUSTOMER_SURFACE.text}`,
                 boxShadow: '0 0 0 3px rgba(27,44,91,0.18)',
               },
               '.Label': {
@@ -1003,7 +1005,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         lineHeight: 1.5,
         color: 'var(--text)',
       }}>
-        <span style={{
+        <span data-glass="soft" style={{
           width: 32,
           height: 32,
           borderRadius: 8,
@@ -1037,6 +1039,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 aria-pressed={active}
                 onClick={() => selectPaymentMethod(method.value)}
                 disabled={methodControlsDisabled}
+                {...(active ? {} : { 'data-glass': 'chip' })}
                 style={{
                   minHeight: 72,
                   borderRadius: 8,
@@ -1053,7 +1056,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                   gap: 10,
                 }}
               >
-                <span style={{
+                <span {...(active ? { 'data-glass': 'soft' } : { 'data-glass-clear': '' })} style={{
                   width: 34,
                   height: 34,
                   borderRadius: 8,
@@ -1061,8 +1064,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                   alignItems: 'center',
                   justifyContent: 'center',
                   flexShrink: 0,
-                  background: active ? '#FFFFFF' : '#FAF8F3',
-                  border: '1px solid #E7E2D7',
+                  background: active ? '#FFFFFF' : CUSTOMER_SURFACE.page,
+                  border: `1px solid ${CUSTOMER_SURFACE.border}`,
                   color: active ? COLORS.blueDeeper : 'var(--text-muted)',
                 }}>
                   <Icon name={method.icon} size={17} strokeWidth={2} />
@@ -1105,11 +1108,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      <div style={{
+      <div data-glass-clear="" style={{
         padding: 16,
         borderRadius: 8,
-        background: '#FAF8F3',
-        border: '1px solid #E7E2D7',
+        background: CUSTOMER_SURFACE.page,
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
         fontFamily: FONTS.mono,
         fontSize: 14,
       }}>
@@ -1211,7 +1214,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 // ── Main /pay/:token V2 page ───────────────────────────────────────
 export default function PayPageV2() {
   // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
-  useGlassProGate();
+  // Native data-glass markup — no classify() walker on this page.
+  useGlassSurface(glassParamRequested(), 'pro');
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -1653,7 +1657,7 @@ export default function PayPageV2() {
             </StatusPill>
           </div>
 
-          <div style={{
+          <div data-glass-clear="" style={{
             ...subtlePanel,
             padding: 18,
             marginBottom: 20,
@@ -1671,7 +1675,7 @@ export default function PayPageV2() {
                 Pay securely online. Credit card surcharge, if any, is shown before payment.
               </div>
             </div>
-            <span style={{
+            <span data-glass="soft" style={{
               width: 42,
               height: 42,
               borderRadius: 8,
@@ -1697,7 +1701,7 @@ export default function PayPageV2() {
                 background: '#EEF6FF',
                 border: '1px solid #BFE4F8',
               }}>
-                <span style={{
+                <span data-glass="soft" style={{
                   width: 36,
                   height: 36,
                   borderRadius: 8,
@@ -1768,7 +1772,7 @@ export default function PayPageV2() {
               <div style={{ marginBottom: 20 }}>
                 <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice items</div>
                 <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                  <div style={{
+                  <div data-glass-clear="" style={{
                     display: 'grid',
                     gridTemplateColumns: '1fr auto auto',
                     gap: '0 14px',
@@ -1777,8 +1781,8 @@ export default function PayPageV2() {
                     color: 'var(--text-muted)',
                     fontWeight: 850,
                     textTransform: 'uppercase',
-                    background: '#FAF8F3',
-                    borderBottom: '1px solid #E7E2D7',
+                    background: CUSTOMER_SURFACE.page,
+                    borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                   }}>
                     <div>Description</div>
                     <div style={{ textAlign: 'right' }}>Qty</div>
@@ -1821,6 +1825,7 @@ export default function PayPageV2() {
                       href={`${API_BASE}/pay/${token}/attachments/${attachment.id}`}
                       target="_blank"
                       rel="noopener noreferrer"
+                      data-glass="chip" data-glass-pill=""
                       style={{
                         minHeight: 44,
                         display: 'grid',
@@ -1858,7 +1863,7 @@ export default function PayPageV2() {
               </div>
             )}
 
-            <div style={{ ...subtlePanel, padding: 16, marginBottom: 24 }}>
+            <div data-glass-clear="" style={{ ...subtlePanel, padding: 16, marginBottom: 24 }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -1876,7 +1881,7 @@ export default function PayPageV2() {
             </div>
 
             {invoice.notes && (
-              <div style={{ marginBottom: 24, ...subtlePanel, padding: 16 }}>
+              <div data-glass-clear="" style={{ marginBottom: 24, ...subtlePanel, padding: 16 }}>
                 <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
                 <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                   {invoice.notes}
@@ -1949,6 +1954,7 @@ export default function PayPageV2() {
             <div style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
               <a
                 href={`${API_BASE}/pay/${token}/invoice.pdf`}
+                data-glass="chip" data-glass-pill=""
                 style={{
                   minHeight: 40,
                   display: 'inline-flex',
@@ -1970,6 +1976,7 @@ export default function PayPageV2() {
               <button
                 type="button"
                 onClick={() => window.print()}
+                data-glass="chip" data-glass-pill=""
                 style={{
                   minHeight: 40,
                   display: 'inline-flex',

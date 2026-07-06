@@ -83,6 +83,7 @@ import {
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
+import { ZoneMarkingStep } from "../../pages/admin/SchedulePage";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -2247,6 +2248,421 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   );
 }
 
+// ─── Property zones desk backfill (satellite coverage) ──────────────────
+// Office flow for the zone-marking lane: re-mark a property whose satellite
+// marks were dropped by a geocode drift, or backfill marks onto zones created
+// before the capture UI existed. Reuses the completion flow's ZoneMarkingStep
+// (retained-module pattern) against the customer-scoped endpoints from
+// PR #2386. Server contract: one entry per label; complete line-scoped sets
+// (every zone on the selected line ends marked, or everything ends cleared);
+// only TOUCHED labels submit — resubmitting an untouched preload would
+// restamp its drift ref with today's image params.
+
+function normalizeZoneKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+// Mirrors the server's zoneSupportsServiceLine: untagged zones participate
+// in every line; tagged zones only in their own.
+function zoneOnServiceLine(zone, line) {
+  const lines = Array.isArray(zone.serviceLines) ? zone.serviceLines : [];
+  if (!lines.length || !line) return true;
+  return lines.includes(line);
+}
+
+// Pure entry composition, exported for tests: a drawn shape submits with the
+// served image's params as its drift ref; a removed PRELOADED mark submits a
+// clear tombstone; a removed same-session mark submits nothing. On an
+// all-cleared save, zones whose stored mark was HIDDEN by drift resolution
+// (staleKeys — the raw column still holds a shape the PUT's completeness
+// check will see) get an explicit clear too, or the server would reject the
+// save as partial over a mark the operator cannot even see.
+export function composeZoneShapeEntries({
+  areas,
+  marks,
+  dirty,
+  preloads,
+  image,
+  capturedAt,
+  staleKeys = new Set(),
+  allCleared = false,
+}) {
+  const ref = {
+    lat: image?.center?.lat,
+    lng: image?.center?.lng,
+    zoom: image?.zoom,
+    width: image?.width || 640,
+    height: image?.height || 340,
+    capturedAt,
+  };
+  const entries = [];
+  for (const label of areas) {
+    if (!dirty.has(label)) continue;
+    const mark = Object.prototype.hasOwnProperty.call(marks, label)
+      ? marks[label]
+      : undefined;
+    if (mark) entries.push({ areaLabel: label, shape: { ...mark, ref } });
+    else if (mark === null && preloads[normalizeZoneKey(label)]) {
+      entries.push({ areaLabel: label, clear: true });
+    }
+  }
+  if (allCleared) {
+    for (const label of areas) {
+      if (entries.some((entry) => entry.areaLabel === label)) continue;
+      if (staleKeys.has(normalizeZoneKey(label))) {
+        entries.push({ areaLabel: label, clear: true });
+      }
+    }
+  }
+  return entries;
+}
+
+function PropertyZonesPanel({ customerId }) {
+  const [open, setOpen] = useState(false);
+  const [map, setMap] = useState(null); // property-map payload
+  const [loading, setLoading] = useState(false);
+  const [line, setLine] = useState("pest");
+  const [marks, setMarks] = useState({}); // this session's edits (null = removed)
+  const [preloads, setPreloads] = useState({}); // normalized-label → stored shape
+  const dirtyRef = useRef(new Set());
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  // bumped by Retry — the fetch effect must not depend on the map/loading
+  // state it mutates, or its own setLoading(true) triggers the cleanup that
+  // cancels the request it just started
+  const [loadNonce, setLoadNonce] = useState(0);
+
+  // The 360 sheet swaps customers in place (selected360Id) — everything here
+  // is per-property state, so a customer change must drop it all or the old
+  // satellite image/zones would stay on screen while saves hit the new id.
+  // customerRef lets in-flight save responses check whether they still
+  // belong to the customer on screen (the load effect uses its own cleanup).
+  const customerRef = useRef(customerId);
+  useEffect(() => {
+    customerRef.current = customerId;
+    setOpen(false);
+    setMap(null);
+    setMarks({});
+    setPreloads({});
+    dirtyRef.current = new Set();
+    setLine("pest");
+    setErr("");
+    setMsg("");
+    setSaving(false);
+  }, [customerId]);
+
+  // Deps are the EXPANSION triggers only (open / customer / Retry nonce) —
+  // never the map/loading state this effect writes, so starting the request
+  // cannot re-run the effect and self-cancel via its own cleanup.
+  useEffect(() => {
+    if (!open || map) return undefined;
+    // cancelled guards the resolve against a customer switch mid-flight —
+    // without it, customer A's response would repopulate the panel after the
+    // customerId reset, and a later save would post A's zones to B's id
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    adminFetch(`/admin/dispatch/customers/${customerId}/property-map`)
+      .then((res) => {
+        if (cancelled) return;
+        setMap(res || { available: false, reason: "empty_response" });
+        const preload = {};
+        const norm01 = (v) =>
+          Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
+        (res?.zones || []).forEach((zone) => {
+          const shape = zone.geometryImage;
+          if (!shape || typeof shape !== "object") return;
+          if (shape.type === "rect" || shape.type === "circle") {
+            preload[normalizeZoneKey(zone.label)] = shape;
+          } else if (
+            shape.type == null &&
+            [shape.x, shape.y, shape.w, shape.h].every(norm01)
+          ) {
+            // legacy typeless rect — the report renderer treats it as a
+            // valid rect, so it must preload (and be clearable) here too
+            preload[normalizeZoneKey(zone.label)] = { ...shape, type: "rect" };
+          }
+        });
+        setPreloads(preload);
+        const tagged = new Set(
+          (res?.zones || []).flatMap((zone) =>
+            Array.isArray(zone.serviceLines) ? zone.serviceLines : [],
+          ),
+        );
+        if (tagged.size && !tagged.has("pest")) setLine([...tagged][0]);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // map must go non-null or this effect refires and loops the failed
+        // request forever; the render shows the error with a manual Retry
+        setErr(e.message || "Failed to load the property map");
+        setMap({ available: false, reason: "load_failed" });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, customerId, loadNonce]);
+
+  const zones = map?.zones || [];
+  // only lines that actually surface at least one zone (untagged zones match
+  // every line, so an all-untagged property still offers the pest default)
+  const lineOptions = [
+    ...new Set(["pest", ...zones.flatMap((z) => z.serviceLines || [])]),
+  ].filter((opt) => zones.some((zone) => zoneOnServiceLine(zone, opt)));
+  // zones whose stored mark was hidden by drift resolution — the raw column
+  // still holds a shape the PUT's completeness check will count as marked
+  const staleKeys = new Set(
+    zones
+      .filter((zone) => zone.staleMark)
+      .map((zone) => normalizeZoneKey(zone.label)),
+  );
+  const areas = zones
+    .filter((zone) => zoneOnServiceLine(zone, line))
+    .map((zone) => zone.label);
+  const displayMarks = {};
+  areas.forEach((label) => {
+    const local = Object.prototype.hasOwnProperty.call(marks, label)
+      ? marks[label]
+      : undefined;
+    const mark = local !== undefined ? local : preloads[normalizeZoneKey(label)];
+    if (mark) displayMarks[label] = mark;
+  });
+  const markedCount = areas.filter((label) => displayMarks[label]).length;
+  const dirtyCount = [...dirtyRef.current].filter((label) =>
+    areas.includes(label),
+  ).length;
+  const staleOnLine = areas.filter((label) =>
+    staleKeys.has(normalizeZoneKey(label)),
+  ).length;
+  // A fully-drifted property shows nothing to remove, so there is no dirty
+  // action an operator could take — Save doubles as "clear the stale marks"
+  // (composeZoneShapeEntries emits the tombstones on all-cleared saves).
+  const clearingStaleOnly =
+    dirtyCount === 0 && markedCount === 0 && staleOnLine > 0;
+  // Server end-state gate: all marked, or all cleared. Anything else is 400.
+  const saveable =
+    (dirtyCount > 0 && (markedCount === areas.length || markedCount === 0)) ||
+    clearingStaleOnly;
+
+  const setZoneMark = (label, shape) => {
+    // frozen during a save: ZoneMarkingStep's Remove/resize buttons bypass
+    // its disabled prop, and an edit landing here mid-PUT would be wiped by
+    // the success handler while the panel reports Saved
+    if (saving) return;
+    dirtyRef.current.add(label);
+    setMarks((prev) => ({ ...prev, [label]: shape }));
+  };
+  const clearZoneMark = (label) => {
+    if (saving) return;
+    // removing a preload must submit a clear; removing a session mark is local
+    if (preloads[normalizeZoneKey(label)]) dirtyRef.current.add(label);
+    else dirtyRef.current.delete(label);
+    setMarks((prev) => ({ ...prev, [label]: null }));
+  };
+
+  const save = async () => {
+    if (!saveable || saving) return;
+    setSaving(true);
+    setErr("");
+    setMsg("");
+    try {
+      const entries = composeZoneShapeEntries({
+        areas,
+        marks,
+        dirty: dirtyRef.current,
+        preloads,
+        image: map?.image,
+        capturedAt: new Date().toISOString(),
+        staleKeys,
+        allCleared: markedCount === 0,
+      });
+      if (!entries.length) {
+        setMsg("Nothing to save");
+        return;
+      }
+      const res = await adminFetch(
+        `/admin/dispatch/customers/${customerId}/property-zones`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ serviceLine: line, zoneShapes: entries }),
+        },
+      );
+      // the 360 sheet may have swapped customers while the PUT was in
+      // flight — this response belongs to the OLD customer, and folding it
+      // into state would overwrite the new customer's panel
+      if (customerRef.current !== customerId) return;
+      // fold the saved state into the preloads so the panel reflects
+      // reality, and drop ONLY the saved labels from the edit state — an
+      // operator can have unsaved marks on another service line, and wiping
+      // everything here would silently discard them
+      const savedLabels = new Set(entries.map((entry) => entry.areaLabel));
+      const savedKeys = new Set(
+        entries.map((entry) => normalizeZoneKey(entry.areaLabel)),
+      );
+      const nextPreloads = { ...preloads };
+      for (const entry of entries) {
+        const key = normalizeZoneKey(entry.areaLabel);
+        if (entry.clear) delete nextPreloads[key];
+        else nextPreloads[key] = entry.shape;
+      }
+      setPreloads(nextPreloads);
+      // saved zones are no longer stale — leaving the flags set would keep
+      // the warning (and the Clear-stale-marks button) alive and let every
+      // further click send another no-op clear
+      setMap((prev) =>
+        prev?.zones
+          ? {
+            ...prev,
+            zones: prev.zones.map((zone) =>
+              savedKeys.has(normalizeZoneKey(zone.label))
+                ? { ...zone, staleMark: false }
+                : zone,
+            ),
+          }
+          : prev,
+      );
+      setMarks((prev) => {
+        const next = { ...prev };
+        savedLabels.forEach((label) => delete next[label]);
+        return next;
+      });
+      const nextDirty = new Set(dirtyRef.current);
+      savedLabels.forEach((label) => nextDirty.delete(label));
+      dirtyRef.current = nextDirty;
+      const s = res?.summary || {};
+      setMsg(
+        `Saved — ${s.shapesApplied || 0} mark${(s.shapesApplied || 0) === 1 ? "" : "s"} applied${s.cleared ? `, ${s.cleared} cleared` : ""}${s.created ? `, ${s.created} zone${s.created === 1 ? "" : "s"} created` : ""}`,
+      );
+    } catch (e) {
+      if (customerRef.current === customerId) setErr(e.message || "Save failed");
+    } finally {
+      if (customerRef.current === customerId) setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
+      <div className="flex items-center justify-between gap-2">
+        <SectionTitle className="mb-0">
+          Satellite Coverage Zones
+        </SectionTitle>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Hide" : "Mark treated areas"}
+        </Button>
+      </div>
+      {open && (
+        <div className="mt-3">
+          {loading && (
+            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+          )}
+          {!loading && map && !map.available && (
+            <div className="flex items-center gap-3">
+              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+                {map.reason === "load_failed"
+                  ? err || "Failed to load the property map"
+                  : `Satellite view unavailable (${map.reason || "unknown"}).`}
+              </span>
+              {map.reason === "load_failed" && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMap(null);
+                    setErr("");
+                    setLoadNonce((n) => n + 1);
+                  }}
+                >
+                  Retry
+                </Button>
+              )}
+            </div>
+          )}
+          {!loading && map?.available && !zones.length && (
+            <div className="text-13 text-ink-secondary">
+              No zones yet — zones are created when a visit is completed with
+              treated areas.
+            </div>
+          )}
+          {!loading && map?.available && zones.length > 0 && (
+            <div>
+              {lineOptions.length > 1 && (
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-12 text-ink-secondary">Service line</span>
+                  {lineOptions.map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => setLine(opt)}
+                      className={cn(
+                        "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                        opt === line
+                          ? "border-zinc-900 bg-zinc-900 text-white"
+                          : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
+                      )}
+                    >
+                      {opt.replace(/_/g, " ")}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {areas.some((label) => staleKeys.has(normalizeZoneKey(label))) && (
+                <div className="text-12 text-zinc-700 mb-2">
+                  Some zones have marks that no longer match the current
+                  satellite image (the property was re-geocoded) — they show
+                  as unmarked below. Redraw them, or clear everything to
+                  remove the stored marks:{" "}
+                  {areas
+                    .filter((label) => staleKeys.has(normalizeZoneKey(label)))
+                    .join(", ")}
+                  .
+                </div>
+              )}
+              <ZoneMarkingStep
+                map={map}
+                areas={areas}
+                marks={displayMarks}
+                onSetMark={setZoneMark}
+                onClearMark={clearZoneMark}
+                disabled={saving}
+              />
+              <div className="flex items-center gap-3 mt-2">
+                <Button size="sm" onClick={save} disabled={!saveable || saving}>
+                  {saving
+                    ? "Saving…"
+                    : clearingStaleOnly
+                      ? "Clear stale marks"
+                      : "Save zone marks"}
+                </Button>
+                {!saveable && dirtyCount > 0 && (
+                  <span className="text-12 text-ink-secondary">
+                    Mark every zone on this line (or clear them all) to save.
+                  </span>
+                )}
+                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {err && map && (
+                  <span className="text-12 text-alert-fg">{err}</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Autopay panel ───────────────────────────────────────────────
 function AdminAutopayPanelV2({
   customerId,
@@ -4229,6 +4645,9 @@ export default function Customer360ProfileV2({
           {activeTab === "overview" && (
             <div>
               <CustomerRequestsPanel customerId={customerId} />
+              {/* both customer-scoped zone endpoints are requireAdmin — a
+                  technician session would only 403 on expand */}
+              {isAdmin && <PropertyZonesPanel customerId={customerId} />}
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}

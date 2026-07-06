@@ -12,6 +12,7 @@ jest.mock('../services/short-url', () => ({
 }));
 jest.mock('../services/customer-contact', () => ({
   getServiceContact: jest.fn(),
+  firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
 }));
 jest.mock('../utils/portal-url', () => ({
   publicPortalUrl: jest.fn(() => 'https://waves.test'),
