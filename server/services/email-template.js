@@ -234,12 +234,16 @@ const APPLE_BADGE_IMG = 'https://portal.wavespestcontrol.com/app-email/apple-app
 const GOOGLE_BADGE_IMG = 'https://portal.wavespestcontrol.com/app-email/google-play-badge.png';
 
 function appFooterHtml(T) {
+  // Badge art differs: Apple's PNG fills its canvas, Google's (cropped of
+  // its baked-in 41px margin) runs visually denser — 36px next to Apple's
+  // 40px is the optical match. The 16px bottom margin keeps the badges
+  // clear of the business fine-print lines that follow.
   return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:12px;font-weight:700;color:${T.ink};text-align:center;">
             Track visits, reports &amp; payments in the Waves app
           </div>
-          <div style="text-align:center;">
+          <div style="text-align:center;margin:0 0 16px 0;">
             <a href="${APP_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;"><img src="${APPLE_BADGE_IMG}" alt="Download on the App Store" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
-            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
+            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="36" style="height:36px;width:auto;border:0;vertical-align:middle;" /></a>
           </div>`;
 }
 

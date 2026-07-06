@@ -96,14 +96,12 @@ const TEMPLATES = [
     name: 'Referral Invite',
     category: 'referral',
     sensitivity: 'normal',
-    // Referral asks are marketing end-to-end: marketing mode (newsletter
-    // wrapper with unsubscribe footer in previews AND sends),
-    // commercial_marketing legal class, and the dedicated
-    // marketing_referral suppression group (seeded in 20260518000001) so
-    // a referral unsubscribe never kills service email.
-    mode: 'marketing',
-    legal: 'commercial_marketing',
-    layout: 'newsletter_default_v1',
+    // OWNER DIRECTIVE 2026-07-06: render in the SERVICE chrome (pill
+    // header + card, like the bond renewal) — not the newsletter wrapper.
+    // The invite still routes through the marketing_referral suppression
+    // group (seeded 20260518000001, user-unsubscribable), so a referral
+    // opt-out is honored at send time without touching service email,
+    // and the body carries an explicit reply-to-opt-out line.
     stream: 'marketing_referral',
     description: 'Invites a happy customer to refer neighbors; the reward line comes from the sender so amounts are never baked into copy.',
     required: ['first_name', 'referral_url', 'referral_reward_line'],
@@ -115,6 +113,7 @@ const TEMPLATES = [
       { type: 'paragraph', content: 'Your account has a personal referral link that makes it official: share it, and when a neighbor signs up, {{referral_reward_line}}' },
       { type: 'small_note', content: 'Your link lives in the Refer tab of your portal too — share it by text, email, or the neighborhood group.' },
       { type: 'cta', label: 'Get my referral link', url_variable: 'referral_url' },
+      { type: 'small_note', content: 'Prefer not to get referral emails? Reply "no thanks" and we\'ll turn them off.' },
       { type: 'signature', content: 'Thank you for spreading the word. — The Waves Team' },
     ],
     fixture: {
