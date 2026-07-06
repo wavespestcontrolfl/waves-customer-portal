@@ -211,6 +211,26 @@ describe('generatePage review stamping', () => {
     expect(patch.review_status).toBe('auto');
     expect(JSON.parse(patch.risk_flags)).toContain('manual_override');
   });
+
+  test('a successful regeneration drops the stale generation_stub flag from a red-pinned stub', async () => {
+    // Red-pinned stub → retry succeeds with real content. The stub flag must
+    // not outlive the placeholder, or approve/pin actions stay locked out.
+    const existing = {
+      id: 'ke-1', slug: 'product/talstar-p',
+      content: '# Product: Talstar P\n\n*Pending AI generation — 2 data points available.*',
+      data_point_count: 2, source_treatment_ids: ['o1'], stale_flag: false,
+      review_tier: 'red', review_status: 'pending_review',
+      risk_flags: ['generation_stub', 'manual_override'],
+    };
+    const state = useDb({ knowledge_entries: [existing], knowledge_contradictions: [], knowledge_base: [] });
+
+    await wiki.generatePage('product/talstar-p', 'product', { outcomes: [{ id: 'o1' }, { id: 'o2' }] }, 'Product: Talstar P');
+
+    const patch = state.updates.knowledge_entries[0];
+    const flags = JSON.parse(patch.risk_flags);
+    expect(flags).not.toContain('generation_stub');
+    expect(flags).toContain('manual_override'); // the pin itself survives
+  });
 });
 
 describe('KB-copy trust propagation', () => {
@@ -601,6 +621,72 @@ describe('contradiction gate recompute', () => {
     ]));
   });
 
+  test('a NEW contradiction re-gates a green-pinned page (pins do not outrank live exceptions)', async () => {
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'green', review_status: 'auto',
+        risk_flags: ['low_confidence', 'manual_override'],
+      }],
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_tier).toBe('red');
+    expect(patch.review_status).toBe('pending_review');
+    const flags = JSON.parse(patch.risk_flags);
+    expect(flags).toEqual(expect.arrayContaining(['open_contradiction', 'contradiction:kc-1', 'manual_override']));
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
+  });
+
+  test('clearing a pinned page contradiction strips the identity flags but keeps it queued', async () => {
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'red', review_status: 'pending_review',
+        risk_flags: ['manual_override', 'open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: [],
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(JSON.parse(patch.risk_flags)).toEqual(['manual_override']);
+    // status stays pending_review — a human closes out the exception
+    expect(patch.review_status).toBe('pending_review');
+  });
+
+  test('recomputeEntryReviewGate RETHROWS write failures (detector dedup means no retry)', async () => {
+    const inner = makeDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'green', review_status: 'auto', risk_flags: [],
+      }],
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_base: [],
+    });
+    global.__tierDbMock = (table) => {
+      const b = inner(table);
+      if (table === 'knowledge_entries') {
+        const origUpdate = b.update;
+        b.update = (patch) => ({ then: (res, rej) => Promise.reject(new Error('write failed')).then(res, rej), returning: origUpdate(patch).returning });
+      }
+      return b;
+    };
+
+    await expect(wiki.recomputeEntryReviewGate('ke-1')).rejects.toThrow('write failed');
+  });
+
   test('recomputeEntryReviewGate is a no-op without an entry id', async () => {
     const state = useDb({ knowledge_entries: [] });
     await wiki.recomputeEntryReviewGate(null);
@@ -759,6 +845,37 @@ describe('review service methods', () => {
     // pinning red keeps it gated — valid
     const pinned = await wiki.setTierOverride('product/talstar-p', 'red');
     expect(pinned.review_status).toBe('pending_review');
+  });
+
+  test('a failed AI-refresh that also fails to WRITE the gate fails the whole call', async () => {
+    // AI down AND the review-state write fails while the target state is
+    // untrusted (open contradiction): returning writeState 'failed' would
+    // read as \"gate applied\" — the call must fail outright instead.
+    const existing = {
+      id: 'ke-1', slug: 'product/talstar-p',
+      content: '# Talstar P\n\nReal content.', data_point_count: 5,
+      source_treatment_ids: ['o1'], stale_flag: false,
+      review_tier: 'green', review_status: 'auto', risk_flags: [],
+    };
+    const inner = makeDb({
+      knowledge_entries: [existing],
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_base: [],
+    });
+    global.__tierDbMock = (table) => {
+      const b = inner(table);
+      if (table === 'knowledge_entries') {
+        b.update = () => ({ then: (res, rej) => Promise.reject(new Error('write failed')).then(res, rej) });
+      }
+      return b;
+    };
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    const result = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1' }, { id: 'o2' }],
+    }, 'Product: Talstar P');
+
+    expect(result).toBeNull(); // failed outright, not 'failed-but-gated'
   });
 
   test('a failed GATING mirror update propagates instead of reading as success', async () => {

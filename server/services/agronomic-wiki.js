@@ -170,9 +170,32 @@ function sameFlagSets(a, b) {
 function resolveReviewFields(existing, { confidence, content, hasOpenContradiction, openContradictionIds }) {
   const existingFlags = parseFlags(existing?.risk_flags);
   if (existingFlags.includes('manual_override')) {
+    // A pin overrides confidence/compliance judgment, NOT live exceptions:
+    let flags = existingFlags;
+    // ...a stale generation_stub never outlives real content (a red-pinned
+    // stub must become approvable once a retry succeeds)...
+    if (!(content || '').includes('*Pending AI generation')) {
+      flags = flags.filter((f) => f !== 'generation_stub');
+    }
+    // ...and contradiction identity is recomputed fresh each pass — a NEW
+    // open contradiction re-gates a pinned page (exception-based model),
+    // while a fully cleared set drops the stale identity flags.
+    const ids = [...(openContradictionIds || [])].sort();
+    const identityFlags = ids.map((id) => `contradiction:${id}`);
+    const newIds = identityFlags.filter((f) => !flags.includes(f));
+    if (newIds.length) {
+      return {
+        tier: 'red',
+        flags: [...new Set([...flags, 'open_contradiction', ...identityFlags])],
+        reviewStatus: existing.review_status === 'blocked' ? 'blocked' : 'pending_review',
+      };
+    }
+    if (!ids.length) {
+      flags = flags.filter((f) => f !== 'open_contradiction' && !f.startsWith('contradiction:'));
+    }
     return {
       tier: existing.review_tier,
-      flags: existingFlags,
+      flags,
       reviewStatus: existing.review_status,
     };
   }
@@ -286,7 +309,12 @@ async function recomputeEntryReviewGate(entryId, { assumeOpenIds = [] } = {}) {
     }
     await syncKbCopyTrust(entryId, TRUSTED_STATUSES.includes(review.reviewStatus));
   } catch (err) {
+    // Rethrow: detector callers just inserted the contradiction row, so
+    // dedup means THIS was the only recompute that would ever run for it —
+    // a swallowed failure would leave the page trusted until an unrelated
+    // regeneration. Callers surface it (detector outer catches, route 500).
     logger.error(`[agronomic-wiki] recomputeEntryReviewGate failed for entry ${entryId}: ${err.message}`);
+    throw err;
   }
 }
 
@@ -887,6 +915,10 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
           await syncKbCopyTrust(existing.id, TRUSTED_STATUSES.includes(review.reviewStatus));
         } catch (reviewErr) {
           logger.error(`[agronomic-wiki] Failed to update review state for ${slug}: ${reviewErr.message}`);
+          // If the target state is UNTRUSTED, a swallowed failure would
+          // report 'failed' as though the gate was applied while the page
+          // or its mirror stays trusted — fail the whole call instead.
+          if (!TRUSTED_STATUSES.includes(review.reviewStatus)) throw reviewErr;
         }
         await logUpdate('error', slug, `Generation failed for ${category} page: ${title} — existing content preserved`, {
           triggerType: 'wiki_generation',
