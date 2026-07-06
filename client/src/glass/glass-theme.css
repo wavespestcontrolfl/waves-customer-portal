@@ -77,6 +77,16 @@ html[data-glass-theme] button * {
   font-weight: 600 !important;
   letter-spacing: 0 !important;
 }
+/* Anchor CTAs styled as buttons (gold accents, chips) get the same type
+   normalization as real buttons — mixed inline weights (700/800/850) read
+   as different fonts when they sit side by side. */
+html[data-glass-theme] a[data-glass-accent],
+html[data-glass-theme] a[data-glass-accent] *,
+html[data-glass-theme] a[data-glass="chip"],
+html[data-glass-theme] a[data-glass="chip"] * {
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+}
 html[data-glass-theme] [data-gt="eyebrow"] {
   font-size: 12px !important;
   font-weight: 700 !important;
