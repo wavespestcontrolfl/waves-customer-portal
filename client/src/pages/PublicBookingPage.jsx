@@ -5,6 +5,7 @@ import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault, fireGlassConfetti } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 
@@ -68,6 +69,13 @@ function captureBookingAttribution() {
 }
 
 export default function PublicBookingPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
+
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
@@ -384,6 +392,8 @@ export default function PublicBookingPage() {
         recurring: !!recurringPattern,
       });
       setStep(4);
+      // Celebration burst — no-ops when glass is off or reduced-motion.
+      fireGlassConfetti(window.innerWidth / 2, window.innerHeight / 3);
     } catch (err) {
       setError(err.message);
     }
@@ -612,6 +622,7 @@ export default function PublicBookingPage() {
                 variant="primary"
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
                 disabled={!address.line1}
+                data-glass-accent=""
                 style={{ width: '100%' }}
               >
                 Find my best times →
@@ -762,7 +773,7 @@ export default function PublicBookingPage() {
             {/* Secondary finders — only on the day list */}
             {!loading && !openDay && (
               <>
-                <div style={{ background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
+                <div data-glass="soft" style={{ position: 'relative', background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
                   <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
                     Need a date further out? Pick any day that works.
                   </label>
@@ -823,6 +834,7 @@ export default function PublicBookingPage() {
                 variant="primary"
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_CONTACT_STARTED, { is_existing_customer: !!existingCustomerId }); setStep(3); }}
                 disabled={continueDisabled}
+                data-glass-accent=""
                 style={{ flex: 1 }}
               >
                 Continue →
@@ -962,6 +974,7 @@ export default function PublicBookingPage() {
                 variant="primary"
                 onClick={handleConfirm}
                 disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contact.phone.replace(/\D/g, '').length !== 10))}
+                data-glass-accent=""
                 style={{ flex: 1 }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
@@ -988,7 +1001,8 @@ export default function PublicBookingPage() {
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               We just texted a confirmation to {contact.phone || 'the phone number on file'}.
             </p>
-            <div style={{
+            <div data-glass="card" style={{
+              position: 'relative',
               background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
               borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
             }}>

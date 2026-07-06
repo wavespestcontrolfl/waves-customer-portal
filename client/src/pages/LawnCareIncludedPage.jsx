@@ -1,6 +1,7 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPinned, ShieldCheck, Sprout } from "lucide-react";
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from "../glass/glass-engine";
 
 const TURF_SECTIONS = [
   {
@@ -66,6 +67,13 @@ function CheckItem({ children }) {
 }
 
 export default function LawnCareIncludedPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, "full");
+
   useEffect(() => {
     document.title = "What's Included in Lawn Care Service? | Waves Lawn Care";
     const desc = document.querySelector('meta[name="description"]') || document.createElement("meta");
@@ -75,18 +83,18 @@ export default function LawnCareIncludedPage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#f7f4ee] text-zinc-950">
-      <header className="border-b border-zinc-200 bg-white">
+    <div data-glass-clear="" className="min-h-screen bg-[#f7f4ee] text-zinc-950">
+      <header data-glass-clear="" className="border-b border-zinc-200 bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
           <Link to="/" className="text-lg font-semibold tracking-tight">Waves</Link>
-          <Link to="/estimate/lawn" className="inline-flex h-10 items-center justify-center rounded-xs bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800">
+          <Link to="/estimate/lawn" data-glass-accent="" className="inline-flex h-10 items-center justify-center rounded-xs bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800">
             Request Lawn Care Estimate
           </Link>
         </div>
       </header>
 
       <main>
-        <section className="bg-white">
+        <section data-glass-clear="" className="bg-white">
           <div className="mx-auto grid max-w-6xl gap-8 px-4 py-12 lg:grid-cols-[1fr_360px]">
             <div>
               <div className="inline-flex items-center gap-2 rounded-xs border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-800">
@@ -98,11 +106,11 @@ export default function LawnCareIncludedPage() {
                 Waves lawn care is a documented turf health program, not a one-size-fits-all spray. Each visit is guided by grass type, season, lawn condition, weather, product labels, local fertilizer rules, and technician observations.
               </p>
               <div className="mt-6 flex flex-wrap gap-3">
-                <Link to="/estimate/lawn" className="inline-flex h-11 items-center justify-center rounded-xs bg-zinc-950 px-5 text-sm font-semibold text-white hover:bg-zinc-800">Request Estimate</Link>
-                <a href="#reports" className="inline-flex h-11 items-center justify-center rounded-xs border border-zinc-300 bg-white px-5 text-sm font-semibold text-zinc-950 hover:bg-zinc-50">See Reporting</a>
+                <Link to="/estimate/lawn" data-glass-accent="" className="inline-flex h-11 items-center justify-center rounded-xs bg-zinc-950 px-5 text-sm font-semibold text-white hover:bg-zinc-800">Request Estimate</Link>
+                <a href="#reports" data-glass="chip" className="inline-flex h-11 items-center justify-center rounded-xs border border-zinc-300 bg-white px-5 text-sm font-semibold text-zinc-950 hover:bg-zinc-50">See Reporting</a>
               </div>
             </div>
-            <aside className="rounded-md border border-zinc-200 bg-zinc-50 p-5">
+            <aside data-glass="soft" className="rounded-md border border-zinc-200 bg-zinc-50 p-5">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Built Around</h2>
               <ul className="mt-4 space-y-3 text-sm leading-6 text-zinc-700">
                 <CheckItem>Turf-specific program logic</CheckItem>
@@ -117,7 +125,7 @@ export default function LawnCareIncludedPage() {
         </section>
 
         <section className="mx-auto max-w-6xl px-4 py-10">
-          <div className="rounded-md border border-zinc-200 bg-white p-6">
+          <div data-glass="card" className="rounded-md border border-zinc-200 bg-white p-6">
             <h2 className="text-2xl font-semibold">More Than a Standard Spray Visit</h2>
             <p className="mt-3 max-w-4xl text-base leading-7 text-zinc-700">
               Your lawn does not need the same treatment every visit. A Waves visit starts with assessment, then treatment decisions are adjusted based on turf type, season, weather, weed pressure, insect pressure, disease risk, irrigation, local fertilizer rules, and previous service history.
@@ -143,7 +151,7 @@ export default function LawnCareIncludedPage() {
               "Progress since last visit",
               "Customer action items",
             ].map((item) => (
-              <div key={item} className="rounded-md border border-zinc-200 bg-white p-3 text-sm text-zinc-700">{item}</div>
+              <div key={item} data-glass="soft" className="rounded-md border border-zinc-200 bg-white p-3 text-sm text-zinc-700">{item}</div>
             ))}
           </div>
         </section>
@@ -152,7 +160,7 @@ export default function LawnCareIncludedPage() {
           <h2 className="text-2xl font-semibold">Turf Type Expectations</h2>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             {TURF_SECTIONS.map((section) => (
-              <article key={section.title} className="rounded-md border border-zinc-200 bg-white p-5">
+              <article key={section.title} data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
                 <h3 className="text-lg font-semibold">{section.title}</h3>
                 <p className="mt-2 text-sm leading-6 text-zinc-700">{section.summary}</p>
                 <ul className="mt-4 space-y-2 text-sm leading-6 text-zinc-700">
@@ -170,7 +178,7 @@ export default function LawnCareIncludedPage() {
           </div>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             {SEASONS.map(([months, title, body]) => (
-              <article key={months} className="rounded-md border border-zinc-200 bg-white p-5">
+              <article key={months} data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{months}</p>
                 <h3 className="mt-2 text-lg font-semibold">{title}</h3>
                 <p className="mt-2 text-sm leading-6 text-zinc-700">{body}</p>
@@ -181,17 +189,17 @@ export default function LawnCareIncludedPage() {
 
         <section className="mx-auto max-w-6xl px-4 pb-10">
           <div className="grid gap-4 lg:grid-cols-3">
-            <article className="rounded-md border border-zinc-200 bg-white p-5">
+            <article data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
               <ShieldCheck size={22} strokeWidth={1.75} className="text-emerald-700" />
               <h2 className="mt-3 text-xl font-semibold">Product Transparency</h2>
               <p className="mt-2 text-sm leading-6 text-zinc-700">Some visits focus on weed control, some on pest monitoring, some on micronutrient or stress support, and some on observation. Product choices depend on turf type, season, weather, label directions, local rules, and what the lawn is showing.</p>
             </article>
-            <article className="rounded-md border border-zinc-200 bg-white p-5">
+            <article data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
               <MapPinned size={22} strokeWidth={1.75} className="text-emerald-700" />
               <h2 className="mt-3 text-xl font-semibold">Local Rule Awareness</h2>
               <p className="mt-2 text-sm leading-6 text-zinc-700">Local fertilizer rules may affect whether nitrogen or phosphorus can be applied during certain months. When fertilizer is restricted, the visit may focus on inspection, pest monitoring, micronutrients, iron, soil support, and stress management.</p>
             </article>
-            <article id="reports" className="rounded-md border border-zinc-200 bg-white p-5">
+            <article id="reports" data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
               <FileText size={22} strokeWidth={1.75} className="text-emerald-700" />
               <h2 className="mt-3 text-xl font-semibold">Post-Service Reports</h2>
               <p className="mt-2 text-sm leading-6 text-zinc-700">The estimate outline explains what may be used. The post-service report shows what was actually done, including products applied, EPA registration numbers where applicable, photos, technician notes, what to expect, and follow-up items.</p>
@@ -200,7 +208,7 @@ export default function LawnCareIncludedPage() {
         </section>
 
         <section className="mx-auto max-w-6xl px-4 pb-10">
-          <div className="rounded-md border border-zinc-200 bg-white p-6">
+          <div data-glass="card" className="rounded-md border border-zinc-200 bg-white p-6">
             <h2 className="text-2xl font-semibold">What This Does Not Include</h2>
             <p className="mt-3 text-base leading-7 text-zinc-700">Lawn care treatments support turf health, weed control, pest monitoring, and seasonal improvement, but some issues require separate work or customer action.</p>
             <ul className="mt-4 grid gap-2 text-sm leading-6 text-zinc-700 md:grid-cols-2">
@@ -216,7 +224,7 @@ export default function LawnCareIncludedPage() {
           <h2 className="text-2xl font-semibold">Common Questions</h2>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             {FAQS.map(([question, answer]) => (
-              <article key={question} className="rounded-md border border-zinc-200 bg-white p-5">
+              <article key={question} data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
                 <h3 className="font-semibold">{question}</h3>
                 <p className="mt-2 text-sm leading-6 text-zinc-700">{answer}</p>
               </article>

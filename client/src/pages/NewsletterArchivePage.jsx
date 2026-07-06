@@ -14,6 +14,7 @@ import { Link, useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
@@ -79,6 +80,12 @@ function ArchiveBody({ html }) {
 
 export default function NewsletterArchivePage() {
   const { id } = useParams();
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
   const [post, setPost] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | notfound
 
@@ -98,11 +105,11 @@ export default function NewsletterArchivePage() {
   }, [id]);
 
   if (status === 'loading') {
-    return <div style={{ background: PAGE_BG, minHeight: '100vh' }} />;
+    return <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />;
   }
   if (status === 'notfound') {
     return (
-      <div style={{ background: PAGE_BG, minHeight: '100vh', padding: '56px 24px', textAlign: 'center' }}>
+      <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh', padding: '56px 24px', textAlign: 'center' }}>
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, letterSpacing: 0, color: TEXT, margin: '0 0 8px' }}>
           We couldn't find that issue.
         </h1>
@@ -111,6 +118,7 @@ export default function NewsletterArchivePage() {
         </p>
         <Link
           to="/newsletter"
+          data-glass-accent=""
           style={{
             fontFamily: FONTS.ui,
             fontSize: 14,
@@ -136,7 +144,7 @@ export default function NewsletterArchivePage() {
     : '';
 
   return (
-    <div style={{ background: PAGE_BG, minHeight: '100vh' }}>
+    <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }}>
       {/* Header strip */}
       <div style={{ background: B.blueDeeper, color: '#fff', padding: '16px 24px' }}>
         <div style={{ maxWidth: 760, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
@@ -186,7 +194,7 @@ export default function NewsletterArchivePage() {
 
       {/* Body — sandboxed render of the email HTML */}
       <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 24px' }}>
-        <div style={{
+        <div data-glass="card" style={{
           background: '#fff',
           border: `1px solid ${BORDER}`,
           borderRadius: 8,
@@ -198,7 +206,7 @@ export default function NewsletterArchivePage() {
 
       {/* Inline signup CTA */}
       <div style={{ maxWidth: 760, margin: '0 auto', padding: '36px 24px 8px' }}>
-        <div style={{
+        <div data-glass="card" style={{
           background: '#fff',
           border: `1px solid ${BORDER}`,
           borderRadius: 8,

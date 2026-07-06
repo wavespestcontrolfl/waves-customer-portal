@@ -70,9 +70,9 @@ function Page({ children }) {
   );
 }
 
-function Card({ children, style }) {
+function Card({ children, style, ...rest }) {
   return (
-    <div data-glass="card" style={{ background: S.surface, border: `1px solid ${S.border}`, borderRadius: 12, padding: 24, marginBottom: 16, ...style }}>
+    <div data-glass="card" {...rest} style={{ background: S.surface, border: `1px solid ${S.border}`, borderRadius: 12, padding: 24, marginBottom: 16, ...style }}>
       {children}
     </div>
   );
@@ -260,6 +260,12 @@ function SuccessCard({ result, service }) {
 
 export default function ReschedulePage() {
   const { token } = useParams();
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
+  // keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -274,13 +280,6 @@ export default function ReschedulePage() {
   // query/summary recap clears with the filter — a stale "Two openings
   // Tuesday afternoon" line must not sit above the unfiltered day list.
   const [aiSession, setAiSession] = useState(0);
-
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1 / ?glass=0
-  // keep param precedence — same rider as LoginPage/PortalPage.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -479,7 +478,7 @@ export default function ReschedulePage() {
         )}
       </Card>
 
-      <Card style={{ background: S.page }}>
+      <Card data-glass="soft" style={{ background: S.page }}>
         <div style={{ fontSize: 14, color: S.body, lineHeight: 1.55 }}>
           Don't see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.
         </div>

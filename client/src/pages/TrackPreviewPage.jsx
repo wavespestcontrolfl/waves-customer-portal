@@ -13,6 +13,7 @@ import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_SMS_TEL,
@@ -162,7 +163,7 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
       </div>
     </WavesShell>
@@ -171,7 +172,7 @@ function Page({ children }) {
 
 function Card({ children, accent }) {
   return (
-    <div style={{
+    <div data-glass="card" style={{
       background: TRACK_SURFACE.surface,
       borderRadius: 8,
       padding: 24,
@@ -187,7 +188,7 @@ function Card({ children, accent }) {
 
 function StatusPill({ label, color }) {
   return (
-    <div style={{
+    <div data-glass="chip" data-glass-pill="" style={{
       display: 'inline-block',
       fontSize: 12,
       fontWeight: 700,
@@ -265,7 +266,7 @@ function TrackerMap({ tech, property }) {
   // the rest of the en-route card still works without a map key.
   if (!MAPS_KEY || loadError) {
     return (
-      <div style={{
+      <div data-glass="soft" style={{
         marginTop: 20,
         height: 240,
         borderRadius: 8,
@@ -426,7 +427,7 @@ function PrepChecklist() {
     'Sprinklers off until tonight',
   ];
   return (
-    <div style={{
+    <div data-glass="soft" style={{
       marginTop: 16,
       padding: '14px 18px',
       background: TRACK_SURFACE.surface,
@@ -530,7 +531,7 @@ function EnRouteCard({ data }) {
             ) : null}
           </>
         ) : (
-          <div style={{
+          <div data-glass="soft" style={{
             marginTop: 20, padding: 14, background: TRACK_SURFACE.soft,
             borderRadius: 8, fontSize: 14, color: TRACK_SURFACE.body,
           }}>
@@ -549,6 +550,7 @@ function EnRouteCard({ data }) {
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
+          data-glass-accent=""
           style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
           TEXT WAVES
@@ -600,6 +602,7 @@ function CompleteCard({ data }) {
       </div>
       <a
         href={data.summary?.reviewUrl || '#'}
+        data-glass-accent=""
         style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 24, boxSizing: 'border-box' }}
       >
         LEAVE A 5-STAR REVIEW
@@ -612,7 +615,7 @@ function CompleteCard({ data }) {
 function StateSwitcher({ value, onChange }) {
   const states = ['scheduled', 'en_route', 'on_property', 'complete'];
   return (
-    <div style={{
+    <div data-glass="soft" style={{
       display: 'flex',
       gap: 6,
       flexWrap: 'wrap',
@@ -654,6 +657,13 @@ function StateSwitcher({ value, onChange }) {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPreviewPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
+
   const [params, setParams] = useSearchParams();
   const state = params.get('state') || 'en_route';
   const data = useMemo(() => mockData(state), [state]);

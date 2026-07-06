@@ -6,6 +6,7 @@ import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell } from '../components/brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -157,7 +158,7 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
       </div>
     </WavesShell>
@@ -166,7 +167,7 @@ function Page({ children }) {
 
 function StatusPill({ label, color }) {
   return (
-    <div style={{
+    <div data-glass="chip" data-glass-pill="" style={{
       display: 'inline-block',
       fontSize: 12, fontWeight: 700,
       letterSpacing: 0, textTransform: 'uppercase',
@@ -227,7 +228,7 @@ function TrackerMap({ tech, property }) {
 
   if (!MAPS_KEY || loadError) {
     return (
-      <div style={{
+      <div data-glass="soft" style={{
         marginTop: 20, height: 200, borderRadius: 8,
         background: TRACK_SURFACE.soft,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -298,6 +299,7 @@ function PrepLink({ prepToken }) {
   return (
     <a
       href={`/prep/${prepToken}`}
+      data-glass="chip"
       style={{
         display: 'block', marginTop: 16, padding: '12px 20px',
         background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
@@ -313,7 +315,7 @@ function PrepLink({ prepToken }) {
 
 function Card({ children, accent }) {
   return (
-    <div style={{
+    <div data-glass="card" style={{
       background: TRACK_SURFACE.surface,
       borderRadius: 8,
       padding: 24,
@@ -454,7 +456,7 @@ function EnRouteCard({ data }) {
             ) : null}
           </>
         ) : (
-          <div style={{
+          <div data-glass="soft" style={{
             marginTop: 20, padding: 14, background: TRACK_SURFACE.soft,
             borderRadius: 8, fontSize: 14, color: TRACK_SURFACE.body,
           }}>
@@ -473,6 +475,7 @@ function EnRouteCard({ data }) {
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
+          data-glass-accent=""
           style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
           TEXT {techFirst.toUpperCase()}
@@ -542,6 +545,7 @@ function CompleteCard({ data }) {
         {summary.serviceReportToken ? (
           <a
             href={`/report/${summary.serviceReportToken}`}
+            data-glass-accent=""
             style={{
               display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
@@ -552,6 +556,7 @@ function CompleteCard({ data }) {
         {summary.reviewUrl ? (
           <a
             href={summary.reviewUrl}
+            data-glass-accent=""
             style={{
               display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
@@ -562,6 +567,7 @@ function CompleteCard({ data }) {
         {summary.invoiceToken ? (
           <a
             href={`/pay/${summary.invoiceToken}`}
+            data-glass="chip"
             style={{
               display: 'block', padding: '14px 20px', background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
@@ -592,6 +598,7 @@ function CancelledCard({ data }) {
       ) : null}
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.blueDeeper, color: COLORS.white,
@@ -619,6 +626,7 @@ function NoShowCard({ data }) {
       </div>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.blueDeeper, color: COLORS.white,
@@ -659,6 +667,13 @@ function NotFoundCard() {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
+
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

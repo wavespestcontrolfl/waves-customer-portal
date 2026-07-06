@@ -43,6 +43,15 @@ html[data-glass-theme] [data-glass-clear] {
 html[data-glass-theme] [data-glass-pill] {
   border-radius: 999px !important;
 }
+/* Dark brand panels deliberately preserved under glass (newsletter hero,
+   dark banners): the global heading repaint to var(--brand) would render
+   navy-on-navy inside them. Container opt-out restores light ink. */
+html[data-glass-theme] [data-glass-ink="light"] h1,
+html[data-glass-theme] [data-glass-ink="light"] h2,
+html[data-glass-theme] [data-glass-ink="light"] h3,
+html[data-glass-theme] [data-glass-ink="light"] h4 {
+  color: #fff !important;
+}
 
 /* ---------- type system ---------- */
 html[data-glass-theme] *:not(svg):not(path) {

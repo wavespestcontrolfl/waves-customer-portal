@@ -4,6 +4,7 @@ import { useParams, useSearchParams } from "react-router-dom";
 import BrandFooter from "../components/BrandFooter";
 import { Button } from "../components/Button";
 import Icon from "../components/Icon";
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault, fireGlassConfetti } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -52,6 +53,13 @@ function Ripple({ x, y }) {
 }
 
 export default function BookingPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
+
   const { estimateToken } = useParams();
   const [searchParams] = useSearchParams();
   const [step, setStep] = useState(0);
@@ -105,6 +113,8 @@ export default function BookingPage() {
       );
       setConfCode(result.confirmationCode || result.booking?.confirmation_code || 'WPC-????');
       setStep(4);
+      // Celebration burst — no-ops when glass is off or reduced-motion.
+      fireGlassConfetti(window.innerWidth / 2, window.innerHeight / 3);
     } catch { setConfCode('WPC-ERR'); setStep(4); }
     setLoading(false);
   };
@@ -125,7 +135,7 @@ export default function BookingPage() {
   const selectedDay = availability.find((d) => d.date === selectedDate);
 
   return (
-    <div style={{ minHeight: "100vh", background: COLORS.sand, fontFamily: FONTS.body }}>
+    <div style={{ minHeight: "100vh", background: COLORS.sand, fontFamily: FONTS.body }} data-glass-clear="">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap');
         @keyframes rippleOut { to { transform: scale(4); opacity: 0; } }
@@ -211,7 +221,8 @@ export default function BookingPage() {
             </div>
 
             {/* Estimate summary card */}
-            <div style={{
+            <div data-glass="card" style={{
+              position: "relative",
               background: COLORS.white,
               border: `1px solid ${COLORS.slate200}`,
               borderRadius: 14,
@@ -260,6 +271,7 @@ export default function BookingPage() {
             <Button
               variant="primary"
               onClick={() => setStep(1)}
+              data-glass-accent=""
               style={{ width: "100%" }}
             >
               Show available times
@@ -305,7 +317,8 @@ export default function BookingPage() {
                 </div>
               </div>
             ) : availability.length === 0 ? (
-              <div style={{
+              <div data-glass="card" style={{
+                position: "relative",
                 background: COLORS.white,
                 border: `1px solid ${COLORS.slate200}`,
                 borderRadius: 14, padding: "32px 20px",
@@ -480,6 +493,7 @@ export default function BookingPage() {
               <Button
                 variant="primary"
                 onClick={() => setStep(3)}
+                data-glass-accent=""
                 style={{ width: "100%", marginTop: 24, animation: "slideUp 0.3s ease-out" }}
               >
                 Continue
@@ -509,7 +523,8 @@ export default function BookingPage() {
             </h2>
 
             {/* Summary card */}
-            <div style={{
+            <div data-glass="card" style={{
+              position: "relative",
               background: COLORS.white,
               border: `1px solid ${COLORS.slate200}`,
               borderRadius: 14, overflow: "hidden",
@@ -583,7 +598,8 @@ export default function BookingPage() {
             </div>
 
             {/* SMS consent */}
-            <div style={{
+            <div data-glass="soft" style={{
+              position: "relative",
               display: "flex", gap: 10, alignItems: "flex-start",
               marginBottom: 24, padding: "12px 14px",
               background: COLORS.offWhite, borderRadius: 10,
@@ -601,6 +617,7 @@ export default function BookingPage() {
               variant="primary"
               onClick={handleConfirm}
               disabled={loading}
+              data-glass-accent=""
               style={{ width: "100%", fontSize: 16, cursor: loading ? "wait" : "pointer" }}
             >
               {loading ? (
@@ -648,7 +665,8 @@ export default function BookingPage() {
             </p>
 
             {/* Confirmation code card */}
-            <div style={{
+            <div data-glass="card" style={{
+              position: "relative",
               background: COLORS.white,
               border: `1.5px solid ${COLORS.slate200}`,
               borderRadius: 14, padding: "24px 20px",
@@ -689,7 +707,8 @@ export default function BookingPage() {
             </div>
 
             {/* Reminder info */}
-            <div style={{
+            <div data-glass="soft" style={{
+              position: "relative",
               background: COLORS.blueLight,
               borderRadius: 10,
               padding: "14px 16px",
