@@ -113,7 +113,7 @@ describe('classifyReviewTier', () => {
   });
 
   test('compliance signals force red at any confidence', () => {
-    for (const phrase of ['the June blackout window', 'per county ordinance', 'local ordinances require', 'REI is 12 hours', 'rei is 12 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
+    for (const phrase of ['the June blackout window', 'per county ordinance', 'local ordinances require', 'REI is 12 hours', 'rei is 12 hours', 're-entry interval of 4 hours', 'reentry interval of 4 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
       const { tier, flags } = classifyReviewTier({ confidence: 'very_high', content: phrase });
       expect(tier).toBe('red');
       expect(flags).toContain('compliance_content');
@@ -607,6 +607,30 @@ describe('contradiction gate recompute', () => {
     expect(state.updates.knowledge_entries).toBeUndefined();
   });
 
+  test('assumeOpenIds gates a FIRST contradiction even when the lookup fails', async () => {
+    // The detector just inserted kc-9 against a trusted page that has no
+    // stored contradiction flags. The live lookup fails — the caller-known
+    // id must still close the gate.
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'green', review_status: 'auto', risk_flags: [],
+      }],
+      knowledge_contradictions: () => { throw new Error('relation unavailable'); },
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1', { assumeOpenIds: ['kc-9'] });
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_status).toBe('pending_review');
+    expect(JSON.parse(patch.risk_flags)).toEqual(expect.arrayContaining(['open_contradiction', 'contradiction:kc-9']));
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
+  });
+
   test('a FAILED contradiction lookup preserves the existing gate (fail closed)', async () => {
     // The live query throws; the stored contradiction:kc-1 identity must be
     // treated as still open — the page stays gated and the mirror flagged,
@@ -717,6 +741,44 @@ describe('review service methods', () => {
     // blocking a stub is still a valid human judgment
     const blocked = await wiki.reviewPage('product/talstar-p', { action: 'block' });
     expect(blocked.review_status).toBe('blocked');
+  });
+
+  test('setTierOverride refuses green/yellow pins on a generation stub (red pin allowed)', async () => {
+    const stub = {
+      id: 'ke-1', slug: 'product/talstar-p',
+      content: '# Product: Talstar P\n\n*Pending AI generation — 30 data points available.*',
+      risk_flags: ['generation_stub'],
+    };
+    const state = useDb({ knowledge_entries: [stub], knowledge_base: [] });
+
+    await expect(wiki.setTierOverride('product/talstar-p', 'green'))
+      .rejects.toMatchObject({ isOperational: true, statusCode: 409 });
+    expect(state.updates.knowledge_entries).toBeUndefined();
+    expect(state.updates.knowledge_base).toBeUndefined();
+
+    // pinning red keeps it gated — valid
+    const pinned = await wiki.setTierOverride('product/talstar-p', 'red');
+    expect(pinned.review_status).toBe('pending_review');
+  });
+
+  test('a failed GATING mirror update propagates instead of reading as success', async () => {
+    const page = { id: 'ke-1', slug: 'product/talstar-p', human_notes: null, content: '# Real content', risk_flags: [] };
+    const inner = makeDb({ knowledge_entries: [page] });
+    global.__tierDbMock = (table) => {
+      const b = inner(table);
+      if (table === 'knowledge_base') {
+        b.update = () => ({ then: (res, rej) => Promise.reject(new Error('update failed')).then(res, rej) });
+      }
+      return b;
+    };
+
+    // block = un-trusting the mirror; a failure must surface
+    await expect(wiki.reviewPage('product/talstar-p', { action: 'block' }))
+      .rejects.toThrow('update failed');
+    // approve = re-trusting; a failure is conservative (mirror stays
+    // flagged) and must NOT abort the approval
+    const approved = await wiki.reviewPage('product/talstar-p', { action: 'approve' });
+    expect(approved.review_status).toBe('approved');
   });
 
   test('reviewPage rejects unknown actions and missing pages', async () => {

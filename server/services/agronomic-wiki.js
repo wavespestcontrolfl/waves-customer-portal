@@ -108,7 +108,7 @@ const COMPLIANCE_PATTERNS = [
   /\bblackout\b/i,
   /\bordinances?\b/i,
   /\brei\b/i,
-  /re-entry interval/i,
+  /\bre[- ]?entry interval/i,
   /\bdo[- ]not[- ]apply\b/i,
   /phytotox/i,
   /restricted[- ]use\b/i,
@@ -233,7 +233,15 @@ async function syncKbCopyTrust(entryId, trusted) {
     await db('knowledge_base')
       .where({ wiki_entry_id: entryId, source: 'wiki-sync' })
       .update({ status: trusted ? 'active' : 'flagged', active: trusted, updated_at: new Date() });
-  } catch { /* knowledge_base may not exist */ }
+  } catch (err) {
+    // Only an absent knowledge_base table (42P01, fresh install) is benign.
+    if (err?.code === '42P01') return;
+    logger.error(`[agronomic-wiki] KB mirror trust sync failed for entry ${entryId} (trusted=${trusted}): ${err.message}`);
+    // A failed GATING update leaves a stale active mirror agent-visible —
+    // that must surface to the caller, not read as success. A failed
+    // re-trust merely keeps the mirror flagged (conservative), so log only.
+    if (!trusted) throw err;
+  }
 }
 
 // Recompute a page's review gate from the CURRENT open-contradiction state
@@ -246,15 +254,23 @@ async function syncKbCopyTrust(entryId, trusted) {
 // approval are honored by the shared resolver; per-id contradiction flags
 // mean a genuinely NEW contradiction changes the flag set, so a stale
 // approval never absorbs it.
-async function recomputeEntryReviewGate(entryId) {
+async function recomputeEntryReviewGate(entryId, { assumeOpenIds = [] } = {}) {
   if (!entryId) return;
   try {
     const existing = await db('knowledge_entries').where({ id: entryId }).first();
     if (!existing) return;
+    // assumeOpenIds: contradiction ids the caller KNOWS are open (it just
+    // inserted them). The union guards the first-contradiction case — with
+    // nothing recorded in risk_flags yet, a transient lookup failure would
+    // otherwise resolve to "no blockers" and leave the page trusted.
+    const openContradictionIds = [...new Set([
+      ...(await getOpenContradictionIdsFor(entryId, existing)),
+      ...assumeOpenIds.filter((id) => id != null),
+    ])];
     const review = resolveReviewFields(existing, {
       confidence: existing.confidence,
       content: existing.content,
-      openContradictionIds: await getOpenContradictionIdsFor(entryId, existing),
+      openContradictionIds,
     });
     if (
       review.reviewStatus !== existing.review_status ||
@@ -1208,6 +1224,19 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
     }
     const page = await db('knowledge_entries').where({ slug }).first();
     if (!page) return null;
+
+    // Same boundary as reviewPage approve: a green/yellow pin would set
+    // review_status 'auto' and re-trust the KB mirror with placeholder
+    // text. Pinning red (keep it gated) remains allowed.
+    if (
+      tier !== 'red' &&
+      ((page.content || '').includes('*Pending AI generation') || parseFlags(page.risk_flags).includes('generation_stub'))
+    ) {
+      const err = new Error('Cannot pin a green/yellow tier on a page whose content is still pending AI generation — retry generation first');
+      err.isOperational = true;
+      err.statusCode = 409;
+      throw err;
+    }
 
     const flags = [...new Set([...parseFlags(page.risk_flags), 'manual_override'])];
     const [updated] = await db('knowledge_entries')

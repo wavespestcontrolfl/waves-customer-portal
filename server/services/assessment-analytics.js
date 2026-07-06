@@ -697,11 +697,15 @@ async function detectContradictions() {
               .first();
 
             if (!existing) {
-              await db('knowledge_contradictions').insert(contradiction);
+              const [inserted] = await db('knowledge_contradictions').insert(contradiction).returning('id');
               found.push(contradiction);
               // Trusted reads gate on the page's cached review_status — flip
               // the page and its KB mirror now, not at the next regeneration.
-              await recomputeEntryReviewGate(contradiction.wiki_entry_id);
+              // Passing the just-inserted id keeps the gate closed even if
+              // the recompute's own contradiction lookup transiently fails.
+              await recomputeEntryReviewGate(contradiction.wiki_entry_id, {
+                assumeOpenIds: [inserted?.id ?? inserted],
+              });
             }
           }
         }

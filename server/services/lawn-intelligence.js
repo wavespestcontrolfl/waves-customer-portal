@@ -303,18 +303,22 @@ If no contradictions, return: { "contradictions": [] }`
               .where({ kb_entry_id: kb.id, wiki_entry_id: wiki.id, contradiction_type: c.type, resolved: false })
               .first();
             if (!existing) {
-              await db('knowledge_contradictions').insert({
+              const [inserted] = await db('knowledge_contradictions').insert({
                 kb_entry_id: kb.id,
                 wiki_entry_id: wiki.id,
                 kb_claim: (c.kb_claim || '').substring(0, 500),
                 wiki_evidence: (c.wiki_evidence || '').substring(0, 500),
                 contradiction_type: c.type || 'efficacy',
                 severity: c.severity || 'moderate',
-              });
+              }).returning('id');
               stats.found++;
               // Trusted reads gate on the page's cached review_status — flip
               // the page and its KB mirror now, not at the next regeneration.
-              await agronomicWiki().recomputeEntryReviewGate(wiki.id);
+              // Passing the just-inserted id keeps the gate closed even if
+              // the recompute's own contradiction lookup transiently fails.
+              await agronomicWiki().recomputeEntryReviewGate(wiki.id, {
+                assumeOpenIds: [inserted?.id ?? inserted],
+              });
             }
           }
         } catch (aiErr) {
