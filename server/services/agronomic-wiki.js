@@ -412,7 +412,10 @@ const AgronomicWiki = {
         assessmentCount: assessments.length,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
-        allOutcomeIds: outcomes.map((o) => o.id),
+        // Assessment-only condition pages (no outcomes yet) fingerprint on
+        // the matching assessment ids — an empty id set would make the skip
+        // guard blind to a changed assessment set with an equal count.
+        allOutcomeIds: outcomes.length ? outcomes.map((o) => o.id) : assessments.map((a) => a.id),
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'condition', data, `Condition: ${conditionName}`);
@@ -900,8 +903,19 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
     try {
       const dupe = await db('knowledge_entries')
         .where({ slug: variantSlug, category: 'product' })
-        .first('id', 'slug');
+        .first('id', 'slug', 'kb_entry_id');
       if (!dupe) continue;
+
+      // Carry the direct wiki→KB back-pointer if the variant was the only
+      // linked page — the bridge dashboard and unified search read it.
+      if (dupe.kb_entry_id && !canonicalEntry.kb_entry_id) {
+        try {
+          await db('knowledge_entries')
+            .where({ id: canonicalEntry.id })
+            .update({ kb_entry_id: dupe.kb_entry_id });
+          canonicalEntry.kb_entry_id = dupe.kb_entry_id;
+        } catch { /* kb_entry_id column may not exist */ }
+      }
 
       try {
         await db('knowledge_base')

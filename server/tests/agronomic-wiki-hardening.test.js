@@ -449,6 +449,49 @@ describe('generatePage condition-count fallback', () => {
     // 0 outcomes must fall through to the assessment count, not freeze at 0
     expect(state.inserts.knowledge_entries[0].data_point_count).toBe(7);
   });
+
+  test('updateConditionPage fingerprints assessment ids when no outcomes exist', async () => {
+    const state = useDb({
+      lawn_assessments: [{ id: 'a1', customer_id: 'c1' }, { id: 'a2', customer_id: 'c2' }],
+      treatment_outcomes: [],
+      knowledge_entries: [],
+    });
+
+    await wiki.updateConditionPage('dollar spot');
+
+    // the fingerprint must be the assessment ids, not an empty set — a
+    // changed assessment set with an equal count must invalidate the skip
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids)).toEqual(['a1', 'a2']);
+  });
+});
+
+describe('mergeVariantProductPages back-pointer', () => {
+  test('carries kb_entry_id from the variant when the canonical lacks one', async () => {
+    const CANON_SLUG = 'product/lesco-high-manganese-combo';
+    const state = useDb({
+      products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
+      product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
+      treatment_outcomes: [{ id: 'o1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] }],
+      knowledge_entries: (rec) => {
+        const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) {
+          return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: 'kb-42' }];
+        }
+        return [];
+      },
+      knowledge_bridge: [],
+      knowledge_base: [],
+      knowledge_contradictions: [],
+    });
+
+    await wiki.updateProductPage('LESCO HMC Variant');
+
+    // canonical was a fresh insert (no kb_entry_id) → variant's pointer copied
+    expect(state.updates.knowledge_entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kb_entry_id: 'kb-42' }),
+    ]));
+    expect(state.deletes.knowledge_entries).toBe(1);
+  });
 });
 
 // ── weeklyRefreshIfDue / weeklyRefresh ─────────────────────────────────────
