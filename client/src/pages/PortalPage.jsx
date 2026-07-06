@@ -2530,7 +2530,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     const toneBorder = isGreen ? '#BBF7D0' : isOrange ? '#FED7AA' : '#BFDBFE';
 
     return (
-      <div key={s.id} style={{
+      <div key={s.id} data-glass="card" style={{
         ...card,
         overflow: 'hidden',
         border: `1px solid ${toneBorder}`,
@@ -2630,7 +2630,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
   // Compact card for future (3+ days) services
   const renderCompactCard = (s) => (
-    <div key={s.id} style={{
+    <div key={s.id} data-glass="card" style={{
       ...card,
       padding: 16,
       display: 'flex', gap: 14, alignItems: 'center',
@@ -3621,7 +3621,7 @@ function BillingTab({ customer }) {
 
       <AutopayCard onStateChange={setAutopay} />
 
-      <div style={{
+      <div data-glass="card" style={{
         ...card,
         padding: 20,
       }}>
@@ -3674,7 +3674,7 @@ function BillingTab({ customer }) {
         )}
       </div>
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div>
             <div style={sectionTitle}>Payment Methods</div>
@@ -3782,7 +3782,7 @@ function BillingTab({ customer }) {
       )}
 
       {(totalCredits > 0 || credits.length > 0) && (
-        <div style={{ ...card, padding: 20 }}>
+        <div data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}>Credits</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Adjustments</div>
           {totalCredits > 0 && (
@@ -3829,7 +3829,7 @@ function BillingTab({ customer }) {
         </div>
       )}
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>{currentYear} Summary</div>
         <div style={{ marginTop: 8, fontSize: 28, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
           {money(ytdTotal)}
@@ -3851,7 +3851,7 @@ function BillingTab({ customer }) {
         </div>
       </div>
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}>Payment History</div>
@@ -3915,7 +3915,7 @@ function BillingTab({ customer }) {
         ))}
       </div>
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Recipients</div>
 

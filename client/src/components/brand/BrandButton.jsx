@@ -59,8 +59,18 @@ export default function BrandButton({
     };
   }
 
+  // Native glass tags (inert without html[data-glass-theme]): primary CTAs
+  // go gold-accent, secondary reads as a chip — mirrors the estimate
+  // walker's dark-CTA / white-chip classification for these primitives.
+  const glassAttrs = variant === 'primary'
+    ? { 'data-glass-accent': '' }
+    : variant === 'secondary'
+      ? { 'data-glass': 'chip' }
+      : {};
+
   return (
     <button
+      {...glassAttrs}
       {...rest}
       type={type}
       disabled={disabled}

@@ -40,6 +40,7 @@ export default function SaveCardConsent({
   const isChecked = locked ? true : !!checked;
   return (
     <label
+      data-glass="soft"
       style={{
         display: 'flex', gap: 10, alignItems: 'flex-start',
         padding: 14,
