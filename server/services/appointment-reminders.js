@@ -392,20 +392,64 @@ async function buildServiceLabel(scheduledServiceId, parentName) {
   }
 }
 
-function mergeServiceLabels(existingLabel, nextLabel) {
-  const existing = smsServiceLabelStored(existingLabel);
-  const next = smsServiceLabelStored(nextLabel);
-  if (!existing || existing === 'service') return next || 'service';
-  if (!next || next === 'service') return existing;
+async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }) {
+  // Rebuild the merged label from the PRISTINE service names of every
+  // reminder sharing this customer+slot — never parse a merged label back
+  // apart. Real service names contain both list delimiters (e.g. "Rodent
+  // Trapping, Exclusion & Sanitation Service", "Tree & Shrub Care"), so any
+  // string split corrupts them. Suppressed sibling rows keep their
+  // scheduled_service_id, which joins to the untouched source name;
+  // ar.service_type is only the fallback for legacy rows with no link.
+  const rows = await conn('appointment_reminders as ar')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .orderBy('ar.created_at', 'asc')
+    .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
-  const existingLower = existing.toLowerCase();
-  const nextLower = next.toLowerCase();
-  if (existingLower.includes(nextLower)) return existing;
-  if (nextLower.includes(existingLower)) return next;
+  // Each part must be the same customer-facing label registration stored:
+  // parent + add-ons + smsServiceLabel cleanup (buildServiceLabel semantics,
+  // but through the caller's connection so in-transaction addon rows are
+  // visible). Raw ss.service_type would silently drop add-ons.
+  const candidateLabels = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    let label = String(r.label || '').trim();
+    if (r.scheduled_service_id) {
+      try {
+        const addons = await conn('scheduled_service_addons')
+          .where({ scheduled_service_id: r.scheduled_service_id })
+          .pluck('service_name');
+        const all = [label, ...(Array.isArray(addons) ? addons : [])].map(smsServiceLabel).filter(Boolean);
+        if (all.length === 2) label = `${all[0]} & ${all[1]}`;
+        else if (all.length > 2) label = `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
+        else if (all.length === 1) label = all[0];
+      } catch { /* keep the base label */ }
+    }
+    candidateLabels.push(label);
+  }
+  candidateLabels.push(String(nextLabel || '').trim());
 
-  return /(?:\s&\s|,\s)/.test(existing)
-    ? `${existing}, and ${next}`
-    : `${existing} & ${next}`;
+  const parts = [];
+  for (const raw of candidateLabels) {
+    const label = String(raw || '').trim();
+    if (!label) continue;
+    const lower = label.toLowerCase();
+    // 'service' is the smsServiceLabel fallback placeholder, not a real
+    // component — merging it produces "service & Quarterly Pest Control".
+    // It only survives via the final fallback when NO real label exists.
+    if (lower === 'service') continue;
+    // Same containment semantics the pairwise merge had: skip a candidate an
+    // existing part already covers; a candidate that covers existing parts
+    // replaces them.
+    if (parts.some((part) => part.toLowerCase().includes(lower))) continue;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (lower.includes(parts[i].toLowerCase())) parts.splice(i, 1);
+    }
+    parts.push(label);
+  }
+  if (parts.length === 0) return String(nextLabel || '').trim() || 'service';
+  if (parts.length === 1) return parts[0];
+  // List-style join (owner call 07-06): "A, B & C".
+  return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
 }
 
 function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
@@ -743,7 +787,7 @@ const AppointmentReminders = {
       ])
       .first();
     if (sameAppointment) {
-      const merged = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+      const merged = await buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel: serviceLabel });
       if (merged !== sameAppointment.service_type) {
         await conn('appointment_reminders')
           .where({ id: sameAppointment.id })
@@ -754,7 +798,9 @@ const AppointmentReminders = {
           scheduled_service_id: scheduledServiceId,
           customer_id: customerId,
           appointment_time: apptTime,
-          service_type: merged,
+          // The suppressed row keeps its own pristine label (it never sends;
+          // buildMergedServiceLabel reads per-row names, not the merged one).
+          service_type: serviceLabel,
           source: reminderSource,
           confirmation_sent: true,
           confirmation_sent_at: now,
@@ -842,7 +888,7 @@ const AppointmentReminders = {
           .first();
 
         if (sameAppointment) {
-          const mergedServiceLabel = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+          const mergedServiceLabel = await buildMergedServiceLabel(trx, { customerId, apptTime, nextLabel: serviceLabel });
           if (mergedServiceLabel !== sameAppointment.service_type) {
             await trx('appointment_reminders')
               .where({ id: sameAppointment.id })
@@ -854,7 +900,8 @@ const AppointmentReminders = {
             scheduled_service_id: scheduledServiceId,
             customer_id: customerId,
             appointment_time: apptTime,
-            service_type: mergedServiceLabel,
+            // Pristine per-row label — see buildMergedServiceLabel.
+            service_type: serviceLabel,
             source,
             confirmation_sent: true,
             confirmation_sent_at: now,
@@ -1561,6 +1608,7 @@ const AppointmentReminders = {
           'scheduled_services.customer_id',
           'scheduled_services.scheduled_date',
           'scheduled_services.window_start',
+          'scheduled_services.service_type',
           'technicians.name as tech_name',
         )
         .first();
@@ -1613,6 +1661,27 @@ const AppointmentReminders = {
         // and 'appointment_no_show' is not a registered MessagePurpose).
       }, 'appointment_no_show', 'appointment_cancellation');
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      // Email twin (appointment.no_show template) — second channel like the
+      // other appointment notices. Best-effort: an email failure never
+      // fails the SMS leg or the status flip. `when` is the same composed
+      // same-day/back-dated phrase the SMS used; the fee outcome comes
+      // from the dispatch route (options.feeCharged) so the charge line
+      // is always truthful.
+      try {
+        const AppointmentEmail = require('./appointment-email');
+        await AppointmentEmail.sendAppointmentNoShowEmail({
+          customerId: svc.customer_id,
+          scheduledServiceId,
+          serviceLabel: svc.service_type,
+          missedWhen: when,
+          noShowReason: options.noShowReason || '',
+          feeOutcome: options.feeOutcome
+            || (options.feeCharged === true ? 'charged' : 'none'),
+        });
+      } catch (e) {
+        logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
+      }
 
       return { customer_id: svc.customer_id };
     } catch (err) {

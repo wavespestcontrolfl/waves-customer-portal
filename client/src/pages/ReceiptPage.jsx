@@ -33,6 +33,7 @@
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
 import { FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
@@ -79,8 +80,8 @@ function fmtDate(d) {
 }
 
 const subtlePanel = {
-  background: '#FAF8F3',
-  border: '1px solid #E7E2D7',
+  background: CUSTOMER_SURFACE.page,
+  border: `1px solid ${CUSTOMER_SURFACE.border}`,
   borderRadius: 8,
 };
 
@@ -107,7 +108,7 @@ function StatusPill({ tone = 'neutral', children }) {
     processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
     refunded: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
     partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
   };
   const t = tones[tone] || tones.neutral;
   const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
@@ -608,8 +609,8 @@ export default function ReceiptPage() {
                   color: 'var(--text-muted)',
                   fontWeight: 850,
                   textTransform: 'uppercase',
-                  background: '#FAF8F3',
-                  borderBottom: '1px solid #E7E2D7',
+                  background: CUSTOMER_SURFACE.page,
+                  borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                 }}>
                   <div>Description</div>
                   <div style={{ textAlign: 'right' }}>Qty</div>

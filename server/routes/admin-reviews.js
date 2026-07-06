@@ -655,7 +655,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
         if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
           return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
         }
-        // A previous send may have DEFERRED (quiet hours) or hit a transient
+        // A previous send may have hit a transient
         // failure, leaving a pending row scheduled for processScheduled() with no
         // sent timestamp. The cap counts only delivered asks, so a second click on
         // the 202 response would queue ANOTHER pending row and processScheduled
@@ -707,7 +707,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
         return { status: 202, payload: {
           success: false, deferred: true,
           nextAllowedAt: outcome.nextAllowedAt,
-          message: 'Outside the review-send window (quiet hours). Queued — it will send automatically when the window opens.',
+          message: 'Send deferred. Queued — it will send automatically on the next retry.',
         } };
       }
       if (outcome.blocked || outcome.terminal) {

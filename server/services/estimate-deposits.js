@@ -355,7 +355,7 @@ async function receivedDepositTotal(estimateId) {
 // never downgrade credited (or refunded/failed) back to received, which
 // would make the same money eligible for a second credit.
 async function markDepositReceived({ paymentIntentId, estimateId, amountDollars }) {
-  await db('estimate_deposits')
+  const inserted = await db('estimate_deposits')
     .insert({
       estimate_id: estimateId,
       amount: amountDollars,
@@ -365,14 +365,163 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
       updated_at: db.fn.now(),
     })
     .onConflict('stripe_payment_intent_id')
-    .ignore();
-  await db('estimate_deposits')
+    .ignore()
+    .returning('id');
+  const updated = await db('estimate_deposits')
     .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
     .update({
       status: 'received',
       received_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
+
+  // Exactly one caller wins the not-yet-received → received transition
+  // (webhook vs the accept flow's live verification) — that winner sends the
+  // single receipt text. Best-effort: a receipt failure must never fail
+  // deposit recording.
+  if ((Array.isArray(inserted) && inserted.length > 0) || updated > 0) {
+    await sendDepositReceiptSms({ estimateId, amountDollars }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
+    });
+  }
+}
+
+// One SMS per received deposit: "we got your $X — applied toward your first
+// visit." The deposit intent is customerless and carries no receipt_email
+// (the idempotency key pins the create params), so without this the
+// customer's only proof of payment is the on-screen success state.
+// Kill switch = the deposit_receipt template row itself.
+async function sendDepositReceiptSms({ estimateId, amountDollars }) {
+  const estimate = await db('estimates')
+    .where({ id: estimateId })
+    .first('id', 'customer_id', 'customer_phone', 'customer_name');
+  if (!estimate) return;
+
+  // For customer-linked estimates, text the CUSTOMER's verified phone — the
+  // estimate's stored phone can be stale or edited, and phone_matches_customer
+  // trust must only ride a number that actually comes from the customer row.
+  const customer = estimate.customer_id
+    ? await db('customers').where({ id: estimate.customer_id }).first('id', 'phone', 'first_name', 'city')
+    : null;
+  const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
+  if (!phone) return;
+
+  // Honor the customer's receipt CHANNEL choice — the messaging policy layer
+  // enforces the payment_receipt toggle but not payment_receipt_channel, so
+  // an email-only customer would still get texted here. Same sms/both check
+  // the no-show fee receipt uses (estimate-card-holds.sendNoShowFeeReceipt).
+  // No deposit receipt email exists yet (deferred behind the email stack),
+  // so email-only customers get no deposit receipt for now — deliberate.
+  if (estimate.customer_id) {
+    const prefs = await db('notification_prefs')
+      .where({ customer_id: estimate.customer_id })
+      .first('payment_receipt_channel')
+      .catch(() => null);
+    const channel = prefs?.payment_receipt_channel || 'sms';
+    if (channel !== 'sms' && channel !== 'both') {
+      logger.info(`[estimate-deposits] deposit receipt SMS skipped for estimate ${estimateId} — customer receipt channel is "${channel}"`);
+      return;
+    }
+  }
+
+  const { renderSmsTemplate } = require('./sms-template-renderer');
+  const firstName = String(customer?.first_name || '').trim()
+    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
+    || 'there';
+  const amount = Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '');
+  const body = await renderSmsTemplate('deposit_receipt', {
+    first_name: firstName,
+    amount,
+  }, {
+    workflow: 'deposit_receipt',
+    entity_type: 'estimate',
+    entity_id: estimateId,
+  });
+  if (!body) return; // template missing or toggled off — deliberate silence
+
+  const { sendCustomerMessage } = require('./messaging/send-customer-message');
+  // Lead-only estimates (no customer row yet) can't satisfy the
+  // payment_receipt policy (requires customerId + phone_matches_customer) —
+  // mirror the estimate-accept lead send instead: estimate-scoped purpose,
+  // token-verified trust (they paid through the tokened estimate page), and
+  // an explicit transactional consent basis.
+  const result = await sendCustomerMessage({
+    to: phone,
+    body,
+    channel: 'sms',
+    audience: estimate.customer_id ? 'customer' : 'lead',
+    purpose: estimate.customer_id ? 'payment_receipt' : 'estimate_followup',
+    customerId: estimate.customer_id || undefined,
+    estimateId,
+    identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'estimate_token_verified',
+    consentBasis: estimate.customer_id ? undefined : {
+      status: 'transactional_allowed',
+      source: 'estimate_deposit_payment',
+      capturedAt: new Date().toISOString(),
+    },
+    entryPoint: 'estimate_deposit_receipt',
+    metadata: { original_message_type: 'deposit_receipt' },
+  });
+  if (!result.sent) {
+    // Deposits are commonly paid in the evening — a quiet-hours hold (or a
+    // transient provider failure) must not eat the only payment receipt.
+    // Re-queue onto the scheduled-SMS rail; the cron replays it at
+    // nextAllowedAt under the same policy the immediate send enforced —
+    // payment_receipt for customer-linked rows, conversational + forwarded
+    // consent basis for lead rows (see purposeForScheduledMessageType).
+    // original_message_type keeps the deposit_receipt row as the kill
+    // switch. Mirrors the twilio-webhook AI-reply requeue.
+    // CONSENT_LOOKUP_FAILED is a transient DB blip during the consent
+    // lookup — retry-advised by contract but carries no retry metadata, so
+    // give it a default delay instead of dropping the only receipt.
+    const isRetryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
+    const retryAt = result.nextAllowedAt
+      ? new Date(result.nextAllowedAt)
+      : (result.code === 'CONSENT_LOOKUP_FAILED' ? new Date(Date.now() + 15 * 60 * 1000) : null);
+    if (isRetryable && retryAt) {
+      try {
+        // sms_log.from_phone is NOT NULL — resolve the same location number
+        // the immediate send would have used (twilio.js falls back to the
+        // bradenton line when no location can be derived). The cron forwards
+        // this as the sending number on replay.
+        const { resolveLocation } = require('../config/locations');
+        const TWILIO_NUMBERS = require('../config/twilio-numbers');
+        const locationId = customer?.city ? resolveLocation(customer.city).id : null;
+        const fromPhone = TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton');
+        await db('sms_log').insert({
+          customer_id: estimate.customer_id || null,
+          direction: 'outbound',
+          from_phone: fromPhone,
+          to_phone: phone,
+          message_body: body,
+          status: 'scheduled',
+          scheduled_for: retryAt,
+          message_type: 'deposit_receipt',
+          metadata: JSON.stringify({
+            entry_point: 'estimate_deposit_receipt_requeue',
+            original_failure_code: result.code || null,
+            estimate_id: estimateId,
+            // The customer can change their phone between the hold and
+            // nextAllowedAt — the cron re-reads customers.phone at send time
+            // so the phone_matches_customer trust it asserts stays true.
+            ...(estimate.customer_id ? { refresh_customer_phone: true } : {}),
+            ...(estimate.customer_id ? {} : {
+              consent_basis: {
+                status: 'transactional_allowed',
+                source: 'estimate_deposit_payment',
+                capturedAt: new Date().toISOString(),
+              },
+            }),
+          }),
+        });
+        logger.info(`[estimate-deposits] deposit receipt re-queued for estimate ${estimateId} (retry at ${retryAt.toISOString()})`);
+        return;
+      } catch (requeueErr) {
+        logger.error(`[estimate-deposits] deposit receipt re-queue failed for estimate ${estimateId}: ${requeueErr.message}`);
+      }
+    }
+    logger.warn(`[estimate-deposits] deposit receipt SMS blocked/failed for estimate ${estimateId}: ${result.code || result.reason || 'unknown'}`);
+  }
 }
 
 // A live-retrieved PaymentIntent counts only when Stripe says it succeeded

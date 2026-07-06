@@ -360,7 +360,7 @@ async function markEnRoute(serviceId, opts = {}) {
  *   'suppressed' deterministic local suppression (opt-out / SMS disabled / no
  *                SMS-capable contact). The arrival is HANDLED; keep the claim so
  *                a later same-job signal can't re-fire if the pref flips.
- *   'retry'      a retryable miss (provider error / quiet hours / missing
+ *   'retry'      a retryable miss (provider error / missing
  *                template, or sendTechArrived threw) — release the claim so a
  *                later arrival signal can try again.
  */

@@ -18,8 +18,14 @@ const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
 const CONTENT_REGISTRY_LIVE_LIMIT = 300;
 
-function purposeForScheduledMessageType(messageType) {
+function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}) {
   const type = String(messageType || '').toLowerCase();
+  // Deposit receipts requeued from a quiet-hours hold must replay under the
+  // same policy the immediate send enforced: payment_receipt (prefs-gated)
+  // for customer-linked rows; lead rows have no customerId so they replay
+  // under the transactional-grade conversational policy with the forwarded
+  // consent basis — payment_receipt would hard-require a customerId.
+  if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   if (type.includes('billing') || type.includes('payment') || type.includes('invoice')) return 'billing';
   if (type.includes('review')) return 'review_request';
   if (type.includes('referral')) return 'referral';
@@ -27,10 +33,47 @@ function purposeForScheduledMessageType(messageType) {
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
   // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
-  // own quiet-enforced purpose, not fall through to conversational — the
-  // quiet-hours re-check at dispatch is what keeps a re-queued row honest.
+  // own purpose, not fall through to conversational, so the policy re-check at
+  // dispatch keeps a re-queued row honest.
   if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
   return 'conversational';
+}
+
+// Rows queued with refresh_customer_phone (deposit-receipt retries) re-read
+// the customer's CURRENT phone at send time — the queued number was frozen at
+// hold time, and the phone_matches_customer trust the cron asserts for
+// customer rows must ride a number that still comes from the customer row,
+// not a snapshot the customer may have since changed. Returns null when the
+// refresh is required but the current phone can't be verified (lookup error
+// or the customer no longer has one) — falling back to the snapshot would
+// reintroduce exactly the staleness the flag exists to prevent, so the cron
+// retries the row instead of sending.
+async function resolveScheduledRecipient(msg, claimMeta) {
+  if (claimMeta?.refresh_customer_phone !== true || !msg.customer_id) return msg.to_phone;
+  try {
+    const freshCustomer = await db('customers').where({ id: msg.customer_id }).first('phone');
+    return String(freshCustomer?.phone || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// Deposit-receipt replays re-check payment_receipt_channel at send time —
+// the immediate send honors the channel choice, and a customer who switches
+// to email-only between the hold and scheduled_for must not be texted by the
+// retry. Fail-open to 'sms' on a lookup error, matching the immediate path's
+// default. Non-receipt rows and lead rows pass through untouched.
+async function scheduledDepositReceiptAllowed(msg) {
+  if (!msg.customer_id || String(msg.message_type || '').toLowerCase() !== 'deposit_receipt') return true;
+  try {
+    const prefs = await db('notification_prefs')
+      .where({ customer_id: msg.customer_id })
+      .first('payment_receipt_channel');
+    const channel = prefs?.payment_receipt_channel || 'sms';
+    return channel === 'sms' || channel === 'both';
+  } catch {
+    return true;
+  }
 }
 
 function scheduledSmsAttemptSql() {
@@ -1329,6 +1372,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Deliver queued new-recurring welcome texts. Booking paths
+  // enqueue the welcome (sms_sequences, ~1h delay) so it never lands
+  // back-to-back with the appointment confirmation; this tick sends the ones
+  // whose delay has elapsed. runExclusive: overlapping deploy instances
+  // would double-text the same queued row.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('new-recurring-welcome-queue', async () => {
+        const { processDueWelcomes } = require('./new-recurring-welcome-sms');
+        const result = await processDueWelcomes();
+        if (result.sent > 0 || result.errors > 0) {
+          logger.info(`New-recurring welcome queue: ${result.sent} sent, ${result.skipped} skipped, ${result.errors} errors`);
+        }
+      });
+    } catch (err) {
+      logger.error(`New-recurring welcome queue failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Storm watch. Probes the NWS hourly forecast at the
   // CUSTOMER coordinates of each tech's upcoming stops and nudges the
   // tech (tech_notifications, same channel as geofence prompts) when
@@ -1507,12 +1571,43 @@ function initScheduledJobs() {
           return raw || {};
         };
         try {
-          const purpose = purposeForScheduledMessageType(msg.message_type);
+          const purpose = purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          const toPhone = await resolveScheduledRecipient(msg, claimMeta);
+          if (!toPhone) {
+            // Refresh-required row whose current customer phone can't be
+            // verified right now — retry on the bounded attempt rail rather
+            // than sending to the frozen snapshot under customer trust.
+            const completedAt = new Date();
+            if ((Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'scheduled',
+                scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                updated_at: completedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('recipient_refresh_failed_at', ?::timestamptz)", [completedAt]),
+              });
+              logger.warn(`[scheduled-sms] Could not verify current customer phone for ${msg.id}; retrying (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
+            } else {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
+              logger.warn(`[scheduled-sms] Blocked scheduled SMS ${msg.id}: customer phone unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
+            }
+            continue;
+          }
+          if (!(await scheduledDepositReceiptAllowed(msg))) {
+            // The customer's explicit channel choice wins — this is a
+            // permanent skip, not a retry.
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'blocked',
+              updated_at: new Date(),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'receipt_channel_not_sms')"),
+            });
+            logger.info(`[scheduled-sms] Skipped deposit receipt ${msg.id} — customer receipt channel is no longer sms`);
+            continue;
+          }
           const smsResult = await sendCustomerMessage({
-            to: msg.to_phone,
+            to: toPhone,
             body: msg.message_body,
             channel: 'sms',
             audience: msg.customer_id ? 'customer' : 'lead',
@@ -1521,7 +1616,7 @@ function initScheduledJobs() {
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
-            // quiet-hours-held voicemail text-back persists transactional_allowed)
+            // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
             // NO_CONSENT_RECORD. Safe to forward blindly: the consent validator
             // only honors a consentBasis on transactional-grade policies for the
@@ -1592,29 +1687,26 @@ function initScheduledJobs() {
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
-          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
-            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-              status: 'scheduled',
-              scheduled_for: new Date(smsResult.nextAllowedAt),
-              updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quiet_hours_held_at', ?::timestamptz, 'quiet_hours_reason', ?)", [completedAt, smsResult.reason || null]),
-            });
-            logger.info(`[scheduled-sms] Held scheduled SMS ${msg.id} until ${smsResult.nextAllowedAt}`);
-          } else if (smsResult.retryable && smsResult.nextAllowedAt
+          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
-            // Transient provider failure (Twilio 429/5xx/timeout): re-queue
-            // like a quiet-hours hold so the next cron tick retries it,
+            // Transient provider failure (Twilio 429/5xx/timeout) or a DB
+            // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
+            // no retry metadata but is retry-advised by contract): re-queue
+            // so the next cron tick retries it,
             // instead of marking it permanently blocked and dropping it
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
             // parked decisions stay parked — we do NOT reopen them here.
+            const retryAt = smsResult.nextAllowedAt
+              ? new Date(smsResult.nextAllowedAt)
+              : new Date(Date.now() + 15 * 60 * 1000);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
-              scheduled_for: new Date(smsResult.nextAllowedAt),
+              scheduled_for: retryAt,
               updated_at: completedAt,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
             });
-            logger.warn(`[scheduled-sms] Provider failure on ${msg.id} (${smsResult.code}); retry at ${smsResult.nextAllowedAt} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
+            logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
@@ -1928,7 +2020,7 @@ function initScheduledJobs() {
   // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
-  // ~1h first-touch SMS responsive. Quiet hours + suppression are enforced in
+  // ~1h first-touch SMS responsive. Suppression is enforced in
   // the service + the messaging validator. Ships LIVE; kill switch is
   // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
   // =========================================================================
@@ -2157,36 +2249,9 @@ function initScheduledJobs() {
   // The former 2AM (customer-health-v2 → unread customers.health_score) and
   // 2:15AM (standalone v3) jobs were removed to end the three-writer collision.
 
-  // =========================================================================
-  // 28TH OF MONTH 10AM — Send billing reminders (for customers who opted in)
-  // =========================================================================
-  cron.schedule('0 10 28 * *', async () => {
-    logger.info('Running: billing reminder job');
-    try {
-      await runExclusive('billing-reminders-28th', async () => {
-      const customers = await db('customers')
-        .join('notification_prefs', 'customers.id', 'notification_prefs.customer_id')
-        .where({ 'customers.active': true, 'notification_prefs.billing_reminder': true })
-        .whereNull('customers.deleted_at')
-        .whereNotNull('customers.monthly_rate')
-        .select('customers.id', 'customers.monthly_rate', 'customers.first_name');
-
-      for (const cust of customers) {
-        const nextMonth = new Date();
-        nextMonth.setMonth(nextMonth.getMonth() + 1);
-        const chargeDate = `${nextMonth.toLocaleDateString('en-US', { month: 'long', timeZone: 'America/New_York' })} 1`;
-
-        try {
-          await TwilioService.sendBillingReminder(cust.id, cust.monthly_rate, chargeDate);
-        } catch (err) {
-          logger.error(`Billing reminder failed for ${cust.id}: ${err.message}`);
-        }
-      }
-      });
-    } catch (err) {
-      logger.error(`Billing reminder job failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // (Removed 2026-07-06) The 28th-of-month WaveGuard billing-reminder text is
+  // retired — autopay customers already get the pre-charge notice, and the
+  // extra monthly text was noise (owner call).
 
   // =========================================================================
   // EVERY 15 MIN — Process scheduled content (blog + social auto-publish).
@@ -3026,8 +3091,8 @@ function initScheduledJobs() {
   // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
-  // preview/dev env with live creds can't text/email real customers. Quiet
-  // hours, suppression, and per-customer prefs still apply at the send site.
+  // preview/dev env with live creds can't text/email real customers.
+  // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
   cron.schedule('*/30 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
@@ -3046,19 +3111,66 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:10AM — Agronomic Wiki refresh (stale pages + seasonal), weekly
-  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard.
+  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard,
+  // then the trusted wiki→KB sync chained after it (own weekly guard).
   // The former single Sunday-6AM fire time missed whole weeks whenever the
   // process wasn't up at that exact minute (update-log lint rows show 3 runs
   // in 3 months); a daily check self-heals after any missed fire.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
+    let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
       const result = await wiki.weeklyRefreshIfDue();
-      if (result.skipped) return;
-      logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      if (result?.error) refreshFailed = true;
+      else if (!result.skipped) {
+        logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      }
     } catch (err) {
+      refreshFailed = true;
       logger.error(`Agronomic wiki refresh failed: ${err.message}`);
+    }
+
+    // Trusted wiki→Knowledge Base sync, CHAINED strictly after the refresh
+    // (weekly cadence via syncToClaudeopediaIfDue's own guard; invoked daily
+    // so an error day self-heals tomorrow). A fixed-offset cron could fire
+    // mid-refresh and write its weekly marker before the freshly refreshed
+    // rows exist — missing them until the guard expires. A FAILED refresh
+    // skips the sync entirely: syncing now would stamp the weekly kb_sync
+    // marker, and tomorrow's successful refresh retry would find its fresh
+    // rows locked out of the KB by that marker. Refresh-skip days still
+    // sync (the refresh is done for the week; the sync self-heals its own
+    // misses). Only trusted pages (review_status auto/approved) cross —
+    // the exception-based review gate controls what feeds agents.
+    if (refreshFailed) {
+      logger.warn('Wiki→KB sync skipped: wiki refresh failed — both retry tomorrow');
+      return;
+    }
+    try {
+      const KnowledgeBridge = require('./knowledge-bridge');
+      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      if (!result.skipped) {
+        logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
+      }
+    } catch (err) {
+      logger.error(`Wiki→KB sync failed: ${err.message}`);
+    }
+
+    // Yellow-digest email to the owner, CHAINED as leg 3 for the same reason
+    // the sync is leg 2: a fixed-offset cron could fire mid-refresh, digest
+    // the pre-refresh queue, and stamp its weekly marker — suppressing a
+    // corrected digest for six days. Weekly cadence + the dark-ship gate live
+    // inside sendYellowDigestIfDue; the failed-refresh early-return above
+    // already keeps it off stale-state days. Runs even if the KB sync leg
+    // errored — the digest reports review state, which the sync doesn't change.
+    try {
+      const YellowDigest = require('./wiki-yellow-digest');
+      const result = await YellowDigest.sendYellowDigestIfDue();
+      if (result.sent) {
+        logger.info(`Wiki yellow digest sent: ${result.pendingCount} blocked, ${result.yellowCount} yellow`);
+      }
+    } catch (err) {
+      logger.error(`Wiki yellow digest failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3482,6 +3594,8 @@ module.exports = {
   initScheduledJobs,
   initBankingSync,
   purposeForScheduledMessageType,
+  resolveScheduledRecipient,
+  scheduledDepositReceiptAllowed,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

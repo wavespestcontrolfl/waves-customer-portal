@@ -154,10 +154,7 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 }
 
 function retryAtForDeferredSend(result) {
-  if (
-    !result ||
-    !(result.retryable || result.deferred || result.code === "QUIET_HOURS_HOLD")
-  ) {
+  if (!result || !(result.retryable || result.deferred)) {
     return null;
   }
   const nextAllowedAt = result.nextAllowedAt
@@ -832,6 +829,15 @@ const ReviewService = {
 
     await db("review_requests").where({ id: request.id }).update(updates);
 
+    // Referral invite on the warmest moment we have (owner trigger call
+    // 2026-07-06): a promoter-grade rating just came in. Fire-and-forget
+    // and once-per-customer-ever (the helper's idempotency key is
+    // customer-scoped), so repeat promoters aren't re-invited.
+    if (isPromoter && request.customer_id) {
+      const { sendReferralInviteEmail } = require('./referral-invite-email');
+      void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'positive_review' });
+    }
+
     // Also record in satisfaction_responses for backward compat
     try {
       const existing = await db("satisfaction_responses")
@@ -1316,7 +1322,7 @@ const ReviewService = {
     // chosen template defaults to the standard friendly ask (audit P1). Email
     // touches always render the review_request_email DB template, so we record
     // THAT for honest per-template attribution. An edited SMS body is persisted
-    // (custom_body) so a quiet-hours/provider retry re-sends the operator's copy
+    // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
@@ -1434,7 +1440,7 @@ const ReviewService = {
         `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
       );
       // Only a SENT result must avoid retry (would double-send). A not-sent
-      // result (quiet-hours hold / rate-limit / transient provider failure) has
+      // result (rate-limit / transient provider failure) has
       // NO duplicate-send risk, so keep it retryable — don't drop the manual
       // retry or stop the cadence over a bookkeeping blip.
       return result?.sent
@@ -1577,8 +1583,8 @@ const ReviewService = {
       return { started: false, reason: "cooldown" };
     }
 
-    // Supersede any already-queued ASK (post-service auto, or a quiet-hours
-    // deferral): otherwise processScheduled() would fire it AND the cadence's
+    // Supersede any already-queued ASK (post-service auto, or a deferred
+    // retry): otherwise processScheduled() would fire it AND the cadence's
     // Day-0 touch → a duplicate review request. Only ASKS are superseded — a
     // queued private no-link check-in (ASK_TOUCH_SQL excludes it) is left alone.
     // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and

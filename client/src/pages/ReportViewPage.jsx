@@ -26,6 +26,7 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -35,11 +36,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+// Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_BUTTON_BG = B.blueDeeper;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
@@ -2063,7 +2065,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
           <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700, marginBottom: 2 }}>
+            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
             <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>

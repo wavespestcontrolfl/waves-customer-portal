@@ -33,31 +33,12 @@ function shouldSendServiceReportV1Delivery(record) {
   return status === 'completed' || status === 'complete';
 }
 
-// Progress visits (typed trend types, visit 2+) get the short progress SMS
-// whose lead sentence is the snapshot's generated Today's Result headline —
-// immutable, versioned, banned-words-safe, and identical to the report it
-// links to. No headline (or visit 1) → not progress-eligible.
-function typedProgressContext(record) {
-  let serviceData = record?.service_data;
-  if (typeof serviceData === 'string') {
-    try {
-      serviceData = JSON.parse(serviceData);
-    } catch {
-      serviceData = null;
-    }
-  }
-  const snapshot = serviceData && typeof serviceData === 'object'
-    ? serviceData.typedReportSnapshot
-    : null;
-  if (!snapshot || typeof snapshot !== 'object') return { isProgress: false, headline: '' };
-  const headline = String(snapshot.todaysResult?.headline || '').trim();
-  const isProgress = Number(snapshot.visitSequence) > 1 && !!headline;
-  return { isProgress, headline };
-}
-
-function serviceReportV1SmsType({ hasInvoiceLink = false, isProgress = false } = {}) {
-  if (hasInvoiceLink) return 'service_report_v1_with_invoice';
-  return isProgress ? 'service_report_v1_progress' : 'service_report_v1';
+// The progress-headline SMS variant (service_report_v1_progress) was removed
+// 2026-07-06 (owner call): the completion text is a gateway to the service
+// report, and the report itself carries the Today's Result trend — a special
+// SMS lead-in was overkill. Every visit sends the base report text.
+function serviceReportV1SmsType({ hasInvoiceLink = false } = {}) {
+  return hasInvoiceLink ? 'service_report_v1_with_invoice' : 'service_report_v1';
 }
 
 function buildServiceReportV1Sms({
@@ -143,11 +124,9 @@ function buildServiceReportV1DeliveryContext({
 
   const config = getServiceLineConfig(record.service_line || service?.service_type);
   const hasInvoiceLink = !!String(payUrl || '').trim();
-  const progress = typedProgressContext(record);
-  const smsType = serviceReportV1SmsType({ hasInvoiceLink, isProgress: progress.isProgress });
+  const smsType = serviceReportV1SmsType({ hasInvoiceLink });
   // Frozen V2 synthesis line (write-gate) — keeps the text on-message with the report.
-  // Not used for progress SMS (those lead with the progress headline).
-  const summaryLine = smsType === 'service_report_v1_progress' ? null : (summaryLineParam || frozenSmsSummary(record));
+  const summaryLine = summaryLineParam || frozenSmsSummary(record);
   const vars = buildServiceReportV1SmsVars({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
@@ -156,9 +135,6 @@ function buildServiceReportV1DeliveryContext({
     payUrl,
   });
   if (summaryLine) vars.summary_line = summaryLine;
-  if (smsType === 'service_report_v1_progress') {
-    vars.progress_headline = progress.headline;
-  }
   const body = buildServiceReportV1Sms({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
@@ -233,5 +209,4 @@ module.exports = {
   foldLawnScoreIntoCompletionSms,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,
-  typedProgressContext,
 };

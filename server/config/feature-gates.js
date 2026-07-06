@@ -418,6 +418,18 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_GLASS.
   estimateGlassTheme: isProd ? process.env.GATE_ESTIMATE_GLASS === 'true' : true,
 
+  // Liquid-glass email chrome (glass rollout Phase 3) — switches every
+  // email wrapper in services/email-template.js (transactional, service,
+  // newsletter) from the warm sand chrome to the glass LAYOUT (orb
+  // scene, floating pill header, hero on scene, frosted cards).
+  // Explicit opt-in in EVERY environment (unlike estimateGlassTheme's
+  // dev-open default): glass is a different DOM, so a dev-open gate
+  // would make jest and local [TEST] sends render glass while prod
+  // renders classic — the suite must exercise what prod sends.
+  // Off = the pre-glass chrome, byte-for-byte. Kill switch: unset
+  // GATE_EMAIL_GLASS.
+  emailGlassTheme: process.env.GATE_EMAIL_GLASS === 'true',
+
   // Liquid-glass customer service-report experience — makes glass the DEFAULT
   // render for the React report viewer (live mode only: pdf/static/sms_preview
   // renders never mount the scene, so the print pipeline and cached artifacts
@@ -434,6 +446,14 @@ const gates = {
   // customer (?glass=0 stays as the per-link escape hatch).
   // Kill switch: unset GATE_PORTAL_GLASS.
   portalGlassTheme: isProd ? process.env.GATE_PORTAL_GLASS === 'true' : true,
+
+  // Waves AI schedule search on the wavespestcontrol.com /book page (astro
+  // island). Exposed to the marketing site via GET /api/booking/config as
+  // `ai_search`, so the island fails closed: the search bar only renders when
+  // the portal affirms the flag. The portal's own /book page and the estimate
+  // page are NOT behind this gate — their bars are already live.
+  // Kill switch: unset GATE_BOOK_AI_SEARCH.
+  bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
 
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
@@ -492,8 +512,8 @@ const gates = {
   // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
   // This lane NEVER auto-sends: the only send path is the operator's explicit
   // approve/revise click on /api/admin/drafts, which runs the full messaging
-  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs, quiet
-  // hours). With the gate OFF the generators only shadow-log candidate counts —
+  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs).
+  // With the gate OFF the generators only shadow-log candidate counts —
   // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
   // too) so campaign drafts never accumulate silently in a preview/dev queue.
   campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',

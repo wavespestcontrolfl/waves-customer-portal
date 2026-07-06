@@ -16,12 +16,13 @@
 // for ACH; anything else (or omitted) renders the card variant.
 
 import { getConsentText } from '../../lib/paymentMethodConsentText';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
 
 const CONSENT_STYLE = {
-  soft: '#FAF8F3',
-  border: '#E7E2D7',
-  text: '#1B2C5B',
-  muted: '#6B7280',
+  soft: CUSTOMER_SURFACE.page,
+  border: CUSTOMER_SURFACE.border,
+  text: CUSTOMER_SURFACE.text,
+  muted: CUSTOMER_SURFACE.muted,
 };
 
 export default function SaveCardConsent({

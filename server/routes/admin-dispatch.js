@@ -1914,10 +1914,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       // One-time card-on-file hold: a no-show triggers the flat fee against the
       // saved card (dark until ONE_TIME_CARD_HOLD; no-op when no hold exists).
-      // Best-effort — never fail the committed status flip.
+      // Best-effort — never fail the committed status flip. The outcome feeds
+      // the customer notice below so its charge line is truthful.
+      // 'none' | 'charged' | 'review' — charge_review means Stripe MAY have
+      // accepted the fee (ambiguous API error, parked for reconciliation), so
+      // the customer notice must not claim "no charge".
+      let noShowFeeOutcome = 'none';
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+        const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+        if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
+        else if (feeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
       } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
 
       // Notify the customer we missed them and invite a reschedule.
@@ -1927,6 +1934,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleNoShow(svc.id, {
           sendNotification: notifyCustomer !== false,
+          feeOutcome: noShowFeeOutcome,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
 
@@ -4896,11 +4904,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // or a resumed completion's persisted value) — the client no longer sends
         // customerRecap, so reading the request field would drop the recap here.
         const recapText = (recordStructuredNotes.customerRecap || customerRecap || '').trim();
-        const withRecap = (body, conciseBody) => {
-          const suffix = countSegments(`${conciseBody}${reviewSuffix}`).segmentCount <= 2 ? reviewSuffix : '';
-          const tail = countSegments(`${body}${suffix}`).segmentCount <= 2 ? body : conciseBody;
-          return composeCompletionSmsBody({ recapText, body: tail, suffix });
-        };
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
@@ -4963,6 +4966,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               entity_id: record.id,
             });
           }
+          // A toggled-off or removed variant must not cost the customer
+          // their completion text — fall back to the base report template
+          // before giving up (owner report 2026-07-06: the since-removed
+          // progress variant was inactive and progress visits would have
+          // texted nothing).
+          if (!body && sentSmsType !== 'service_report_v1') {
+            sentSmsType = 'service_report_v1';
+            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+              workflow: 'dispatch_service_complete',
+              entity_type: 'service_record',
+              entity_id: record.id,
+            });
+          }
           if (!body) throw new Error(`SMS template ${sentSmsType} is missing or inactive`);
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
@@ -5013,15 +5029,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               sentSmsBody = `${body}${reviewSuffix}`.trim();
               completionSmsWasTruncated = false;
             } else {
-              const concise = await renderRequiredTemplate('service_complete_concise', {
-                first_name: svc.first_name || '',
-                portal_url: reportUrl,
-              }, {
-                workflow: 'dispatch_service_complete',
-                entity_type: 'service_record',
-                entity_id: record.id,
-              });
-              ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
+              // The service_complete_concise overflow swap was removed
+              // 2026-07-06 (owner call) — a long completion text now sends at
+              // full length; composeCompletionSmsBody still trims only the
+              // recap line to keep the report link intact.
+              ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = composeCompletionSmsBody({
+                recapText,
+                body,
+                suffix: reviewSuffix,
+              }));
             }
           }
         }

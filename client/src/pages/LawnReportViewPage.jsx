@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
@@ -15,7 +16,7 @@ const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
 const TEXT = '#1B2C5B';
 const BODY = '#3F4A65';
-const MUTED = '#6B7280';
+const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
