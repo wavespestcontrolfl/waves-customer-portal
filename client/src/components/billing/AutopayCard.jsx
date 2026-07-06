@@ -46,6 +46,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { COLORS as B, FONTS } from '../../theme-brand';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
 import api from '../../utils/api';
 import { etDateString, addETDays } from '../../lib/timezone';
 import { getStripe } from '../../lib/stripeLoader';
@@ -59,17 +60,9 @@ import {
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 
-const PORTAL_BILLING = {
-  surface: '#FFFFFF',
-  page: '#FAF8F3',
-  border: '#E7E2D7',
-  borderStrong: '#D8D0C0',
-  soft: '#F8FCFE',
-  softBorder: '#CFE7F5',
-  text: '#1B2C5B',
-  body: '#3F4A65',
-  muted: '#475569',
-};
+// Local alias kept for the many call sites below; values come from the
+// shared customer palette (this used to be a hand-copied hex block).
+const PORTAL_BILLING = CUSTOMER_SURFACE;
 
 const AUTOPAY_CARD_STYLE = {
   background: PORTAL_BILLING.surface,

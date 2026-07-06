@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 import { isNativeApp } from '../native/platform';
@@ -105,7 +106,7 @@ export default function LoginPage() {
         '--login-blue': B.blueDeeper,
         '--login-brand': B.wavesBlue,
         '--login-text': '#3F4A65',
-        '--login-muted': '#6B7280',
+        '--login-muted': CUSTOMER_SURFACE.muted,
         '--login-border': '#E7E2D7',
         '--login-border-strong': '#D8D0C0',
         '--login-soft': '#F8FCFE',
@@ -667,7 +668,7 @@ export default function LoginPage() {
               border: '1px solid #E7E2D7',
               textAlign: 'center',
             }}>
-              <div style={{ fontSize: 12, fontWeight: 850, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 850, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
                 The Waves App
               </div>
               <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>

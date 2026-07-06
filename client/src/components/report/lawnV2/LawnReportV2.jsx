@@ -12,6 +12,7 @@
 
 import { useRef, useState, useEffect, createContext, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
+import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -19,10 +20,11 @@ export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (mirror LawnReportViewPage / public estimate surface) ──────
-const TEXT = '#1B2C5B';
-const BODY = '#3F4A65';
-const MUTED = '#6B7280';
-const BORDER = '#E7E2D7';
+const TEXT = CUSTOMER_SURFACE.text;
+const BODY = CUSTOMER_SURFACE.body;
+// muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
+const MUTED = CUSTOMER_SURFACE.muted;
+const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
