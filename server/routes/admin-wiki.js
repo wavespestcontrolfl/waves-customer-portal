@@ -148,7 +148,8 @@ router.post('/generate', async (req, res, next) => {
     } else {
       // Generic page generation
       const slug = `${category}/${subject.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-      page = await wiki.generatePage(slug, category, { outcomes: [] }, subject);
+      const result = await wiki.generatePage(slug, category, { outcomes: [] }, subject);
+      page = result?.entry || null;
     }
 
     if (!page) {

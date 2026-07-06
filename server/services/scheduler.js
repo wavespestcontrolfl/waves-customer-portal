@@ -3045,13 +3045,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY SUNDAY 6AM — Agronomic Wiki refresh (stale pages + seasonal)
+  // DAILY 6:10AM — Agronomic Wiki refresh (stale pages + seasonal), weekly
+  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard.
+  // The former single Sunday-6AM fire time missed whole weeks whenever the
+  // process wasn't up at that exact minute (update-log lint rows show 3 runs
+  // in 3 months); a daily check self-heals after any missed fire.
   // =========================================================================
-  cron.schedule('0 6 * * 0', async () => {
-    logger.info('Running: agronomic wiki weekly refresh');
+  cron.schedule('10 6 * * *', async () => {
     try {
       const wiki = require('./agronomic-wiki');
-      const result = await wiki.weeklyRefresh();
+      const result = await wiki.weeklyRefreshIfDue();
+      if (result.skipped) return;
       logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
     } catch (err) {
       logger.error(`Agronomic wiki refresh failed: ${err.message}`);
