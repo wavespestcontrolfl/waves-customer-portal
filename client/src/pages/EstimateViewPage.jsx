@@ -48,11 +48,13 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   glassCopyActive,
+  glassCtaMicroFor,
+  glassDayLinesFor,
   glassEstimateCopyFor,
+  glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
   GLASS_COPY,
-  GLASS_DAY_LINES,
 } from '../lib/estimate-glass-copy';
 import {
   GlassProofStrip,
@@ -107,7 +109,7 @@ function scrollToBookingSection() {
 
 // Primary booking CTA — same navy treatment as the add-service button;
 // jumps the customer straight to the scheduling section.
-function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null }) {
+function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, microText = null }) {
   const glass = glassCopyActive();
   // Slot-aware label (PR C): once a slot is picked the CTA names it, so the
   // action reads as confirming THAT visit rather than restarting the flow.
@@ -139,12 +141,13 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null }) {
         {label}
         {glass && slotMeta ? <Icon name="check" size={16} strokeWidth={2.6} /> : null}
       </button>
-      {/* Recurring-plan terms only (unlimited callbacks, 90-day guarantee) —
-          the one-time branch renders this CTA too and has different terms,
-          so the microcopy is opt-in per call site. */}
+      {/* Terms microcopy is opt-in per call site, and the line itself is
+          category-aware (glassCtaMicroFor): recurring plans carry the
+          contract/callback/guarantee terms, one-time projects carry the
+          license + satisfaction-guarantee line instead. */}
       {glass && showGuaranteeMicro ? (
         <div style={{ marginTop: 10, fontSize: 12.5, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
-          {GLASS_COPY.ctaMicro}
+          {microText || GLASS_COPY.ctaMicro}
         </div>
       ) : null}
     </div>
@@ -2267,10 +2270,14 @@ export function ServiceSection({
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
   const current = frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
   const copy = section.copy || {};
-  // Glass pest cards restate the per-day figure with a cadence-matched
-  // comparison tail; other services keep their server-provided wording.
-  const priceWording = glassCopyActive() && section.isPest
-    ? { ...copy.priceWording, dayLineByKey: GLASS_DAY_LINES }
+  // Glass cards restate the per-day figure with a value-anchor comparison
+  // tail (pest keeps its cadence-matched trio; other programs get their
+  // service-matched line). Sections without a glass line — and every
+  // section when glass is off — keep their server-provided wording.
+  const sectionSlug = section.isPest ? 'pest_control' : glassServiceSlug(section.key || section.label);
+  const glassDayLines = glassCopyActive() ? glassDayLinesFor(sectionSlug) : null;
+  const priceWording = glassDayLines
+    ? { ...copy.priceWording, dayLineByKey: glassDayLines }
     : copy.priceWording;
   const showSlider = frequencies.length > 1;
   const showAddOns = showAddOnsProp
@@ -2329,7 +2336,7 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro slotMeta={ctaSlotMeta} /> : null}
+        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro slotMeta={ctaSlotMeta} microText={glassCtaMicroFor(sectionSlug)} /> : null}
       </div>
 
       {afterPrice}
@@ -3017,19 +3024,20 @@ export default function EstimateViewPage() {
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
   const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
-  // Glass copy pack (?glass=1, PR B) — null unless the glass preview is
-  // active AND this is a pest estimate; every use below falls back to the
-  // standard copy. `glassContent` alone gates the service-agnostic swaps.
+  // Glass copy pack — null unless glass is active; every service category
+  // has a pack now (unknown categories fall back to the property-generic
+  // bundle pack), and every use below still falls back to the standard copy
+  // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
-  const glassPest = glassEstimateCopyFor(serviceCategory);
-  const headline = glassPest?.heroH1 || UNIVERSAL_HEADLINE;
+  const glassPack = glassEstimateCopyFor(serviceCategory);
+  const headline = glassPack?.heroH1 || UNIVERSAL_HEADLINE;
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  const intelligenceDisplay = glassPest && estimate.intelligence
-    ? { ...estimate.intelligence, title: glassPest.aiTitle, body: glassPest.aiBody }
+  const intelligenceDisplay = glassPack && estimate.intelligence
+    ? { ...estimate.intelligence, title: glassPack.aiTitle, body: glassPack.aiBody }
     : estimate.intelligence;
-  const askChips = glassPest?.askChips || pricing.askChips;
+  const askChips = glassPack?.askChips || pricing.askChips;
   const headerContactProps = {
     customerFirstName: estimate.customerFirstName,
     customerName: estimate.customerName,
@@ -3190,7 +3198,7 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroFor(serviceCategory)} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
@@ -3258,7 +3266,7 @@ export default function EstimateViewPage() {
             cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
           )}
           headline={headline}
-          eyebrowOverride={glassPest?.eyebrow || null}
+          eyebrowOverride={glassPack?.eyebrow || null}
         />
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
@@ -3299,7 +3307,7 @@ export default function EstimateViewPage() {
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
           headline={headline}
-          eyebrowOverride={glassPest?.eyebrow || null}
+          eyebrowOverride={glassPack?.eyebrow || null}
         />
         <SuccessCard acceptResult={acceptResult} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
@@ -3344,8 +3352,8 @@ export default function EstimateViewPage() {
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={headline}
-          eyebrowOverride={glassPest?.eyebrow || null}
-          subline={glassPest?.heroSub || null}
+          eyebrowOverride={glassPack?.eyebrow || null}
+          subline={glassPack?.heroSub || null}
         />
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
@@ -3364,10 +3372,10 @@ export default function EstimateViewPage() {
         {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
         headline={headline}
-        eyebrowOverride={glassPest?.eyebrow || null}
+        eyebrowOverride={glassPack?.eyebrow || null}
         // The booking-forward subline only belongs where booking is still on
         // the table — terminal and success states keep the plain hero.
-        subline={glassPest?.heroSub || null}
+        subline={glassPack?.heroSub || null}
       />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (

@@ -2,13 +2,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   glassCopyActive,
+  glassCtaMicroFor,
+  glassDayLinesFor,
   glassEstimateCopyFor,
   glassPestInclusions,
   glassRewriteSlotSummary,
+  glassRowInclusions,
   glassSchedQualifier,
   glassSchedTitle,
+  glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
+  GLASS_COPY,
+  GLASS_DAY_LINES,
 } from './estimate-glass-copy';
 
 const setSearch = (search) => {
@@ -44,13 +50,95 @@ describe('glassCopyActive', () => {
 });
 
 describe('glassEstimateCopyFor', () => {
-  it('returns the pest pack only for glass + pest_control', () => {
+  it('returns a pack for every service category under glass, none when glass is off', () => {
     setSearch('?glass=1');
-    expect(glassEstimateCopyFor('pest_control')).not.toBeNull();
-    // Other categories keep standard copy until their packs are approved.
-    expect(glassEstimateCopyFor('lawn_care')).toBeNull();
+    expect(glassEstimateCopyFor('pest_control').heroH1).toMatch(/pest-free home plan/);
+    expect(glassEstimateCopyFor('lawn_care').heroH1).toMatch(/lawn/i);
+    expect(glassEstimateCopyFor('mosquito').heroH1).toMatch(/mosquito/i);
+    expect(glassEstimateCopyFor('termite_bait').heroH1).toMatch(/termite/i);
+    expect(glassEstimateCopyFor('termite_trenching').heroH1).toMatch(/barrier/i);
+    expect(glassEstimateCopyFor('bundle').heroH1).toMatch(/complete home protection/i);
     setSearch('');
     expect(glassEstimateCopyFor('pest_control')).toBeNull();
+    expect(glassEstimateCopyFor('lawn_care')).toBeNull();
+  });
+
+  it('falls back to the property-generic bundle pack for unknown categories', () => {
+    setSearch('?glass=1');
+    expect(glassEstimateCopyFor('mystery_service')).toEqual(glassEstimateCopyFor('bundle'));
+  });
+
+  it('every pack carries the full field set the page consumes', () => {
+    setSearch('?glass=1');
+    const categories = [
+      'pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait',
+      'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
+      'bora_care', 'rodent', 'bundle',
+    ];
+    for (const category of categories) {
+      const pack = glassEstimateCopyFor(category);
+      expect(pack.heroH1, category).toContain('{first}');
+      expect(pack.heroSub, category).toBeTruthy();
+      expect(pack.eyebrow, category).toBeTruthy();
+      expect(pack.aiTitle, category).toBeTruthy();
+      expect(pack.aiBody, category).toBeTruthy();
+      expect(pack.askChips, category).toHaveLength(4);
+    }
+  });
+});
+
+describe('glassCtaMicroFor', () => {
+  it('keeps the recurring terms for recurring plans and swaps them for one-time projects', () => {
+    expect(glassCtaMicroFor('pest_control')).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroFor('lawn_care')).toBe(GLASS_COPY.ctaMicro);
+    // One-time projects must not advertise contract/callback terms.
+    expect(glassCtaMicroFor('termite_trenching')).toMatch(/FDACS JB351547/);
+    expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/long-term contract/);
+    expect(glassCtaMicroFor('bora_care')).toMatch(/Satisfaction guaranteed/);
+    // Row-slug spelling of rodent resolves to the rodent pack's line.
+    expect(glassCtaMicroFor('rodent_bait')).toBe(glassCtaMicroFor('rodent'));
+    expect(glassCtaMicroFor('rodent')).not.toMatch(/callbacks/);
+  });
+});
+
+describe('glassDayLinesFor', () => {
+  it('keeps the cadence-matched trio for pest and gives other programs a service-matched line', () => {
+    expect(glassDayLinesFor('pest_control')).toBe(GLASS_DAY_LINES);
+    const lawn = glassDayLinesFor('lawn_care');
+    expect(lawn.quarterly).toContain('{amount}');
+    expect(lawn.monthly).toBe(lawn.quarterly);
+    expect(glassDayLinesFor('termite_bait').monthly).toMatch(/termite/i);
+    // Unknown sections keep the server-provided wording.
+    expect(glassDayLinesFor('wdo_inspection')).toBeNull();
+  });
+});
+
+describe('glassRowInclusions', () => {
+  it('routes pest rows through the visit-count-aware pest stack', () => {
+    expect(glassRowInclusions('pest_control', 6)[1]).toMatch(/^Protected 6× a year/);
+    expect(glassRowInclusions('pest_control', 4, true)).toHaveLength(7);
+  });
+
+  it('returns the glass rewrite for known service rows and null for unknown ones', () => {
+    expect(glassRowInclusions('lawn_care').some((b) => /money-back/.test(b))).toBe(true);
+    expect(glassRowInclusions('mosquito').length).toBeGreaterThanOrEqual(3);
+    expect(glassRowInclusions('palm_injection').length).toBeGreaterThanOrEqual(3);
+    // Fail-safe: no glass list means the caller keeps the baseline list.
+    expect(glassRowInclusions('unknown_row')).toBeNull();
+  });
+});
+
+describe('glassServiceSlug', () => {
+  it('mirrors PriceCard serviceKey precedence', () => {
+    expect(glassServiceSlug('lawn_care')).toBe('lawn_care');
+    expect(glassServiceSlug('Mosquito Control')).toBe('mosquito');
+    expect(glassServiceSlug('Tree & Shrub')).toBe('tree_shrub');
+    expect(glassServiceSlug('foam_recurring')).toBe('foam_recurring');
+    expect(glassServiceSlug('termite_bait')).toBe('termite_bait');
+    expect(glassServiceSlug('Palm Injection')).toBe('palm_injection');
+    expect(glassServiceSlug('Rodent Bait Stations')).toBe('rodent_bait');
+    expect(glassServiceSlug('pest_control')).toBe('pest_control');
+    expect(glassServiceSlug('')).toBe('pest_control');
   });
 });
 

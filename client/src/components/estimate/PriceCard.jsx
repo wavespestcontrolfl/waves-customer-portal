@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { glassCopyActive, glassPestInclusions, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { glassCopyActive, glassRowInclusions, glassTierDisplay } from '../../lib/estimate-glass-copy';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
@@ -375,10 +375,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                 {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
               <RowInclusions
-                items={glass && serviceKey(row) === 'pest_control'
-                  ? glassPestInclusions(row.visitsPerYear, glassSetupBullet)
-                  : serviceInclusions(row)}
-                collapsible={glass && serviceKey(row) === 'pest_control'}
+                items={(glass && glassRowInclusions(serviceKey(row), row.visitsPerYear, glassSetupBullet))
+                  || serviceInclusions(row)}
+                collapsible={glass}
               />
             </div>
           ))}
