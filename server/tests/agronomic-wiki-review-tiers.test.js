@@ -113,7 +113,7 @@ describe('classifyReviewTier', () => {
   });
 
   test('compliance signals force red at any confidence', () => {
-    for (const phrase of ['the June blackout window', 'per county ordinance', 'REI is 12 hours', 'do not apply to bahia', 'phytotoxicity risk']) {
+    for (const phrase of ['the June blackout window', 'per county ordinance', 'REI is 12 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
       const { tier, flags } = classifyReviewTier({ confidence: 'very_high', content: phrase });
       expect(tier).toBe('red');
       expect(flags).toContain('compliance_content');
@@ -221,7 +221,7 @@ describe('KB-copy trust propagation', () => {
     await wiki.reviewPage('product/talstar-p', { action: 'block', reviewedBy: 'admin' });
 
     expect(state.updates.knowledge_base).toEqual([
-      expect.objectContaining({ status: 'flagged' }),
+      expect.objectContaining({ status: 'flagged', active: false }),
     ]);
     const kbCall = state.calls.knowledge_base[0];
     const whereObj = kbCall.ops.find(([m, a]) => m === 'where' && typeof a[0] === 'object')[1][0];
@@ -235,7 +235,7 @@ describe('KB-copy trust propagation', () => {
     await wiki.reviewPage('product/talstar-p', { action: 'approve', reviewedBy: 'admin' });
 
     expect(state.updates.knowledge_base).toEqual([
-      expect.objectContaining({ status: 'active' }),
+      expect.objectContaining({ status: 'active', active: true }),
     ]);
   });
 
@@ -283,6 +283,36 @@ describe('KB-copy trust propagation', () => {
     expect(row.review_tier).toBe('red');
     expect(row.review_status).toBe('pending_review');
     expect(JSON.parse(row.risk_flags)).toContain('generation_stub');
+  });
+});
+
+describe('post-merge contradiction recheck', () => {
+  test('a contradiction inherited from a merged variant re-gates the canonical page', async () => {
+    const CANON_SLUG = 'product/lesco-high-manganese-combo';
+    const state = useDb({
+      products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
+      product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
+      treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] })),
+      knowledge_entries: (rec) => {
+        const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
+        return [];
+      },
+      // the canonical page is NEW (no pre-merge contradiction lookup runs);
+      // the variant's contradiction is discovered by the post-merge recheck
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_bridge: [],
+      knowledge_base: [],
+    });
+
+    const entry = await wiki.updateProductPage('LESCO HMC Variant');
+
+    // 25 pts + clean content → initially high/green, but the inherited
+    // contradiction must re-gate it after the merge
+    expect(entry.review_status).toBe('pending_review');
+    const regate = (state.updates.knowledge_entries || []).find((u) => u.review_status === 'pending_review');
+    expect(regate).toBeTruthy();
+    expect(JSON.parse(regate.risk_flags)).toContain('open_contradiction');
   });
 });
 

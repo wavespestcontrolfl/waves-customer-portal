@@ -20,7 +20,7 @@ const COMPLIANCE_PATTERNS = [
   /\bordinance\b/i,
   /\bREI\b/,
   /re-entry interval/i,
-  /\bdo not apply\b/i,
+  /\bdo[- ]not[- ]apply\b/i,
   /phytotox/i,
   /restricted[- ]use\b/i,
 ];
@@ -70,6 +70,22 @@ exports.up = async function up(knex) {
       review_status: tier === 'red' ? 'pending_review' : 'auto',
       risk_flags: JSON.stringify(flags),
     });
+  }
+
+  // Existing wiki-sync KB mirrors of now-untrusted pages must be gated from
+  // the same deploy — status for bridge/search readers AND the `active`
+  // boolean that wiki-qa filters on.
+  if (
+    (await knex.schema.hasTable('knowledge_base')) &&
+    (await knex.schema.hasColumn('knowledge_base', 'wiki_entry_id'))
+  ) {
+    await knex('knowledge_base')
+      .where({ source: 'wiki-sync' })
+      .whereIn(
+        'wiki_entry_id',
+        knex('knowledge_entries').select('id').whereNotIn('review_status', ['auto', 'approved']),
+      )
+      .update({ status: 'flagged', active: false, updated_at: knex.fn.now() });
   }
 };
 

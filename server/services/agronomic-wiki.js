@@ -109,7 +109,7 @@ const COMPLIANCE_PATTERNS = [
   /\bordinance\b/i,
   /\bREI\b/,
   /re-entry interval/i,
-  /\bdo not apply\b/i,
+  /\bdo[- ]not[- ]apply\b/i,
   /phytotox/i,
   /restricted[- ]use\b/i,
 ];
@@ -193,9 +193,11 @@ async function hasOpenContradictionFor(entryId) {
 async function syncKbCopyTrust(entryId, trusted) {
   if (!entryId) return;
   try {
+    // Both gates: `status` (bridge/search readers) AND the `active` boolean
+    // (wiki-qa query/search/list/lookup filter on active alone).
     await db('knowledge_base')
       .where({ wiki_entry_id: entryId, source: 'wiki-sync' })
-      .update({ status: trusted ? 'active' : 'flagged', updated_at: new Date() });
+      .update({ status: trusted ? 'active' : 'flagged', active: trusted, updated_at: new Date() });
   } catch { /* knowledge_base may not exist */ }
 }
 
@@ -480,6 +482,30 @@ const AgronomicWiki = {
         && entry && !entry.content?.includes('*Pending AI generation');
       if (mergeSafe) {
         await mergeVariantProductPages(entry, variants, slug);
+
+        // The merge re-points variant contradictions onto the canonical page —
+        // a page stamped trusted moments ago may have inherited an open
+        // contradiction. Re-resolve so the gate reflects the post-merge state.
+        const inheritedContradiction = await hasOpenContradictionFor(entry.id);
+        if (inheritedContradiction) {
+          const review = resolveReviewFields(entry, {
+            confidence: entry.confidence,
+            content: entry.content,
+            hasOpenContradiction: true,
+          });
+          if (review.reviewStatus !== entry.review_status || review.tier !== entry.review_tier) {
+            await db('knowledge_entries')
+              .where({ id: entry.id })
+              .update({
+                review_tier: review.tier,
+                review_status: review.reviewStatus,
+                risk_flags: JSON.stringify(review.flags),
+                updated_at: new Date(),
+              });
+            await syncKbCopyTrust(entry.id, TRUSTED_STATUSES.includes(review.reviewStatus));
+            Object.assign(entry, { review_tier: review.tier, review_status: review.reviewStatus, risk_flags: review.flags });
+          }
+        }
       }
 
       return entry;

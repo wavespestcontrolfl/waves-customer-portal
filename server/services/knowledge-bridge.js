@@ -223,11 +223,12 @@ const KnowledgeBridge = {
       })
       .where({ status: 'active' });
     if (options.trustedOnly) {
-      // Wiki-sync copies inherit the wiki's review gate on agent-facing reads
-      claudeopediaQuery = claudeopediaQuery.where(function trustedWikiCopies() {
-        this.whereNull('wiki_entry_id').orWhereIn(
+      // Wiki-sync MIRRORS inherit the wiki's review gate on agent-facing
+      // reads; merely-linked curated articles stay visible.
+      claudeopediaQuery = claudeopediaQuery.whereNot(function untrustedWikiMirror() {
+        this.where('source', 'wiki-sync').whereIn(
           'wiki_entry_id',
-          db('knowledge_entries').select('id').whereIn('review_status', TRUSTED_STATUSES),
+          db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
         );
       });
     }
@@ -385,11 +386,12 @@ const KnowledgeBridge = {
       const protocolEntries = await db('knowledge_base')
         .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
         .where({ status: 'active' })
-        // Wiki-sync copies inherit the wiki's review gate (customer-visible recs)
-        .where(function trustedWikiCopies() {
-          this.whereNull('wiki_entry_id').orWhereIn(
+        // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
+        // recs); merely-linked curated articles stay visible.
+        .whereNot(function untrustedWikiMirror() {
+          this.where('source', 'wiki-sync').whereIn(
             'wiki_entry_id',
-            db('knowledge_entries').select('id').whereIn('review_status', TRUSTED_STATUSES),
+            db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
           );
         })
         .where(function () {

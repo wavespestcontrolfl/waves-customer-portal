@@ -385,13 +385,15 @@ async function searchKnowledgeBase(db, terms) {
       .where(function activeKnowledge() {
         this.where({ active: true }).orWhereNull('active');
       })
-      // Wiki-sync copies inherit the wiki's review gate: a KB row that
+      // Wiki-sync MIRRORS inherit the wiki's review gate: a KB row that
       // mirrors an untrusted (red/blocked) wiki page must not reach the
       // customer-facing estimate context through this branch either.
-      .where(function trustedWikiCopies() {
-        this.whereNull('wiki_entry_id').orWhereIn(
+      // Curated articles that are merely LINKED to a wiki page (createLink
+      // also sets wiki_entry_id) are not mirrors and stay visible.
+      .whereNot(function untrustedWikiMirror() {
+        this.where('source', 'wiki-sync').whereIn(
           'wiki_entry_id',
-          db('knowledge_entries').select('id').whereIn('review_status', require('./agronomic-wiki').TRUSTED_STATUSES),
+          db('knowledge_entries').select('id').whereNotIn('review_status', require('./agronomic-wiki').TRUSTED_STATUSES),
         );
       })
       .where(function relevantKnowledge() {
