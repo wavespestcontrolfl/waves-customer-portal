@@ -395,11 +395,21 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
   const estimate = await db('estimates')
     .where({ id: estimateId })
     .first('id', 'customer_id', 'customer_phone', 'customer_name');
-  const phone = String(estimate?.customer_phone || '').trim();
+  if (!estimate) return;
+
+  // For customer-linked estimates, text the CUSTOMER's verified phone — the
+  // estimate's stored phone can be stale or edited, and phone_matches_customer
+  // trust must only ride a number that actually comes from the customer row.
+  const customer = estimate.customer_id
+    ? await db('customers').where({ id: estimate.customer_id }).first('id', 'phone', 'first_name')
+    : null;
+  const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
   if (!phone) return;
 
   const { renderSmsTemplate } = require('./sms-template-renderer');
-  const firstName = String(estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = String(customer?.first_name || '').trim()
+    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
+    || 'there';
   const amount = Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '');
   const body = await renderSmsTemplate('deposit_receipt', {
     first_name: firstName,
@@ -435,6 +445,41 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
     metadata: { original_message_type: 'deposit_receipt' },
   });
   if (!result.sent) {
+    // Deposits are commonly paid in the evening — a quiet-hours hold (or a
+    // transient provider failure) must not eat the only payment receipt.
+    // Re-queue onto the scheduled-SMS rail; the cron replays it at
+    // nextAllowedAt under purpose 'conversational' with the same consent
+    // basis, and original_message_type keeps the deposit_receipt row as the
+    // kill switch. Mirrors the twilio-webhook AI-reply requeue.
+    if (result.retryable && result.nextAllowedAt) {
+      try {
+        await db('sms_log').insert({
+          customer_id: estimate.customer_id || null,
+          direction: 'outbound',
+          to_phone: phone,
+          message_body: body,
+          status: 'scheduled',
+          scheduled_for: new Date(result.nextAllowedAt),
+          message_type: 'deposit_receipt',
+          metadata: JSON.stringify({
+            entry_point: 'estimate_deposit_receipt_requeue',
+            original_failure_code: result.code || null,
+            estimate_id: estimateId,
+            ...(estimate.customer_id ? {} : {
+              consent_basis: {
+                status: 'transactional_allowed',
+                source: 'estimate_deposit_payment',
+                capturedAt: new Date().toISOString(),
+              },
+            }),
+          }),
+        });
+        logger.info(`[estimate-deposits] deposit receipt re-queued for estimate ${estimateId} (retry at ${result.nextAllowedAt})`);
+        return;
+      } catch (requeueErr) {
+        logger.error(`[estimate-deposits] deposit receipt re-queue failed for estimate ${estimateId}: ${requeueErr.message}`);
+      }
+    }
     logger.warn(`[estimate-deposits] deposit receipt SMS blocked/failed for estimate ${estimateId}: ${result.code || result.reason || 'unknown'}`);
   }
 }

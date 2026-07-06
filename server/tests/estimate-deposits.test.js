@@ -584,7 +584,7 @@ describe('webhook + invoice credit', () => {
   // and writes the SAME row across several queries, so the mock must carry
   // state. Conditional updates (status / whereIn) only land when the live
   // row matches — mirroring knex affected-row semantics.
-  function statefulWebhookDb({ estimateRow, initialDepositRow = null, onEstimateRead = null }) {
+  function statefulWebhookDb({ estimateRow, customerRow = null, initialDepositRow = null, onEstimateRead = null }) {
     const state = {
       row: initialDepositRow ? { credited_amount: 0, refunded_amount: 0, ...initialDepositRow } : null,
       inserts: [],
@@ -593,6 +593,12 @@ describe('webhook + invoice credit', () => {
     const handler = (table) => {
       if (table === 'estimates') {
         return { where: () => ({ first: async () => { if (onEstimateRead) onEstimateRead(state); return estimateRow; } }) };
+      }
+      if (table === 'customers') {
+        return { where: () => ({ first: async () => customerRow } ) };
+      }
+      if (table === 'sms_log') {
+        return { insert: async (row) => { state.smsLogInserts = (state.smsLogInserts || []).concat(row); return [row]; } };
       }
       if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
       const q = { criteria: {}, inStatuses: null };
@@ -663,7 +669,10 @@ describe('webhook + invoice credit', () => {
     renderSmsTemplate.mockResolvedValue('Deposit received — applied toward your first visit.');
     mockIsEstimateAcceptActive.mockReturnValue(true);
     const { handler } = statefulWebhookDb({
-      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0100', customer_name: 'Sam Customer' },
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      // The receipt must go to the CUSTOMER's verified phone, not the
+      // estimate's stored one.
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam' },
     });
     mockDbHandler = handler;
 
@@ -673,6 +682,11 @@ describe('webhook + invoice credit', () => {
       amount: '70',
     }), expect.any(Object));
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '(941) 555-0100',
+      purpose: 'payment_receipt',
+      identityTrustLevel: 'phone_matches_customer',
+    }));
 
     // Webhook replay — the row is already received; no second text.
     await handleDepositIntentSucceeded(succeededPi);

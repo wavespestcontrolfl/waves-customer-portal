@@ -298,7 +298,7 @@ class AppointmentTagger {
 
       const executor = require('./email-template-automation-executor');
       const portalVisitsUrl = portalUrl('/?tab=visits');
-      await executor.processTrigger({
+      const trigger = await executor.processTrigger({
         triggerEventKey: 'appointment.booked',
         triggerEventId: `appointment_booked:${service.id}`,
         automationKey,
@@ -320,7 +320,13 @@ class AppointmentTagger {
         },
         executeImmediately: false,
       });
-      return true;
+      // "Queued" means a NEW run was created and not condition-skipped —
+      // an inactive automation (zero results), an idempotency dedupe
+      // (re-run of the same appointment), or a skipped run means no guide
+      // email is coming, so the SMS that references it must not send.
+      return (trigger?.results || []).some(
+        (r) => !r.deduped && String(r.run?.status || '') !== 'skipped',
+      );
     } catch (err) {
       logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
       return false;

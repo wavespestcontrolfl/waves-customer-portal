@@ -20,7 +20,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
 jest.mock('../services/email-template-automation-executor', () => ({
-  processTrigger: jest.fn(async () => ({ automation_count: 1, results: [] })),
+  processTrigger: jest.fn(async () => ({
+    automation_count: 1,
+    results: [{ automation_key: 'prep', run: { id: 'run-1', status: 'queued' }, deduped: false }],
+  })),
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -137,6 +140,28 @@ describe('appointment tagger prep email automation', () => {
       { first_name: 'Taylor' },
       { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
     );
+  });
+
+  test('no prep SMS when the guide email run was deduped or skipped (re-run safety)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    executor.processTrigger.mockResolvedValueOnce({
+      automation_count: 1,
+      results: [{ automation_key: 'prep.cockroach', run: { id: 'run-1', status: 'queued' }, deduped: true }],
+    });
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('no prep SMS when the automation is inactive (zero results)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    executor.processTrigger.mockResolvedValueOnce({ automation_count: 0, results: [] });
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 
   test('skips prep entirely when the customer already had a same-family booking', async () => {
