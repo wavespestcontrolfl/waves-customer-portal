@@ -34,6 +34,15 @@ const REMOVED_TEMPLATE_KEYS = [
   // Completion-text overflow swap retired — long completion texts now send
   // at full length (recap-only trimming keeps the report link intact).
   'service_complete_concise',
+  // Progress-headline report variant retired — the SMS is a gateway to the
+  // report; the report itself carries the trend. Every visit sends the base
+  // service_report_v1 text.
+  'service_report_v1_progress',
+  // Never wired to a live sender (sendRescheduleRequest had no callers, zero
+  // prod sends); the rain-out engine owns weather moves with its own text.
+  'reschedule_options_weather',
+  'reschedule_options_access',
+  'reschedule_options_general',
 ];
 
 const REACTIVATED_TEMPLATE_KEYS = [

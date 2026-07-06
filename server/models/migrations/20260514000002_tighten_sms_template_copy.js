@@ -691,30 +691,8 @@ const TEMPLATES = [
     variables: ['first_name'],
     sort_order: 13,
   },
-  {
-    template_key: 'reschedule_options_weather',
-    name: 'Reschedule Options - Weather (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Weather means your {service_type} on {original_date} needs to move.\n\nOptions:\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2, or suggest another day.',
-    variables: ['first_name', 'service_type', 'original_date', 'option_1', 'option_2'],
-    sort_order: 14,
-  },
-  {
-    template_key: 'reschedule_options_access',
-    name: 'Reschedule Options - Access Issue (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! We stopped by for your {service_type}, but {access_issue}. We can come back:\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2.',
-    variables: ['first_name', 'service_type', 'access_issue', 'option_1', 'option_2'],
-    sort_order: 15,
-  },
-  {
-    template_key: 'reschedule_options_general',
-    name: 'Reschedule Options - General (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Your {service_type} on {original_date} needs to be rescheduled.{reason_text}\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2.',
-    variables: ['first_name', 'service_type', 'original_date', 'reason_text', 'option_1', 'option_2'],
-    sort_order: 16,
-  },
+  // reschedule_options_* removed by 20260706000010_sms_template_cleanup.js —
+  // their sender was never wired; the rain-out engine owns weather moves.
   {
     template_key: 'self_booking_confirmation',
     name: 'Self-Booking Confirmation (hardcoded)',

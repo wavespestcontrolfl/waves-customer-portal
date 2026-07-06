@@ -13,6 +13,10 @@ const EXPECTED_REMOVED = [
   'seasonal_alert',
   'estimate_auto_renewed',
   'service_complete_concise',
+  'service_report_v1_progress',
+  'reschedule_options_weather',
+  'reschedule_options_access',
+  'reschedule_options_general',
 ];
 
 const EXPECTED_REACTIVATED = [
