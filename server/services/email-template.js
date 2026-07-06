@@ -57,6 +57,7 @@ const CLASSIC_THEME = {
   ctaBorder: '#1B2C5B',
   ctaText: '#FFFFFF',
   ctaRadius: '10px',
+  ctaWeight: '800', // same value ctaButton hardcoded — byte-identical gate-off
   ctaShadow: '',
   // DB-template block palette (email-template-library.js renderBlocks).
   // Classic keeps the original slate set verbatim — byte-identical gate-off.
@@ -126,7 +127,10 @@ const GLASS_THEME = {
   // Glass keeps CTA text on the legacy navy deliberately — matches
   // [data-glass-accent] in glass-theme.css, which pins #1B2C5B.
   ctaText: '#1B2C5B',
-  ctaRadius: '12px',
+  // Match the live report action bar ([data-glass-accent]): 10px radius,
+  // ~48px full-width bars — with bolder labels per owner call 07-06.
+  ctaRadius: '10px',
+  ctaWeight: '900',
   // Mirrors [data-glass-accent]: warm float + gold glow + inset shine.
   ctaShadow: '0 12px 32px rgba(180,110,0,0.28),0 0 36px rgba(240,165,0,0.46),inset 0 1px 0 rgba(255,255,255,0.65)',
   // Under glass the block palette converges on the chrome palette — the
@@ -142,7 +146,7 @@ const GLASS_THEME = {
     calloutBorder: '#F4B014',
     calloutBg: '#FFF8E4',
     calloutText: '#04395E',
-    footerLink: '#0A7EC2',
+    footerLink: '#04395E', // value-navy like detail rows (owner call 07-06)
   },
   // Newsletter bodies converge on the same glass tokens: navy ink,
   // accent blue, accent gold, cool card tints and rules.
@@ -202,11 +206,15 @@ function formatDate(d) {
 
 function ctaButton(href, label) {
   const T = activeTheme();
+  // Glass buttons mirror the lawn service report's action bar (owner call
+  // 2026-07-06): full-width gold bars with centered labels, stacked.
+  // Classic keeps the original auto-width pill — byte-identical gate-off.
+  const block = Boolean(T.cardGlassBg);
   return `
-    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;${block ? 'width:100%;' : ''}">
       <tr>
-        <td style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
-          <a href="${href}" style="display:inline-block;padding:14px 24px;font-family:${T.font};font-size:15px;font-weight:800;color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;">
+        <td ${block ? 'align="center" ' : ''}style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
+          <a href="${href}" style="display:${block ? 'block' : 'inline-block'};padding:14px 24px;font-family:${T.font};font-size:15px;font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
             ${label}
           </a>
         </td>
@@ -256,6 +264,10 @@ function appFooterHtml(T) {
  */
 function ctaChip(href, label) {
   const T = activeTheme();
+  // Owner call 2026-07-06: under glass ALL buttons render like the lawn
+  // report's action bar (identical gold bars); the quiet chip remains
+  // the classic-theme secondary treatment.
+  if (T.cardGlassBg) return ctaButton(href, label);
   return `
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
       <tr>
@@ -359,7 +371,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         </td></tr>` : ''}
         <tr><td align="center" style="padding:28px 4px 0 4px;">
           <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.ink};font-weight:700;text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
           </div>
         </td></tr>
         <tr><td align="center" style="padding:20px 4px 0 4px;">
@@ -379,7 +391,7 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
         </td></tr>
         <tr><td align="center" style="padding:24px 4px 0 4px;">
           <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.ink};font-weight:700;text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
           </div>
         </td></tr>
         <tr><td align="center" style="padding:18px 4px 0 4px;">

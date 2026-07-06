@@ -285,6 +285,9 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     : {
       service_type: clean(serviceLabel) || 'service',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      // The details card lists Date above Scheduled start (owner call
+      // 2026-07-06 — if we show the start time, show the date too).
+      appointment_date: apptTime ? formatETDate(apptTime) : '',
       // Composed clause for the 24h opening sentence (migration
       // 20260705010020): "…scheduled for tomorrow{{appointment_when}}."
       // Composed HERE so fallback sends with no reconstructable

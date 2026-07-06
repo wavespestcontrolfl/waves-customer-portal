@@ -338,7 +338,11 @@ function renderBlocks(blocks, payload) {
       textParts.push('---');
     } else if (block.type === 'signature') {
       const content = renderInline(block.content || 'The Waves Pest Control team', payload);
-      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};">${content}</p>`);
+      // white-space:pre-line lets authored signatures split onto two lines
+      // ("We look forward to servicing your home.\n— The Waves Team")
+      // without HTML in block content; single-line signatures render
+      // exactly as before.
+      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};white-space:pre-line;">${content}</p>`);
       textParts.push(renderInline(block.content || 'The Waves Pest Control team', payload, { html: false }));
     } else {
       const content = renderInline(block.content, payload);
