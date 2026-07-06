@@ -6,6 +6,7 @@ const {
   wrapNewsletter,
   ensureLegalTextFooter,
   ctaButton,
+  ctaChip,
   blockPalette,
   stripeFooterLine,
 } = require('./email-template');
@@ -259,6 +260,11 @@ function renderBlocks(blocks, payload) {
   const htmlParts = [];
   const textParts = [];
   const B = blockPalette();
+  // Only the FIRST rendered CTA gets the primary button; later CTA
+  // blocks render as quiet chips (owner ask 2026-07-05 — templates like
+  // appointment.confirmation carry reschedule + view, and two stacked
+  // primary buttons read as competing asks).
+  let renderedCtaCount = 0;
 
   for (const block of normalizeBlocks(blocks)) {
     if (block.type === 'heading') {
@@ -298,7 +304,9 @@ function renderBlocks(blocks, payload) {
       const href = block.url_variable ? textFor(payload, block.url_variable) : block.url;
       if (href) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
-        htmlParts.push(`<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(href), escapeHtml(label))}</div>`);
+        const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
+        renderedCtaCount += 1;
+        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0' : '12px 0 24px 0'};text-align:center;">${render(escapeHtml(href), escapeHtml(label))}</div>`);
         textParts.push(`${label}: ${href}`);
       }
     } else if (block.type === 'image') {

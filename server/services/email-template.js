@@ -244,6 +244,28 @@ function appFooterHtml(T) {
 }
 
 /**
+ * Quiet chip for SECONDARY actions (owner ask 2026-07-05: templates with
+ * two CTA blocks were rendering two stacked gold buttons). Mirrors the
+ * glass page language — primary gets the gold [data-glass-accent], the
+ * secondary gets a white chip. Theme-aware: classic renders a clean
+ * white outline button in the legacy navy.
+ */
+function ctaChip(href, label) {
+  const T = activeTheme();
+  return `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+      <tr>
+        <td style="border-radius:${T.ctaRadius};background:#FFFFFF;${T.cardGlassBg ? `background:rgba(255,255,255,0.6);` : ''}border:1px solid ${T.cardGlassBg ? T.cardBorder : T.ink};">
+          <a href="${href}" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;letter-spacing:0;line-height:1.1;">
+            ${label}
+          </a>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+/**
  * Stripe trust line for invoice-family emails (owner ask 2026-07-05) —
  * mirrors Stripe's own invoice-email convention. Styled-text wordmark
  * (no hosted badge asset to maintain); the muted link follows the
@@ -715,6 +737,7 @@ module.exports = {
   ensureLegalTextFooter,
   ctaButton,
   blockPalette,
+  ctaChip,
   stripeFooterLine,
   newsletterPalette,
   currency,
