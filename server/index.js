@@ -847,6 +847,22 @@ httpServer.listen(PORT, () => {
             logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);
           }
         }, { timezone: 'America/New_York' });
+
+        // Daily lifecycle email sweeps (termite bond renewals) — 10:05 AM
+        // ET so renewal notices land during the day. Self-healing: each
+        // run syncs termite_bonds rows from newly completed bond visits
+        // before checking the 30-day pre-renewal window.
+        cron.schedule('5 10 * * *', async () => {
+          try {
+            await runExclusive('lifecycle-email-sweeps-daily', async () => {
+              const sweeps = require('./services/lifecycle-email-sweeps');
+              const results = await sweeps.runDailySweeps();
+              logger.info(`[cron] Lifecycle email sweeps complete: ${JSON.stringify(results)}`);
+            });
+          } catch (err) {
+            logger.error(`[cron] Lifecycle email sweeps failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
       }
     }
   })();

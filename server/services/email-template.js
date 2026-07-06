@@ -57,6 +57,9 @@ const CLASSIC_THEME = {
   ctaBorder: '#1B2C5B',
   ctaText: '#FFFFFF',
   ctaRadius: '10px',
+  ctaWeight: '800', // same values ctaButton hardcoded — byte-identical gate-off
+  ctaPad: '14px 24px',
+  ctaSize: '15px',
   ctaShadow: '',
   // DB-template block palette (email-template-library.js renderBlocks).
   // Classic keeps the original slate set verbatim — byte-identical gate-off.
@@ -126,9 +129,15 @@ const GLASS_THEME = {
   // Glass keeps CTA text on the legacy navy deliberately — matches
   // [data-glass-accent] in glass-theme.css, which pins #1B2C5B.
   ctaText: '#1B2C5B',
-  ctaRadius: '12px',
-  // Mirrors [data-glass-accent]: warm float + gold glow + inset shine.
-  ctaShadow: '0 12px 32px rgba(180,110,0,0.28),0 0 36px rgba(240,165,0,0.46),inset 0 1px 0 rgba(255,255,255,0.65)',
+  // Match the live report action bar ([data-glass-accent]): 10px radius,
+  // ~48px full-width bars — with bolder labels per owner call 07-06.
+  ctaRadius: '10px',
+  ctaWeight: '900',
+  ctaPad: '11px 20px', // slimmer bars per owner (round 3) — ~42px tall
+  ctaSize: '14px', // matches the report action bar's label size
+  // Quiet float only — the gold outer glow read as glare (owner call
+  // 07-06 round 3); subtle inset top highlight retained.
+  ctaShadow: '0 8px 20px rgba(180,110,0,0.20),inset 0 1px 0 rgba(255,255,255,0.5)',
   // Under glass the block palette converges on the chrome palette — the
   // slate/gold clash between DB-template bodies and the wrapper is the
   // thing this theme layer removes. Callout keeps a gold identity but on
@@ -142,7 +151,7 @@ const GLASS_THEME = {
     calloutBorder: '#F4B014',
     calloutBg: '#FFF8E4',
     calloutText: '#04395E',
-    footerLink: '#0A7EC2',
+    footerLink: '#04395E', // value-navy like detail rows (owner call 07-06)
   },
   // Newsletter bodies converge on the same glass tokens: navy ink,
   // accent blue, accent gold, cool card tints and rules.
@@ -202,11 +211,15 @@ function formatDate(d) {
 
 function ctaButton(href, label) {
   const T = activeTheme();
+  // Glass buttons mirror the lawn service report's action bar (owner call
+  // 2026-07-06): full-width gold bars with centered labels, stacked.
+  // Classic keeps the original auto-width pill — byte-identical gate-off.
+  const block = Boolean(T.cardGlassBg);
   return `
-    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;${block ? 'width:100%;' : ''}">
       <tr>
-        <td style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
-          <a href="${href}" style="display:inline-block;padding:14px 24px;font-family:${T.font};font-size:15px;font-weight:800;color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;">
+        <td ${block ? 'align="center" ' : ''}style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
+          <a href="${href}" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
             ${label}
           </a>
         </td>
@@ -234,12 +247,16 @@ const APPLE_BADGE_IMG = 'https://portal.wavespestcontrol.com/app-email/apple-app
 const GOOGLE_BADGE_IMG = 'https://portal.wavespestcontrol.com/app-email/google-play-badge.png';
 
 function appFooterHtml(T) {
-  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:12px;font-weight:700;color:${T.ink};text-align:center;">
+  // Badge art differs: Apple's PNG fills its canvas, Google's (cropped of
+  // its baked-in 41px margin) runs visually denser — 36px next to Apple's
+  // 40px is the optical match. The 16px bottom margin keeps the badges
+  // clear of the business fine-print lines that follow.
+  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:13px;font-weight:700;color:${T.ink};text-align:center;">
             Track visits, reports &amp; payments in the Waves app
           </div>
-          <div style="text-align:center;">
+          <div style="text-align:center;margin:0 0 16px 0;">
             <a href="${APP_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;"><img src="${APPLE_BADGE_IMG}" alt="Download on the App Store" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
-            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
+            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="38" style="height:38px;width:auto;border:0;vertical-align:middle;" /></a>
           </div>`;
 }
 
@@ -252,6 +269,10 @@ function appFooterHtml(T) {
  */
 function ctaChip(href, label) {
   const T = activeTheme();
+  // Owner call 2026-07-06: under glass ALL buttons render like the lawn
+  // report's action bar (identical gold bars); the quiet chip remains
+  // the classic-theme secondary treatment.
+  if (T.cardGlassBg) return ctaButton(href, label);
   return `
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
       <tr>
@@ -294,10 +315,26 @@ function glassCard(T, innerHtml, padding = '22px 26px') {
           </table>`;
 }
 
+const SOCIALS = [
+  ['facebook', 'https://facebook.com/wavespestcontrol', 'Facebook'],
+  ['instagram', 'https://instagram.com/wavespestcontrol', 'Instagram'],
+  ['youtube', 'https://youtube.com/@wavespestcontrol', 'YouTube'],
+  ['tiktok', 'https://tiktok.com/@wavespestcontrol', 'TikTok'],
+  ['x', 'https://x.com/wavespest', 'X'],
+];
+
+function socialRowHtml() {
+  return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 7px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="18" height="18" style="width:18px;height:18px;border:0;vertical-align:middle;opacity:0.8;" /></a>`).join('')}</div>`;
+}
+
 function glassFinePrint(T, extra = '') {
-  return `${extra}<div style="font-family:${T.font};font-size:11px;letter-spacing:0.02em;color:${T.muted};line-height:1.7;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
-          </div>`;
+  // Balanced, centered stack: business+address / site·email·phone /
+  // license — then socials and the logo (owner footer spec 07-06).
+  return `${extra}<div style="font-family:${T.font};font-size:11px;letter-spacing:0.02em;color:${T.muted};line-height:1.8;text-align:center;">
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
+          </div>
+          ${socialRowHtml()}
+          <div style="margin:12px 0 0 0;text-align:center;"><img src="${GLASS_LOGO_IMG}" alt="${WAVES_BUSINESS_NAME}" width="44" height="44" style="width:44px;height:44px;border:0;" /></div>`;
 }
 
 function glassPage(T, { preheader, title, contentHtml }) {
@@ -353,11 +390,12 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         <tr><td align="center" style="padding:30px 0 0 0;">
           ${ctaButton(ctaHref, ctaLabel)}
         </td></tr>` : ''}
+        ${footerNote ? `
         <tr><td align="center" style="padding:28px 4px 0 4px;">
           <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+            ${footerNote}
           </div>
-        </td></tr>
+        </td></tr>` : ''}
         <tr><td align="center" style="padding:20px 4px 0 4px;">
           ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
@@ -373,11 +411,12 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
         <tr><td style="padding:28px 0 0 0;">
           ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px')}
         </td></tr>
+        ${footerNote ? `
         <tr><td align="center" style="padding:24px 4px 0 4px;">
           <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+            ${footerNote}
           </div>
-        </td></tr>
+        </td></tr>` : ''}
         <tr><td align="center" style="padding:18px 4px 0 4px;">
           ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
@@ -501,7 +540,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         <tr><td align="center" style="background:${T.footerBand};padding:20px 32px;border-top:1px solid ${T.rule};">
           ${appFooterHtml(T)}
           <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:underline;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
@@ -562,7 +601,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
         <tr><td align="center" style="background:${T.footerBand};padding:18px 24px;border-top:1px solid ${T.rule};">
           ${appFooterHtml(T)}
           <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:underline;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
