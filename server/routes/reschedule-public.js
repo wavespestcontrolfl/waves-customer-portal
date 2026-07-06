@@ -178,7 +178,7 @@ function searchParseOpts(config, now = new Date()) {
   };
 }
 
-async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, expandOpenDays }) {
+async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
 
@@ -203,7 +203,6 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     today: new Date(),
     excludeServiceIds: [svc.id],
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(expandOpenDays ? { expandOpenDays: true } : {}),
   });
 }
 
@@ -291,12 +290,15 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
 
     let availability = null;
     try {
+      // No expandOpenDays here (unlike /book's find-slots): the search must be
+      // a pure filter over what this page's GET list and the POST commit
+      // revalidation offer — synthetic open-day windows would 409 SLOT_TAKEN
+      // at commit because the single-day revalidation doesn't expand either.
       availability = await buildAvailabilityForService(svc, {
         rangeFrom: when.dateFrom,
         rangeTo: when.dateTo,
         config,
         timeOfDay: when.timeOfDay,
-        expandOpenDays: true,
       });
     } catch (err) {
       logger.error(`[reschedule-public] find-slots availability failed for ${svc.id}: ${err.message}`);

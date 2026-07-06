@@ -320,14 +320,17 @@ export default function ReschedulePage() {
   };
 
   // Back to the full window after a search — quiet refetch (no skeleton
-  // flash) so the list is fresh, falling back to the current list on error.
+  // flash) so the list is fresh. aiFiltered only clears once the full-window
+  // response is applied: on failure the filtered list is still what's on
+  // screen, so the reset link must survive for another try.
   const showAllTimes = async () => {
-    setAiFiltered(false);
     setSelectedSlot(null);
     try {
       const res = await fetch(`${API_BASE}/public/reschedule/${token}`);
-      if (res.ok) setData(await res.json());
-    } catch { /* keep the current list */ }
+      if (!res.ok) return;
+      setData(await res.json());
+      setAiFiltered(false);
+    } catch { /* keep the filtered list + reset link */ }
   };
 
   const confirm = async () => {

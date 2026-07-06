@@ -174,4 +174,48 @@ describe('ReschedulePage Waves AI search', () => {
     expect(await screen.findByText('Sunday, July 12')).toBeInTheDocument();
     expect(screen.queryByText('Tuesday, July 14')).not.toBeInTheDocument();
   });
+
+  it('keeps the filtered list AND the reset link when the full-window refetch fails', async () => {
+    let getCalls = 0;
+    const findSlotsBody = {
+      summary: 'One match.',
+      availability: {
+        slots: [],
+        nearby: true,
+        days: [{
+          date: '2026-07-14',
+          fullDate: 'Tuesday, July 14',
+          nearby: true,
+          slots: [{ start_time: '14:00', end_time: '15:00', start_label: '2:00 PM', end_label: '3:00 PM', technician_id: 'tech-1' }],
+        }],
+        rangeFrom: '2026-07-11',
+        rangeTo: '2026-07-24',
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse(findSlotsBody));
+      if (!opts.method || opts.method === 'GET') {
+        getCalls += 1;
+        return Promise.resolve(getCalls === 1 ? jsonResponse(reschedulablePayload()) : jsonResponse({ error: 'boom' }, 500));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+
+    renderPage();
+
+    const input = await screen.findByLabelText('Search for a service date or time');
+    fireEvent.change(input, { target: { value: 'tuesday afternoon' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('Tuesday, July 14')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all open times' }));
+
+    // Refetch 500s: the filtered list is still on screen, so the reset link
+    // must survive for another try — never a dead end.
+    expect(await screen.findByRole('button', { name: 'Show all open times' })).toBeInTheDocument();
+    expect(screen.getByText('Tuesday, July 14')).toBeInTheDocument();
+    expect(screen.queryByText('Sunday, July 12')).not.toBeInTheDocument();
+  });
 });
