@@ -367,6 +367,37 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   return { ...referral, lead_id: leadId, status: smsSent ? 'contacted' : 'sms_failed', sms_sent: smsSent };
 }
 
+// Email twin of the reward SMS (referral.reward_earned template) — fired
+// from the SAME two moments as the SMS: immediately at conversion when
+// require_service_completion is off, or at first-service credit when it's
+// on. Best-effort and idempotent per referral, so the two call sites can
+// never double-send. Promoters aren't always customers, so the send goes
+// straight to promoter.customer_email.
+async function sendRewardEarnedEmail(promoter, referral, rewardDollars) {
+  try {
+    const email = String(promoter?.customer_email || '').trim();
+    if (!email || !email.includes('@')) return;
+    const EmailTemplateLibrary = require('./email-template-library');
+    await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'referral.reward_earned',
+      to: email,
+      payload: {
+        first_name: String(promoter.first_name || '').trim() || 'there',
+        referred_first_name: referral.referee_name || referral.referral_first_name || 'your friend',
+        reward_line: `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
+        customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/?tab=refer`,
+      },
+      recipientType: 'referral_promoter',
+      recipientId: promoter.id,
+      idempotencyKey: `referral.reward_earned:${referral.id}`,
+      triggerEventId: `referral.reward_earned:${referral.id}`,
+      categories: ['referral_reward'],
+    });
+  } catch (err) {
+    logger.warn(`[ReferralEngine] reward email failed for referral ${referral?.id}: ${err.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 3. convertReferral
 // ---------------------------------------------------------------------------
@@ -474,6 +505,11 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
             promoterId: promoter.id,
             entryPoint: 'referral_engine_convert',
           });
+        }
+        if (!settings.require_service_completion) {
+          // Email leg mirrors the immediate-earned SMS above — but sends
+          // even when the promoter has no usable phone.
+          await sendRewardEarnedEmail(promoter, referral, rewardDollars);
         }
         if (outcome.milestoneAward) {
           await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
@@ -775,6 +811,12 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
           promoterId: promoter.id,
           entryPoint: 'referral_engine_first_service',
         });
+      }
+      if (promoter) {
+        // Email leg for the deferred-earned path — same moment the money
+        // is actually issued; idempotency key keeps it single-send even
+        // if a conversion-time email ever fired for this referral.
+        await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars);
       }
     } catch (smsErr) {
       logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);

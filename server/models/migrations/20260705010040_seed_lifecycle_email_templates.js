@@ -137,7 +137,7 @@ const TEMPLATES = [
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, good news: your referral signed up. {{reward_line}}' },
       { type: 'paragraph', content: 'Referrals like yours are the best compliment we get — thank you for trusting us with your neighbors.' },
-      { type: 'cta', label: 'View my account credit', url_variable: 'customer_portal_url' },
+      { type: 'cta', label: 'View my referral balance', url_variable: 'customer_portal_url' },
       { type: 'signature', content: 'Thank you. — The Waves Team' },
     ],
     fixture: {

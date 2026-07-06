@@ -1561,6 +1561,7 @@ const AppointmentReminders = {
           'scheduled_services.customer_id',
           'scheduled_services.scheduled_date',
           'scheduled_services.window_start',
+          'scheduled_services.service_type',
           'technicians.name as tech_name',
         )
         .first();
@@ -1613,6 +1614,26 @@ const AppointmentReminders = {
         // and 'appointment_no_show' is not a registered MessagePurpose).
       }, 'appointment_no_show', 'appointment_cancellation');
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      // Email twin (appointment.no_show template) — second channel like the
+      // other appointment notices. Best-effort: an email failure never
+      // fails the SMS leg or the status flip. `when` is the same composed
+      // same-day/back-dated phrase the SMS used; the fee outcome comes
+      // from the dispatch route (options.feeCharged) so the charge line
+      // is always truthful.
+      try {
+        const AppointmentEmail = require('./appointment-email');
+        await AppointmentEmail.sendAppointmentNoShowEmail({
+          customerId: svc.customer_id,
+          scheduledServiceId,
+          serviceLabel: svc.service_type,
+          missedWhen: when,
+          noShowReason: options.noShowReason || '',
+          feeCharged: options.feeCharged === true,
+        });
+      } catch (e) {
+        logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
+      }
 
       return { customer_id: svc.customer_id };
     } catch (err) {

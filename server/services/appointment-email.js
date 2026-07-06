@@ -325,9 +325,49 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
   });
 }
 
+/**
+ * Missed-visit (no-show) email — the email twin of the appointment_no_show
+ * SMS, fired from AppointmentReminders.handleNoShow. missedWhen arrives
+ * pre-composed by the caller (same-day "today" vs "on Tuesday, July 8" for
+ * back-dated marks — the SMS path already computes it). The charge line is
+ * composed HERE from the fee outcome the dispatch route passes through, so
+ * the email never claims "no charge" to a customer whose card hold was
+ * charged the no-show fee.
+ */
+async function sendAppointmentNoShowEmail({
+  customerId,
+  scheduledServiceId,
+  serviceLabel,
+  missedWhen,
+  noShowReason,
+  feeCharged,
+  idempotencyKey,
+} = {}) {
+  const chargeLine = feeCharged
+    ? 'Per your booking terms, the missed-visit fee was charged to your card on file — it will show on your emailed receipt.'
+    : 'There’s no charge for the attempted visit.';
+  return sendTemplate({
+    customerId,
+    templateKey: 'appointment.no_show',
+    eventType: 'appointment.no_show',
+    payload: {
+      service_type: clean(serviceLabel) || 'service',
+      missed_when: clean(missedWhen) || 'recently',
+      no_show_reason: clean(noShowReason),
+      charge_line: chargeLine,
+      rebook_url: portalTabUrl('visits'),
+    },
+    idempotencyKey: idempotencyKey || `appointment.no_show:${scheduledServiceId || customerId}`,
+    categories: ['appointment_no_show'],
+    triggerEventId: `appointment.no_show:${scheduledServiceId || customerId}`,
+    metadata: { scheduled_service_id: scheduledServiceId || null },
+  });
+}
+
 module.exports = {
   sendAppointmentConfirmationEmail,
   sendAppointmentReminderEmail,
+  sendAppointmentNoShowEmail,
   sendTechEnRouteEmail,
   _private: { sendTemplate, loadCustomer, resolveRecipients, isEmailLike, propertyLabel },
 };
