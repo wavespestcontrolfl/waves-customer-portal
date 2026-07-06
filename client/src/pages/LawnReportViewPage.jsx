@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 
@@ -163,12 +163,13 @@ export default function LawnReportViewPage() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [glassDefault, setGlassDefault] = useState(false);
 
-  // Liquid-glass dark launch: this page has no pdf/static render modes (the
-  // route only ever serves the live customer view), so the scene is gated on
-  // the ?glass=1 param alone. Without it nothing mounts and every glass rule
-  // (all scoped under html[data-glass-theme]) stays inert — pixel-identical.
-  const glassActive = glassParamRequested();
+  // Liquid-glass release: follows GATE_REPORT_GLASS via the payload's
+  // glassDefault (like /report/:token), with ?glass=1 / ?glass=0 as the
+  // per-link force-on / escape hatch. This page has no pdf/static render
+  // modes — the route only ever serves the live customer view.
+  const glassActive = glassReleaseActive(glassDefault);
   useGlassSurface(glassActive, 'full');
 
   const load = useCallback(async () => {
@@ -179,6 +180,7 @@ export default function LawnReportViewPage() {
       if (!res.ok) throw new Error(`lawn report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
+      setGlassDefault(body.glassDefault === true);
     } catch {
       setNotFound(true);
     } finally {
