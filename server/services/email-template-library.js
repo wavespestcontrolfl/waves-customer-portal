@@ -1071,6 +1071,7 @@ module.exports = {
   normalizeBlocks,
   validationFor,
   redactedPayloadSnapshot,
+  redactEmailAddresses,
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,

@@ -137,6 +137,7 @@ async function runBondRenewalSweep() {
     );
 
   let sent = 0;
+  const EmailTemplateLibrary = require('./email-template-library');
   for (const bond of due) {
     const email = String(bond.email || '').trim();
     if (!email || !email.includes('@')) {
@@ -144,7 +145,6 @@ async function runBondRenewalSweep() {
       continue;
     }
     try {
-      const EmailTemplateLibrary = require('./email-template-library');
       await EmailTemplateLibrary.sendTemplate({
         templateKey: 'termite.bond_renewal',
         to: email,
@@ -161,6 +161,10 @@ async function runBondRenewalSweep() {
         idempotencyKey: `termite.bond_renewal:${bond.id}:${String(bond.renews_at).slice(0, 10)}`,
         triggerEventId: `termite.bond_renewal:${bond.id}`,
         categories: ['termite_bond_renewal'],
+        // This loop iterates real recipient addresses — SendGrid 4xx bodies
+        // can echo the offending address, so keep provider errors out of the
+        // logs and log a redacted reason ourselves below.
+        suppressProviderErrorLog: true,
       });
       await db('termite_bonds').where({ id: bond.id }).update({
         renewal_notified_at: new Date(),
@@ -168,7 +172,10 @@ async function runBondRenewalSweep() {
       });
       sent += 1;
     } catch (err) {
-      logger.error(`[lifecycle-sweeps] bond renewal email failed for bond ${bond.id}: ${err.message}`);
+      const reason = err.status
+        ? `SendGrid ${err.status}`
+        : EmailTemplateLibrary.redactEmailAddresses(err.message);
+      logger.error(`[lifecycle-sweeps] bond renewal email failed for bond ${bond.id} (customer ${bond.customer_id}): ${reason}`);
     }
   }
   if (sent) logger.info(`[lifecycle-sweeps] sent ${sent} bond renewal notice(s)`);

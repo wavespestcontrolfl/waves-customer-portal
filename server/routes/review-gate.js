@@ -216,6 +216,20 @@ router.post('/:token/submit', async (req, res, next) => {
     const customerForLoc = await db('customers').where({ id: request.customer_id }).first();
     const loc = resolveReviewLocation(request, customerForLoc);
 
+    // Referral invite email on the warmest moment we have (owner trigger
+    // call 2026-07-06) — same hook and same >=7 bar as the legacy
+    // /api/review submit path (a 7 is 'passive' here but still
+    // invite-grade). Fire-and-forget; the helper's customer-scoped
+    // idempotency key keeps repeat submitters from being re-invited.
+    if (score >= 7 && request.customer_id) {
+      try {
+        const { sendReferralInviteEmail } = require('../services/referral-invite-email');
+        void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'positive_review' });
+      } catch (err) {
+        logger.error(`[review-gate] referral invite failed: ${err.message}`);
+      }
+    }
+
     // Handle by category
     if (category === 'promoter') {
       // Score 8-10: redirect to Google review
@@ -230,19 +244,6 @@ router.post('/:token/submit', async (req, res, next) => {
         }
       } catch (err) {
         logger.error(`[review-gate] Referral nudge require failed: ${err.message}`);
-      }
-
-      // Referral invite email on the warmest moment we have (owner trigger
-      // call 2026-07-06) — same hook the legacy /api/review submit fires.
-      // Fire-and-forget; the helper's customer-scoped idempotency key keeps
-      // repeat promoters from being re-invited.
-      if (request.customer_id) {
-        try {
-          const { sendReferralInviteEmail } = require('../services/referral-invite-email');
-          void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'positive_review' });
-        } catch (err) {
-          logger.error(`[review-gate] referral invite failed: ${err.message}`);
-        }
       }
 
       // Fire-and-forget: update customer health score
