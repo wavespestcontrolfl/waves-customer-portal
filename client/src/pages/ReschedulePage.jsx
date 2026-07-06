@@ -361,6 +361,7 @@ export default function ReschedulePage() {
       if (body.code === 'SLOT_TAKEN') {
         setSelectedSlot(null);
         setAiFiltered(false); // refreshed availability spans the full window
+        setAiSession((n) => n + 1); // remount the bar — its recap is stale too
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
         } else {
