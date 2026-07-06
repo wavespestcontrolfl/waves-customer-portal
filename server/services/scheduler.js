@@ -3053,13 +3053,16 @@ function initScheduledJobs() {
   // in 3 months); a daily check self-heals after any missed fire.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
+    let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
       const result = await wiki.weeklyRefreshIfDue();
-      if (!result.skipped) {
+      if (result?.error) refreshFailed = true;
+      else if (!result.skipped) {
         logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
       }
     } catch (err) {
+      refreshFailed = true;
       logger.error(`Agronomic wiki refresh failed: ${err.message}`);
     }
 
@@ -3067,9 +3070,17 @@ function initScheduledJobs() {
     // (weekly cadence via syncToClaudeopediaIfDue's own guard; invoked daily
     // so an error day self-heals tomorrow). A fixed-offset cron could fire
     // mid-refresh and write its weekly marker before the freshly refreshed
-    // rows exist — missing them until the guard expires. Only trusted pages
-    // (review_status auto/approved) cross — the exception-based review gate
-    // controls what feeds agents.
+    // rows exist — missing them until the guard expires. A FAILED refresh
+    // skips the sync entirely: syncing now would stamp the weekly kb_sync
+    // marker, and tomorrow's successful refresh retry would find its fresh
+    // rows locked out of the KB by that marker. Refresh-skip days still
+    // sync (the refresh is done for the week; the sync self-heals its own
+    // misses). Only trusted pages (review_status auto/approved) cross —
+    // the exception-based review gate controls what feeds agents.
+    if (refreshFailed) {
+      logger.warn('Wiki→KB sync skipped: wiki refresh failed — both retry tomorrow');
+      return;
+    }
     try {
       const KnowledgeBridge = require('./knowledge-bridge');
       const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
