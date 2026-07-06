@@ -373,7 +373,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 // on. Best-effort and idempotent per referral, so the two call sites can
 // never double-send. Promoters aren't always customers, so the send goes
 // straight to promoter.customer_email.
-async function sendRewardEarnedEmail(promoter, referral, rewardDollars) {
+async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
     const email = String(promoter?.customer_email || '').trim();
     if (!email || !email.includes('@')) return;
@@ -384,7 +384,12 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars) {
       payload: {
         first_name: String(promoter.first_name || '').trim() || 'there',
         referred_first_name: referral.referee_name || referral.referral_first_name || 'your friend',
-        reward_line: `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
+        // The deferred first-service path issues the reward as an ACCOUNT
+        // credit (postCreditMovement), not referral balance — the email must
+        // point the promoter at the right ledger.
+        reward_line: destination === 'account_credit'
+          ? `Your $${Math.round(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
+          : `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
         customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/?tab=refer`,
       },
       recipientType: 'referral_promoter',
@@ -815,8 +820,9 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       if (promoter) {
         // Email leg for the deferred-earned path — same moment the money
         // is actually issued; idempotency key keeps it single-send even
-        // if a conversion-time email ever fired for this referral.
-        await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars);
+        // if a conversion-time email ever fired for this referral. This path
+        // pays out as an account credit, so the copy must say so.
+        await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars, 'account_credit');
       }
     } catch (smsErr) {
       logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);

@@ -20,6 +20,16 @@
 
 const BOND_MATCH = '%Termite Bond Service%';
 
+// DATE columns reflect the ET business calendar (same rule as the runtime
+// sweep in lifecycle-email-sweeps.js): a visit completed after 8 PM Eastern
+// has a completed_at already on the next UTC day, so UTC ISO slices would
+// backfill started_at/renews_at a day late and shift the renewal notice.
+function etDateString(date) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date);
+}
+
 function termYearsFrom(serviceType) {
   const m = String(serviceType || '').match(/(\d+)\s*-\s*Year/i);
   return m ? Number(m[1]) : 1;
@@ -30,8 +40,12 @@ exports.up = async function up(knex) {
   if (!has) {
     await knex.schema.createTable('termite_bonds', (t) => {
       t.increments('id').primary();
-      t.integer('customer_id').notNullable().index();
-      t.integer('scheduled_service_id').unique();
+      // customers.id / scheduled_services.id are UUIDs (initial schema) —
+      // the sweep joins these columns back to them.
+      t.uuid('customer_id').notNullable().index()
+        .references('id').inTable('customers').onDelete('CASCADE');
+      t.uuid('scheduled_service_id').unique()
+        .references('id').inTable('scheduled_services').onDelete('SET NULL');
       t.string('service_type').notNullable();
       t.integer('term_years').notNullable().defaultTo(1);
       t.date('started_at').notNullable();
@@ -55,15 +69,16 @@ exports.up = async function up(knex) {
     const started = new Date(startedRaw);
     if (Number.isNaN(started.getTime())) continue;
     const years = termYearsFrom(v.service_type);
-    const renews = new Date(started);
-    renews.setFullYear(renews.getFullYear() + years);
+    const startedEt = etDateString(started);
+    const [sy, sm, sd] = startedEt.split('-').map(Number);
+    const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
     await knex('termite_bonds').insert({
       customer_id: v.customer_id,
       scheduled_service_id: v.id,
       service_type: v.service_type,
       term_years: years,
-      started_at: started.toISOString().slice(0, 10),
-      renews_at: renews.toISOString().slice(0, 10),
+      started_at: startedEt,
+      renews_at: renewsEt,
       status: 'active',
     });
   }
