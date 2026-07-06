@@ -14,6 +14,7 @@ function fakeDb(tables = {}) {
       }
       return this;
     },
+    whereIn() { return this; },
     whereNull() { return this; },
     orWhere() { return this; },
     orWhereNull() { return this; },
@@ -36,6 +37,7 @@ function filteringDb(tables = {}) {
         if (typeof arg === 'function') arg.call(this);
         return this;
       },
+      whereIn() { return this; },
       whereNull() { return this; },
       orWhere(column, _op, pattern) {
         if (typeof column === 'function') {

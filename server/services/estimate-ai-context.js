@@ -415,6 +415,9 @@ async function searchAgronomicWiki(db, terms) {
   if (!db || !terms.length) return [];
   try {
     const rows = await db('knowledge_entries')
+      // Estimate AI answers are customer-facing — only trusted pages
+      // (review_status auto/approved) may feed them.
+      .whereIn('review_status', require('./agronomic-wiki').TRUSTED_STATUSES)
       .where(function freshWiki() {
         this.where({ stale_flag: false }).orWhereNull('stale_flag');
       })

@@ -71,6 +71,56 @@ router.get('/log', async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /review/queue — exception queue: pending red pages, blocked pages,
+// recently-updated yellow pages. Must register before the /:slug(*) catch-all.
+// =========================================================================
+router.get('/review/queue', async (req, res, next) => {
+  try {
+    const queue = await wiki.getReviewQueue();
+    res.json(queue);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// POST /review/:slug(*) — approve or block a page awaiting review
+// Body: { action: 'approve' | 'block', notes? }
+// =========================================================================
+router.post('/review/:slug(*)', async (req, res, next) => {
+  try {
+    const { action, notes } = req.body || {};
+    if (!['approve', 'block'].includes(action)) {
+      return res.status(400).json({ error: "action must be 'approve' or 'block'" });
+    }
+    const page = await wiki.reviewPage(req.params.slug, { action, notes, reviewedBy: 'admin' });
+    if (!page) return res.status(404).json({ error: 'Page not found' });
+    res.json({ success: true, page });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// PUT /tier/:slug(*) — pin a page's review tier (manual override; the
+// generator respects the pin on subsequent regenerations)
+// Body: { tier: 'green' | 'yellow' | 'red' }
+// =========================================================================
+router.put('/tier/:slug(*)', async (req, res, next) => {
+  try {
+    const { tier } = req.body || {};
+    if (!['green', 'yellow', 'red'].includes(tier)) {
+      return res.status(400).json({ error: "tier must be 'green', 'yellow' or 'red'" });
+    }
+    const page = await wiki.setTierOverride(req.params.slug, tier, { reviewedBy: 'admin' });
+    if (!page) return res.status(404).json({ error: 'Page not found' });
+    res.json({ success: true, page });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
 // GET /:slug(*) — get single page (slug can contain slashes like product/celsius-wg)
 // =========================================================================
 router.get('/:slug(*)', async (req, res, next) => {

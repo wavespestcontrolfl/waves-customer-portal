@@ -20,6 +20,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { loadCustomerGrassContext } = require('./lawn-grass-context');
+const { TRUSTED_STATUSES } = require('./agronomic-wiki');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -225,16 +226,22 @@ const KnowledgeBridge = {
       .limit(limit)
       .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
 
-    // Search Agronomic Wiki
-    const wiki = await db('knowledge_entries')
+    // Search Agronomic Wiki. Agent-facing callers pass trustedOnly so red
+    // pages awaiting review never feed an agent; the admin browse/review UI
+    // omits it and sees everything.
+    let wikiQuery = db('knowledge_entries')
       .where(function () {
         this.where('title', 'ilike', term)
           .orWhere('content', 'ilike', term)
           .orWhere('summary', 'ilike', term);
-      })
+      });
+    if (options.trustedOnly) {
+      wikiQuery = wikiQuery.whereIn('review_status', TRUSTED_STATUSES);
+    }
+    const wiki = await wikiQuery
       .orderBy('data_point_count', 'desc')
       .limit(limit)
-      .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id');
+      .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status');
 
     // Find bridged pairs
     const allKbIds = claudeopedia.map(e => e.id).filter(Boolean);
@@ -377,7 +384,10 @@ const KnowledgeBridge = {
         .limit(10);
 
       // Pull relevant wiki outcome data (what's actually worked)
+      // Trusted pages only — these feed customer-visible recommendations,
+      // so red pages awaiting review are excluded (exception-based gate).
       const outcomeEntries = await db('knowledge_entries')
+        .whereIn('review_status', TRUSTED_STATUSES)
         .where(function () {
           this.where('category', 'seasonal');
           if (grassTrack) {

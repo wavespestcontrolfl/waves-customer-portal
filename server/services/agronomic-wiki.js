@@ -92,6 +92,62 @@ function confidenceLevel(count) {
   return 'low';
 }
 
+// ── Exception-based review tiers (owner directive 2026-07-06) ──────────────
+// green  → auto-update, trusted immediately
+// yellow → auto-update, trusted, listed in the weekly digest
+// red    → excluded from agent-facing reads until a human approves
+// Generation is NEVER blocked — the tier gates who may READ the page.
+const TRUSTED_STATUSES = ['auto', 'approved'];
+
+// Strong compliance signals only. Ordinary rate mentions in internal outcome
+// aggregations stay green/yellow — the generation prompt frames everything as
+// field intelligence, not label authority. These patterns catch content that
+// reads as regulatory/label guidance, which is always review-required.
+// Mirrored in migration 20260706000001 (backfill).
+const COMPLIANCE_PATTERNS = [
+  /\bblackout\b/i,
+  /\bordinance\b/i,
+  /\bREI\b/,
+  /re-entry interval/i,
+  /\bdo not apply\b/i,
+  /phytotox/i,
+  /restricted[- ]use\b/i,
+];
+
+function classifyReviewTier({ confidence, content, hasOpenContradiction = false, externalSource = false }) {
+  const flags = [];
+  if (externalSource) flags.push('external_source');
+  if (hasOpenContradiction) flags.push('open_contradiction');
+  if (COMPLIANCE_PATTERNS.some((p) => p.test(content || ''))) flags.push('compliance_content');
+  if (confidence === 'low') flags.push('low_confidence');
+  else if (confidence === 'moderate') flags.push('moderate_confidence');
+
+  let tier = 'green';
+  if (flags.includes('moderate_confidence')) tier = 'yellow';
+  if (
+    flags.includes('low_confidence') ||
+    flags.includes('compliance_content') ||
+    flags.includes('open_contradiction') ||
+    flags.includes('external_source')
+  ) tier = 'red';
+
+  return { tier, flags };
+}
+
+function parseFlags(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+  }
+  return [];
+}
+
+function sameFlagSets(a, b) {
+  const setA = new Set(parseFlags(a));
+  const setB = new Set(parseFlags(b));
+  return setA.size === setB.size && [...setA].every((f) => setB.has(f));
+}
+
 async function callClaude(systemPrompt, userPrompt) {
   if (!Anthropic) {
     logger.warn('[agronomic-wiki] Anthropic SDK not available — skipping AI generation');
@@ -564,7 +620,9 @@ const AgronomicWiki = {
         return { entry: existing, writeState: 'skipped' };
       }
 
-      const systemPrompt = `You are maintaining an agronomic knowledge wiki for Waves Pest Control in Southwest Florida. You write technically accurate, data-driven content based on real treatment outcomes. Never fabricate data. Only make claims supported by the provided data points. When data is limited, say so explicitly. When data contradicts existing claims, flag it clearly. Write in markdown format.`;
+      const systemPrompt = `You are maintaining an agronomic knowledge wiki for Waves Pest Control in Southwest Florida. You write technically accurate, data-driven content based on real treatment outcomes. Never fabricate data. Only make claims supported by the provided data points. When data is limited, say so explicitly. When data contradicts existing claims, flag it clearly. Write in markdown format.
+
+Frame every finding as internal field intelligence, never as label authority: do not present application rates, intervals, or restrictions as official guidance — the product label and local ordinances are always the authority. Include this line verbatim immediately after the top heading: *Field intelligence from Waves treatment outcomes — not label guidance.*`;
 
       const existingContent = existing ? `\n\nCurrent wiki page content:\n${existing.content}` : '';
 
@@ -612,6 +670,42 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         ? result.text
         : `# ${title}\n\n*Pending AI generation — ${dataPointCount} data points available.*`;
 
+      // Classify the fresh content into a review tier. Open contradictions
+      // against this page force red regardless of confidence.
+      let hasOpenContradiction = false;
+      if (existing) {
+        try {
+          const contradiction = await db('knowledge_contradictions')
+            .where({ wiki_entry_id: existing.id })
+            .whereNotIn('status', ['resolved', 'dismissed'])
+            .first('id');
+          hasOpenContradiction = !!contradiction;
+        } catch { /* table may not exist */ }
+      }
+
+      const existingFlags = parseFlags(existing?.risk_flags);
+      let tier;
+      let flags;
+      let reviewStatus;
+      if (existingFlags.includes('manual_override')) {
+        // A human pinned this page's tier — regeneration must not clobber it.
+        tier = existing.review_tier;
+        flags = existingFlags;
+        reviewStatus = existing.review_status;
+      } else {
+        ({ tier, flags } = classifyReviewTier({ confidence, content, hasOpenContradiction }));
+        reviewStatus = 'auto';
+        if (tier === 'red') {
+          // Approval is sticky while the risk reasons are unchanged — new data
+          // on an already-reviewed page shouldn't re-block it, but a NEW risk
+          // reason (e.g. a contradiction appearing) must.
+          const stickyApproval = existing?.review_status === 'approved' && sameFlagSets(existing.risk_flags, flags);
+          reviewStatus = stickyApproval ? 'approved' : 'pending_review';
+        }
+        // A human block always holds until a human lifts it.
+        if (existing?.review_status === 'blocked') reviewStatus = 'blocked';
+      }
+
       const entryData = {
         slug,
         category,
@@ -623,6 +717,9 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         last_data_update: new Date(),
         stale_flag: false,
         source_treatment_ids: JSON.stringify(sourceIds),
+        review_tier: tier,
+        review_status: reviewStatus,
+        risk_flags: JSON.stringify(flags),
       };
 
       let entry;
@@ -640,7 +737,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       await logUpdate(
         existing ? 'update' : 'ingest',
         slug,
-        `${existing ? 'Updated' : 'Created'} ${category} page: ${title} (${dataPointCount} data points, ${confidence} confidence)`,
+        `${existing ? 'Updated' : 'Created'} ${category} page: ${title} (${dataPointCount} data points, ${confidence} confidence, tier ${tier}${reviewStatus === 'pending_review' ? ' — awaiting review' : ''})`,
         {
           triggerType: 'wiki_generation',
           model: result?.model || null,
@@ -660,20 +757,26 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
   // ────────────────────────────────────────────────────────────
   // searchWiki — full-text search across wiki pages
   // ────────────────────────────────────────────────────────────
-  async searchWiki(query) {
+  async searchWiki(query, options = {}) {
     if (!query || !query.trim()) return [];
     const term = `%${query.trim().toLowerCase()}%`;
-    return db('knowledge_entries')
+    let q = db('knowledge_entries')
       .where(function () {
         this.where('title', 'ilike', term)
           .orWhere('content', 'ilike', term)
           .orWhere('summary', 'ilike', term)
           .orWhereRaw("tags::text ILIKE ?", [term]);
-      })
+      });
+    // Agent-facing callers pass trustedOnly — red pages awaiting review (or
+    // human-blocked) never feed an agent.
+    if (options.trustedOnly) {
+      q = q.whereIn('review_status', TRUSTED_STATUSES);
+    }
+    return q
       .orderByRaw("CASE WHEN title ILIKE ? THEN 0 WHEN summary ILIKE ? THEN 1 ELSE 2 END", [term, term])
       .orderBy('data_point_count', 'desc')
       .limit(30)
-      .select('id', 'slug', 'category', 'title', 'summary', 'data_point_count', 'confidence', 'tags', 'last_data_update', 'stale_flag');
+      .select('id', 'slug', 'category', 'title', 'summary', 'data_point_count', 'confidence', 'tags', 'last_data_update', 'stale_flag', 'review_tier', 'review_status', 'risk_flags');
   },
 
   // ────────────────────────────────────────────────────────────
@@ -688,7 +791,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
   // ────────────────────────────────────────────────────────────
   async listPages(category, options = {}) {
     let query = db('knowledge_entries')
-      .select('id', 'slug', 'category', 'title', 'summary', 'data_point_count', 'confidence', 'tags', 'last_data_update', 'stale_flag', 'created_at', 'updated_at');
+      .select('id', 'slug', 'category', 'title', 'summary', 'data_point_count', 'confidence', 'tags', 'last_data_update', 'stale_flag', 'created_at', 'updated_at', 'review_tier', 'review_status', 'risk_flags', 'last_human_review', 'reviewed_by');
 
     if (category) {
       query = query.where({ category });
@@ -829,6 +932,84 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       });
       return { refreshed: 0, error: err.message };
     }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // getReviewQueue — the exception surface: what actually needs judgment.
+  // ────────────────────────────────────────────────────────────
+  async getReviewQueue() {
+    const select = ['id', 'slug', 'category', 'title', 'summary', 'data_point_count', 'confidence', 'review_tier', 'review_status', 'risk_flags', 'last_human_review', 'reviewed_by', 'human_notes', 'updated_at'];
+    const pending = await db('knowledge_entries')
+      .where({ review_status: 'pending_review' })
+      .orderBy('updated_at', 'desc')
+      .select(select);
+    const blocked = await db('knowledge_entries')
+      .where({ review_status: 'blocked' })
+      .orderBy('updated_at', 'desc')
+      .select(select);
+    // Yellow pages updated in the last 7 days — the optional-review digest set
+    const recentYellow = await db('knowledge_entries')
+      .where({ review_tier: 'yellow' })
+      .where('updated_at', '>', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
+      .orderBy('updated_at', 'desc')
+      .limit(50)
+      .select(select);
+    return { pending, blocked, recentYellow };
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // reviewPage — human judgment on a red page: approve or block.
+  // ────────────────────────────────────────────────────────────
+  async reviewPage(slug, { action, notes = null, reviewedBy = 'admin' } = {}) {
+    if (!['approve', 'block'].includes(action)) {
+      throw new Error(`Unsupported review action: ${action}`);
+    }
+    const page = await db('knowledge_entries').where({ slug }).first();
+    if (!page) return null;
+
+    const reviewStatus = action === 'approve' ? 'approved' : 'blocked';
+    const [updated] = await db('knowledge_entries')
+      .where({ id: page.id })
+      .update({
+        review_status: reviewStatus,
+        last_human_review: new Date(),
+        reviewed_by: reviewedBy,
+        human_notes: notes || page.human_notes || null,
+        updated_at: new Date(),
+      })
+      .returning('*');
+
+    await logUpdate('review', slug, `${action === 'approve' ? 'Approved' : 'Blocked'} by ${reviewedBy}${notes ? ` — ${String(notes).substring(0, 200)}` : ''}`, {
+      triggerType: 'human_review',
+    });
+    return updated;
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // setTierOverride — human pins a page's tier; regeneration respects it.
+  // ────────────────────────────────────────────────────────────
+  async setTierOverride(slug, tier, { reviewedBy = 'admin' } = {}) {
+    if (!['green', 'yellow', 'red'].includes(tier)) {
+      throw new Error(`Unsupported tier: ${tier}`);
+    }
+    const page = await db('knowledge_entries').where({ slug }).first();
+    if (!page) return null;
+
+    const flags = [...new Set([...parseFlags(page.risk_flags), 'manual_override'])];
+    const [updated] = await db('knowledge_entries')
+      .where({ id: page.id })
+      .update({
+        review_tier: tier,
+        review_status: tier === 'red' ? 'pending_review' : 'auto',
+        risk_flags: JSON.stringify(flags),
+        last_human_review: new Date(),
+        reviewed_by: reviewedBy,
+        updated_at: new Date(),
+      })
+      .returning('*');
+
+    await logUpdate('review', slug, `Tier pinned to ${tier} by ${reviewedBy}`, { triggerType: 'human_review' });
+    return updated;
   },
 
   // ────────────────────────────────────────────────────────────
@@ -1009,12 +1190,16 @@ function aggregateOutcomes(outcomes) {
 
 module.exports = AgronomicWiki;
 
+module.exports.TRUSTED_STATUSES = TRUSTED_STATUSES;
+
 // Exposed for unit tests only.
 module.exports.__private = {
   escapeLike,
   extractSummary,
   sameSourceIds,
   resolveCanonicalProduct,
+  classifyReviewTier,
+  sameFlagSets,
   PRE_ASSESSMENT_MAX_AGE_DAYS,
   POST_ASSESSMENT_MAX_DAYS,
 };
