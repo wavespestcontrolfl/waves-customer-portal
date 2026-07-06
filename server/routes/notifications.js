@@ -62,7 +62,7 @@ const CHANNEL_VALUES = ['sms', 'email', 'both'];
 
 // Delivery channel is an account-level "how to reach me" preference, stored on
 // the account's primary profile so it is consistent across every property.
-const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
+const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel', 'seasonal_channel'];
 
 const PREF_SELECT = [
   'appointment_confirmation',
@@ -335,12 +335,9 @@ async function loadPreferencePayload(req) {
   const prefs = await ensurePrefs(req.customerId);
   const primaryId = await resolvePrimaryProfileId(req);
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
-  return preferencePayload({
-    ...prefs,
-    appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
-    service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
-    service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
-  });
+  const channelOverlay = {};
+  for (const col of CHANNEL_DB_COLUMNS) channelOverlay[col] = channelPrefs[col];
+  return preferencePayload({ ...prefs, ...channelOverlay });
 }
 
 // =========================================================================
@@ -426,6 +423,7 @@ router.put('/preferences', async (req, res, next) => {
       appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
+      seasonalTipsChannel: Joi.string().valid(...CHANNEL_VALUES),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);

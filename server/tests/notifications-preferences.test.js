@@ -123,6 +123,14 @@ describe('notification preference updates', () => {
     });
   });
 
+  test('maps the seasonal tips delivery channel to seasonal_channel', () => {
+    expect(notificationPrefsDbUpdates({ seasonalTipsChannel: 'email' }, {}))
+      .toEqual({ seasonal_channel: 'email' });
+    // Seasonal defaults to 'both' (two real senders), not the sms fallback.
+    expect(notificationPrefsDbUpdates({ seasonalTipsChannel: 'pigeon' }, {}))
+      .toEqual({ seasonal_channel: 'both' });
+  });
+
   test('coerces an unrecognized channel value to sms', () => {
     const updates = notificationPrefsDbUpdates(
       { serviceReminder24hChannel: 'pigeon' },
@@ -185,11 +193,12 @@ describe('account-level channel routing', () => {
     expect(id).toBe('solo-1');
   });
 
-  test('CHANNEL_DB_COLUMNS lists the three appointment channel columns', () => {
+  test('CHANNEL_DB_COLUMNS lists every account-level channel column', () => {
     expect(CHANNEL_DB_COLUMNS).toEqual([
       'appointment_confirmation_channel',
       'service_reminder_72h_channel',
       'service_reminder_24h_channel',
+      'seasonal_channel',
     ]);
   });
 });

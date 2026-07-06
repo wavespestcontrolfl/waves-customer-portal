@@ -925,7 +925,9 @@ const TwilioService = {
       .first();
     if (!customer || !prefs?.seasonal_tips || !prefs?.sms_enabled) return;
     // Delivery-channel preference: 'email' means the customer opted out of
-    // the SMS leg specifically (NULL/'both'/'sms' all keep it).
+    // the SMS leg specifically (NULL/'both'/'sms' all keep it). 'email' is
+    // always an explicit portal choice — migration 20260706001000 nulled the
+    // inert 'email' column default that predated any UI for this preference.
     if (prefs?.seasonal_channel === 'email') return;
 
     const body =

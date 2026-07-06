@@ -518,4 +518,40 @@ describe("TwilioService legacy customer SMS helpers", () => {
     expect(result).toBeUndefined();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test("sendSeasonalAlert skips the SMS leg when the delivery channel is email-only", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ seasonal_tips: true, sms_enabled: true, seasonal_channel: "email" }),
+    );
+
+    const result = await TwilioService.sendSeasonalAlert("cust-1", "Mosquitoes", "Check standing water.");
+
+    expect(result).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test("sendSeasonalAlert keeps the SMS leg for both/sms/unset delivery channels", async () => {
+    for (const seasonal_channel of ["both", "sms", null]) {
+      jest.clearAllMocks();
+      db.mockReturnValueOnce(
+        firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+      ).mockReturnValueOnce(
+        firstQuery({
+          seasonal_tips: true,
+          sms_enabled: true,
+          seasonal_channel,
+          updated_at: "2026-05-01T12:00:00.000Z",
+        }),
+      );
+      smsTemplates.getTemplate.mockResolvedValue("Seasonal alert body");
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+
+      const result = await TwilioService.sendSeasonalAlert("cust-1", "Mosquitoes", "Check standing water.");
+
+      expect(result.sent).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    }
+  });
 });
