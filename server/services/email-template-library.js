@@ -11,6 +11,7 @@ const {
   stripeFooterLine,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
+const { isEnabled } = require('../config/feature-gates');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -507,9 +508,15 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const isInvoiceTemplate = templateKey.startsWith('invoice.')
     || templateKey.startsWith('billing_late_payment')
     || templateKey.startsWith('payer.statement');
-  const footerNote = mode === 'marketing'
-    ? null
+  // Under glass the default "Questions?" line is dropped (owner call
+  // 07-06 — the pill header and fine print already carry the phone);
+  // billing templates keep the Stripe trust line. Classic output is
+  // unchanged.
+  const glassChrome = isEnabled('emailGlassTheme');
+  const serviceFooter = glassChrome
+    ? (isInvoiceTemplate ? stripeFooterLine() : null)
     : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.${isInvoiceTemplate ? stripeFooterLine() : ''}`;
+  const footerNote = mode === 'marketing' ? null : serviceFooter;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });

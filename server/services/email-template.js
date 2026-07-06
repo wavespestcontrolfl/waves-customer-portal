@@ -246,12 +246,12 @@ function appFooterHtml(T) {
   // its baked-in 41px margin) runs visually denser — 36px next to Apple's
   // 40px is the optical match. The 16px bottom margin keeps the badges
   // clear of the business fine-print lines that follow.
-  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:12px;font-weight:700;color:${T.ink};text-align:center;">
+  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:13px;font-weight:700;color:${T.ink};text-align:center;">
             Track visits, reports &amp; payments in the Waves app
           </div>
           <div style="text-align:center;margin:0 0 16px 0;">
             <a href="${APP_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;"><img src="${APPLE_BADGE_IMG}" alt="Download on the App Store" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
-            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="36" style="height:36px;width:auto;border:0;vertical-align:middle;" /></a>
+            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="38" style="height:38px;width:auto;border:0;vertical-align:middle;" /></a>
           </div>`;
 }
 
@@ -369,11 +369,12 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         <tr><td align="center" style="padding:30px 0 0 0;">
           ${ctaButton(ctaHref, ctaLabel)}
         </td></tr>` : ''}
+        ${footerNote ? `
         <tr><td align="center" style="padding:28px 4px 0 4px;">
           <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.ink};font-weight:700;text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+            ${footerNote}
           </div>
-        </td></tr>
+        </td></tr>` : ''}
         <tr><td align="center" style="padding:20px 4px 0 4px;">
           ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
@@ -389,11 +390,12 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
         <tr><td style="padding:28px 0 0 0;">
           ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px')}
         </td></tr>
+        ${footerNote ? `
         <tr><td align="center" style="padding:24px 4px 0 4px;">
           <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.ink};font-weight:700;text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
+            ${footerNote}
           </div>
-        </td></tr>
+        </td></tr>` : ''}
         <tr><td align="center" style="padding:18px 4px 0 4px;">
           ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
