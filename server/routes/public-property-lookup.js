@@ -10,6 +10,7 @@ const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
+const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { isEnabled } = require('../config/feature-gates');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
@@ -277,6 +278,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
     const fbc = attr?.fbc ? String(attr.fbc).slice(0, 255) : null;
     const fbp = attr?.fbp ? String(attr.fbp).slice(0, 255) : null;
+    // Anonymous experiment unit id (waves_exp_uid) — joins this lead to any
+    // A/B assignments in experiment_exposures. Stored as a first-class column
+    // (like the click ids above) so later extracted_data rewrites can't drop it.
+    const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
     const serviceInterest = normalizeServiceInterest(req.body || {});
 
@@ -320,6 +325,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             city: normalizedAddress.city || zipToCity(normalizedAddress.zip) || null,
             zip: normalizedAddress.zip || null,
             ...(serviceInterest ? { service_interest: serviceInterest } : {}),
+            ...(anonId ? { anon_id: anonId } : {}),
             // A lead the office parked as 'unresponsive' just responded — the
             // admin UI buckets that status as closed, so reopen it or the
             // re-engaged prospect stays hidden. Other statuses are untouched.
@@ -361,6 +367,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         fbclid,
         fbc,
         fbp,
+        anon_id: anonId,
         service_interest: serviceInterest || null,
         extracted_data: JSON.stringify(startedStage),
       }).returning(['id']);

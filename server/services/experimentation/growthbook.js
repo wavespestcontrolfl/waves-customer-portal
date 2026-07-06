@@ -283,11 +283,29 @@ function isKnownTrackingKey(key) {
   return false;
 }
 
+// Marketing-lead unit ids must satisfy the SAME shape contract as the public
+// exposure intake's UNIT_ID_RE (routes/experiments-public.js): the anon_id a
+// lead submission carries joins to an experiment_exposures row keyed on that
+// exact string, so an id the exposure endpoint would have refused is
+// worthless — store null instead so the join never sees junk.
+const ANON_UNIT_ID_RE = /^[A-Za-z0-9._-]{8,190}$/;
+
+/**
+ * Validate a client-supplied anonymous experiment unit id
+ * (`attribution.anon_id` on the public lead-intake routes). Returns the id,
+ * or null when absent/malformed — callers persist null rather than rejecting
+ * the lead; losing a join beats losing a lead.
+ */
+function sanitizeAnonUnitId(value) {
+  return (typeof value === 'string' && ANON_UNIT_ID_RE.test(value)) ? value : null;
+}
+
 // Best-effort cache warm at boot so the first eligible view can participate
 // rather than fail open to control.
 if (experimentsEnabled()) scheduleRefresh();
 
 module.exports = {
+  sanitizeAnonUnitId,
   assignExperiment,
   assignEstimateViewExperiment,
   assignBookingRecoveryExperiment,

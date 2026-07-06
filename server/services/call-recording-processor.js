@@ -3368,7 +3368,7 @@ const CallRecordingProcessor = {
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
         // quote-wizard link. Only on the voicemail lead path — new prospect,
         // workable signal, no existing customer. All send gates (feature
-        // gate, one-shot dedupe, landline, quiet hours, STOP suppression,
+        // gate, one-shot dedupe, landline, STOP suppression,
         // template kill switch) live in the service. Best-effort: a text-back
         // failure must never break call processing or the lead that was just
         // created.

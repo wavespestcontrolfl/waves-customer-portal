@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { ArrowDownRight, ArrowRight, ArrowUpRight, Minus, Sparkles } from 'lucide-react';
 import {
   Area,
@@ -83,10 +84,10 @@ export function PressureHistoryChart({ history, cadence }) {
   return (
     <div style={{ marginTop: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-        <div style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 700 }}>
           Score history
         </div>
-        <div style={{ fontSize: 12, color: '#6B7280' }}>{subtitle}</div>
+        <div style={{ fontSize: 12, color: CUSTOMER_SURFACE.muted }}>{subtitle}</div>
       </div>
       <div style={{
         width: '100%', height: 180, padding: 6, boxSizing: 'border-box',
@@ -106,7 +107,7 @@ export function PressureHistoryChart({ history, cadence }) {
                 const month = date.toLocaleDateString('en-US', { month: 'short' });
                 return `${month} '${String(date.getFullYear()).slice(-2)}`;
               }}
-              tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
+              tick={{ fontSize: 10, fill: CUSTOMER_SURFACE.muted, fontFamily: "'Inter', system-ui, sans-serif" }}
               tickLine={false}
               axisLine={false}
               interval="preserveStartEnd"
@@ -114,7 +115,7 @@ export function PressureHistoryChart({ history, cadence }) {
             <YAxis
               domain={[0, 5]}
               ticks={[1, 2, 3, 4, 5]}
-              tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
+              tick={{ fontSize: 10, fill: CUSTOMER_SURFACE.muted, fontFamily: "'Inter', system-ui, sans-serif" }}
               tickLine={false}
               axisLine={false}
               width={20}
@@ -135,7 +136,7 @@ export function PressureHistoryChart({ history, cadence }) {
         </ResponsiveContainer>
       </div>
       {cadenceWord ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: '#6B7280', lineHeight: 1.45 }}>
+        <div style={{ marginTop: 8, fontSize: 12, color: CUSTOMER_SURFACE.muted, lineHeight: 1.45 }}>
           X-axis spacing reflects this customer's service cadence — {cadenceWord}.
         </div>
       ) : null}

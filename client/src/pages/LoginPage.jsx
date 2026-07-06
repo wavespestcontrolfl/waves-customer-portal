@@ -2,13 +2,15 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { isNativeApp } from '../native/platform';
 
 const SUPPORT_LINKS = [
   { label: 'Call', href: 'tel:+19412975749', icon: 'phone' },
   { label: 'Text', href: 'sms:+19412975749', icon: 'chat' },
-  { label: 'Estimate', href: '/estimate', icon: 'arrowRight' },
+  { label: 'Estimate', href: '/estimate', icon: 'clipboard' },
 ];
 
 function safeNextPath(search) {
@@ -41,9 +43,11 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
-  // Glass dark-launch (?glass=1): the login page is the app's front door,
-  // so it gets the full scene like the estimate hero.
-  const [glassActive] = useState(glassParamRequested);
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
@@ -102,7 +106,7 @@ export default function LoginPage() {
         '--login-blue': B.blueDeeper,
         '--login-brand': B.wavesBlue,
         '--login-text': '#3F4A65',
-        '--login-muted': '#6B7280',
+        '--login-muted': CUSTOMER_SURFACE.muted,
         '--login-border': '#E7E2D7',
         '--login-border-strong': '#D8D0C0',
         '--login-soft': '#F8FCFE',
@@ -511,7 +515,7 @@ export default function LoginPage() {
         <section className="portal-login-brand" aria-labelledby="portal-login-heading">
           <a className="portal-login-logo" href="https://wavespestcontrol.com">
             <img src="/waves-logo.png" alt="Waves" />
-            <span>Waves Customer Portal</span>
+            <span>Waves</span>
           </a>
           <div className="portal-login-eyebrow" data-glass="chip" style={{ position: 'relative' }}>
             <Icon name="lock" size={15} strokeWidth={2.2} />
@@ -610,7 +614,6 @@ export default function LoginPage() {
                 {sending
                   ? busyLabel
                   : (step === 'phone' ? 'Send Code' : 'Sign In')}
-                {!sending && <Icon name="arrowRight" size={16} strokeWidth={2.2} />}
               </button>
 
               {step === 'code' && (
@@ -646,12 +649,44 @@ export default function LoginPage() {
 
           <div className="portal-login-help" aria-label="Support links" data-glass="soft" style={{ position: 'relative' }}>
             {SUPPORT_LINKS.map(link => (
-              <a key={link.label} href={link.href}>
+              <a key={link.label} href={link.href} data-glass-accent="" style={{ position: 'relative' }}>
                 <Icon name={link.icon} size={15} strokeWidth={2} />
                 {link.label}
               </a>
             ))}
           </div>
+
+          {/* Store badges — hidden inside the native apps (isNativeApp),
+              where the customer already has the app. */}
+          {!isNativeApp() && (
+            <section data-glass="card" aria-label="Get the Waves app" style={{
+              position: 'relative',
+              marginTop: 14,
+              padding: 24,
+              borderRadius: 16,
+              background: '#FFFFFF',
+              border: '1px solid #E7E2D7',
+              textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 850, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+                The Waves App
+              </div>
+              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+                Your home team, one tap away.
+              </div>
+              <div style={{ marginTop: 6, fontSize: 14, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
+                See when we're coming, read every report the moment it's ready, and pay in seconds.
+              </div>
+              <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
+                <a href="https://apps.apple.com/us/app/waves-pest-control/id6782775654" target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store">
+                  <img src="/app-email/apple-app-store-badge.png" alt="Download on the App Store" style={{ height: 44, display: 'block' }} />
+                </a>
+                <a href="https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal" target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play">
+                  <img src="/app-email/google-play-badge-tight.png" alt="Get it on Google Play" style={{ height: 44, display: 'block' }} />
+                </a>
+              </div>
+            </section>
+          )}
         </section>
       </div>
     </main>

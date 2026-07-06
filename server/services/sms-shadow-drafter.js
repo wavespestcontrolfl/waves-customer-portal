@@ -303,14 +303,58 @@ const MAX_REVISIONS = (() => {
   return Number.isInteger(n) && n >= 0 && n <= 4 ? n : 2;
 })();
 
-async function generateDraftOnce(client, system, userContent) {
+// Save-the-sale routing (owner directive 2026-07-05): retention-critical
+// inbound — a customer trying to cancel, complaining, or reporting an issue —
+// drafts on Claude Sonnet (ROUTES.smsDraftSaveSale); everything else drafts on
+// the default mini route (ROUTES.smsDraftDefault).
+//
+// Two signals, either one routes to save-the-sale:
+// - intent name: triage labels (customer_issue_needs_review) and legacy
+//   webhook labels (COMPLAINT, CANCEL_REQUEST).
+// - the raw message text: the upstream router classifies service scheduling
+//   BEFORE customer triage, so a complaint that also carries a time word
+//   ("still have spiders this morning", "what happened this morning") arrives
+//   here labeled service_scheduling_window_reply — the intent string alone
+//   would misroute exactly the retention-critical class to the mini lane.
+const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
+const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
+
+function draftRouteFor({ intentName, inboundMessage } = {}) {
+  if (SAVE_SALE_INTENT_RE.test(String(intentName || ''))) return MODELS.ROUTES.smsDraftSaveSale;
+  if (SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))) return MODELS.ROUTES.smsDraftSaveSale;
+  return MODELS.ROUTES.smsDraftDefault;
+}
+
+/**
+ * One draft generation, routed per the SMS reply-drafting split in
+ * config/models.js. Any routed miss — missing provider key, provider error,
+ * unparseable output — falls back to the original Anthropic FLAGSHIP call, so
+ * a provider issue never causes a gap. Returns { parsed, model } (model = the
+ * one that actually produced the draft, persisted on the row for the judge),
+ * or null when both paths are unusable.
+ */
+async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault) {
+  try {
+    const { dispatch } = require('./llm/call');
+    const routed = await dispatch(route, { system, text: userContent, jsonMode: false, maxTokens: 600 });
+    if (routed.ok) {
+      const parsed = parseShadowResponse(routed.text || '');
+      if (parsed) return { parsed, model: routed.model };
+      logger.warn(`[sms-shadow] routed draft unparseable (${route.provider}/${route.model}); falling back to ${MODELS.FLAGSHIP}`);
+    } else {
+      logger.warn(`[sms-shadow] routed draft unavailable (${route.provider}/${route.model}: ${routed.reason}); falling back to ${MODELS.FLAGSHIP}`);
+    }
+  } catch (err) {
+    logger.warn(`[sms-shadow] draft route dispatch failed (${err.message}); falling back to ${MODELS.FLAGSHIP}`);
+  }
   const resp = await client.messages.create({
     model: MODELS.FLAGSHIP,
     max_tokens: 600,
     system,
     messages: [{ role: 'user', content: userContent }],
   });
-  return parseShadowResponse(resp.content?.[0]?.text || '');
+  const parsed = parseShadowResponse(resp.content?.[0]?.text || '');
+  return parsed ? { parsed, model: MODELS.FLAGSHIP } : null;
 }
 
 /**
@@ -318,11 +362,13 @@ async function generateDraftOnce(client, system, userContent) {
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged }. converged=true means the verifier signed
- * off (or the reply was empty — nothing to assert). Verify failures degrade
- * gracefully: keep the current draft, stop, converged=false — a verification
- * miss must never break drafting. Caller supplies the Anthropic client so
- * live + backfill share one implementation.
+ * { parsed, passes, converged, model }. converged=true means the verifier
+ * signed off (or the reply was empty — nothing to assert). model is whichever
+ * model produced the FINAL draft (routed default / save-the-sale, or the
+ * FLAGSHIP fallback) — persist it, don't assume FLAGSHIP. Verify failures
+ * degrade gracefully: keep the current draft, stop, converged=false — a
+ * verification miss must never break drafting. Caller supplies the Anthropic
+ * client so live + backfill share one implementation.
  */
 async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent }) {
   const system = buildSystemPrompt();
@@ -338,10 +384,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const exemplarBlock = formatExemplarBlock(exemplars);
   const userContent = buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock);
 
-  let parsed = await generateDraftOnce(client, system, userContent);
-  if (!parsed) return { parsed: null, passes: 1, converged: false };
+  // Route once for the whole loop (revisions included) — routing looks at the
+  // intent label AND the raw message so complaints mislabeled as scheduling
+  // still draft on the save-the-sale lane.
+  const route = draftRouteFor({ intentName: intent?.intent, inboundMessage });
+  const first = await generateDraftOnce(client, system, userContent, route);
+  if (!first) return { parsed: null, passes: 1, converged: false, model: null };
+  let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
-  if (!VERIFY_ENABLED) return { parsed, passes: 1, converged: true };
+  if (!VERIFY_ENABLED) return { parsed, passes: 1, converged: true, model };
 
   const verifier = require('./sms-draft-verifier');
   let passes = 1;
@@ -378,7 +429,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       revised = await generateDraftOnce(
         client,
         system,
-        `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`
+        `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`,
+        route
       );
     } catch (err) {
       // A revise call that times out / rate-limits must NOT drop the whole
@@ -388,11 +440,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       break;
     }
     if (!revised) break; // revision unparseable — keep the prior draft
-    parsed = revised;
+    parsed = revised.parsed;
+    model = revised.model;
     passes += 1;
   }
 
-  return { parsed, passes, converged };
+  return { parsed, passes, converged, model };
 }
 
 /**
@@ -468,7 +521,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     // v3: draft → adversarial fact-check → revise loop (generateGroundedDraft).
-    const { parsed, passes, converged } = await generateGroundedDraft({
+    const { parsed, passes, converged, model: draftModel } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent,
     });
     if (!parsed) {
@@ -508,7 +561,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         flags: JSON.stringify(context.flags || []),
         status: SHADOW_STATUS,
         drafter: DRAFTER,
-        model: MODELS.FLAGSHIP,
+        model: draftModel,
         prompt_version: PROMPT_VERSION,
         // What the drafter actually saw — the judge grades fact-grounding
         // against this, not the one-line summary (without it, a draft that
@@ -550,7 +603,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           intendedActions: parsed.intended_actions,
           actionsVerifiedSafe: parsed.auto_send_safe,
           confidence: intent?.confidence ?? null,
-          model: MODELS.FLAGSHIP,
+          model: draftModel,
           promptVersion: PROMPT_VERSION,
           schedulingIntent,
         });
@@ -582,7 +635,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               reply: parsed.reply,
               intent: intentName,
               confidence: intent?.confidence ?? null,
-              model: MODELS.FLAGSHIP,
+              model: draftModel,
               promptVersion: PROMPT_VERSION,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
@@ -597,7 +650,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           reply: parsed.reply,
           intent: intentName,
           confidence: intent?.confidence ?? null,
-          model: MODELS.FLAGSHIP,
+          model: draftModel,
           promptVersion: PROMPT_VERSION,
         });
         if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
@@ -617,6 +670,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
 module.exports = {
   draftShadowReply,
   generateGroundedDraft,
+  generateDraftOnce,
+  draftRouteFor,
+  SAVE_SALE_INTENT_RE,
+  SAVE_SALE_TEXT_RE,
   parseShadowResponse,
   buildSystemPrompt,
   buildUserPrompt,

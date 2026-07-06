@@ -37,7 +37,12 @@ const logger = require('../services/logger');
 const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const {
+  annualPrepayEligibleForEstimateData,
   buildPricingBundle,
+  commercialAcceptDepositExempt,
+  isCommercialAutoAcceptEstimate,
+  isPestServiceName,
+  shouldPersistPestOnlyRecurringChoice,
   estimateTrenchingReviewRequired,
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
@@ -442,12 +447,13 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
 // authoritative; ESTIMATE_DEPOSIT_REQUIRED rollout switch). Gates mirror
 // accept exactly: estimate-token format gate, terminal/expired rejection,
 // the accept-time quote gate (never collect money for an estimate accept
-// will reject), and the deposit policy itself (prepay-annual choice and
-// existing plan customers owe nothing). serviceMode picks the amount class —
-// one-time accepts pay the heavier flat amount, credited against their
-// completed-visit invoice. The client pays the intent, then calls accept
-// with depositPaymentIntentId; the intent is idempotent per estimate+amount,
-// so retries reuse it.
+// will reject), and the deposit policy itself (existing plan customers owe
+// nothing; prepay-annual owes the $49 like any recurring accept — it credits
+// against the annual invoice minted at accept). serviceMode picks the amount
+// class — one-time accepts pay the heavier flat amount, credited against
+// their completed-visit invoice. The client pays the intent, then calls
+// accept with depositPaymentIntentId; the intent is idempotent per
+// estimate+amount, so retries reuse it.
 router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -485,6 +491,55 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       }
     }
     const oneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
+    // Mirror ALL of accept's annual-prepay preconditions BEFORE collecting
+    // money — a stale/crafted client requesting prepay must never pay a
+    // deposit for an acceptance shape /accept rejects up front:
+    //   1. one-time + prepay (billing choices are recurring-only),
+    //   2. invoice-mode estimates (accept 400s annualPrepaySelected there),
+    //   3. ineligible service mix / frozen-snapshot existing customer.
+    // Error copy matches the accept handler verbatim. Live existing plan
+    // customers never reach the mint — the deposit policy 409-exempts them
+    // below. The prepay slot requirement is deliberately NOT mirrored: like
+    // any recurring deposit, a pre-slot mint credits forward once the
+    // customer books and accepts (deposits are fungible across recurring
+    // modes).
+    if (req.body?.paymentMethodPreference === 'prepay_annual') {
+      if (oneTime) {
+        return res.status(400).json({ error: 'prepay_annual is not available for one-time visits — pick pay_at_visit instead' });
+      }
+      if (resolveEstimateInvoiceMode(estimate, estData)) {
+        return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
+      }
+      if (!annualPrepayEligibleForEstimateData(estData)) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
+      // Mirror the converter's fail-closed multi-service block
+      // (ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED, thrown INSIDE the accept
+      // transaction): a bundled recurring estimate can pass the eligibility
+      // mix yet 422 at conversion — the deposit must not be collected for a
+      // prepay that cannot complete. Count the mix the CONVERTER will see:
+      // a show_one_time_option pest estimate's recurring accept narrows the
+      // recurring rows to pest-only before persisting + converting (accept's
+      // shouldPersistPestOnlyRecurringChoice path), so that shape prepays as
+      // a single-service plan and must not 400 here on its raw rows.
+      let prepayCountData = estData;
+      if (shouldPersistPestOnlyRecurringChoice(estimate, estData)) {
+        const pestOnly = (recurring) => (recurring && Array.isArray(recurring.services)
+          ? { ...recurring, services: recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)) }
+          : recurring);
+        prepayCountData = { ...estData };
+        if (estData.result?.recurring) {
+          prepayCountData.result = { ...estData.result, recurring: pestOnly(estData.result.recurring) };
+        }
+        if (estData.recurring) {
+          prepayCountData.recurring = pestOnly(estData.recurring);
+        }
+      }
+      const prepayUnitCount = require('../services/estimate-converter').annualPrepayRecurringUnitCount(prepayCountData);
+      if (prepayUnitCount > 1) {
+        return res.status(400).json({ error: 'annual prepay is not available for multi-service plans — choose pay per application' });
+      }
+    }
     // Mirror accept's invoice-mode customer gate BEFORE collecting money:
     // accept rejects an invoice-mode estimate (admin flag OR derived
     // guarantee-only renewal) with no linked customer and no customer phone —
@@ -498,7 +553,6 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     // intent here would charge a current WaveGuard member who owes nothing.
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
       membership,
       oneTime,
       // Effective invoice mode (admin flag OR derived guarantee-only renewal)
@@ -508,16 +562,23 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
       oneTimeUninvoiced: oneTime && !resolveEstimateInvoiceMode(estimate, estData),
       noVisit: isRodentGuaranteeOnlyEstimate(estimate, estData),
     });
-    // A narrow low-confidence commercial RECURRING accept is held for on-site
-    // price confirmation — whatever the billing mode, no money moves at accept
-    // (invoice-mode holds the first-invoice mint; non-invoice bills per
-    // application after the confirmed visit), so there's nothing to credit a
-    // deposit against. Exempt it here too (matches the accept handler + the
-    // /data deposit policy), so a "no payment now" estimate never collects a
-    // deposit at the confirm step.
-    if (!oneTime) {
+    // Commercial deposit exemption — the SAME predicate the accept gate runs
+    // (commercialAcceptDepositExempt): commercial auto-priced programs and
+    // site-confirmation-held recurring estimates mint nothing at accept (the
+    // team invoices manually after confirmation), so there is nothing to
+    // credit a deposit against; an uninvoiced one-time commercial accept has
+    // no completed-visit roll-forward either. Only the one-time INVOICE-MODE
+    // accept keeps its deposit (minted + credited inside the accept
+    // transaction). Exempting here keeps every "no payment now" estimate from
+    // collecting a deposit at the confirm step — matches accept + /data.
+    {
       const lc = commercialLowConfidenceRange(estData);
-      if (lc.hasLowConfidence && !lc.forceSiteQuote) {
+      if (commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
+        treatAsOneTime: oneTime,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      })) {
         return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'commercial_manual_billing' });
       }
     }

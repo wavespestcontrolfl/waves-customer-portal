@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
+import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 
@@ -14,7 +16,7 @@ const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
 const TEXT = '#1B2C5B';
 const BODY = '#3F4A65';
-const MUTED = '#6B7280';
+const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
@@ -28,8 +30,32 @@ const SEVERITY_DOT = { mild: COLORS.green, moderate: COLORS.orange, severe: COLO
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
-      <header style={{ background: CARD, borderBottom: `1px solid ${BORDER}`, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+    <div className="lawn-report-page" style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
+      {/* ---------- liquid glass (?glass=1 only) ----------
+          useGlassSurface sets html[data-glass-theme]; every rule below is
+          scoped under it so the un-gated page stays pixel-identical. Card
+          material comes from glass-theme.css via the data-glass attributes —
+          this block only clears the page wash and adds the print reset. */}
+      <style>{`
+        html[data-glass-theme] .lawn-report-page { background: transparent !important; }
+        /* the glass ::before/::after specular layers position against the card */
+        html[data-glass-theme] .lawn-report-page [data-glass] { position: relative; }
+        @media print {
+          /* printing a ?glass=1 view still yields the paper document */
+          html[data-glass-theme] .lawn-report-page { background: #fff !important; }
+          html[data-glass-theme] .lawn-report-page [data-glass],
+          html[data-glass-theme] .lawn-report-page [data-glass-accent] {
+            background: #fff !important;
+            border-color: #d4d4d4 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          html[data-glass-theme] .glass-scene-orbs,
+          html[data-glass-theme] .glass-scene-grain { display: none !important; }
+        }
+      `}</style>
+      <header data-glass="soft" style={{ background: CARD, borderBottom: `1px solid ${BORDER}`, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontFamily: FONTS.display, fontSize: 22, color: TEXT, letterSpacing: '0.01em' }}>Waves Pest Control &amp; Lawn</span>
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: COLORS.blueDeeper, textDecoration: 'none' }}>{WAVES_PHONE_DISPLAY}</a>
       </header>
@@ -40,8 +66,9 @@ function Page({ children }) {
 }
 
 function SectionCard({ children, style }) {
+  // data-glass is inert without html[data-glass-theme] — gate-off unchanged.
   return (
-    <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -68,7 +95,7 @@ function NotFoundCard() {
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
       </p>
-      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -122,7 +149,7 @@ function QuoteRequestForm({ token, firstName }) {
       <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" type="tel" autoComplete="tel" style={inputStyle} />
       <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" type="email" autoComplete="email" style={inputStyle} />
       <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" style={inputStyle} />
-      <button type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
+      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>
       {error ? (
@@ -137,6 +164,14 @@ export default function LawnReportViewPage() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [glassDefault, setGlassDefault] = useState(false);
+
+  // Liquid-glass release: follows GATE_REPORT_GLASS via the payload's
+  // glassDefault (like /report/:token), with ?glass=1 / ?glass=0 as the
+  // per-link force-on / escape hatch. This page has no pdf/static render
+  // modes — the route only ever serves the live customer view.
+  const glassActive = glassReleaseActive(glassDefault);
+  useGlassSurface(glassActive, 'full');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -146,6 +181,7 @@ export default function LawnReportViewPage() {
       if (!res.ok) throw new Error(`lawn report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
+      setGlassDefault(body.glassDefault === true);
     } catch {
       setNotFound(true);
     } finally {
@@ -219,7 +255,7 @@ export default function LawnReportViewPage() {
           ) : null}
           {watchItems.length ? (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
-              <div style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
+              <div data-gt="eyebrow" style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
               <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 14, lineHeight: 1.6 }}>
                 {watchItems.map((w, i) => <li key={i}>{w}</li>)}
               </ul>
@@ -230,7 +266,7 @@ export default function LawnReportViewPage() {
 
       {report.seasonal_context ? (
         <SectionCard style={{ background: COLORS.sand, border: `1px solid ${BORDER}` }}>
-          <div style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
+          <div data-gt="eyebrow" style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
           <p style={{ margin: 0, color: BODY, fontSize: 14, lineHeight: 1.55 }}>{report.seasonal_context}</p>
         </SectionCard>
       ) : null}

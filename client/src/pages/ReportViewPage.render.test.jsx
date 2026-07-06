@@ -52,7 +52,10 @@ describe('ReportViewPage — legacy lawn layout (reportV2 off)', () => {
 
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
-    expect(container.querySelectorAll('#map')).toHaveLength(1);
+    // The Visit Timeline now renders directly under Re-entry (owner ask
+    // 2026-07-05), so #map only exists when the coverage card itself shows —
+    // and lawn reports hide the per-area coverage map.
+    expect(container.querySelectorAll('#map')).toHaveLength(0);
   });
 
   it('omits the lawn trend chart on a first assessment (single data point)', async () => {

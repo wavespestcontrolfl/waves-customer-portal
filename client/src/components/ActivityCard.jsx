@@ -3,6 +3,7 @@ import {
   PressureHistoryChart,
   TrendChip,
 } from './report/GaugePrimitives';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 
 /**
  * Customer-facing activity gauge for typed specialty reports (rodent,
@@ -38,17 +39,17 @@ export default function ActivityCard({ data, sectionId = 'activity' }) {
       data-glass="card"
       style={{
         background: '#FFFFFF',
-        border: '1px solid #E7E2D7',
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
         borderRadius: 14,
         padding: 24,
         margin: '0 0 16px',
         fontFamily: "'Inter', system-ui, sans-serif",
-        color: '#1B2C5B',
+        color: CUSTOMER_SURFACE.text,
       }}
     >
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 600 }}>
+          <div style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 600 }}>
             {data.label}
           </div>
           <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
