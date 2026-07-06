@@ -403,9 +403,15 @@ function mergeServiceLabels(existingLabel, nextLabel) {
   if (existingLower.includes(nextLower)) return existing;
   if (nextLower.includes(existingLower)) return next;
 
-  return /(?:\s&\s|,\s)/.test(existing)
-    ? `${existing}, and ${next}`
-    : `${existing} & ${next}`;
+  // List-style join (owner call 07-06): split any previously merged label
+  // back into its parts (handles both the current "A & B" form and legacy
+  // "A & B, and C" rows), add the new service, and re-join as
+  // "A, B & C" — commas between all but the last pair. Shared by SMS and
+  // email, so both channels read identically.
+  const parts = existing.split(/\s*(?:,\s*and\s+|,\s+|\s&\s)\s*/).filter(Boolean);
+  if (!parts.some((part) => part.toLowerCase() === nextLower)) parts.push(next);
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
 }
 
 function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
