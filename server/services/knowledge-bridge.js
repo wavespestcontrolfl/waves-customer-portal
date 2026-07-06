@@ -578,7 +578,22 @@ Return a JSON object with:
       }
 
       logger.info(`[knowledge-bridge] syncToClaudeopedia complete: ${JSON.stringify(stats)}`);
-      return stats;
+      // Reconcile: copies whose source page is no longer trusted get flagged.
+    // Event-driven flips (syncKbCopyTrust) handle transitions in real time;
+    // this weekly pass heals any missed flip so drift can't persist.
+    try {
+      await db('knowledge_base')
+        .where({ source: 'wiki-sync' })
+        .whereIn(
+          'wiki_entry_id',
+          db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
+        )
+        .update({ status: 'flagged', active: false, updated_at: new Date() });
+    } catch (err) {
+      logger.error(`[knowledge-bridge] Sync trust reconciliation failed: ${err.message}`);
+    }
+
+    return stats;
     } catch (err) {
       logger.error(`[knowledge-bridge] syncToClaudeopedia failed: ${err.message}`);
       return stats;

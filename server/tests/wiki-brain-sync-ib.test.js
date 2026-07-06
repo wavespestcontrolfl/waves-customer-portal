@@ -100,6 +100,19 @@ describe('syncToClaudeopedia trust gate', () => {
     expect(stats.created).toBe(1);
     expect((state.inserts.knowledge_base || []).map((r) => r.slug)).toEqual(['outcomes-product-talstar-p']);
   });
+
+  test('sync reconciles copies of no-longer-trusted pages to flagged', async () => {
+    const state = useDb({ knowledge_entries: [], knowledge_base: [] });
+
+    await KnowledgeBridge.syncToClaudeopedia();
+
+    // the reconciliation pass flags wiki-sync copies whose source page is untrusted
+    const reconcile = (state.updates.knowledge_base || []).find((u) => u.status === 'flagged');
+    expect(reconcile).toBeTruthy();
+    const kbCalls = state.calls.knowledge_base;
+    const reconcileCall = kbCalls.find((rec) => rec.ops.some(([m, a]) => m === 'where' && a[0]?.source === 'wiki-sync'));
+    expect(reconcileCall).toBeTruthy();
+  });
 });
 
 describe('syncToClaudeopediaIfDue', () => {
