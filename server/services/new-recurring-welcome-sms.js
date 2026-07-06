@@ -12,6 +12,10 @@ const WELCOME_DELAY_MINUTES = 60;
 // A queued row that keeps erroring is abandoned after this many attempts so
 // the processor can't retry forever.
 const MAX_DELIVERY_ATTEMPTS = 3;
+// A 'sending' claim older than this is presumed crashed mid-dispatch and is
+// settled by the recovery pass (completed if a provider row proves the text
+// left, released for retry otherwise). Must comfortably exceed one dispatch.
+const STALE_CLAIM_MINUTES = 30;
 
 async function isNewRecurringSignupCandidate(customerId) {
   if (!customerId) return false;
@@ -226,6 +230,9 @@ async function deliverQueuedWelcome(row) {
         ? new Date(sendResult.nextAllowedAt)
         : new Date(Date.now() + 15 * 60 * 1000);
       await db('sms_sequences').where({ id: row.id }).update({
+        // The sweep claimed this row as 'sending' before dispatch — release
+        // the claim so the next tick can retry it.
+        status: 'active',
         next_send_at: nextAt,
         ...(isLegalHold ? { step: parseInt(row.step, 10) || 0 } : {}),
         updated_at: new Date(),
@@ -264,6 +271,35 @@ async function processDueWelcomes() {
   const results = { sent: 0, skipped: 0, errors: 0 };
   try {
     if (!(await db.schema.hasTable('sms_sequences'))) return results;
+
+    // Recover stale claims first: a crash between Twilio's accept and the
+    // completed-stamp leaves a row in 'sending'. A provider sms_log row for
+    // this customer + template proves the text left (the welcome is
+    // once-ever per customer, so the pair is unambiguous) — settle it as
+    // completed; otherwise release the claim so the next tick retries
+    // (attempts were already counted at claim time, so the cap still holds).
+    const staleBefore = new Date(Date.now() - STALE_CLAIM_MINUTES * 60 * 1000);
+    const stale = await db('sms_sequences')
+      .where({ sequence_type: SEQUENCE_TYPE, status: 'sending' })
+      .where('updated_at', '<', staleBefore)
+      .limit(25);
+    for (const row of stale) {
+      try {
+        const proof = await db('sms_log')
+          .where({ customer_id: row.customer_id, direction: 'outbound', message_type: TEMPLATE_KEY })
+          .whereIn('status', ['queued', 'sent', 'delivered'])
+          .first('id');
+        await db('sms_sequences').where({ id: row.id, status: 'sending' }).update({
+          status: proof ? 'completed' : 'active',
+          ...(proof ? {} : { next_send_at: new Date() }),
+          updated_at: new Date(),
+        });
+        logger.warn(`[new-recurring-welcome] recovered stale claim for customer ${row.customer_id} — ${proof ? 'provider row found, settled as completed' : 'no provider row, released for retry'}`);
+      } catch (err) {
+        logger.error(`[new-recurring-welcome] stale-claim recovery failed for sequence ${row.id}: ${err.message}`);
+      }
+    }
+
     const due = await db('sms_sequences')
       .where({ sequence_type: SEQUENCE_TYPE, status: 'active' })
       .whereNotNull('next_send_at')
@@ -273,13 +309,20 @@ async function processDueWelcomes() {
     for (const row of due) {
       try {
         const attempts = (parseInt(row.step, 10) || 0) + 1;
-        await db('sms_sequences').where({ id: row.id }).update({ step: attempts, updated_at: new Date() });
         if (attempts > MAX_DELIVERY_ATTEMPTS) {
           await db('sms_sequences').where({ id: row.id }).update({ status: 'cancelled', updated_at: new Date() });
           results.skipped++;
           logger.warn(`[new-recurring-welcome] abandoned after ${MAX_DELIVERY_ATTEMPTS} attempts for customer ${row.customer_id}`);
           continue;
         }
+        // Claim before dispatch (active → sending, atomic on status) so a
+        // crash after Twilio accepts can't leave the row due for the next
+        // 10-minute sweep and double-text the customer. A miss means another
+        // worker claimed it.
+        const claimed = await db('sms_sequences')
+          .where({ id: row.id, status: 'active' })
+          .update({ status: 'sending', step: attempts, updated_at: new Date() });
+        if (!claimed) continue;
         const outcome = await deliverQueuedWelcome(row);
         if (outcome?.sent) results.sent++;
         else results.skipped++;

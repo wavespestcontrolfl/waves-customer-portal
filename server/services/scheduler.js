@@ -58,6 +58,24 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+// Deposit-receipt replays re-check payment_receipt_channel at send time —
+// the immediate send honors the channel choice, and a customer who switches
+// to email-only between the hold and scheduled_for must not be texted by the
+// retry. Fail-open to 'sms' on a lookup error, matching the immediate path's
+// default. Non-receipt rows and lead rows pass through untouched.
+async function scheduledDepositReceiptAllowed(msg) {
+  if (!msg.customer_id || String(msg.message_type || '').toLowerCase() !== 'deposit_receipt') return true;
+  try {
+    const prefs = await db('notification_prefs')
+      .where({ customer_id: msg.customer_id })
+      .first('payment_receipt_channel');
+    const channel = prefs?.payment_receipt_channel || 'sms';
+    return channel === 'sms' || channel === 'both';
+  } catch {
+    return true;
+  }
+}
+
 function scheduledSmsAttemptSql() {
   return `
     CASE
@@ -1575,6 +1593,17 @@ function initScheduledJobs() {
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
               logger.warn(`[scheduled-sms] Blocked scheduled SMS ${msg.id}: customer phone unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
             }
+            continue;
+          }
+          if (!(await scheduledDepositReceiptAllowed(msg))) {
+            // The customer's explicit channel choice wins — this is a
+            // permanent skip, not a retry.
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'blocked',
+              updated_at: new Date(),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'receipt_channel_not_sms')"),
+            });
+            logger.info(`[scheduled-sms] Skipped deposit receipt ${msg.id} — customer receipt channel is no longer sms`);
             continue;
           }
           const smsResult = await sendCustomerMessage({
@@ -3527,6 +3556,7 @@ module.exports = {
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,
+  scheduledDepositReceiptAllowed,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

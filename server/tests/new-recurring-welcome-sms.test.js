@@ -10,19 +10,28 @@ let mockSequenceExists = false;
 let mockPriorRecurringSeries = null;
 let mockPriorServiceRecord = null;
 let mockDueSequences = [];
+let mockStaleSequences = [];
+let mockSmsLogProviderRow = null;
+let mockClaimResults = []; // shift()ed per sms_sequences update; empty = always 1
 let mockCustomerRow = null;
 let mockScheduledServiceRow = null;
 let mockInserts = [];
 let mockUpdates = [];
 
 const mockDb = jest.fn((table) => {
+  const wheres = [];
   const chain = {
-    where: jest.fn(() => chain),
+    where: jest.fn((arg) => { wheres.push(arg); return chain; }),
     whereNot: jest.fn(() => chain),
     whereIn: jest.fn(() => chain),
     whereNotNull: jest.fn(() => chain),
     limit: jest.fn(async () => {
-      if (table === 'sms_sequences') return mockDueSequences;
+      if (table === 'sms_sequences') {
+        // The sweep runs two scans over this table — stale-claim recovery
+        // (status 'sending') and due delivery (status 'active').
+        const statusFilter = wheres.find((w) => w && typeof w === 'object' && 'status' in w)?.status;
+        return statusFilter === 'sending' ? mockStaleSequences : mockDueSequences;
+      }
       return [];
     }),
     first: jest.fn(async () => {
@@ -39,6 +48,9 @@ const mockDb = jest.fn((table) => {
       }
       if (table === 'customers') {
         return mockCustomerRow;
+      }
+      if (table === 'sms_log') {
+        return mockSmsLogProviderRow;
       }
       return null;
     }),
@@ -71,7 +83,8 @@ const mockDb = jest.fn((table) => {
       return [data];
     }),
     update: jest.fn(async (data) => {
-      mockUpdates.push({ table, data });
+      mockUpdates.push({ table, data, wheres: [...wheres] });
+      if (table === 'sms_sequences' && mockClaimResults.length) return mockClaimResults.shift();
       return 1;
     }),
   };
@@ -100,6 +113,9 @@ describe('new recurring welcome SMS', () => {
     mockPriorRecurringSeries = null;
     mockPriorServiceRecord = null;
     mockDueSequences = [];
+    mockStaleSequences = [];
+    mockSmsLogProviderRow = null;
+    mockClaimResults = [];
     mockCustomerRow = null;
     mockScheduledServiceRow = null;
     mockInserts = [];
@@ -253,11 +269,13 @@ describe('new recurring welcome SMS', () => {
     const results = await service.processDueWelcomes();
 
     expect(results.sent).toBe(0);
-    // Row stays active with a pushed-out next_send_at — never cancelled.
+    // Claimed as 'sending' before dispatch, released back to 'active' with a
+    // pushed-out next_send_at — never cancelled or completed.
     const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
-    expect(statusUpdates).toEqual([]);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
     const requeue = mockUpdates.find((u) => u.table === 'sms_sequences' && 'next_send_at' in u.data);
     expect(requeue).toBeTruthy();
+    expect(requeue.data.status).toBe('active');
   });
 
   test('processDueWelcomes schedules quiet-hours holds at nextAllowedAt without burning an attempt', async () => {
@@ -280,8 +298,58 @@ describe('new recurring welcome SMS', () => {
     // Legal-window hold refunds the attempt so overnight holds can't
     // exhaust MAX_DELIVERY_ATTEMPTS before 8am.
     expect(requeue.data.step).toBe(0);
+    // Claim → release only; never cancelled or completed.
     const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
-    expect(statusUpdates).toEqual([]);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
+  });
+
+  test('processDueWelcomes claims the row before dispatch and skips on a claim miss', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+    // Another worker won the claim (0 rows updated) — this sweep must not text.
+    mockClaimResults = [0];
+
+    const results = await service.processDueWelcomes();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(results.sent).toBe(0);
+    // The claim carried the status flip + attempt count in one atomic update,
+    // guarded on status='active'.
+    const claim = mockUpdates.find((u) => u.table === 'sms_sequences' && u.data.status === 'sending');
+    expect(claim).toBeTruthy();
+    expect(claim.data.step).toBe(1);
+    expect(claim.wheres).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'active' })]));
+  });
+
+  test('stale-claim recovery settles as completed when a provider row proves the send, else releases', async () => {
+    // Crash after Twilio accepted: provider sms_log row exists → completed,
+    // never re-sent.
+    mockStaleSequences = [{ id: 'seq-stale', customer_id: 'customer-1', step: 1 }];
+    mockSmsLogProviderRow = { id: 'sms-1' };
+
+    await service.processDueWelcomes();
+
+    let recovery = mockUpdates.find((u) => u.table === 'sms_sequences' && u.data.status === 'completed');
+    expect(recovery).toBeTruthy();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+    // Crash before Twilio accepted: no provider row → released for retry.
+    mockUpdates = [];
+    mockSmsLogProviderRow = null;
+
+    await service.processDueWelcomes();
+
+    recovery = mockUpdates.find((u) => u.table === 'sms_sequences' && u.data.status === 'active');
+    expect(recovery).toBeTruthy();
+    expect(recovery.data.next_send_at).toBeInstanceOf(Date);
   });
 
   test('processDueWelcomes drops the welcome when the appointment was cancelled', async () => {
