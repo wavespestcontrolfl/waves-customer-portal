@@ -1,4 +1,5 @@
 import { COLORS as B, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import NewsletterSignup from './NewsletterSignup';
 import { WAVES_ADDRESS_LINE } from '../constants/business';
 import { glassCopyActive, GLASS_FOOTER_CITY_LINKS } from '../lib/estimate-glass-copy';
@@ -52,13 +53,13 @@ export default function BrandFooter({ borderColor, variant }) {
       <div style={{
         textAlign: 'center', padding: '40px 20px 32px',
         borderTop: `1px solid ${borderColor || B.grayLight}`,
-        background: '#FAF8F3',
+        background: CUSTOMER_SURFACE.page,
       }}>
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 16 }}>
           {SOCIAL_ICON_PATHS.map(s => (
             <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
               width: 36, height: 36, borderRadius: '50%',
-              background: '#F7F5EE', border: '1px solid #E7E2D7', color: B.navy,
+              background: CUSTOMER_SURFACE.chrome, border: `1px solid ${CUSTOMER_SURFACE.border}`, color: B.navy,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               textDecoration: 'none',
             }}>

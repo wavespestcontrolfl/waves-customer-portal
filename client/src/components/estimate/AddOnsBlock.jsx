@@ -5,6 +5,7 @@
  * the accept handler as part of the final payload.
  */
 import { estimateCard, estimateInnerBox } from './cardStyles';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
 
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', green: '#16A34A',
@@ -37,7 +38,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
       }}>
         Skip parts you don't need
       </div>
-      <div style={{ fontSize: 14, color: '#6B7280', lineHeight: 1.5, marginBottom: 18 }}>
+      <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.5, marginBottom: 18 }}>
         {disabled
           ? "The add-ons included in the visit you booked."
           : "These are on by default. Toggle off whatever you don't want and the price adjusts instantly."}

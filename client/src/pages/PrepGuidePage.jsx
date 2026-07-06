@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -14,7 +15,7 @@ const SURFACE = {
   border: '#E7E2D7',
   text: '#1B2C5B',
   body: '#3F4A65',
-  muted: '#6B7280',
+  muted: CUSTOMER_SURFACE.muted,
   calloutBg: '#FDF6EC',
   calloutBorder: '#FFD700',
   detailBg: '#F9F8F5',

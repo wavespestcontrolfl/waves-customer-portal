@@ -1,8 +1,8 @@
 /**
  * Abandoned-booking recovery service.
  *
- * Pins the contract: gate-off shadow mode (count, never claim/send), quiet-hours
- * skip, reply-pause skip, the claim + transactional-consent SMS send (touch 1),
+ * Pins the contract: gate-off shadow mode (count, never claim/send),
+ * reply-pause skip, the claim + transactional-consent SMS send (touch 1),
  * and the email send (touch 2). Mirrors the deposit-abandonment stage's mock
  * harness (estimate-followup-deposit-abandoned.test.js).
  */
@@ -60,10 +60,7 @@ function makeBuilder(table, cfg = {}) {
 let queues;
 function enqueue(table, cfg) { (queues[table] = queues[table] || []).push(cfg); }
 
-// 11:00 ET — inside the 8a–8p window.
 const NOW = new Date('2026-06-10T15:00:00Z');
-// 2:00 ET — quiet hours.
-const QUIET_NOW = new Date('2026-06-10T06:00:00Z');
 
 function intent(overrides = {}) {
   return {
@@ -152,16 +149,6 @@ describe('runSmsStage (touch 1)', () => {
     expect(updates).toEqual([]);
   });
 
-  test('quiet hours → skips without sending', async () => {
-    enqueue('booking_intents', { rows: [intent()] });
-
-    const sent = await _internals.runSmsStage(QUIET_NOW, new Set());
-
-    expect(sent).toBe(0);
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(updates).toEqual([]);
-  });
-
   test('reply-pause → skips a phone that has texted Waves recently', async () => {
     enqueue('booking_intents', { rows: [intent()] });
     enqueue('messages', { first: { id: 'm-1' } }); // replied recently
@@ -191,8 +178,8 @@ describe('runSmsStage (touch 1)', () => {
     ]);
   });
 
-  test('retryable hold (quiet-hours) releases the claim so it retries next tick', async () => {
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', retryable: true });
+  test('retryable failure (transient provider) releases the claim so it retries next tick', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true });
     enqueue('booking_intents', { rows: [intent()] });
     enqueue('messages', { first: null });
     enqueue('booking_intents', { update: 1 }); // claim

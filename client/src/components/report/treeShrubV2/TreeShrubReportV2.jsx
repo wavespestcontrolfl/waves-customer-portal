@@ -18,15 +18,17 @@
 
 import { useRef, useState, useEffect, createContext, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
+import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (shared with the lawn/pest V2 + public estimate surface) ─────
-const TEXT = '#1B2C5B';
-const BODY = '#3F4A65';
-const MUTED = '#6B7280';
-const BORDER = '#E7E2D7';
+const TEXT = CUSTOMER_SURFACE.text;
+const BODY = CUSTOMER_SURFACE.body;
+// muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
+const MUTED = CUSTOMER_SURFACE.muted;
+const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
@@ -121,8 +123,10 @@ export function StatusPill({ status, small = false }) {
 }
 
 function Card({ children, style }) {
+  // data-glass is inert without html[data-glass-theme] (?glass=1 on the live
+  // report view) — glass-theme.css supplies all material; gate-off unchanged.
   return (
-    <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -148,7 +152,7 @@ function KeyLine({ label, value, dot }) {
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
-        <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
+        <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
         <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
@@ -175,7 +179,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
         <div style={{ flex: 1, minWidth: 220 }}>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
+          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Landscape Plant Health
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
@@ -195,14 +199,14 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
       {/* Peace of mind — the reassurance line that frames the whole report. */}
       {peaceOfMind ? (
         <div style={{ marginTop: 14, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
-          <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Peace of mind</div>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Peace of mind</div>
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{peaceOfMind}</div>
         </div>
       ) : null}
 
       {watching.length ? (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>What we’re monitoring</div>
+          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>What we’re monitoring</div>
           <ol style={{ margin: 0, padding: '0 0 0 20px', display: 'grid', gap: 5 }}>
             {watching.map((w, i) => (
               <li key={i} style={{ fontSize: 14.5, color: BODY, lineHeight: 1.45 }}>{w}</li>
