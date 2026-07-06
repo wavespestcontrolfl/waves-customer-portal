@@ -62,13 +62,88 @@ const REACTIVATED_TEMPLATE_KEYS = [
 const FLEA_PREP_TEMPLATE = {
   template_key: 'auto_flea',
   name: 'Flea Treatment',
-  category: 'automations',
+  category: 'onboarding',
   body: "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.",
   description: 'Treatment-prep text sent when a first-time flea treatment is booked.',
   variables: JSON.stringify(['first_name']),
   is_active: true,
   is_internal: false,
   sort_order: 100,
+};
+
+// Library re-grouping (owner-directed 2026-07-06): the old buckets were
+// lopsided (billing carried 36 templates) and named by mechanism, not by
+// customer moment. Categories only affect admin-library grouping — the UI
+// derives its filter list from the live rows, so no client change rides
+// along. 'custom' rows and any key not listed keep their category.
+const RECATEGORIZED_TEMPLATE_KEYS = {
+  leads: ['lead_auto_reply_biz', 'voicemail_quote_link', 'missed_call'],
+  estimates: [
+    'estimate_sent', 'estimate_followup_unviewed', 'estimate_followup_viewed',
+    'estimate_followup_final', 'estimate_followup_expiring', 'estimate_followup_deposit',
+    'estimate_accepted_onetime', 'estimate_accepted_annual_prepay',
+    'estimate_extended', 'quote_wizard_booking_invite',
+  ],
+  appointments: [
+    'appointment_confirmation', 'reminder_72h', 'reminder_24h',
+    'tech_en_route', 'tech_arrived', 'appointment_no_show', 'rain_out_moved',
+    'appointment_rescheduled', 'appointment_cancelled',
+    'appointment_series_rescheduled', 'appointment_series_cancelled',
+    'booking_abandonment_recovery',
+  ],
+  onboarding: [
+    'auto_new_recurring', 'auto_new_appointment',
+    'auto_bed_bug', 'auto_cockroach', 'auto_flea',
+  ],
+  'service-reports': [
+    'service_complete', 'service_complete_prepaid', 'service_complete_with_invoice',
+    'service_report_v1', 'service_report_v1_with_invoice',
+    'lawn_health_report_ready', 'project_report_ready',
+  ],
+  requests: ['service_request_confirmation'],
+  invoices: [
+    'invoice_sent', 'invoice_sent_upfront', 'invoice_sent_annual_prepay',
+    'invoice_receipt', 'manual_payment_receipt', 'payment_failed',
+    'ach_payment_processing', 'annual_prepay_payment_reminder',
+    'invoice_followup_3day', 'invoice_followup_7day',
+    'invoice_followup_14day', 'invoice_followup_30day',
+  ],
+  'late-payments': [
+    'late_payment_7d', 'late_payment_14d', 'late_payment_30d',
+    'late_payment_60d', 'late_payment_90d',
+    'balance_reminder_gentle', 'balance_reminder_firm', 'balance_reminder_urgent',
+    'balance_payment_received',
+  ],
+  autopay: [
+    'autopay_pre_charge', 'autopay_charge_success', 'autopay_charge_failed',
+    'autopay_retry_success', 'autopay_retry_failed', 'autopay_retry_final_failed',
+    'autopay_card_expired', 'autopay_card_expiring', 'payment_method_expiry',
+    'billing_reminder', 'ach_retry_notice', 'ach_card_fallback', 'ach_suspended',
+    'bank_verification_incomplete', 'bank_verification_failed',
+  ],
+  cancellations: [
+    'service_cancellation_confirmation',
+    'cancellation_save_step1_price', 'cancellation_save_step1_moving',
+    'cancellation_save_step1_quality', 'cancellation_save_step1_default',
+    'cancellation_save_step2_price', 'cancellation_save_step2_moving',
+    'cancellation_save_step2_quality', 'cancellation_save_step2_default',
+    'cancellation_save_step3', 'cancellation_save_accepted_offer',
+    'cancellation_save_callback_requested', 'cancellation_save_cancelled',
+  ],
+  retention: [
+    'renewal_reminder', 'annual_prepay_renewal_reminder', 'auto_service_renewal',
+    'seasonal_reactivation', 'upsell_interest_confirmation',
+    'upsell_tier_upgrade', 'upsell_add_service',
+  ],
+  referrals: [
+    'referral_enrollment', 'referral_invite', 'referral_milestone',
+    'referral_nudge', 'referral_reward',
+  ],
+  reviews: ['review_request', 'review_request_followup'],
+  // Not message copy — these three rows are the ops kill switches the
+  // twilio send layer consults via isTemplateActive (AI conversational
+  // replies + draft-approval sends).
+  system: ['ai_assistant', 'ai_approved', 'ai_revised'],
 };
 
 exports.up = async function up(knex) {
@@ -95,6 +170,15 @@ exports.up = async function up(knex) {
     .first('id');
   if (!existingFlea) {
     await knex('sms_templates').insert(FLEA_PREP_TEMPLATE);
+  }
+
+  // Category only — bodies, names, and active flags stay whatever the admin
+  // last saved.
+  for (const [category, keys] of Object.entries(RECATEGORIZED_TEMPLATE_KEYS)) {
+    await knex('sms_templates')
+      .whereIn('template_key', keys)
+      .whereNot({ category })
+      .update({ category, updated_at: new Date() });
   }
 };
 

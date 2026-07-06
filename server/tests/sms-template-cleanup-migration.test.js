@@ -31,8 +31,7 @@ function buildKnex({ fleaExists = false } = {}) {
   const state = {
     deletedTemplateKeys: [],
     deletedVariantKeys: [],
-    reactivatedKeys: [],
-    reactivateUpdate: null,
+    updates: [],
     inserted: [],
   };
 
@@ -59,14 +58,17 @@ function buildKnex({ fleaExists = false } = {}) {
         query.__where = criteria;
         return query;
       },
+      whereNot(criteria) {
+        query.__whereNot = criteria;
+        return query;
+      },
       del: jest.fn(async () => {
         state.deletedTemplateKeys.push(...query.__keys);
         return query.__keys.length;
       }),
       update: jest.fn(async (data) => {
-        state.reactivatedKeys.push(...(query.__keys || []));
-        state.reactivateUpdate = data;
-        return query.__keys.length;
+        state.updates.push({ keys: [...(query.__keys || [])], data });
+        return (query.__keys || []).length;
       }),
       first: jest.fn(async () => (fleaExists ? { id: 'existing-flea' } : null)),
       insert: jest.fn(async (data) => {
@@ -99,10 +101,37 @@ describe('sms template cleanup migration (20260706000010)', () => {
 
     await migration.up(knex);
 
-    expect(state.reactivatedKeys).toEqual(EXPECTED_REACTIVATED);
+    const reactivation = state.updates.find((u) => 'is_active' in u.data);
+    expect(reactivation.keys).toEqual(EXPECTED_REACTIVATED);
     // Only the flag flips — admin-edited copy stays whatever it is.
-    expect(Object.keys(state.reactivateUpdate).sort()).toEqual(['is_active', 'updated_at']);
-    expect(state.reactivateUpdate.is_active).toBe(true);
+    expect(Object.keys(reactivation.data).sort()).toEqual(['is_active', 'updated_at']);
+    expect(reactivation.data.is_active).toBe(true);
+  });
+
+  test('recategorizes without overlaps and never touches a removed key', async () => {
+    const { knex, state } = buildKnex();
+
+    await migration.up(knex);
+
+    const categoryUpdates = state.updates.filter((u) => 'category' in u.data);
+    expect(categoryUpdates.length).toBeGreaterThan(0);
+    const seen = new Set();
+    for (const u of categoryUpdates) {
+      // Category-only update — bodies and active flags untouched.
+      expect(Object.keys(u.data).sort()).toEqual(['category', 'updated_at']);
+      for (const key of u.keys) {
+        expect(seen.has(key)).toBe(false); // one bucket per key
+        seen.add(key);
+        expect(EXPECTED_REMOVED).not.toContain(key);
+      }
+    }
+    // Every retained seed template has a home in the new taxonomy.
+    for (const template of cleanTemplateSeed.TEMPLATES) {
+      if (template.category === 'custom') continue;
+      expect(seen.has(template.template_key)).toBe(true);
+    }
+    // The seeded flea prep text is bucketed too.
+    expect(seen.has('auto_flea')).toBe(true);
   });
 
   test('seeds auto_flea when missing and skips when present', async () => {
@@ -111,7 +140,7 @@ describe('sms template cleanup migration (20260706000010)', () => {
     expect(missing.state.inserted).toHaveLength(1);
     expect(missing.state.inserted[0]).toMatchObject({
       template_key: 'auto_flea',
-      category: 'automations',
+      category: 'onboarding',
       is_active: true,
     });
     expect(missing.state.inserted[0].body).toContain('flea-free');
