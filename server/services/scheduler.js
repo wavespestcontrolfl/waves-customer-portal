@@ -39,6 +39,22 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   return 'conversational';
 }
 
+// Rows queued with refresh_customer_phone (deposit-receipt retries) re-read
+// the customer's CURRENT phone at send time — the queued number was frozen at
+// hold time, and the phone_matches_customer trust the cron asserts for
+// customer rows must ride a number that still comes from the customer row,
+// not a snapshot the customer may have since changed.
+async function resolveScheduledRecipient(msg, claimMeta) {
+  if (claimMeta?.refresh_customer_phone !== true || !msg.customer_id) return msg.to_phone;
+  try {
+    const freshCustomer = await db('customers').where({ id: msg.customer_id }).first('phone');
+    const freshPhone = String(freshCustomer?.phone || '').trim();
+    return freshPhone || msg.to_phone;
+  } catch {
+    return msg.to_phone; // fall back to the queued number
+  }
+}
+
 function scheduledSmsAttemptSql() {
   return `
     CASE
@@ -1538,8 +1554,9 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          const toPhone = await resolveScheduledRecipient(msg, claimMeta);
           const smsResult = await sendCustomerMessage({
-            to: msg.to_phone,
+            to: toPhone,
             body: msg.message_body,
             channel: 'sms',
             audience: msg.customer_id ? 'customer' : 'lead',
@@ -3482,6 +3499,7 @@ module.exports = {
   initScheduledJobs,
   initBankingSync,
   purposeForScheduledMessageType,
+  resolveScheduledRecipient,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

@@ -717,8 +717,44 @@ describe('webhook + invoice credit', () => {
       to_phone: '(941) 555-0100',
     });
     expect(state.smsLogInserts[0].scheduled_for.toISOString()).toBe(nextAllowedAt);
-    // Lead-only estimate — the replay consent basis must ride the metadata.
-    expect(JSON.parse(state.smsLogInserts[0].metadata).consent_basis).toMatchObject({ status: 'transactional_allowed' });
+    // sms_log.from_phone is NOT NULL — the row must carry a real outbound
+    // number (location default) or the insert throws and the receipt is lost.
+    expect(state.smsLogInserts[0].from_phone).toEqual(expect.stringMatching(/^\+1\d{10}$/));
+    // Lead-only estimate — the replay consent basis must ride the metadata,
+    // and there is no customer row to refresh the recipient from.
+    const leadMeta = JSON.parse(state.smsLogInserts[0].metadata);
+    expect(leadMeta.consent_basis).toMatchObject({ status: 'transactional_allowed' });
+    expect(leadMeta.refresh_customer_phone).toBeUndefined();
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('customer-linked receipt retries carry the location from-number and flag recipient refresh', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({
+      customer_id: 'cust-1',
+      to_phone: '(941) 555-0100', // customer's verified phone, not the estimate's
+      from_phone: expect.stringMatching(/^\+1\d{10}$/), // Venice location line
+    });
+    // The cron re-reads customers.phone at nextAllowedAt so the
+    // phone_matches_customer trust it asserts is still true then.
+    expect(JSON.parse(state.smsLogInserts[0].metadata).refresh_customer_phone).toBe(true);
     renderSmsTemplate.mockResolvedValue(null);
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });

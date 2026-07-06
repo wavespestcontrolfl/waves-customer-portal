@@ -401,7 +401,7 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
   // estimate's stored phone can be stale or edited, and phone_matches_customer
   // trust must only ride a number that actually comes from the customer row.
   const customer = estimate.customer_id
-    ? await db('customers').where({ id: estimate.customer_id }).first('id', 'phone', 'first_name')
+    ? await db('customers').where({ id: estimate.customer_id }).first('id', 'phone', 'first_name', 'city')
     : null;
   const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
   if (!phone) return;
@@ -455,9 +455,18 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
     // switch. Mirrors the twilio-webhook AI-reply requeue.
     if (result.retryable && result.nextAllowedAt) {
       try {
+        // sms_log.from_phone is NOT NULL — resolve the same location number
+        // the immediate send would have used (twilio.js falls back to the
+        // bradenton line when no location can be derived). The cron forwards
+        // this as the sending number on replay.
+        const { resolveLocation } = require('../config/locations');
+        const TWILIO_NUMBERS = require('../config/twilio-numbers');
+        const locationId = customer?.city ? resolveLocation(customer.city).id : null;
+        const fromPhone = TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton');
         await db('sms_log').insert({
           customer_id: estimate.customer_id || null,
           direction: 'outbound',
+          from_phone: fromPhone,
           to_phone: phone,
           message_body: body,
           status: 'scheduled',
@@ -467,6 +476,10 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
             entry_point: 'estimate_deposit_receipt_requeue',
             original_failure_code: result.code || null,
             estimate_id: estimateId,
+            // The customer can change their phone between the hold and
+            // nextAllowedAt — the cron re-reads customers.phone at send time
+            // so the phone_matches_customer trust it asserts stays true.
+            ...(estimate.customer_id ? { refresh_customer_phone: true } : {}),
             ...(estimate.customer_id ? {} : {
               consent_basis: {
                 status: 'transactional_allowed',
