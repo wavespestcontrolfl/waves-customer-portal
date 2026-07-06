@@ -23,10 +23,13 @@ exports.up = async function up(knex) {
     && await knex.schema.hasTable('email_template_versions');
   if (!hasTables) return;
 
-  // 1. Service-chrome pin for the invite.
+  // 1. Service-chrome pin for the invite. mode also flips to 'service' so
+  //    the column reflects the render intent (the parent seed says
+  //    'marketing'); suppression/unsubscribe still key on the
+  //    marketing_referral stream, which is untouched.
   await knex('email_templates')
     .where({ template_key: 'referral.invite' })
-    .update({ layout_wrapper_id: 'service_pinned_v1', updated_at: new Date() });
+    .update({ layout_wrapper_id: 'service_pinned_v1', mode: 'service', updated_at: new Date() });
 
   // 2. Variable CTA for the reward email: template variable lists + the
   //    active version's CTA block label.

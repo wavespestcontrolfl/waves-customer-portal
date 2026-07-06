@@ -123,6 +123,9 @@ async function runBondRenewalSweep() {
     .where('termite_bonds.renews_at', '<=', windowEnd.toISOString().slice(0, 10))
     .where('termite_bonds.renews_at', '>=', graceStart.toISOString().slice(0, 10))
     .join('customers', 'customers.id', 'termite_bonds.customer_id')
+    // Soft-deleted customers keep their FK-backed bond rows and email —
+    // same guard the renewal-reminder workflow applies.
+    .whereNull('customers.deleted_at')
     .select(
       'termite_bonds.*',
       'customers.first_name',

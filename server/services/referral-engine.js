@@ -499,22 +499,28 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
       const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
       if (promoter) {
         if (!settings.require_service_completion && promoter.customer_phone) {
-          const rewardSms = await renderReferralSms('referral_reward', {
-            referrer_name: promoter.first_name,
-            referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-            reward_amount: `$${Math.round(rewardDollars)}`,
-          }, settings.reward_sms_template, {
-            workflow: 'referral_reward',
-            entity_type: 'referral',
-            entity_id: referral.id,
-          });
-          await sendSMS(promoter.customer_phone, rewardSms, {
-            customerId: promoter.customer_id,
-            messageType: 'referral_reward',
-            referralId: referral.id,
-            promoterId: promoter.id,
-            entryPoint: 'referral_engine_convert',
-          });
+          // Own try: the reward is already committed — an SMS render/send
+          // failure must not jump to the outer catch and skip the email leg.
+          try {
+            const rewardSms = await renderReferralSms('referral_reward', {
+              referrer_name: promoter.first_name,
+              referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
+              reward_amount: `$${Math.round(rewardDollars)}`,
+            }, settings.reward_sms_template, {
+              workflow: 'referral_reward',
+              entity_type: 'referral',
+              entity_id: referral.id,
+            });
+            await sendSMS(promoter.customer_phone, rewardSms, {
+              customerId: promoter.customer_id,
+              messageType: 'referral_reward',
+              referralId: referral.id,
+              promoterId: promoter.id,
+              entryPoint: 'referral_engine_convert',
+            });
+          } catch (smsErr) {
+            logger.warn(`[ReferralEngine] reward SMS leg failed for referral ${referral.id}: ${smsErr.message}`);
+          }
         }
         if (!settings.require_service_completion) {
           // Email leg mirrors the immediate-earned SMS above — but sends
