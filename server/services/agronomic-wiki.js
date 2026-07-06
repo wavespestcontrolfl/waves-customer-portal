@@ -353,14 +353,21 @@ const AgronomicWiki = {
 
       // Aggregate stats
       const stats = aggregateOutcomes(outcomes);
-      const data = { productName: canonicalName, stats, outcomes: outcomes.slice(0, 50) };
+      const data = {
+        productName: canonicalName,
+        stats,
+        outcomes: outcomes.slice(0, 50),
+        totalOutcomeCount: outcomes.length,
+        allOutcomeIds: outcomes.map((o) => o.id),
+      };
 
       const entry = await AgronomicWiki.generatePage(slug, 'product', data, `Product: ${canonicalName}`);
 
-      // Fold variant-named duplicate pages into the canonical page. Only after
-      // a successful canonical write, so a generation failure never deletes
-      // the only copy of the content.
-      if (entry) {
+      // Fold variant-named duplicate pages into the canonical page. Only when
+      // the canonical page holds real content — a placeholder stub (e.g. the
+      // AI-failure path returned an existing stub) must never absorb a variant
+      // page that may hold the only real copy.
+      if (entry && !entry.content?.includes('*Pending AI generation')) {
         await mergeVariantProductPages(entry, variants, slug);
       }
 
@@ -395,7 +402,14 @@ const AgronomicWiki = {
         : [];
 
       const stats = aggregateOutcomes(outcomes);
-      const data = { conditionName, stats, assessmentCount: assessments.length, outcomes: outcomes.slice(0, 50) };
+      const data = {
+        conditionName,
+        stats,
+        assessmentCount: assessments.length,
+        outcomes: outcomes.slice(0, 50),
+        totalOutcomeCount: outcomes.length,
+        allOutcomeIds: outcomes.map((o) => o.id),
+      };
 
       return AgronomicWiki.generatePage(slug, 'condition', data, `Condition: ${conditionName}`);
     } catch (err) {
@@ -423,7 +437,14 @@ const AgronomicWiki = {
 
       const stats = aggregateOutcomes(outcomes);
       const customerCount = new Set(outcomes.map((o) => o.customer_id)).size;
-      const data = { trackId, stats, customerCount, outcomes: outcomes.slice(0, 50) };
+      const data = {
+        trackId,
+        stats,
+        customerCount,
+        outcomes: outcomes.slice(0, 50),
+        totalOutcomeCount: outcomes.length,
+        allOutcomeIds: outcomes.map((o) => o.id),
+      };
 
       return AgronomicWiki.generatePage(slug, 'track', data, `Track ${trackId} Performance`);
     } catch (err) {
@@ -450,14 +471,35 @@ const AgronomicWiki = {
 
       // Match product/track behavior: no outcomes → no page. Generating from
       // zero data burns an AI call to write a page that can only say
-      // "no data yet".
+      // "no data yet". Any page that already exists for a zero-outcome month
+      // is definitionally filler (the query spans all years) — prune it so it
+      // can't clog the stale-refresh budget or surface in agent reads.
       if (!outcomes.length) {
+        try {
+          const pruned = await db('knowledge_entries')
+            .where({ slug, category: 'seasonal' })
+            .del();
+          if (pruned) {
+            await logUpdate('prune', slug, `Pruned zero-outcome seasonal page for ${monthName}`, {
+              triggerType: 'wiki_generation',
+            });
+          }
+        } catch (err) {
+          logger.error(`[agronomic-wiki] Failed to prune empty seasonal page ${slug}: ${err.message}`);
+        }
         logger.info(`[agronomic-wiki] No outcomes found for month ${month} — skipping seasonal page`);
         return null;
       }
 
       const stats = aggregateOutcomes(outcomes);
-      const data = { month, monthName, stats, outcomes: outcomes.slice(0, 50) };
+      const data = {
+        month,
+        monthName,
+        stats,
+        outcomes: outcomes.slice(0, 50),
+        totalOutcomeCount: outcomes.length,
+        allOutcomeIds: outcomes.map((o) => o.id),
+      };
 
       return AgronomicWiki.generatePage(slug, 'seasonal', data, `${monthName} — Seasonal Intelligence`);
     } catch (err) {
@@ -474,24 +516,27 @@ const AgronomicWiki = {
       // Check for existing page
       const existing = await db('knowledge_entries').where({ slug }).first();
 
-      const dataPointCount = data.outcomes?.length || data.assessmentCount || 0;
+      // Fingerprint the FULL outcome set (callers slice data.outcomes to 50
+      // for the prompt, but stats aggregate everything — a change outside the
+      // newest 50 must still invalidate the skip).
+      const dataPointCount = data.totalOutcomeCount ?? (data.outcomes?.length || data.assessmentCount || 0);
       const confidence = confidenceLevel(dataPointCount);
-      const sourceIds = (data.outcomes || []).map((o) => o.id).slice(0, 200);
+      const sourceIds = (data.allOutcomeIds || (data.outcomes || []).map((o) => o.id)).slice(0, 500);
 
       // Skip regeneration when the underlying data hasn't changed — the AI
       // pass would just rewrite the same page. Placeholder stubs are always
-      // retried.
+      // retried. last_data_update advances so the page doesn't get re-marked
+      // stale (and re-skipped) on every subsequent refresh: it records "data
+      // verified current", which is what this branch just did.
       if (
         existing &&
         !existing.content.includes('*Pending AI generation') &&
         existing.data_point_count === dataPointCount &&
         sameSourceIds(existing.source_treatment_ids, sourceIds)
       ) {
-        if (existing.stale_flag) {
-          await db('knowledge_entries')
-            .where({ id: existing.id })
-            .update({ stale_flag: false, updated_at: new Date() });
-        }
+        await db('knowledge_entries')
+          .where({ id: existing.id })
+          .update({ stale_flag: false, last_data_update: new Date(), updated_at: new Date() });
         await logUpdate('skip', slug, `Skipped ${category} page: ${title} — no new data since last generation (${dataPointCount} data points)`, {
           triggerType: 'wiki_generation',
         });
@@ -826,9 +871,11 @@ function extractSummary(content) {
 }
 
 // Delete leftover product pages that were keyed on a non-canonical name
-// variant, re-pointing any knowledge_base.wiki_entry_id references at the
-// canonical page first. knowledge_bridge rows cascade on delete and
-// knowledge_contradictions references SET NULL (migration 20260414000018/19).
+// variant, re-pointing every cross-system reference at the canonical page
+// first — knowledge_bridge rows would otherwise be dropped by the ON DELETE
+// CASCADE and knowledge_contradictions links nulled by SET NULL (migrations
+// 20260414000018/19), silently losing curated links and contradiction
+// history.
 async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug) {
   for (const variant of variants) {
     const variantSlug = `product/${slugify(variant)}`;
@@ -844,6 +891,31 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
           .where({ wiki_entry_id: dupe.id })
           .update({ wiki_entry_id: canonicalEntry.id });
       } catch { /* knowledge_base.wiki_entry_id column may not exist */ }
+
+      try {
+        // Move bridge rows one by one: the table has a unique
+        // (kb_entry_id, wiki_entry_id, link_type) constraint, so a link the
+        // canonical page already has is dropped as a duplicate instead.
+        const bridgeRows = await db('knowledge_bridge')
+          .where({ wiki_entry_id: dupe.id })
+          .select('id', 'kb_entry_id', 'link_type');
+        for (const row of bridgeRows) {
+          const clash = await db('knowledge_bridge')
+            .where({ wiki_entry_id: canonicalEntry.id, kb_entry_id: row.kb_entry_id, link_type: row.link_type })
+            .first('id');
+          if (clash) {
+            await db('knowledge_bridge').where({ id: row.id }).del();
+          } else {
+            await db('knowledge_bridge').where({ id: row.id }).update({ wiki_entry_id: canonicalEntry.id });
+          }
+        }
+      } catch { /* knowledge_bridge table may not exist */ }
+
+      try {
+        await db('knowledge_contradictions')
+          .where({ wiki_entry_id: dupe.id })
+          .update({ wiki_entry_id: canonicalEntry.id });
+      } catch { /* knowledge_contradictions table may not exist */ }
 
       await db('knowledge_entries').where({ id: dupe.id }).del();
       await logUpdate('merge', canonicalSlug, `Merged duplicate product page ${dupe.slug} into ${canonicalSlug}`, {

@@ -199,7 +199,7 @@ describe('generatePage', () => {
     expect(state.inserts.knowledge_entries[0].content).toContain('Pending AI generation');
   });
 
-  test('skips regeneration when data points are unchanged, clearing the stale flag', async () => {
+  test('skips regeneration when data points are unchanged, clearing the stale flag and advancing the watermark', async () => {
     const existing = {
       id: 'ke-1',
       slug: 'product/talstar-p',
@@ -218,9 +218,35 @@ describe('generatePage', () => {
 
     expect(result).toBe(existing);
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
-    expect(state.updates.knowledge_entries).toEqual([expect.objectContaining({ stale_flag: false })]);
+    // last_data_update advances so the page doesn't get re-marked stale and
+    // re-skipped on every subsequent weekly refresh
+    expect(state.updates.knowledge_entries).toEqual([
+      expect.objectContaining({ stale_flag: false, last_data_update: expect.any(Date) }),
+    ]);
     const skipLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'skip');
     expect(skipLog).toBeTruthy();
+  });
+
+  test('fingerprints the full outcome set, not the 50-outcome prompt slice', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'track/st-augustine',
+      content: '# Track\n\nExisting analysis.',
+      data_point_count: 60,
+      source_treatment_ids: Array.from({ length: 60 }, (_, i) => `o${i}`),
+      stale_flag: false,
+    };
+    useDb({ knowledge_entries: [existing] });
+
+    // Same newest-50 slice, but one id changed outside the slice (o55 → oX)
+    const allIds = Array.from({ length: 60 }, (_, i) => (i === 55 ? 'oX' : `o${i}`));
+    await wiki.generatePage('track/st-augustine', 'track', {
+      outcomes: allIds.slice(0, 50).map((id) => ({ id })),
+      totalOutcomeCount: 60,
+      allOutcomeIds: allIds,
+    }, 'Track st_augustine Performance');
+
+    expect(global.__anthropicCreate).toHaveBeenCalled();
   });
 
   test('placeholder stubs are always retried, never treated as unchanged', async () => {
@@ -243,14 +269,19 @@ describe('generatePage', () => {
 // ── updateSeasonalPage ─────────────────────────────────────────────────────
 
 describe('updateSeasonalPage', () => {
-  test('returns null without generating when the month has no outcomes', async () => {
-    const state = useDb({ treatment_outcomes: [] });
+  test('returns null without generating when the month has no outcomes, pruning any filler page', async () => {
+    const state = useDb({ treatment_outcomes: [], knowledge_entries: [] });
 
     const result = await wiki.updateSeasonalPage(2);
 
     expect(result).toBeNull();
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
     expect(state.inserts.knowledge_entries).toBeUndefined();
+    // an existing zero-outcome page is deleted so it can't clog the
+    // stale-refresh budget (del returns 1 in the mock → prune logged)
+    expect(state.deletes.knowledge_entries).toBe(1);
+    const pruneLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'prune');
+    expect(pruneLog).toBeTruthy();
   });
 });
 
@@ -280,6 +311,14 @@ describe('updateProductPage', () => {
         return [];
       },
       knowledge_base: [],
+      knowledge_bridge: (rec) => {
+        const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+        if (whereObj?.wiki_entry_id === 'ke-dupe') {
+          return [{ id: 'kb-link-1', kb_entry_id: 'kb-9', link_type: 'related' }];
+        }
+        return []; // no clash on the canonical side
+      },
+      knowledge_contradictions: [],
     };
   }
 
@@ -300,7 +339,7 @@ describe('updateProductPage', () => {
     expect(likeArgs.some((p) => p.includes('1\\% Mg'))).toBe(true);
   });
 
-  test('folds variant-named duplicate pages into the canonical page', async () => {
+  test('folds variant-named duplicate pages into the canonical page, preserving cross-references', async () => {
     const state = useDb(productResponses());
 
     await wiki.updateProductPage(RAW_NAME);
@@ -310,8 +349,41 @@ describe('updateProductPage', () => {
     expect(state.updates.knowledge_base).toEqual([
       expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
     ]);
+    // bridge links move to the canonical page instead of dying to the FK cascade
+    expect(state.updates.knowledge_bridge).toEqual([
+      expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
+    ]);
+    expect(state.updates.knowledge_contradictions).toEqual([
+      expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
+    ]);
     const mergeLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'merge');
     expect(mergeLog).toBeTruthy();
+  });
+
+  test('a stub canonical page never absorbs variant pages (AI-failure path)', async () => {
+    const responses = productResponses();
+    // canonical page already exists as a placeholder stub
+    responses.knowledge_entries = (rec) => {
+      const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+      if (whereObj?.slug === 'product/lesco-high-manganese-combo') {
+        return [{
+          id: 'ke-stub',
+          slug: 'product/lesco-high-manganese-combo',
+          content: '# Product: LESCO High Manganese Combo\n\n*Pending AI generation — 1 data points available.*',
+          data_point_count: 0,
+          source_treatment_ids: [],
+          stale_flag: false,
+        }];
+      }
+      return [{ id: 'ke-dupe', slug: whereObj?.slug }];
+    };
+    const state = useDb(responses);
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    await wiki.updateProductPage(RAW_NAME);
+
+    // generation failed → canonical is still a stub → no variant deletion
+    expect(state.deletes.knowledge_entries).toBeUndefined();
   });
 
   test('falls back to the raw name when no catalog match exists', async () => {
