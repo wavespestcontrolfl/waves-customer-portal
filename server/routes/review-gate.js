@@ -228,6 +228,19 @@ router.post('/:token/submit', async (req, res, next) => {
         logger.error(`[review-gate] Referral nudge require failed: ${err.message}`);
       }
 
+      // Referral invite email on the warmest moment we have (owner trigger
+      // call 2026-07-06) — same hook the legacy /api/review submit fires.
+      // Fire-and-forget; the helper's customer-scoped idempotency key keeps
+      // repeat promoters from being re-invited.
+      if (request.customer_id) {
+        try {
+          const { sendReferralInviteEmail } = require('../services/referral-invite-email');
+          void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'positive_review' });
+        } catch (err) {
+          logger.error(`[review-gate] referral invite failed: ${err.message}`);
+        }
+      }
+
       // Fire-and-forget: update customer health score
       try {
         const customerHealth = require('../services/customer-health');

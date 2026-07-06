@@ -21,7 +21,11 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
-const BOND_MATCH = '%Termite Bond Service%';
+// Matches BOTH naming generations: legacy "…Termite Bond Service…" and the
+// live admin-schedule catalog's "Termite Bond (Billed Quarterly | N-Year
+// Term)" (admin-schedule.js termite category). Term still parses from the
+// "(N-Year" fragment; names without one default to 1 year.
+const BOND_MATCH = '%Termite Bond%';
 const RENEWAL_WINDOW_DAYS = 30;
 const GRACE_DAYS = 7; // still notify up to a week past renews_at (missed runs)
 

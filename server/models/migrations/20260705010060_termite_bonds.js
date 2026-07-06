@@ -18,7 +18,11 @@
  * so the backfill is a forward-looking no-op today.
  */
 
-const BOND_MATCH = '%Termite Bond Service%';
+// Matches BOTH naming generations: legacy "…Termite Bond Service…" and the
+// live admin-schedule catalog's "Termite Bond (Billed Quarterly | N-Year
+// Term)" (admin-schedule.js termite category). Term still parses from the
+// "(N-Year" fragment; names without one default to 1 year.
+const BOND_MATCH = '%Termite Bond%';
 
 // DATE columns reflect the ET business calendar (same rule as the runtime
 // sweep in lifecycle-email-sweeps.js): a visit completed after 8 PM Eastern

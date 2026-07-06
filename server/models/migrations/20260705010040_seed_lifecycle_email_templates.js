@@ -96,16 +96,15 @@ const TEMPLATES = [
     name: 'Referral Invite',
     category: 'referral',
     sensitivity: 'normal',
-    // OWNER DIRECTIVE 2026-07-06: render in the SERVICE chrome (pill
-    // header + card, like the bond renewal) — not the newsletter wrapper.
-    // The invite still routes through the marketing_referral suppression
-    // group (seeded 20260518000001, user-unsubscribable), so a referral
-    // opt-out is honored at send time without touching service email,
-    // and the body carries an explicit reply-to-opt-out line.
-    // layout 'service_pinned_v1' is the chrome pin sendTemplate honors —
-    // without it the marketing_referral stream forces the newsletter wrapper.
+    // Referral asks are marketing end-to-end: marketing mode (newsletter
+    // wrapper with unsubscribe footer in previews AND sends),
+    // commercial_marketing legal class, and the dedicated
+    // marketing_referral suppression group (seeded in 20260518000001) so
+    // a referral unsubscribe never kills service email.
+    mode: 'marketing',
+    legal: 'commercial_marketing',
+    layout: 'newsletter_default_v1',
     stream: 'marketing_referral',
-    layout: 'service_pinned_v1',
     description: 'Invites a happy customer to refer neighbors; the reward line comes from the sender so amounts are never baked into copy.',
     required: ['first_name', 'referral_url', 'referral_reward_line'],
     optional: [],
@@ -116,7 +115,6 @@ const TEMPLATES = [
       { type: 'paragraph', content: 'Your account has a personal referral link that makes it official: share it, and when a neighbor signs up, {{referral_reward_line}}' },
       { type: 'small_note', content: 'Your link lives in the Refer tab of your portal too — share it by text, email, or the neighborhood group.' },
       { type: 'cta', label: 'Get my referral link', url_variable: 'referral_url' },
-      { type: 'small_note', content: 'Prefer not to get referral emails? Reply "no thanks" and we\'ll turn them off.' },
       { type: 'signature', content: 'Thank you for spreading the word. — The Waves Team' },
     ],
     fixture: {
@@ -131,22 +129,21 @@ const TEMPLATES = [
     category: 'referral',
     sensitivity: 'account',
     stream: 'service_operational',
-    description: 'A referral converted — confirm the reward. The reward line, CTA label, and CTA destination come from the sender (referral-balance vs account-credit payouts point at different ledgers).',
-    required: ['first_name', 'reward_line', 'cta_label'],
+    description: 'A referral converted — confirm the reward. The reward line comes from the sender.',
+    required: ['first_name', 'reward_line'],
     optional: ['referred_first_name'],
     subject: 'Your referral came through — thank you',
     preview: '{{reward_line}}',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, good news: your referral signed up. {{reward_line}}' },
       { type: 'paragraph', content: 'Referrals like yours are the best compliment we get — thank you for trusting us with your neighbors.' },
-      { type: 'cta', label: '{{cta_label}}', url_variable: 'customer_portal_url' },
+      { type: 'cta', label: 'View my account credit', url_variable: 'customer_portal_url' },
       { type: 'signature', content: 'Thank you. — The Waves Team' },
     ],
     fixture: {
       first_name: 'Taylor',
       referred_first_name: 'Jordan',
       reward_line: 'Your account credit has been applied and will show on your next invoice.',
-      cta_label: 'View my account credit',
       customer_portal_url: 'https://portal.wavespestcontrol.com/login',
     },
   },

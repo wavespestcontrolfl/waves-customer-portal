@@ -404,10 +404,32 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
     .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
     .orderBy('ar.created_at', 'asc')
-    .select(conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
+    .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
+
+  // Each part must be the same customer-facing label registration stored:
+  // parent + add-ons + smsServiceLabel cleanup (buildServiceLabel semantics,
+  // but through the caller's connection so in-transaction addon rows are
+  // visible). Raw ss.service_type would silently drop add-ons.
+  const candidateLabels = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    let label = String(r.label || '').trim();
+    if (r.scheduled_service_id) {
+      try {
+        const addons = await conn('scheduled_service_addons')
+          .where({ scheduled_service_id: r.scheduled_service_id })
+          .pluck('service_name');
+        const all = [label, ...(Array.isArray(addons) ? addons : [])].map(smsServiceLabel).filter(Boolean);
+        if (all.length === 2) label = `${all[0]} & ${all[1]}`;
+        else if (all.length > 2) label = `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
+        else if (all.length === 1) label = all[0];
+      } catch { /* keep the base label */ }
+    }
+    candidateLabels.push(label);
+  }
+  candidateLabels.push(String(nextLabel || '').trim());
 
   const parts = [];
-  for (const raw of [...rows.map((r) => r.label), nextLabel]) {
+  for (const raw of candidateLabels) {
     const label = String(raw || '').trim();
     if (!label) continue;
     const lower = label.toLowerCase();

@@ -518,8 +518,14 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
         }
         if (!settings.require_service_completion) {
           // Email leg mirrors the immediate-earned SMS above — but sends
-          // even when the promoter has no usable phone.
-          await sendRewardEarnedEmail(promoter, referral, rewardDollars);
+          // even when the promoter has no usable phone. Own try: an SMS
+          // render/send failure above must not swallow the reward email
+          // (the reward is already committed at this point).
+          try {
+            await sendRewardEarnedEmail(promoter, referral, rewardDollars);
+          } catch (emailErr) {
+            logger.warn(`[ReferralEngine] reward email leg failed for referral ${referral.id}: ${emailErr.message}`);
+          }
         }
         if (outcome.milestoneAward) {
           await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
@@ -805,6 +811,9 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     try {
       const promoter = await db('referral_promoters').where({ id: outcome.referral.promoter_id }).first();
       if (promoter && promoter.customer_phone) {
+        // Own try: the credit is already posted — an SMS failure must not
+        // skip the reward email below.
+        try {
         const rewardSms = await renderReferralSms('referral_reward', {
           referrer_name: promoter.first_name,
           referee_name: outcome.referral.referee_name || outcome.referral.referral_first_name || 'your friend',
@@ -821,13 +830,22 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
           promoterId: promoter.id,
           entryPoint: 'referral_engine_first_service',
         });
+        } catch (smsErr) {
+          logger.warn(`[ReferralEngine] reward SMS leg failed for referral ${outcome.referral.id}: ${smsErr.message}`);
+        }
       }
       if (promoter) {
         // Email leg for the deferred-earned path — same moment the money
         // is actually issued; idempotency key keeps it single-send even
         // if a conversion-time email ever fired for this referral. This path
-        // pays out as an account credit, so the copy must say so.
-        await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars, 'account_credit');
+        // pays out as an account credit, so the copy must say so. Own try:
+        // an SMS failure above must not swallow the email for a reward that
+        // has already been committed.
+        try {
+          await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars, 'account_credit');
+        } catch (emailErr) {
+          logger.warn(`[ReferralEngine] reward email leg failed for referral ${outcome.referral.id}: ${emailErr.message}`);
+        }
       }
     } catch (smsErr) {
       logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);
