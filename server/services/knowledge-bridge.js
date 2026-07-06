@@ -20,6 +20,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { loadCustomerGrassContext } = require('./lawn-grass-context');
+const { TRUSTED_STATUSES } = require('./agronomic-wiki');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -215,26 +216,43 @@ const KnowledgeBridge = {
     const limit = Math.min(options.limit || 20, 50);
 
     // Search Claudeopedia
-    const claudeopedia = await db('knowledge_base')
+    let claudeopediaQuery = db('knowledge_base')
       .where(function () {
         this.where('title', 'ilike', term)
           .orWhere('content', 'ilike', term);
       })
-      .where({ status: 'active' })
+      .where({ status: 'active' });
+    if (options.trustedOnly) {
+      // Wiki-sync MIRRORS inherit the wiki's review gate on agent-facing
+      // reads; merely-linked curated articles stay visible.
+      claudeopediaQuery = claudeopediaQuery.whereNot(function untrustedWikiMirror() {
+        this.where('source', 'wiki-sync').whereIn(
+          'wiki_entry_id',
+          db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
+        );
+      });
+    }
+    const claudeopedia = await claudeopediaQuery
       .orderBy('updated_at', 'desc')
       .limit(limit)
       .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
 
-    // Search Agronomic Wiki
-    const wiki = await db('knowledge_entries')
+    // Search Agronomic Wiki. Agent-facing callers pass trustedOnly so red
+    // pages awaiting review never feed an agent; the admin browse/review UI
+    // omits it and sees everything.
+    let wikiQuery = db('knowledge_entries')
       .where(function () {
         this.where('title', 'ilike', term)
           .orWhere('content', 'ilike', term)
           .orWhere('summary', 'ilike', term);
-      })
+      });
+    if (options.trustedOnly) {
+      wikiQuery = wikiQuery.whereIn('review_status', TRUSTED_STATUSES);
+    }
+    const wiki = await wikiQuery
       .orderBy('data_point_count', 'desc')
       .limit(limit)
-      .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id');
+      .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status');
 
     // Find bridged pairs
     const allKbIds = claudeopedia.map(e => e.id).filter(Boolean);
@@ -368,6 +386,14 @@ const KnowledgeBridge = {
       const protocolEntries = await db('knowledge_base')
         .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
         .where({ status: 'active' })
+        // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
+        // recs); merely-linked curated articles stay visible.
+        .whereNot(function untrustedWikiMirror() {
+          this.where('source', 'wiki-sync').whereIn(
+            'wiki_entry_id',
+            db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
+          );
+        })
         .where(function () {
           this.where('content', 'ilike', `%${grassType}%`)
             .orWhere('category', 'seasonal');
@@ -377,7 +403,10 @@ const KnowledgeBridge = {
         .limit(10);
 
       // Pull relevant wiki outcome data (what's actually worked)
+      // Trusted pages only — these feed customer-visible recommendations,
+      // so red pages awaiting review are excluded (exception-based gate).
       const outcomeEntries = await db('knowledge_entries')
+        .whereIn('review_status', TRUSTED_STATUSES)
         .where(function () {
           this.where('category', 'seasonal');
           if (grassTrack) {
@@ -477,7 +506,7 @@ Return a JSON object with:
     try {
       const wikiEntries = await db('knowledge_entries')
         .where('data_point_count', '>', 0)
-        .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content');
+        .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content', 'review_status');
 
       for (const wiki of wikiEntries) {
         try {
@@ -485,13 +514,19 @@ Return a JSON object with:
 
           const existing = await db('knowledge_base').where({ slug: kbSlug }).first();
 
+          // Mirror trust follows the source page — a resync must never
+          // resurrect a flagged mirror of a red/blocked page, and a brand-new
+          // mirror of an untrusted page starts gated. Drives BOTH the status
+          // field and the active boolean (different KB readers filter on each).
+          const wikiTrusted = ['auto', 'approved'].includes(wiki.review_status);
           const kbData = {
             title: `Outcome Data: ${wiki.title}`,
             category: wiki.category === 'product' ? 'product' : wiki.category === 'track' ? 'protocol' : 'seasonal',
             content: `## Real-World Outcome Data\n\n${wiki.summary || ''}\n\n**Data Points:** ${wiki.data_point_count}\n**Confidence:** ${wiki.confidence}\n\n---\n\n${(wiki.content || '').substring(0, 3000)}`,
             source: 'wiki-sync',
             confidence: wiki.confidence,
-            status: 'active',
+            status: wikiTrusted ? 'active' : 'flagged',
+            active: wikiTrusted,
             metadata: JSON.stringify({ wiki_slug: wiki.slug, wiki_id: wiki.id, synced_at: new Date().toISOString() }),
             wiki_entry_id: wiki.id,
           };
