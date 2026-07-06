@@ -8,7 +8,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const analytics = require('../services/assessment-analytics');
 const { recomputeEntryReviewGate } = require('../services/agronomic-wiki');
 const db = require('../models/db');
@@ -204,7 +204,12 @@ router.post('/contradictions/detect', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.patch('/contradictions/:id', async (req, res, next) => {
+// requireAdmin: resolving/dismissing a contradiction is a REVIEW action —
+// since the recompute below, it can un-gate a wiki page and its KB mirror
+// back to agent-visible, so it needs the same role bar as the requireAdmin
+// review endpoints in admin-wiki (adminAuthenticate alone accepts any
+// active technician token).
+router.patch('/contradictions/:id', requireAdmin, async (req, res, next) => {
   try {
     const { status, resolution_notes } = req.body;
     const update = { status, updated_at: new Date() };
