@@ -15,6 +15,33 @@ html[data-glass-theme] {
   --tt: rgba(12, 21, 40, 0.52);
   scroll-behavior: smooth;
   background-attachment: fixed;
+  /* Brand-token chrome (WavesShell pages): the page wash drops so the
+     scene shows through — same effect the estimate walker gets by
+     matching computed page colors. */
+  --page: transparent;
+}
+
+/* ---------- native-markup helpers ----------
+   Attribute hooks for surfaces that author data-glass markup natively
+   (no classify() walker). Inert without html[data-glass-theme]. */
+/* Glass hosts anchor their own ::before/::after sheen overlays (and any
+   absolutely-positioned children). The classifier set position:relative
+   inline on every element it tagged; native surfaces get it here. In
+   browsers with backdrop-filter this is a no-op — the filter already
+   makes each glass element a containing block — but where the filter is
+   unsupported the sheen must not spill outside the card. Inline
+   position styles (fixed scrims, sticky headers) still win over this. */
+html[data-glass-theme] [data-glass] {
+  position: relative;
+}
+/* Warm/wash panels that should let the scene through under glass. */
+html[data-glass-theme] [data-glass-clear] {
+  background: transparent !important;
+}
+/* Small interactive chips read as pills under glass (walker parity for
+   buttons/links up to ~56px tall). */
+html[data-glass-theme] [data-glass-pill] {
+  border-radius: 999px !important;
 }
 
 /* ---------- type system ---------- */
@@ -47,6 +74,16 @@ html[data-glass-theme] h4 {
 }
 html[data-glass-theme] button,
 html[data-glass-theme] button * {
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+}
+/* Anchor CTAs styled as buttons (gold accents, chips) get the same type
+   normalization as real buttons — mixed inline weights (700/800/850) read
+   as different fonts when they sit side by side. */
+html[data-glass-theme] a[data-glass-accent],
+html[data-glass-theme] a[data-glass-accent] *,
+html[data-glass-theme] a[data-glass="chip"],
+html[data-glass-theme] a[data-glass="chip"] * {
   font-weight: 600 !important;
   letter-spacing: 0 !important;
 }
@@ -221,9 +258,9 @@ html[data-glass-theme] [data-glass-accent] {
   border: 1px solid rgba(255, 238, 180, 0.92) !important;
   backdrop-filter: blur(18px) saturate(175%) !important;
   -webkit-backdrop-filter: blur(18px) saturate(175%) !important;
-  box-shadow: 0 12px 32px rgba(180, 110, 0, 0.28), 0 0 36px rgba(240, 165, 0, 0.46),
-    inset 0 1px 0 rgba(255, 255, 255, 0.65), inset 0 -2px 8px rgba(180, 110, 0, 0.22),
-    inset 1px 1px 0 rgba(255, 246, 210, 0.5) !important;
+  box-shadow: 0 10px 26px rgba(180, 110, 0, 0.22), 0 0 18px rgba(240, 165, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32), inset 0 -2px 8px rgba(180, 110, 0, 0.18),
+    inset 1px 1px 0 rgba(255, 246, 210, 0.24) !important;
   overflow: hidden;
   transition: transform 300ms var(--spring), box-shadow 300ms ease !important;
   position: relative;
@@ -240,12 +277,12 @@ html[data-glass-theme] [data-glass-accent]::before {
   pointer-events: none;
   border-radius: inherit;
   background: radial-gradient(240px circle at var(--mx, 25%) var(--my, -10%),
-    rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.12) 24%, transparent 50%);
+    rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.07) 24%, transparent 50%);
   opacity: 0;
   transition: opacity 240ms ease;
 }
 html[data-glass-theme] [data-glass-accent]:hover::before {
-  opacity: 0.7;
+  opacity: 0.4;
 }
 html[data-glass-theme] [data-glass-accent]::after {
   content: "";
@@ -253,13 +290,13 @@ html[data-glass-theme] [data-glass-accent]::after {
   inset: 1px;
   pointer-events: none;
   border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.45), transparent 40%);
-  opacity: 0.6;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.22), transparent 38%);
+  opacity: 0.35;
 }
 html[data-glass-theme] [data-glass-accent]:hover {
   transform: translateY(-1px);
-  box-shadow: 0 16px 42px rgba(180, 110, 0, 0.34), 0 0 52px rgba(240, 165, 0, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.75) !important;
+  box-shadow: 0 14px 34px rgba(180, 110, 0, 0.26), 0 0 24px rgba(240, 165, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
 }
 html[data-glass-theme] [data-glass-accent]:active {
   transform: scale(0.97);

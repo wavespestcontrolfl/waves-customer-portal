@@ -1,12 +1,15 @@
 /**
  * Required estimate-acceptance deposits.
  *
- * Policy (owner decision 2026-06-12, revised same day to FLAT amounts):
- * every estimate acceptance requires a deposit — recurring, one-time, with
- * or without a booked slot — EXCEPT:
- *   - prepay-annual acceptances (paying in full at accept), and
+ * Policy (owner decision 2026-06-12, revised same day to FLAT amounts;
+ * prepay-annual exemption removed 2026-07-05 by owner decision):
+ * every estimate acceptance requires a deposit — recurring, one-time,
+ * prepay-annual, with or without a booked slot — EXCEPT:
  *   - existing plan customers (WaveGuard Bronze and up), who skip the
- *     deposit but MUST book an appointment to accept.
+ *     deposit but MUST book an appointment to accept, and
+ *   - estimates whose prepay-annual term is ALREADY committed (post-accept
+ *     summaries only — choosing prepay at accept no longer exempts; the $49
+ *     credits against the annual invoice minted in the same transaction).
  * The deposit is a flat per-service-class amount — $49 for recurring plans,
  * $99 for one-time / intensive jobs (pricing_config-authoritative via
  * constants.DEPOSIT) — NEVER a percentage: the deposit's job is commitment,
@@ -55,26 +58,31 @@ function computeDepositAmount({ oneTime = false } = {}) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : (oneTime ? 99 : 49);
 }
 
-// Resolve what acceptance requires for this estimate + chosen payment
-// preference. membership comes from buildEstimateMembershipContext —
-// isExistingCustomer means the customer already has qualifying recurring
-// plan services (WaveGuard Bronze+). oneTime selects the service class for
-// the AMOUNT — one-time accepts are NOT exempt: a one-time pay-at-visit
-// deposit credits against the completed-visit invoice via the
-// createFromService roll-forward. oneTimeUninvoiced (one-time accept on a
-// non-invoice-mode estimate) additionally REQUIRES a booking: no invoice is
-// created at accept, so the credit's only path back to the customer is the
-// roll-forward, which traces scheduled_services.source_estimate_id — an
-// unbooked accept would orphan the paid deposit (accepted estimates are
-// deliberately outside the terminal sweep). noVisit marks the payment-only
-// accept (guarantee-only renewal): there is NO appointment to book, so the
-// plan-customer booking commitment gate cannot apply — the invoice minted at
-// accept is the commitment.
-function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, oneTime = false, oneTimeUninvoiced = false, noVisit = false }) {
+// Resolve what acceptance requires for this estimate. membership comes from
+// buildEstimateMembershipContext — isExistingCustomer means the customer
+// already has qualifying recurring plan services (WaveGuard Bronze+). oneTime
+// selects the service class for the AMOUNT — one-time accepts are NOT exempt:
+// a one-time pay-at-visit deposit credits against the completed-visit invoice
+// via the createFromService roll-forward. Choosing prepay-annual is NOT
+// exempt either (owner decision 2026-07-05): it was the only zero-money
+// accept path for a new customer, so the $49 recurring deposit applies and
+// credits against the annual invoice minted in the same accept transaction.
+// committedPrepayTerm IS exempt: it marks a post-accept summary for an
+// estimate whose prepay term already exists (legacy accepts predate the
+// deposit; the year is the commitment), never an accept-time choice.
+// oneTimeUninvoiced (one-time accept on a non-invoice-mode estimate)
+// additionally REQUIRES a booking: no invoice is created at accept, so the
+// credit's only path back to the customer is the roll-forward, which traces
+// scheduled_services.source_estimate_id — an unbooked accept would orphan
+// the paid deposit (accepted estimates are deliberately outside the terminal
+// sweep). noVisit marks the payment-only accept (guarantee-only renewal):
+// there is NO appointment to book, so the plan-customer booking commitment
+// gate cannot apply — the invoice minted at accept is the commitment.
+function resolveDepositPolicy({ estimate, committedPrepayTerm = false, membership, oneTime = false, oneTimeUninvoiced = false, noVisit = false }) {
   if (!isDepositEnforced()) {
     return { enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' };
   }
-  if (paymentMethodPreference === 'prepay_annual') {
+  if (committedPrepayTerm) {
     return { enforced: true, required: false, slotRequired: false, exemptReason: 'prepay_annual' };
   }
   if (membership?.isExistingCustomer) {
@@ -135,7 +143,7 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
 // CURRENT qualifying recurring services. A failed live check falls back to
 // requiring the deposit — wrongly charged money still credits forward,
 // while a wrongly granted exemption silently loses the commitment gate.
-async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
+async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm = false, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
   if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
     try {
@@ -148,7 +156,7 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
       logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
     }
   }
-  const policy = resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced, noVisit });
+  const policy = resolveDepositPolicy({ estimate, committedPrepayTerm, membership: member, oneTime, oneTimeUninvoiced, noVisit });
   // Third-party Bill-To: a payer-billed customer's invoices route to the payer's
   // AP inbox, and payer invoices reject homeowner deposit credit (invoice.create
   // skips depositCredit when a payer resolves) — so an acceptance deposit
@@ -229,22 +237,24 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   summary.oneTime = oneTime;
   summary.policyAmount = computeDepositAmount({ oneTime });
 
-  // Recover the customer's accept-time payment choice from the scoped/linked
-  // scheduled service (the accept flow persists payment_method_preference on
-  // commit) so the resolver can honor the prepay_annual exemption — otherwise
-  // the summary shows "Deposit due" once enforcement is live for a visit an
-  // annual prepay already covers. Pre-accept callers (recordable/nudge) keep
-  // passing null because no committed service exists yet, so this load lives
-  // here on the post-accept scheduling summary rather than inside the resolver.
-  // Fail-soft: a read miss leaves the preference null (the safe direction — a
-  // wrongly-charged deposit still credits forward).
+  // Recover the customer's COMMITTED accept-time prepay choice from the
+  // scoped/linked scheduled service (the accept flow persists
+  // payment_method_preference on commit) so the resolver can honor the
+  // committed-term exemption — otherwise the summary shows "Deposit due" for a
+  // visit an annual prepay already covers (legacy accepts predate the deposit;
+  // new prepay accepts had theirs credited at accept). Pre-accept callers
+  // (recordable/nudge) keep passing nothing because no committed service exists
+  // yet — choosing prepay no longer exempts, only a committed term does — so
+  // this load lives here on the post-accept scheduling summary rather than
+  // inside the resolver. Fail-soft: a read miss leaves the flag false (the safe
+  // direction — a wrongly-charged deposit still credits forward).
   let linkedSsId = null;
-  let paymentMethodPreference = null;
+  let committedPrepayTerm = false;
   try {
     linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
     if (linkedSsId) {
       const ss = await db('scheduled_services').where({ id: linkedSsId }).first('payment_method_preference');
-      paymentMethodPreference = ss?.payment_method_preference || null;
+      committedPrepayTerm = ss?.payment_method_preference === 'prepay_annual';
     }
   } catch (err) {
     logger.warn('[estimate-deposits] schedule summary payment-preference read failed', { error: err.message });
@@ -255,17 +265,17 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   // annual_prepay_terms.source_estimate_id — NOT on a scheduled service — so the
   // read above finds no preference and, once enforcement is live, the resolver
   // would report "Deposit due" for an estimate the annual prepay already
-  // exempts. Recognize a live (non-cancelled) prepay term for this estimate as
-  // the prepay_annual signal so the resolver honors the exemption. Fail-soft: a
-  // missing table or read error leaves the preference as-is (the safe direction
+  // covers. Recognize a live (non-cancelled) prepay term for this estimate as
+  // the committed-term signal so the resolver honors the exemption. Fail-soft: a
+  // missing table or read error leaves the flag as-is (the safe direction
   // — a wrongly-charged deposit still credits forward).
-  if (paymentMethodPreference == null && estimate?.id) {
+  if (!committedPrepayTerm && estimate?.id) {
     try {
       const term = await db('annual_prepay_terms')
         .where({ source_estimate_id: estimate.id })
         .whereNotIn('status', ['cancelled', 'canceled'])
         .first('id');
-      if (term) paymentMethodPreference = 'prepay_annual';
+      if (term) committedPrepayTerm = true;
     } catch (err) {
       logger.warn('[estimate-deposits] schedule summary annual-prepay term read failed', { error: err.message });
     }
@@ -274,7 +284,7 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   try {
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference,
+      committedPrepayTerm,
       oneTime,
       oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
       // When the caller answers for a specific appointment (the estimate-source
@@ -537,7 +547,6 @@ async function depositStillRecordable(estimateId) {
       && gates.isStructuralOneTimeOnlyEstimate(estData, estimate);
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: structuralOneTime,
       oneTimeUninvoiced: structuralOneTime && estimate.bill_by_invoice !== true,
@@ -624,7 +633,6 @@ async function assessDepositFollowUpEligibility(estimateId, now = new Date()) {
     }
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: structuralOneTime,
       oneTimeUninvoiced: structuralOneTime && estimate.bill_by_invoice !== true,
@@ -741,7 +749,7 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 }
 
 // Exempt-path sweep (post-accept): when an acceptance completes through a
-// path that owes no deposit (prepay-annual, existing plan customer) — or
+// path that owes no deposit (existing plan customer, payer-billed) — or
 // after the first-invoice credit left a remainder nothing will consume —
 // refund whatever 'received' money was never applied. Partial rows refund
 // only their unapplied remainder; the credited slice stays credited.

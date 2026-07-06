@@ -4,6 +4,7 @@ import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
+import { useGlassSurface, portalGlassInitial } from './glass/glass-engine';
 import Icon from './components/Icon';
 
 class PageErrorBoundary extends Component {
@@ -82,6 +83,16 @@ function FleetRedirect() {
   const requestedTab = params.get('tab');
   params.set('tab', requestedTab === 'analytics' ? 'analytics' : 'maintenance');
   return <Navigate to={`/admin/equipment?${params.toString()}`} replace />;
+}
+
+// Legacy review funnel consolidated onto /rate. Old /review/:token links
+// (already texted to customers, plus the tech-trigger response URL) redirect
+// to the modern RatePage so there is a single review experience. Token +
+// any tracking query string are preserved.
+function ReviewLinkRedirect() {
+  const { token } = useParams();
+  const location = useLocation();
+  return <Navigate to={`/rate/${token}${location.search}`} replace />;
 }
 
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
@@ -182,7 +193,6 @@ const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const TrackPreviewPage = lazyWithRetry(() => import('./pages/TrackPreviewPage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
-const ReviewPage = lazyWithRetry(() => import('./pages/ReviewPage'));
 const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
 const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
@@ -218,6 +228,11 @@ function EstimatePublicGateway() {
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
   const location = useLocation();
+  // The auth-check screen mounts the same glass scene as the portal (cached
+  // gate value resolves synchronously), so loading renders like the real UI
+  // instead of a flat placeholder.
+  const glassActive = portalGlassInitial();
+  useGlassSurface(glassActive && loading, 'full');
 
   if (loading) {
     return (
@@ -226,35 +241,34 @@ function ProtectedRoute({ children }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: '#FAF8F3',
+        background: glassActive ? 'transparent' : '#FAF8F3',
         fontFamily: FONTS.body,
         padding: 24,
         boxSizing: 'border-box',
       }}>
-        <div style={{
+        <div data-glass="card" style={{
           width: 'min(360px, 100%)',
           background: '#fff',
           border: '1px solid #E7E2D7',
-          borderRadius: 8,
-          padding: 24,
+          borderRadius: 16,
+          padding: 28,
           textAlign: 'center',
           color: COLORS.blueDeeper,
           boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+          position: 'relative',
         }}>
-          <div style={{
-            width: 48,
-            height: 48,
-            borderRadius: 8,
-            margin: '0 auto 14px',
-            background: '#EEF6FF',
-            color: COLORS.blueDeeper,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            animation: 'portalPulse 1.4s ease infinite',
-          }}><Icon name="waves" size={24} strokeWidth={2} /></div>
+          <img
+            src="/waves-logo.png"
+            alt="Waves"
+            style={{
+              height: 64,
+              display: 'block',
+              margin: '0 auto 14px',
+              animation: 'portalPulse 1.4s ease infinite',
+            }}
+          />
           <div style={{ fontSize: 17, fontWeight: 850, fontFamily: FONTS.heading }}>Loading your portal</div>
-          <p style={{ fontSize: 14, color: '#64748B', margin: '6px 0 0', lineHeight: 1.45 }}>Checking your secure session.</p>
+          <p style={{ fontSize: 14, color: '#475569', margin: '6px 0 0', lineHeight: 1.45 }}>Checking your secure session.</p>
         </div>
         <style>{`
           @keyframes portalPulse {
@@ -296,7 +310,7 @@ export default function App() {
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportViewPage /></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ServiceOutlinePage /></Suspense>} />
-          <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
+          <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
           <Route path="/quote" element={<Navigate to="/estimate" replace />} />

@@ -137,7 +137,10 @@ const EXCLUDE_KEYWORDS = /\b(4-h|youth|cooking|nutrition|career|volunteer|obitua
 // =========================================================================
 router.get('/blog', async (req, res, next) => {
   try {
-    const data = await fetchWithCache('blog', 'https://www.wavespestcontrol.com/feed/');
+    // The hub is Astro on Cloudflare Pages — its RSS lives at /feed.xml.
+    // The old WordPress-style /feed/ path redirects to the homepage (HTML),
+    // which parsed to zero items and left the Learn tab's blog card empty.
+    const data = await fetchWithCache('blog', 'https://www.wavespestcontrol.com/feed.xml');
     const items = parseItems(data?.rss?.channel);
 
     const posts = items.slice(0, 6).map(item => ({

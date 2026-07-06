@@ -11,6 +11,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 const { aiTriageLead } = require('../services/lead-triage');
+const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 // Service-line inference is shared with the call attribution path so both
@@ -193,6 +194,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       fbclid,
       fbc,
       fbp,
+      anonId,
       firstName,
       lastName,
       serviceInterest,
@@ -460,6 +462,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       city: resolvedCity,
       service_interest: serviceInterest || null,
       customer_id: customer.id,
+      // The visitor just submitted from a browser carrying this unit id — a
+      // call-pipeline lead attaching to a web submission gains the join too.
+      ...(anonId ? { anon_id: anonId } : {}),
     });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
@@ -812,6 +817,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           fbclid: fbclid || null,
           fbc: fbc || null,
           fbp: fbp || null,
+          anon_id: anonId || null,
           is_residential: true,
         }).returning('*');
         leadRecord = newLead;
@@ -1134,6 +1140,11 @@ function getLeadWebhookAttribution(body = {}) {
     fbclid: truncateClickId(body.fbclid || body['Fbclid'] || body.FBCLID || attr.fbclid || ''),
     fbc: truncateClickId(body.fbc || body['Fbc'] || attr.fbc || ''),
     fbp: truncateClickId(body.fbp || body['Fbp'] || attr.fbp || ''),
+    // Anonymous experiment unit id (waves_exp_uid) — joins the lead to any A/B
+    // assignments in experiment_exposures. Validated (not just truncated): it
+    // must satisfy the exposure intake's unit-id contract or the join is dead
+    // weight. null (not '') when absent/malformed.
+    anonId: sanitizeAnonUnitId(body.anon_id || attr.anon_id),
   };
 }
 

@@ -10,6 +10,7 @@ const {
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
+const { firstNameFrom } = require("./customer-contact");
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
@@ -153,10 +154,7 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 }
 
 function retryAtForDeferredSend(result) {
-  if (
-    !result ||
-    !(result.retryable || result.deferred || result.code === "QUIET_HOURS_HOLD")
-  ) {
+  if (!result || !(result.retryable || result.deferred)) {
     return null;
   }
   const nextAllowedAt = result.nextAllowedAt
@@ -390,7 +388,7 @@ const ReviewService = {
       body = OUTREACH.renderOutreachBody(
         request.custom_body,
         {
-          first: contact.name || customer.first_name || "",
+          first: firstNameFrom(contact.name) || customer.first_name || "",
           tech: techName,
           service_type: request.service_type || "service",
           review_url: customIsNoLink ? "" : reviewUrl,
@@ -401,7 +399,7 @@ const ReviewService = {
       body = OUTREACH.renderOutreachBody(
         outreachTpl.body,
         {
-          first: contact.name || customer.first_name || "",
+          first: firstNameFrom(contact.name) || customer.first_name || "",
           tech: techName,
           service_type: request.service_type || "service",
           review_url: reviewUrl,
@@ -412,7 +410,7 @@ const ReviewService = {
       try {
         const tpl = require("../routes/admin-sms-templates");
         body = await tpl.getTemplate("review_request", {
-          first_name: contact.name || customer.first_name || "",
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
           tech_name: techName,
         });
@@ -1133,7 +1131,7 @@ const ReviewService = {
       const body = await renderSmsTemplate(
         "review_request_followup",
         {
-          first_name: contact.name || customer.first_name || "",
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
           google_review_url: googleReviewUrl,
         },
         {
@@ -1324,7 +1322,7 @@ const ReviewService = {
     // chosen template defaults to the standard friendly ask (audit P1). Email
     // touches always render the review_request_email DB template, so we record
     // THAT for honest per-template attribution. An edited SMS body is persisted
-    // (custom_body) so a quiet-hours/provider retry re-sends the operator's copy
+    // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
@@ -1370,7 +1368,7 @@ const ReviewService = {
     });
 
     const vars = {
-      first: contact.name || customer.first_name || "",
+      first: firstNameFrom(contact.name) || customer.first_name || "",
       tech: techName || "Adam",
       service_type: serviceType || "service",
       review_url: reviewUrl,
@@ -1442,7 +1440,7 @@ const ReviewService = {
         `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
       );
       // Only a SENT result must avoid retry (would double-send). A not-sent
-      // result (quiet-hours hold / rate-limit / transient provider failure) has
+      // result (rate-limit / transient provider failure) has
       // NO duplicate-send risk, so keep it retryable — don't drop the manual
       // retry or stop the cadence over a bookkeeping blip.
       return result?.sent
@@ -1507,7 +1505,7 @@ const ReviewService = {
         templateKey: "review_request_email",
         to: contact.email,
         payload: {
-          first_name: contact.name || customer.first_name || "",
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
           tech_name: techName || "Adam",
         },
@@ -1585,8 +1583,8 @@ const ReviewService = {
       return { started: false, reason: "cooldown" };
     }
 
-    // Supersede any already-queued ASK (post-service auto, or a quiet-hours
-    // deferral): otherwise processScheduled() would fire it AND the cadence's
+    // Supersede any already-queued ASK (post-service auto, or a deferred
+    // retry): otherwise processScheduled() would fire it AND the cadence's
     // Day-0 touch → a duplicate review request. Only ASKS are superseded — a
     // queued private no-link check-in (ASK_TOUCH_SQL excludes it) is left alone.
     // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and

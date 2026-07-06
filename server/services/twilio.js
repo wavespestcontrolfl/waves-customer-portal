@@ -638,7 +638,7 @@ const TwilioService = {
     if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
 
     const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
-    const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
+    const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
     // No early return on an empty contact list: a customer with an email but no
     // appointment phone contacts should still get the en-route notice by email
@@ -676,7 +676,9 @@ const TwilioService = {
         landlineSkipped = true;
         continue;
       }
-      const firstName = contact.name || customer.first_name || "";
+      // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
+      // {first_name} template slot wants only the first token, so strip the rest.
+      const firstName = firstNameFrom(contact.name) || customer.first_name || "";
       let body = null;
       if (typeof smsTemplatesRouter.getTemplate === "function") {
         body = await smsTemplatesRouter.getTemplate("tech_en_route", {
@@ -763,7 +765,7 @@ const TwilioService = {
     if (!prefs?.sms_enabled) return { success: false, suppressed: true, reason: "sms_disabled" };
     if (!prefs?.tech_arrived) return { success: false, suppressed: true, reason: "opt_out" };
 
-    const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
+    const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
 
@@ -773,7 +775,9 @@ const TwilioService = {
     } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
     for (const contact of contacts) {
-      const firstName = contact.name || customer.first_name || "";
+      // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
+      // {first_name} template slot wants only the first token, so strip the rest.
+      const firstName = firstNameFrom(contact.name) || customer.first_name || "";
       let body = null;
       if (typeof smsTemplatesRouter.getTemplate === "function") {
         body = await smsTemplatesRouter.getTemplate("tech_arrived", {
@@ -811,8 +815,8 @@ const TwilioService = {
 
     // Nothing delivered. Distinguish a RETRYABLE miss from deterministic
     // suppression so the caller knows whether to release its arrival guard:
-    //  - retryable: a quiet-hours hold or a transient provider failure (both
-    //    carry retryable:true from sendCustomerMessage), or the template was
+    //  - retryable: a transient provider failure (carries
+    //    retryable:true from sendCustomerMessage), or the template was
     //    missing for every contact (results empty → re-seed fixes it).
     //  - suppressed: every attempt was blocked/terminal for a deterministic
     //    reason (STOP/wrong-number/manual-DNC suppression, consent, a non-mobile

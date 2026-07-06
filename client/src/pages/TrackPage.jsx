@@ -1,5 +1,6 @@
 import Icon from '../components/Icon';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
@@ -30,16 +31,8 @@ function socketOrigin() {
 }
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const TRACK_SURFACE = {
-  surface: '#FFFFFF',
-  page: '#FAF8F3',
-  border: '#E7E2D7',
-  soft: '#F8FCFE',
-  softBorder: '#CFE7F5',
-  text: '#1B2C5B',
-  body: '#3F4A65',
-  muted: '#6B7280',
-};
+// Values from the shared customer palette (muted was drifted gray-500).
+const TRACK_SURFACE = { ...CUSTOMER_SURFACE, surface: '#FFFFFF' };
 
 const TRACK_PRIMARY_CTA = {
   display: 'flex',

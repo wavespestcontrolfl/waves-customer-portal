@@ -26,8 +26,9 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import ActivityCard from '../components/ActivityCard';
 
@@ -35,11 +36,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+// Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_BUTTON_BG = B.blueDeeper;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
@@ -408,6 +410,39 @@ export function visitTimeLabel(data = {}) {
   return arrived || exited || '';
 }
 
+// Mirrors the estimate hero's phone display: 10-digit US numbers get the
+// (xxx) xxx-xxxx treatment, anything else renders as stored.
+function formatCustomerPhone(phone) {
+  const raw = String(phone || '').replace(/\D/g, '');
+  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
+  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return String(phone || '').trim();
+}
+
+// "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
+// The displayed arrival window is ALWAYS window_start + 2 hours — window_end
+// is the internal job block and never renders on customer surfaces.
+function formatNextAppointmentLabel(nextAppointment) {
+  if (!nextAppointment?.scheduledDate) return null;
+  const dateLabel = (() => {
+    try {
+      return new Date(`${nextAppointment.scheduledDate}T12:00:00Z`)
+        .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    } catch { return null; }
+  })();
+  if (!dateLabel) return null;
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
+  if (!m) return dateLabel;
+  const fmt = (mins) => {
+    const h24 = Math.floor(mins / 60) % 24;
+    const h12 = h24 % 12 || 12;
+    const mm = mins % 60;
+    return `${h12}:${String(mm).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
+  };
+  const start = (Number(m[1]) * 60) + Number(m[2]);
+  return `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+}
+
 export function serviceReportDateTimeLabel(data = {}) {
   const serviceDate = formatDate(data.serviceDate);
   const serviceTime = visitTimeLabel(data);
@@ -581,7 +616,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (pendingTarget) {
     return {
-      heading: 'your service is complete.',
+      heading: 'your service is complete!',
       status: pendingReadyText,
       statusTone: 'pending',
       result: `${pendingTarget.label || 'Treated'} areas are still drying.`,
@@ -602,7 +637,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   }
 
   return {
-    heading: 'your service is complete.',
+    heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',
     statusTone: allReady ? 'ready' : 'neutral',
     result: 'Routine service completed. No high-priority issues were noted.',
@@ -1621,21 +1656,44 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const serviceLabel = serviceDisplayName(data);
+  // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
+  // headline never reads "... Service service is complete".
+  const headlineServiceLabel = String(serviceLabel || '').replace(/\s+service$/i, '').trim();
+  const headline = headlineServiceLabel
+    ? String(smartStatus.heading || '').replace(/^your service\b/, `your ${headlineServiceLabel} service`)
+    : smartStatus.heading;
   const serviceDateTime = serviceReportDateTimeLabel(data);
+  const nextAppointmentLabel = formatNextAppointmentLabel(data.nextAppointment);
 
   return (
     <section className="service-report-hero" id="service-status">
       <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
-        <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
-        {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
+        <div className="section-eyebrow">Service report</div>
+        <h1 className="sr-title">Hey {firstName}, {headline}</h1>
+        {(() => {
+          // Mirrors the estimate header's contact block: each of name / email /
+          // phone / address on its own eyebrow-styled line.
+          const contactLines = [
+            data.customerName,
+            data.customerEmail,
+            formatCustomerPhone(data.customerPhone),
+            data.serviceAddress,
+          ].map((line) => String(line || '').trim()).filter(Boolean);
+          return contactLines.length ? (
+            <div className="service-meta-contact">
+              {contactLines.map((line) => (
+                <div key={line} className="service-meta-address">{line}</div>
+              ))}
+            </div>
+          ) : null;
+        })()}
       </div>
       <div data-glass="card" className="service-status-card">
         <div className="service-status-main">
           <div>
             <div className="section-eyebrow">Today&apos;s result</div>
             <div className="smart-status-result">{resultOverride || smartStatus.result}</div>
-            <div className="sr-meta">{[serviceLabel, serviceDateTime].filter(Boolean).join(' | ')}</div>
+            {serviceDateTime && <div className="sr-meta">{serviceDateTime}</div>}
           </div>
           {(smartStatus.status || readinessBadge) && (
             <div className={`status-badge status-${smartStatus.statusTone || (readinessBadge?.ready ? 'ready' : 'pending')}`}>
@@ -1656,6 +1714,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             <div className="sr-cell-label">Completion status</div>
             <div className="sr-cell-value">{completionStatus}</div>
           </div>
+          {nextAppointmentLabel && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Next appointment</div>
+              <div className="sr-cell-value">{nextAppointmentLabel}</div>
+            </div>
+          )}
         </div>
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
         <HeroConditions
@@ -1694,10 +1758,33 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
         {pdfUrl
           ? <a data-glass-accent="" href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
           : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
-        <button data-glass="chip" type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
-        <button data-glass="chip" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
-        <a data-glass="chip" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
+        <button data-glass-accent="" type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
+    </section>
+  );
+}
+
+// "Your Visit, in Motion" — the tech-approved recap clip embedded in the
+// report (owner ask 2026-07-05; previously reachable only from the SMS
+// /recap/:token link). The server only attaches `recap` on live views when an
+// approved clip exists, so this self-gates everywhere else (pdf/static/
+// sms_preview and visits without a recap).
+function RecapVideoCard({ recap, token }) {
+  if (!recap?.ready || !token) return null;
+  return (
+    <section data-glass="card" className="sr-section recap-video-section" id="visit-recap">
+      <div className="section-eyebrow">Your visit, in motion</div>
+      <h2>Watch today&apos;s service</h2>
+      <p className="map-context-copy">A short recap your technician recorded during the visit.</p>
+      <video
+        src={`${API_BASE}/reports/${token}/recap/video`}
+        controls
+        preload="metadata"
+        playsInline
+        style={{ width: '100%', maxWidth: 420, borderRadius: 14, background: '#000', display: 'block', margin: '12px auto 0' }}
+      />
     </section>
   );
 }
@@ -1911,8 +1998,11 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
   ].filter(Boolean);
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false }) {
-  const hasCoverageMap = !(serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')));
+function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true }) {
+  // hasCoverageMap comes from the page (the same hideCoverageCard gate that
+  // decides whether the Service Coverage card renders) — deriving it here
+  // from serviceLine alone missed pest V2, whose card hides while the Map
+  // link would still render and jump nowhere.
   const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
 
   return (
@@ -1975,10 +2065,10 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
           <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700, marginBottom: 2 }}>
+            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
-            <dd style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
+            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
               {item.customerValueLabel != null && item.customerValueLabel !== ''
                 ? String(item.customerValueLabel)
                 : String(item.value)}
@@ -4158,49 +4248,6 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
   );
 }
 
-function ServiceReportCoverageAndWorkflow({
-  serviceType,
-  serviceCoverage,
-  visitTimeline,
-  workflowEvents,
-  customerInteraction,
-  visitTiming,
-  timingSource,
-  evidenceLevel,
-  mapBackgroundUrl,
-  mapAttribution,
-  applications = [],
-  serviceLine = null,
-  hideCoverageMap = false,
-}) {
-  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
-  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2 hides
-  // it too (the "Where we protected" Waves diagram up top replaces the legacy
-  // lettered map). Keep the Visit Timeline for every service line.
-  const hideCoverage = serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')) || hideCoverageMap;
-  return (
-    <>
-      <ServiceTimelineSection
-        serviceType={serviceType}
-        visitTimeline={visitTimeline}
-        workflowEvents={workflowEvents}
-        customerInteraction={customerInteraction}
-        visitTiming={visitTiming}
-        timingSource={timingSource}
-      />
-      {!hideCoverage && (
-        <ServiceCoverageCard
-          coverage={serviceCoverage}
-          evidenceLevel={evidenceLevel}
-          mapBackgroundUrl={mapBackgroundUrl}
-          mapAttribution={mapAttribution}
-          applications={applications}
-        />
-      )}
-    </>
-  );
-}
-
 function overlayBox(geometry = {}) {
   if (geometry.type === 'circle') {
     const r = Number(geometry.r || 8);
@@ -4526,10 +4573,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
   const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
 
-  // Liquid-glass dark launch: ?glass=1 on the live view only. PDF / static /
-  // sms_preview renders never mount the scene, so the Playwright print
-  // pipeline and cached artifacts stay byte-identical.
-  const glassActive = mode === 'live' && glassParamRequested();
+  // Liquid-glass theme gate (GATE_REPORT_GLASS → /data glassDefault): live
+  // view only — PDF / static / sms_preview renders never mount the scene, so
+  // the Playwright print pipeline and cached artifacts stay byte-identical.
+  // ?glass=1 still forces on (preview), ?glass=0 is the per-link escape hatch
+  // back to the old page, and otherwise the server's release flag decides.
+  // ServiceReportV1 mounts only after /data resolves, so glassDefault is
+  // already in the payload on first render.
+  const glassActive = mode === 'live' && glassReleaseActive(data.glassDefault);
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
@@ -4557,6 +4608,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
   const hasReentry = Boolean(dynamicContext.reentry);
+  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
+  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
+  // hides it too (the "Where we protected" diagram replaces the lettered map).
+  const hideCoverageCard = data.serviceLine === 'lawn'
+    || /tree|shrub/.test(String(data.serviceLine || ''))
+    || Boolean(data.pestReportV2);
 
   const share = async () => {
     if (navigator.share) {
@@ -4733,6 +4790,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
+        }
+        .service-meta-contact {
+          margin-top: 16px;
+          display: grid;
+          gap: 4px;
+        }
+        .service-meta-contact .service-meta-address {
+          margin-top: 0;
         }
         .service-meta-address {
           margin-top: 16px;
@@ -7226,14 +7291,53 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        /* glass layout drops the uppercase eyebrow labels (owner ask 2026-07-05);
+           the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
+           ("Overall Lawn Status") without touching their inner list labels */
+        html[data-glass-theme] .service-report-v1 .section-eyebrow,
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1) { display: none; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
           border-radius: 12px;
         }
+        /* inner fact grids + weather panel: the navy hairline wash / solid-white
+           panels read legacy on the scene — go whisper-white (owner ask 2026-07-05) */
+        html[data-glass-theme] .service-report-v1 .service-status-grid,
+        html[data-glass-theme] .service-report-v1 .hero-condition-row,
+        html[data-glass-theme] .service-report-v1 .readiness-facts {
+          background: rgba(255, 255, 255, 0.6);
+          border-color: rgba(255, 255, 255, 0.7);
+        }
+        html[data-glass-theme] .service-report-v1 .hero-conditions {
+          background: rgba(255, 255, 255, 0.42);
+          border-color: rgba(255, 255, 255, 0.65);
+        }
+        html[data-glass-theme] .service-report-v1 .hero-condition-cell {
+          background: rgba(255, 255, 255, 0.5);
+        }
+        /* lawn V2 water callouts carry inline legacy surfaces — glass overrides
+           ride the class hooks (inert outside the theme) */
+        html[data-glass-theme] .service-report-v1 .lawn-callout-watch {
+          background: rgba(255, 236, 190, 0.55) !important;
+          border-color: rgba(240, 165, 0, 0.6) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-callout-after {
+          border-top-color: rgba(4, 57, 94, 0.16) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-water-cta {
+          background: rgba(255, 255, 255, 0.42) !important;
+          border-color: rgba(255, 255, 255, 0.65) !important;
+        }
         /* chip CTAs sit on translucent glass — their inline white text would wash out */
         html[data-glass-theme] .service-report-v1 [data-glass="chip"],
         html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
+          color: #04395E !important;
+        }
+        /* inline #1B2C5B stragglers (typed-findings dd, photo summary) — the
+           inline styles stay untouched for gate-off purity; .sr-ink remaps
+           them to the glass navy only while the theme is mounted */
+        html[data-glass-theme] .service-report-v1 .sr-ink {
           color: #04395E !important;
         }
         @media print {
@@ -7290,13 +7394,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
-        {/* V2: a review ask up top, location-synced to the closest GBP (ReviewRequestCard
-            picks the office review URL). Self-gates on eligibility / already-reviewed. */}
-        {data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
+        {/* V2 + pest: a review ask up top, location-synced to the closest GBP
+            (ReviewRequestCard picks the office review URL). Self-gates on
+            eligibility / already-reviewed. Pest gets the top placement like
+            lawn V2 (owner 2026-07-05); the bottom card below is suppressed
+            for pest to match. */}
+        {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard typedReport={data.typedReport} />
 
+        <RecapVideoCard recap={data.recap} token={token} />
+
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
+
+        {/* Visit Timeline sits directly under Re-entry on every layout (owner
+            ask 2026-07-05): lawn/tree V2 already lead with it below; the
+            standard layout renders it here instead of down in the coverage
+            block. */}
+        {!isV2LeadLayout && (
+          <ServiceTimelineSection
+            serviceType={visitTimelineServiceType}
+            visitTimeline={normalizedVisitTimeline}
+            workflowEvents={data.workflowEvents}
+            customerInteraction={data.customerInteraction}
+            visitTiming={data.visitTiming}
+            timingSource={data}
+          />
+        )}
 
         {/* Pest Report V2 — protection-first dashboard, right under Re-entry so it
             leads the pest report. Surfaces the premium-experience intelligence
@@ -7326,6 +7450,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               hasPestPressure={hasPestPressure}
               hasReentry={hasReentry}
               hasActivity={Boolean(data.activity)}
+              hasCoverageMap={!hideCoverageCard}
             />
           </>
         )}
@@ -7449,27 +7574,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hasPestPressure={hasPestPressure && !data.pestReportV2}
             hasReentry={hasReentry}
             hasActivity={Boolean(data.activity) && !data.pestReportV2}
+            hasCoverageMap={!hideCoverageCard}
           />
         )}
 
         {/* Non-lead-layout lines keep Timeline + Coverage and Products here; lawn +
             tree_shrub V2 already rendered them up top. */}
-        {!isV2LeadLayout && (
+        {!isV2LeadLayout && !hideCoverageCard && (
           <div id="map">
-            <ServiceReportCoverageAndWorkflow
-              serviceType={visitTimelineServiceType}
-              serviceCoverage={serviceCoverage}
-              visitTimeline={normalizedVisitTimeline}
-              workflowEvents={data.workflowEvents}
-              customerInteraction={data.customerInteraction}
-              visitTiming={data.visitTiming}
-              timingSource={data}
+            <ServiceCoverageCard
+              coverage={serviceCoverage}
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               applications={data.applications || []}
-              serviceLine={data.serviceLine}
-              hideCoverageMap={Boolean(data.pestReportV2)}
             />
           </div>
         )}
@@ -7527,7 +7645,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
+              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}
@@ -7542,8 +7660,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {/* V2 shows the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
-        {!data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
+        {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.

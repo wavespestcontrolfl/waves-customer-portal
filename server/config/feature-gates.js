@@ -430,6 +430,23 @@ const gates = {
   // GATE_EMAIL_GLASS.
   emailGlassTheme: process.env.GATE_EMAIL_GLASS === 'true',
 
+  // Liquid-glass customer service-report experience — makes glass the DEFAULT
+  // render for the React report viewer (live mode only: pdf/static/sms_preview
+  // renders never mount the scene, so the print pipeline and cached artifacts
+  // stay untouched). Off = the pre-glass page (glass still reachable per-link
+  // via ?glass=1); on = glass for every customer (?glass=0 stays as the
+  // per-link escape hatch). Kill switch: unset GATE_REPORT_GLASS.
+  reportGlassTheme: isProd ? process.env.GATE_REPORT_GLASS === 'true' : true,
+
+  // Liquid-glass portal shell + login page — makes glass the DEFAULT render
+  // for the customer portal SPA (and the Capacitor apps, which load the same
+  // web bundle). Served to the client via GET /api/public/ui-flags because
+  // the shell has no per-page token payload to ride. Off = pre-glass portal
+  // (glass still reachable per-link via ?glass=1); on = glass for every
+  // customer (?glass=0 stays as the per-link escape hatch).
+  // Kill switch: unset GATE_PORTAL_GLASS.
+  portalGlassTheme: isProd ? process.env.GATE_PORTAL_GLASS === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in
@@ -487,8 +504,8 @@ const gates = {
   // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
   // This lane NEVER auto-sends: the only send path is the operator's explicit
   // approve/revise click on /api/admin/drafts, which runs the full messaging
-  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs, quiet
-  // hours). With the gate OFF the generators only shadow-log candidate counts —
+  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs).
+  // With the gate OFF the generators only shadow-log candidate counts —
   // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
   // too) so campaign drafts never accumulate silently in a preview/dev queue.
   campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',

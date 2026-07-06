@@ -15,7 +15,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
-const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
+const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
@@ -707,7 +707,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         serviceLabel,
         rescheduleUrl: reschedule.url,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-          const firstName = contact.name || customer.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           return renderTemplate(
             'appointment_confirmation',
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
@@ -1159,7 +1159,7 @@ const AppointmentReminders = {
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-                const firstName = contact.name || customer?.first_name || 'there';
+                const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
                   { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line },
@@ -1223,7 +1223,7 @@ const AppointmentReminders = {
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-                const firstName = contact.name || customer?.first_name || 'there';
+                const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
                   { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line },
@@ -1455,7 +1455,7 @@ const AppointmentReminders = {
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
         const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = contact.name || customer?.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_rescheduled', {
             first_name: firstName,
             service_type: serviceLabel,
@@ -1549,7 +1549,7 @@ const AppointmentReminders = {
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = contact.name || customer?.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_cancelled', {
             first_name: firstName,
             service_type: serviceLabel,
@@ -1643,7 +1643,7 @@ const AppointmentReminders = {
       }
 
       await safeSendAppointment(customer, prefs || {}, async (contact) => {
-        const customerFirst = contact.name || customer?.first_name || 'there';
+        const customerFirst = firstNameFrom(contact.name) || customer?.first_name || 'there';
         return renderTemplate('appointment_no_show', {
           first_name: customerFirst,
           tech_name: techFirst,
@@ -1733,7 +1733,7 @@ const AppointmentReminders = {
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = contact.name || customer?.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderTemplate(
             'appointment_series_cancelled',
             { first_name: firstName, service_type: serviceLabel, scope: scopeText },

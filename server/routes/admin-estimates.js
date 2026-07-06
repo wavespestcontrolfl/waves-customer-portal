@@ -520,7 +520,6 @@ router.post('/:id/send', async (req, res, next) => {
     // The scheduled-send cron and lead-auto-send already pre-claim before
     // calling sendEstimateNow, so the claim happens here only for immediate
     // sends. A crashed immediate send is recovered by the stale-claim sweep.
-    const quietHoursOverride = req.body?.quietHoursOverride === true;
     const claimed = await db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
@@ -538,7 +537,7 @@ router.post('/:id/send', async (req, res, next) => {
 
     let result;
     try {
-      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey, quietHoursOverride });
+      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey });
     } catch (e) {
       await releaseSendClaim();
       throw e;
@@ -655,8 +654,6 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             entryPoint: 'admin_estimate_send',
             metadata: {
               original_message_type: 'estimate_sent',
-              quietHoursOverride: options.quietHoursOverride === true,
-              quietHoursOverrideSource: options.quietHoursOverride === true ? 'admin_estimate_send' : undefined,
             },
           });
           if (!result.sent) {

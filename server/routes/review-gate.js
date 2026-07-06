@@ -60,8 +60,12 @@ router.get('/:token', async (req, res, next) => {
       logger.warn(`[review-gate] open stamp failed: ${err.message}`);
     }
 
-    // Already submitted
-    if (request.status === 'submitted') {
+    // Already submitted. `rated_at` also covers completed legacy /review
+    // submissions (review-public.js) that now land here via redirect — those
+    // mark completion with rated_at + status rated/reviewed rather than
+    // 'submitted', so honor them too or a finished customer would see a fresh,
+    // overwritable rating flow instead of the thank-you state.
+    if (request.status === 'submitted' || request.rated_at) {
       return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
     }
 
@@ -132,7 +136,7 @@ router.post('/:token/score', async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
-    if (['submitted', 'reviewed'].includes(request.status)) {
+    if (['submitted', 'reviewed'].includes(request.status) || request.rated_at) {
       return res.status(409).json({ error: 'Feedback already submitted' });
     }
 
@@ -171,7 +175,7 @@ router.post('/:token/submit', async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
-    if (request.status === 'submitted') {
+    if (request.status === 'submitted' || request.rated_at) {
       return res.status(409).json({ error: 'Feedback already submitted' });
     }
 

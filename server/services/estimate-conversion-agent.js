@@ -578,6 +578,64 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
   };
 }
 
+/**
+ * Grounded LLM pass for the human-review draft (the "Agent Review Draft" card
+ * in the comms composer). The deterministic classifiers above stay the router
+ * — intent, actions, safety flags are unchanged — but suggested_message was a
+ * fill-in-the-blank template that interpolated raw customer clauses whenever a
+ * part-of-day word matched ("Hello Catherine! Hello what happened this morning
+ * helps."). This replaces the template text with the shadow drafter's
+ * draft → verify → revise engine (house voice; model routed per the SMS
+ * reply-drafting split in config/models.js — default drafts on the mini
+ * route, save-the-sale on Sonnet, FLAGSHIP fallback), so review drafts and
+ * shadow/suggest drafts share one voice and one fact-discipline contract.
+ *
+ * Returns { reply, model, promptVersion, passes } — reply may be '' when the
+ * drafter judges no reply warranted (courtesy ack), which the caller stores as
+ * NULL so the composer shows no card. Returns null when the draft is
+ * unavailable (LLM error, verify loop never converged, redaction placeholder
+ * leaked, kill switch AGENT_REVIEW_LLM_DRAFTS=false, or no matched customer)
+ * — the caller then falls back to the deterministic template, so an LLM miss
+ * never blocks the decision row.
+ *
+ * Customer-scoped on purpose: without the webhook's matched customer row, a
+ * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
+ * (shared numbers) — lead-only estimate threads keep the template.
+ */
+async function generateLlmReviewDraft({ customer, body, decision }) {
+  if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
+  if (!customer) return null;
+  try {
+    const drafter = require('./sms-shadow-drafter');
+    const ContextAggregator = require('./context-aggregator');
+    const { hasSchedulingIntent } = require('./sms-intent');
+    const context = await ContextAggregator.getContextForCustomer(customer);
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
+      client,
+      context,
+      inboundMessage: body,
+      intent: { intent: decision.intent, confidence: decision.confidence },
+      schedulingIntent: hasSchedulingIntent(body),
+    });
+    // Only a verified-clean draft may replace the template: unconverged means
+    // the reply still asserts facts the context doesn't support after the
+    // revision budget — exactly the fabrication class this lane exists to stop.
+    if (!parsed || !converged) return null;
+    if (parsed.reply && require('./sms-suggest-mode').hasRedactionPlaceholder(parsed.reply)) {
+      logger.warn(`[estimate-conversion-agent] LLM review draft leaked a redaction placeholder (customer=${customer.id}); using template`);
+      return null;
+    }
+    return { reply: parsed.reply, model, promptVersion: drafter.PROMPT_VERSION, passes };
+  } catch (err) {
+    logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
+    return null;
+  }
+}
+
 async function processInboundSms({ customer, from, to, body, smsLogId, sourceMessageId } = {}) {
   if (!body || typeof body !== 'string') return null;
 
@@ -590,13 +648,30 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
 
     if (!decision.intent) return null;
 
-    const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
-    const entityId = estimate?.id || lead?.id || customer?.id || null;
     const idempotencyKey = sourceMessageId
       ? `${workflow}:twilio:${sourceMessageId}`
       : smsLogId
         ? `${workflow}:sms_log:${smsLogId}`
         : null;
+
+    // Idempotency BEFORE the LLM draft, not just on insert: a fail-open
+    // webhook redelivery or replay of an already-handled SMS would otherwise
+    // run the full context aggregation + draft→verify→revise loop and then
+    // have the insert dropped by onConflict — burning provider calls for
+    // nothing. A concurrent duplicate can still slip past this read, but the
+    // onConflict ignore below keeps the table correct; this check only
+    // exists to avoid the wasted LLM spend on the common redelivery path.
+    if (idempotencyKey) {
+      const existing = await db('agent_decisions')
+        .where({ idempotency_key: idempotencyKey })
+        .first('id');
+      if (existing) return null; // same semantics as the ignored insert: nothing new
+    }
+
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+
+    const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
+    const entityId = estimate?.id || lead?.id || customer?.id || null;
 
     const payload = {
       workflow,
@@ -620,15 +695,22 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         routing: { workflow },
         recent_sms_thread: recentSmsThread,
         reply_training_hint: decision.metadata || null,
+        // Provenance for the review draft: which engine produced
+        // suggested_message. no_reply=true means the LLM judged a courtesy
+        // ack that warrants no reply — suggested_message is NULL by design,
+        // not a drafting failure.
+        review_draft: llmDraft
+          ? { source: 'llm', passes: llmDraft.passes, no_reply: !llmDraft.reply }
+          : { source: 'template' },
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
       blocked_actions: JSON.stringify(decision.blockedActions),
       safety_flags: JSON.stringify(decision.safetyFlags),
-      suggested_message: decision.suggestedMessage,
+      suggested_message: llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage,
       reasoning_summary: decision.reasoningSummary,
-      model: 'deterministic_rules',
-      prompt_version: null,
+      model: llmDraft ? llmDraft.model : 'deterministic_rules',
+      prompt_version: llmDraft ? llmDraft.promptVersion : null,
       idempotency_key: idempotencyKey,
     };
 
