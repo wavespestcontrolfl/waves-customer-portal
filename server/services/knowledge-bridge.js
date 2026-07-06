@@ -504,11 +504,17 @@ Return a JSON object with:
     const stats = { created: 0, updated: 0, errors: 0 };
 
     try {
+      // Only the clean brain crosses into Claudeopedia: trusted pages
+      // (auto/approved — red pages awaiting review are excluded), with real
+      // content. Everything agents read from the KB side inherits this gate.
       const wikiEntries = await db('knowledge_entries')
         .where('data_point_count', '>', 0)
+        .whereIn('review_status', TRUSTED_STATUSES)
         .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content', 'review_status');
 
-      for (const wiki of wikiEntries) {
+      const syncable = wikiEntries.filter((w) => !(w.content || '').includes('*Pending AI generation'));
+
+      for (const wiki of syncable) {
         try {
           const kbSlug = `outcomes-${wiki.slug.replace(/\//g, '-')}`;
 
@@ -572,11 +578,65 @@ Return a JSON object with:
       }
 
       logger.info(`[knowledge-bridge] syncToClaudeopedia complete: ${JSON.stringify(stats)}`);
-      return stats;
+      // Reconcile: copies whose source page is no longer trusted get flagged.
+    // Event-driven flips (syncKbCopyTrust) handle transitions in real time;
+    // this weekly pass heals any missed flip so drift can't persist.
+    try {
+      await db('knowledge_base')
+        .where({ source: 'wiki-sync' })
+        .whereIn(
+          'wiki_entry_id',
+          db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
+        )
+        .update({ status: 'flagged', active: false, updated_at: new Date() });
+    } catch (err) {
+      logger.error(`[knowledge-bridge] Sync trust reconciliation failed: ${err.message}`);
+      // Count it: a run whose healing pass failed must log kb_sync_error so
+      // the six-day guard retries tomorrow instead of suppressing for a week.
+      stats.errors++;
+    }
+
+    return stats;
     } catch (err) {
       logger.error(`[knowledge-bridge] syncToClaudeopedia failed: ${err.message}`);
+      // A run that died before/around the loop is an ERROR run — without
+      // this, syncToClaudeopediaIfDue records a kb_sync success marker and
+      // the six-day guard suppresses retries for a week with nothing synced.
+      stats.errors++;
       return stats;
     }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // syncToClaudeopediaIfDue — daily cron entry point with a weekly guard
+  // (same self-healing pattern as the wiki's weeklyRefreshIfDue: a single
+  // weekly fire time misses whole weeks when the process isn't up at that
+  // exact minute).
+  // ────────────────────────────────────────────────────────────
+  async syncToClaudeopediaIfDue() {
+    try {
+      const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+      const recentRun = await db('knowledge_update_log')
+        .where({ trigger_type: 'kb_sync' })
+        .where('created_at', '>', sixDaysAgo)
+        .first('id');
+      if (recentRun) return { skipped: true };
+    } catch (err) {
+      logger.error(`[knowledge-bridge] syncIfDue guard query failed: ${err.message}`);
+    }
+
+    const stats = await KnowledgeBridge.syncToClaudeopedia();
+    try {
+      await db('knowledge_update_log').insert({
+        action: stats.errors ? 'error' : 'sync',
+        entry_slug: null,
+        description: `Wiki→KB trusted sync: ${stats.created} created, ${stats.updated} updated, ${stats.errors} errors`,
+        trigger_type: stats.errors ? 'kb_sync_error' : 'kb_sync',
+      });
+    } catch (err) {
+      logger.error(`[knowledge-bridge] Failed to log sync: ${err.message}`);
+    }
+    return stats;
   },
 
   // ────────────────────────────────────────────────────────────

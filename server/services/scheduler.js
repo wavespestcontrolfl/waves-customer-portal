@@ -3046,19 +3046,49 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:10AM — Agronomic Wiki refresh (stale pages + seasonal), weekly
-  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard.
+  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard,
+  // then the trusted wiki→KB sync chained after it (own weekly guard).
   // The former single Sunday-6AM fire time missed whole weeks whenever the
   // process wasn't up at that exact minute (update-log lint rows show 3 runs
   // in 3 months); a daily check self-heals after any missed fire.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
+    let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
       const result = await wiki.weeklyRefreshIfDue();
-      if (result.skipped) return;
-      logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      if (result?.error) refreshFailed = true;
+      else if (!result.skipped) {
+        logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      }
     } catch (err) {
+      refreshFailed = true;
       logger.error(`Agronomic wiki refresh failed: ${err.message}`);
+    }
+
+    // Trusted wiki→Knowledge Base sync, CHAINED strictly after the refresh
+    // (weekly cadence via syncToClaudeopediaIfDue's own guard; invoked daily
+    // so an error day self-heals tomorrow). A fixed-offset cron could fire
+    // mid-refresh and write its weekly marker before the freshly refreshed
+    // rows exist — missing them until the guard expires. A FAILED refresh
+    // skips the sync entirely: syncing now would stamp the weekly kb_sync
+    // marker, and tomorrow's successful refresh retry would find its fresh
+    // rows locked out of the KB by that marker. Refresh-skip days still
+    // sync (the refresh is done for the week; the sync self-heals its own
+    // misses). Only trusted pages (review_status auto/approved) cross —
+    // the exception-based review gate controls what feeds agents.
+    if (refreshFailed) {
+      logger.warn('Wiki→KB sync skipped: wiki refresh failed — both retry tomorrow');
+      return;
+    }
+    try {
+      const KnowledgeBridge = require('./knowledge-bridge');
+      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      if (!result.skipped) {
+        logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
+      }
+    } catch (err) {
+      logger.error(`Wiki→KB sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
