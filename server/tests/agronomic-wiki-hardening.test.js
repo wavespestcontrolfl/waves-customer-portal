@@ -181,7 +181,7 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(result).toBe(existing);
+    expect(result).toEqual({ entry: existing, writeState: 'failed' });
     expect(state.updates.knowledge_entries).toBeUndefined();
     const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'error');
     expect(errorLog).toBeTruthy();
@@ -194,7 +194,8 @@ describe('generatePage', () => {
 
     const result = await wiki.generatePage('product/new-thing', 'product', { outcomes: [{ id: 'o1' }] }, 'Product: New Thing');
 
-    expect(result).toBeTruthy();
+    expect(result?.entry).toBeTruthy();
+    expect(result?.writeState).toBe('stub');
     expect(state.inserts.knowledge_entries).toHaveLength(1);
     expect(state.inserts.knowledge_entries[0].content).toContain('Pending AI generation');
   });
@@ -216,7 +217,7 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(result).toBe(existing);
+    expect(result).toEqual({ entry: existing, writeState: 'skipped' });
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
     // last_data_update advances so the page doesn't get re-marked stale and
     // re-skipped on every subsequent weekly refresh
@@ -349,9 +350,13 @@ describe('updateProductPage', () => {
     expect(state.updates.knowledge_base).toEqual([
       expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
     ]);
-    // bridge links move to the canonical page instead of dying to the FK cascade
+    // bridge links move to the canonical page instead of dying to the FK
+    // cascade, and the denormalized wiki_slug follows
     expect(state.updates.knowledge_bridge).toEqual([
-      expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
+      expect.objectContaining({
+        wiki_entry_id: expect.stringContaining('knowledge_entries-'),
+        wiki_slug: 'product/lesco-high-manganese-combo',
+      }),
     ]);
     expect(state.updates.knowledge_contradictions).toEqual([
       expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
@@ -400,6 +405,49 @@ describe('updateProductPage', () => {
 
     expect(state.inserts.knowledge_entries[0].slug).toBe('product/talstar-p');
     expect(state.deletes.knowledge_entries).toBeUndefined();
+  });
+
+  test('a failed refresh of a real canonical page does not absorb variants', async () => {
+    const responses = productResponses();
+    // canonical page exists with REAL (non-stub) content
+    responses.knowledge_entries = (rec) => {
+      const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+      if (whereObj?.slug === 'product/lesco-high-manganese-combo') {
+        return [{
+          id: 'ke-real',
+          slug: 'product/lesco-high-manganese-combo',
+          content: '# Real canonical analysis (predates variant data)',
+          data_point_count: 99,
+          source_treatment_ids: ['other'],
+          stale_flag: false,
+        }];
+      }
+      return [{ id: 'ke-dupe', slug: whereObj?.slug }];
+    };
+    const state = useDb(responses);
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    await wiki.updateProductPage(RAW_NAME);
+
+    // refresh failed → canonical content may predate the variant's data →
+    // the variant page must survive
+    expect(state.deletes.knowledge_entries).toBeUndefined();
+  });
+});
+
+describe('generatePage condition-count fallback', () => {
+  test('assessment-only condition pages keep a live fingerprint', async () => {
+    const state = useDb({ knowledge_entries: [] });
+
+    await wiki.generatePage('condition/dollar-spot', 'condition', {
+      outcomes: [],
+      totalOutcomeCount: 0,
+      allOutcomeIds: [],
+      assessmentCount: 7,
+    }, 'Condition: Dollar Spot');
+
+    // 0 outcomes must fall through to the assessment count, not freeze at 0
+    expect(state.inserts.knowledge_entries[0].data_point_count).toBe(7);
   });
 });
 

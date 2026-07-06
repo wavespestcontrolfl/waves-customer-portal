@@ -361,13 +361,17 @@ const AgronomicWiki = {
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
-      const entry = await AgronomicWiki.generatePage(slug, 'product', data, `Product: ${canonicalName}`);
+      const result = await AgronomicWiki.generatePage(slug, 'product', data, `Product: ${canonicalName}`);
+      const entry = result?.entry || null;
 
       // Fold variant-named duplicate pages into the canonical page. Only when
-      // the canonical page holds real content — a placeholder stub (e.g. the
-      // AI-failure path returned an existing stub) must never absorb a variant
-      // page that may hold the only real copy.
-      if (entry && !entry.content?.includes('*Pending AI generation')) {
+      // this call actually wrote fresh content ('generated') or verified the
+      // canonical fingerprint already covers the variant-inclusive outcome set
+      // ('skipped'). A failed refresh or a stub must never absorb a variant
+      // page that may hold the only real analysis.
+      const mergeSafe = result && ['generated', 'skipped'].includes(result.writeState)
+        && entry && !entry.content?.includes('*Pending AI generation');
+      if (mergeSafe) {
         await mergeVariantProductPages(entry, variants, slug);
       }
 
@@ -411,7 +415,8 @@ const AgronomicWiki = {
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
-      return AgronomicWiki.generatePage(slug, 'condition', data, `Condition: ${conditionName}`);
+      const result = await AgronomicWiki.generatePage(slug, 'condition', data, `Condition: ${conditionName}`);
+      return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateConditionPage failed for ${conditionName}: ${err.message}`);
       return null;
@@ -446,7 +451,8 @@ const AgronomicWiki = {
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
-      return AgronomicWiki.generatePage(slug, 'track', data, `Track ${trackId} Performance`);
+      const result = await AgronomicWiki.generatePage(slug, 'track', data, `Track ${trackId} Performance`);
+      return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateTrackPage failed for ${trackId}: ${err.message}`);
       return null;
@@ -501,7 +507,8 @@ const AgronomicWiki = {
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
-      return AgronomicWiki.generatePage(slug, 'seasonal', data, `${monthName} — Seasonal Intelligence`);
+      const result = await AgronomicWiki.generatePage(slug, 'seasonal', data, `${monthName} — Seasonal Intelligence`);
+      return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateSeasonalPage failed for month ${month}: ${err.message}`);
       return null;
@@ -509,7 +516,12 @@ const AgronomicWiki = {
   },
 
   // ────────────────────────────────────────────────────────────
-  // generatePage — call Claude to generate/update a wiki page
+  // generatePage — call Claude to generate/update a wiki page.
+  // Returns { entry, writeState } where writeState is one of
+  // 'generated' (fresh AI content written), 'skipped' (data unchanged),
+  // 'failed' (AI call failed, existing preserved), 'stub' (placeholder
+  // created for a new page) — or null on error. Callers that only need
+  // the page should unwrap .entry.
   // ────────────────────────────────────────────────────────────
   async generatePage(slug, category, data, title) {
     try {
@@ -519,9 +531,14 @@ const AgronomicWiki = {
       // Fingerprint the FULL outcome set (callers slice data.outcomes to 50
       // for the prompt, but stats aggregate everything — a change outside the
       // newest 50 must still invalidate the skip).
-      const dataPointCount = data.totalOutcomeCount ?? (data.outcomes?.length || data.assessmentCount || 0);
+      // || (not ??) so a zero outcome count falls through to assessmentCount —
+      // condition pages can be assessment-only, and a hard 0 would freeze
+      // their skip fingerprint forever.
+      const dataPointCount = data.totalOutcomeCount || data.outcomes?.length || data.assessmentCount || 0;
       const confidence = confidenceLevel(dataPointCount);
-      const sourceIds = (data.allOutcomeIds || (data.outcomes || []).map((o) => o.id)).slice(0, 500);
+      // Full id set, uncapped — a truncated fingerprint is blind to changes
+      // past the cap while count stays equal (delete+backfill, alias remap).
+      const sourceIds = data.allOutcomeIds || (data.outcomes || []).map((o) => o.id);
 
       // Skip regeneration when the underlying data hasn't changed — the AI
       // pass would just rewrite the same page. Placeholder stubs are always
@@ -541,7 +558,7 @@ const AgronomicWiki = {
           triggerType: 'wiki_generation',
         });
         logger.info(`[agronomic-wiki] Skipped page ${slug} — data unchanged (${dataPointCount} pts)`);
-        return existing;
+        return { entry: existing, writeState: 'skipped' };
       }
 
       const systemPrompt = `You are maintaining an agronomic knowledge wiki for Waves Pest Control in Southwest Florida. You write technically accurate, data-driven content based on real treatment outcomes. Never fabricate data. Only make claims supported by the provided data points. When data is limited, say so explicitly. When data contradicts existing claims, flag it clearly. Write in markdown format.`;
@@ -585,7 +602,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
           triggerType: 'wiki_generation',
         });
         logger.warn(`[agronomic-wiki] Generation failed for ${slug} — existing content preserved`);
-        return existing;
+        return { entry: existing, writeState: 'failed' };
       }
 
       const content = result?.text?.trim()
@@ -629,7 +646,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       );
 
       logger.info(`[agronomic-wiki] ${existing ? 'Updated' : 'Created'} page: ${slug} (${dataPointCount} pts, ${confidence})`);
-      return entry;
+      return { entry, writeState: result?.text?.trim() ? 'generated' : 'stub' };
 
     } catch (err) {
       logger.error(`[agronomic-wiki] generatePage failed for ${slug}: ${err.message}`);
@@ -906,7 +923,14 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
           if (clash) {
             await db('knowledge_bridge').where({ id: row.id }).del();
           } else {
-            await db('knowledge_bridge').where({ id: row.id }).update({ wiki_entry_id: canonicalEntry.id });
+            // wiki_slug is denormalized on bridge rows (createLink) and
+            // surfaced by unifiedSearch — refresh it or API results keep
+            // pointing at the deleted variant slug.
+            await db('knowledge_bridge').where({ id: row.id }).update({
+              wiki_entry_id: canonicalEntry.id,
+              wiki_slug: canonicalSlug,
+              updated_at: new Date(),
+            });
           }
         }
       } catch { /* knowledge_bridge table may not exist */ }
