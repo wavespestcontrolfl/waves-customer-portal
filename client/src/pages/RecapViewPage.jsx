@@ -48,10 +48,18 @@ export default function RecapViewPage() {
   // is LIGHT, so under glass the root goes transparent with the dark-navy
   // text treatment the other glass pages use. Gate off = today's exact look.
   const ink = glassActive ? COLORS.blueDeeper : COLORS.white;
+  // Root is top-aligned + scrollable; the content stack centers itself via
+  // flex:1 when short. Keeps the footer out of the centered group so a tall
+  // video + footer scrolls instead of pushing content above the viewport.
   const wrap = {
     minHeight: '100vh', background: glassActive ? 'transparent' : `linear-gradient(170deg, ${COLORS.blueDeeper}, ${COLORS.wavesBlue})`,
+    display: 'flex', flexDirection: 'column', alignItems: 'center',
+    padding: '28px 18px', fontFamily: FONTS.body, color: ink, textAlign: 'center',
+  };
+  const contentStack = {
+    flex: 1, width: '100%',
     display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    padding: '28px 18px', fontFamily: FONTS.body, color: ink, textAlign: 'center', gap: 18,
+    gap: 18,
   };
   const wordmark = { fontFamily: FONTS.heading, fontWeight: 900, fontSize: 22, letterSpacing: 4, color: ink };
   const btn = (solid) => ({
@@ -63,6 +71,7 @@ export default function RecapViewPage() {
 
   return (
     <div style={wrap}>
+      <div style={contentStack}>
       <div style={wordmark}>WAVES</div>
       {status === 'loading' && <div style={{ opacity: 0.8 }}>Loading your recap…</div>}
 
@@ -92,6 +101,7 @@ export default function RecapViewPage() {
           <a style={btn(true)} data-glass-accent="" href={reportUrl}>Open your service report</a>
         </>
       )}
+      </div>
 
       <div style={{ width: '100%', maxWidth: 360 }}>
         <BrandFooter variant={glassActive ? undefined : 'dark'} />

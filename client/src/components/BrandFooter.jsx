@@ -87,7 +87,7 @@ function GooglePlayBadgeSvg({ fill }) {
 function StoreBadges({ ctaColor }) {
   if (isNativeApp()) return null;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, flex: '1 1 200px', minWidth: 180 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, flex: '1 1 200px', minWidth: 0, maxWidth: '100%' }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: ctaColor, fontFamily: FONTS.heading, lineHeight: 1.6, maxWidth: 220 }}>
         Track your visits, pay, and message us — get the Waves app!
       </div>
@@ -228,7 +228,7 @@ export default function BrandFooter({ borderColor, variant }) {
         alignItems: 'center', gap: 20, width: '100%', maxWidth: 860,
       }}>
         <StoreBadges ctaColor={headingColor} />
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, flex: '1 1 300px', minWidth: 280 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, flex: '1 1 300px', minWidth: 0, maxWidth: '100%' }}>
           <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity }} />
           <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.4 }}>Waves Pest Control</div>
           <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>

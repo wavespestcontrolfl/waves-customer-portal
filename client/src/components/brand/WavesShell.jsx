@@ -69,7 +69,13 @@ export default function WavesShell({
                 filter: isTransparent ? 'brightness(0) invert(1)' : 'none',
               }}
             />
-            <HelpPhoneLink tone={phoneTone} />
+            {/* marginLeft:auto keeps the phone CTA on the right even when
+                HeaderStoreLinks renders null inside the native app (the
+                logo is absolutely positioned, so space-between alone would
+                pull the lone in-flow child to the left edge). */}
+            <span style={{ marginLeft: 'auto' }}>
+              <HelpPhoneLink tone={phoneTone} />
+            </span>
           </div>
         </header>
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
