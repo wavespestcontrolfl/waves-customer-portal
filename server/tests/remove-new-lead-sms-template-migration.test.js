@@ -75,11 +75,11 @@ describe('remove new lead SMS template migration', () => {
   test('keeps retired SMS row out of the runtime default seed list', () => {
     const retiredKey = ['auto', 'new', 'lead'].join('_');
     const defaultKeys = cleanTemplateSeed.TEMPLATES.map((template) => template.template_key);
-    const billingReminder = cleanTemplateSeed.TEMPLATES.find((template) => (
-      template.template_key === 'billing_reminder'
-    ));
 
     expect(defaultKeys).not.toContain(retiredKey);
-    expect(billingReminder.name).toBe('Billing Reminder (WaveGuard Monthly)');
+    // billing_reminder (the row this migration renamed) was itself retired by
+    // 20260706000010_sms_template_cleanup.js — it must stay out of the seed
+    // too, or the boot seeder would resurrect it.
+    expect(defaultKeys).not.toContain('billing_reminder');
   });
 });

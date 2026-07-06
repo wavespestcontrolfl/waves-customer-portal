@@ -2178,36 +2178,9 @@ function initScheduledJobs() {
   // The former 2AM (customer-health-v2 → unread customers.health_score) and
   // 2:15AM (standalone v3) jobs were removed to end the three-writer collision.
 
-  // =========================================================================
-  // 28TH OF MONTH 10AM — Send billing reminders (for customers who opted in)
-  // =========================================================================
-  cron.schedule('0 10 28 * *', async () => {
-    logger.info('Running: billing reminder job');
-    try {
-      await runExclusive('billing-reminders-28th', async () => {
-      const customers = await db('customers')
-        .join('notification_prefs', 'customers.id', 'notification_prefs.customer_id')
-        .where({ 'customers.active': true, 'notification_prefs.billing_reminder': true })
-        .whereNull('customers.deleted_at')
-        .whereNotNull('customers.monthly_rate')
-        .select('customers.id', 'customers.monthly_rate', 'customers.first_name');
-
-      for (const cust of customers) {
-        const nextMonth = new Date();
-        nextMonth.setMonth(nextMonth.getMonth() + 1);
-        const chargeDate = `${nextMonth.toLocaleDateString('en-US', { month: 'long', timeZone: 'America/New_York' })} 1`;
-
-        try {
-          await TwilioService.sendBillingReminder(cust.id, cust.monthly_rate, chargeDate);
-        } catch (err) {
-          logger.error(`Billing reminder failed for ${cust.id}: ${err.message}`);
-        }
-      }
-      });
-    } catch (err) {
-      logger.error(`Billing reminder job failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // (Removed 2026-07-06) The 28th-of-month WaveGuard billing-reminder text is
+  // retired — autopay customers already get the pre-charge notice, and the
+  // extra monthly text was noise (owner call).
 
   // =========================================================================
   // EVERY 15 MIN — Process scheduled content (blog + social auto-publish).

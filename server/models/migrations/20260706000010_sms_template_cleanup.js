@@ -2,9 +2,10 @@
  * SMS template library cleanup (owner-directed audit, 2026-07-06).
  *
  * Removes templates whose flows are retired or whose sends move to other
- * templates, reactivates two templates that live send paths still render,
- * and seeds the flea treatment-prep text (bed bug / cockroach equivalents
- * already exist as auto_bed_bug / auto_cockroach).
+ * templates, reactivates templates that live send paths still render, seeds
+ * the flea treatment-prep text (bed bug / cockroach equivalents already
+ * exist as auto_bed_bug / auto_cockroach) and the deposit receipt, and
+ * regroups the library into moment-based categories.
  *
  * Removed here AND from the TEMPLATES export in
  * 20260514000002_tighten_sms_template_copy.js — the boot seeder re-inserts
@@ -43,6 +44,9 @@ const REMOVED_TEMPLATE_KEYS = [
   'reschedule_options_weather',
   'reschedule_options_access',
   'reschedule_options_general',
+  // WaveGuard monthly pre-charge text retired — autopay customers already
+  // get the autopay pre-charge notice; the extra monthly text was noise.
+  'billing_reminder',
   // Self-bookings now confirm through the shared appointment_confirmation
   // flow (registerAppointment sendConfirmation) — prefs/channel-aware with
   // email fallback, replacing the bespoke code/address text.
@@ -59,17 +63,30 @@ const REACTIVATED_TEMPLATE_KEYS = [
   'auto_cockroach',
 ];
 
-const FLEA_PREP_TEMPLATE = {
-  template_key: 'auto_flea',
-  name: 'Flea Treatment',
-  category: 'onboarding',
-  body: "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.",
-  description: 'Treatment-prep text sent when a first-time flea treatment is booked.',
-  variables: JSON.stringify(['first_name']),
-  is_active: true,
-  is_internal: false,
-  sort_order: 100,
-};
+const NEW_TEMPLATES = [
+  {
+    template_key: 'auto_flea',
+    name: 'Flea Treatment',
+    category: 'onboarding',
+    body: "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.",
+    description: 'Treatment-prep text sent when a first-time flea treatment is booked.',
+    variables: JSON.stringify(['first_name']),
+    is_active: true,
+    is_internal: false,
+    sort_order: 100,
+  },
+  {
+    template_key: 'deposit_receipt',
+    name: 'Deposit Receipt',
+    category: 'invoices',
+    body: 'Hello {first_name}! We received your ${amount} deposit — it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here.',
+    description: 'Sent once when an estimate deposit payment succeeds (webhook or accept-time verification).',
+    variables: JSON.stringify(['first_name', 'amount']),
+    is_active: true,
+    is_internal: false,
+    sort_order: 100,
+  },
+];
 
 // Library re-grouping (owner-directed 2026-07-06): the old buckets were
 // lopsided (billing carried 36 templates) and named by mechanism, not by
@@ -118,7 +135,7 @@ const RECATEGORIZED_TEMPLATE_KEYS = {
     'autopay_pre_charge', 'autopay_charge_success', 'autopay_charge_failed',
     'autopay_retry_success', 'autopay_retry_failed', 'autopay_retry_final_failed',
     'autopay_card_expired', 'autopay_card_expiring', 'payment_method_expiry',
-    'billing_reminder', 'ach_retry_notice', 'ach_card_fallback', 'ach_suspended',
+    'ach_retry_notice', 'ach_card_fallback', 'ach_suspended',
     'bank_verification_incomplete', 'bank_verification_failed',
   ],
   cancellations: [
@@ -165,11 +182,13 @@ exports.up = async function up(knex) {
     .where({ is_active: false })
     .update({ is_active: true, updated_at: new Date() });
 
-  const existingFlea = await knex('sms_templates')
-    .where({ template_key: FLEA_PREP_TEMPLATE.template_key })
-    .first('id');
-  if (!existingFlea) {
-    await knex('sms_templates').insert(FLEA_PREP_TEMPLATE);
+  for (const template of NEW_TEMPLATES) {
+    const existing = await knex('sms_templates')
+      .where({ template_key: template.template_key })
+      .first('id');
+    if (!existing) {
+      await knex('sms_templates').insert(template);
+    }
   }
 
   // Category only — bodies, names, and active flags stay whatever the admin

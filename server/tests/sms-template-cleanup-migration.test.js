@@ -17,6 +17,7 @@ const EXPECTED_REMOVED = [
   'reschedule_options_weather',
   'reschedule_options_access',
   'reschedule_options_general',
+  'billing_reminder',
   'self_booking_confirmation',
 ];
 
@@ -134,10 +135,10 @@ describe('sms template cleanup migration (20260706000010)', () => {
     expect(seen.has('auto_flea')).toBe(true);
   });
 
-  test('seeds auto_flea when missing and skips when present', async () => {
+  test('seeds auto_flea + deposit_receipt when missing and skips when present', async () => {
     const missing = buildKnex();
     await migration.up(missing.knex);
-    expect(missing.state.inserted).toHaveLength(1);
+    expect(missing.state.inserted).toHaveLength(2);
     expect(missing.state.inserted[0]).toMatchObject({
       template_key: 'auto_flea',
       category: 'onboarding',
@@ -145,6 +146,12 @@ describe('sms template cleanup migration (20260706000010)', () => {
     });
     expect(missing.state.inserted[0].body).toContain('flea-free');
     expect(missing.state.inserted[0].body).not.toMatch(/\{service_date\}/);
+    expect(missing.state.inserted[1]).toMatchObject({
+      template_key: 'deposit_receipt',
+      category: 'invoices',
+      is_active: true,
+    });
+    expect(missing.state.inserted[1].body).toContain('deposit');
 
     const present = buildKnex({ fleaExists: true });
     await migration.up(present.knex);

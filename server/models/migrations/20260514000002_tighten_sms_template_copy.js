@@ -116,14 +116,8 @@ const TEMPLATES = [
     variables: ['first_name', 'invoice_number', 'amount', 'card_line', 'receipt_url'],
     sort_order: 17,
   },
-  {
-    template_key: 'billing_reminder',
-    name: 'Billing Reminder (WaveGuard Monthly)',
-    category: 'billing',
-    body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.\n\nManage your payment method in the customer portal or call (941) 297-5749.',
-    variables: ['first_name', 'waveguard_tier', 'amount', 'charge_date'],
-    sort_order: 18,
-  },
+  // billing_reminder removed by 20260706000010_sms_template_cleanup.js —
+  // the WaveGuard monthly pre-charge text is retired.
   {
     template_key: 'invoice_followup_3day',
     name: 'Invoice — 3-Day Friendly Nudge (hardcoded)',

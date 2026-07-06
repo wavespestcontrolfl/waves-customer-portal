@@ -355,7 +355,7 @@ async function receivedDepositTotal(estimateId) {
 // never downgrade credited (or refunded/failed) back to received, which
 // would make the same money eligible for a second credit.
 async function markDepositReceived({ paymentIntentId, estimateId, amountDollars }) {
-  await db('estimate_deposits')
+  const inserted = await db('estimate_deposits')
     .insert({
       estimate_id: estimateId,
       amount: amountDollars,
@@ -365,14 +365,73 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
       updated_at: db.fn.now(),
     })
     .onConflict('stripe_payment_intent_id')
-    .ignore();
-  await db('estimate_deposits')
+    .ignore()
+    .returning('id');
+  const updated = await db('estimate_deposits')
     .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
     .update({
       status: 'received',
       received_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
+
+  // Exactly one caller wins the not-yet-received → received transition
+  // (webhook vs the accept flow's live verification) — that winner sends the
+  // single receipt text. Best-effort: a receipt failure must never fail
+  // deposit recording.
+  if ((Array.isArray(inserted) && inserted.length > 0) || updated > 0) {
+    await sendDepositReceiptSms({ estimateId, amountDollars }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
+    });
+  }
+}
+
+// One SMS per received deposit: "we got your $X — applied toward your first
+// visit." The deposit intent is customerless and carries no receipt_email
+// (the idempotency key pins the create params), so without this the
+// customer's only proof of payment is the on-screen success state.
+// Kill switch = the deposit_receipt template row itself.
+async function sendDepositReceiptSms({ estimateId, amountDollars }) {
+  const estimate = await db('estimates')
+    .where({ id: estimateId })
+    .first('id', 'customer_id', 'customer_phone', 'customer_name');
+  const phone = String(estimate?.customer_phone || '').trim();
+  if (!phone) return;
+
+  const { renderSmsTemplate } = require('./sms-template-renderer');
+  const firstName = String(estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
+  const amount = Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '');
+  const body = await renderSmsTemplate('deposit_receipt', {
+    first_name: firstName,
+    amount,
+  }, {
+    workflow: 'deposit_receipt',
+    entity_type: 'estimate',
+    entity_id: estimateId,
+  });
+  if (!body) return; // template missing or toggled off — deliberate silence
+
+  const { sendCustomerMessage } = require('./messaging/send-customer-message');
+  const result = await sendCustomerMessage({
+    to: phone,
+    body,
+    channel: 'sms',
+    audience: estimate.customer_id ? 'customer' : 'lead',
+    purpose: 'payment_receipt',
+    customerId: estimate.customer_id || undefined,
+    estimateId,
+    identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+    consentBasis: estimate.customer_id ? undefined : {
+      status: 'transactional_allowed',
+      source: 'estimate_deposit_payment',
+      capturedAt: new Date().toISOString(),
+    },
+    entryPoint: 'estimate_deposit_receipt',
+    metadata: { original_message_type: 'deposit_receipt' },
+  });
+  if (!result.sent) {
+    logger.warn(`[estimate-deposits] deposit receipt SMS blocked/failed for estimate ${estimateId}: ${result.code || result.reason || 'unknown'}`);
+  }
 }
 
 // A live-retrieved PaymentIntent counts only when Stripe says it succeeded

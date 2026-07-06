@@ -8,6 +8,12 @@ jest.mock('../models/db', () => {
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
   return mock;
 });
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(async () => null),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -360,7 +366,17 @@ describe('ensureDepositSatisfied', () => {
         return total > 0 ? [{ amount: total, refunded_amount: 0 }] : [];
       },
       insert(payload) {
-        return { onConflict: () => ({ ignore: async () => { upserts.push(payload); } }) };
+        // ignore() is awaited directly by the claim path and chained with
+        // .returning() by markDepositReceived — support both shapes.
+        return {
+          onConflict: () => ({
+            ignore: () => {
+              const promise = (async () => { upserts.push(payload); return [{ id: 'dep-new' }]; })();
+              promise.returning = () => promise;
+              return promise;
+            },
+          }),
+        };
       },
     };
   }
@@ -595,8 +611,19 @@ describe('webhook + invoice credit', () => {
         insert(payload) {
           return {
             onConflict: () => ({
-              ignore: async () => {
-                if (!state.row) { state.row = { credited_amount: 0, refunded_amount: 0, ...payload }; state.inserts.push(payload); }
+              // Awaited directly by the claim path, chained with .returning()
+              // by markDepositReceived — support both shapes.
+              ignore: () => {
+                const promise = (async () => {
+                  if (!state.row) {
+                    state.row = { credited_amount: 0, refunded_amount: 0, ...payload };
+                    state.inserts.push(payload);
+                    return [{ id: 'dep-new' }];
+                  }
+                  return [];
+                })();
+                promise.returning = () => promise;
+                return promise;
               },
               merge: async () => {
                 if (!state.row) { state.row = { credited_amount: 0, refunded_amount: 0, ...payload }; state.inserts.push(payload); }
@@ -626,6 +653,31 @@ describe('webhook + invoice credit', () => {
     expect(result.refunded).toBeUndefined();
     expect(state.row).toMatchObject({ estimate_id: 'est-1', amount: 70, status: 'received' });
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  it('texts the deposit receipt exactly once — first record only, never on replay', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received — applied toward your first visit.');
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0100', customer_name: 'Sam Customer' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(renderSmsTemplate).toHaveBeenCalledWith('deposit_receipt', expect.objectContaining({
+      first_name: 'Sam',
+      amount: '70',
+    }), expect.any(Object));
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    // Webhook replay — the row is already received; no second text.
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
   });
 
   it('converts the originating lead to won when an eligible deposit is recorded', async () => {
