@@ -49,6 +49,7 @@ const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { assessDepositFollowUpEligibility } = require('../services/estimate-deposits');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const EmailTemplateLibrary = require('../services/email-template-library');
 const smsTemplates = require('../routes/admin-sms-templates');
 const logger = require('../services/logger');
 const { _private } = require('../services/estimate-follow-up');
@@ -286,16 +287,75 @@ describe('checkDepositAbandoned', () => {
     expect(updates).toEqual([]);
   });
 
-  test('missing SMS template skips WITHOUT claiming the stage', async () => {
+  test('missing SMS template + NO email skips WITHOUT claiming the stage', async () => {
     smsTemplates.getTemplate.mockResolvedValue(null);
     enqueue('estimate_deposits', {});
-    enqueue('estimates', { rows: [baseEstimate()] });
+    enqueue('estimates', { rows: [baseEstimate()] }); // customer_email: null
 
     const sent = await _private.checkDepositAbandoned(NOW);
 
     expect(sent).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(updates).toEqual([]); // no claim, so the next tick retries
+  });
+
+  test('email-only estimate: email leg sends with the deposit amount, SMS never attempted', async () => {
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+    const est = baseEstimate({ customer_phone: null, customer_email: 'taylor@example.com' });
+    enqueueHappyPath(est);
+
+    const sent = await _private.checkDepositAbandoned(NOW);
+
+    expect(sent).toBe(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(smsTemplates.getTemplate).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateKey: 'estimate.deposit_abandoned',
+        to: 'taylor@example.com',
+        idempotencyKey: 'estimate_followup_deposit_abandoned:est-1',
+        payload: expect.objectContaining({
+          first_name: 'Taylor',
+          deposit_amount: '49',
+          estimate_url: 'https://portal.wavespestcontrol.com/estimate/tok-xyz',
+        }),
+      }),
+    );
+    // Claimed + counters bumped — email alone carries the stage.
+    expect(updates).toEqual([
+      { table: 'estimates', payload: { followup_deposit_abandoned_sent: true } },
+      {
+        table: 'estimates',
+        payload: expect.objectContaining({ last_follow_up_at: 'NOW()' }),
+      },
+    ]);
+  });
+
+  test('SMS template off but email present: claims and sends the email leg', async () => {
+    smsTemplates.getTemplate.mockResolvedValue(null);
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+    const est = baseEstimate({ customer_email: 'taylor@example.com' });
+    enqueueHappyPath(est);
+
+    const sent = await _private.checkDepositAbandoned(NOW);
+
+    expect(sent).toBe(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('both channels present: SMS and email both fire', async () => {
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+    const est = baseEstimate({ customer_email: 'taylor@example.com' });
+    enqueueHappyPath(est);
+
+    const sent = await _private.checkDepositAbandoned(NOW);
+
+    expect(sent).toBe(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
   });
 
   test('blocked send releases the claim so the next tick can retry', async () => {

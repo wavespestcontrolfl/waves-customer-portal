@@ -302,7 +302,12 @@ async function checkDepositAbandoned(now = new Date()) {
     .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
     .whereIn("estimates.status", ["sent", "viewed"])
     .whereNull("estimates.archived_at")
-    .whereNotNull("estimates.customer_phone")
+    // Channel-aware: email-only estimates are nudgeable too — they started
+    // paying through the tokened estimate page, same audience the deposit
+    // receipt email serves.
+    .where((q) =>
+      q.whereNotNull("estimates.customer_phone").orWhereNotNull("estimates.customer_email"),
+    )
     .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
     .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
     .where((q) =>
@@ -352,32 +357,43 @@ async function checkDepositAbandoned(now = new Date()) {
         continue;
       }
       const firstName = (est.customer_name || "").split(" ")[0] || "there";
-      const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-      const url = await shortenOrPassthrough(longUrl, {
-        kind: "estimate",
-        entityType: "estimates",
-        entityId: est.id,
-        customerId: est.customer_id,
-        leadId: await leadIdForEstimate(est),
-        channel: "sms",
-        purpose: "estimate_followup_deposit",
-      });
-      const smsBody = await renderTemplate("estimate_followup_deposit", {
-        first_name: firstName,
-        // Whole dollars render bare ("$49"); a refund-netted remainder with
-        // cents renders exactly ("$29.50") instead of misquoting via round.
-        deposit_amount: Number.isInteger(depositAmount)
-          ? String(depositAmount)
-          : depositAmount.toFixed(2),
-        estimate_url: url,
-      }, {
-        workflow: "estimate_follow_up",
-        entity_type: "estimate",
-        entity_id: est.id,
-      });
-      if (!smsBody) {
+      // Whole dollars render bare ("$49"); a refund-netted remainder with
+      // cents renders exactly ("$29.50") instead of misquoting via round.
+      const depositAmountText = Number.isInteger(depositAmount)
+        ? String(depositAmount)
+        : depositAmount.toFixed(2);
+      const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_deposit");
+      const smsBody = est.customer_phone
+        ? await renderTemplate("estimate_followup_deposit", {
+          first_name: firstName,
+          deposit_amount: depositAmountText,
+          estimate_url: smsUrl,
+        }, {
+          workflow: "estimate_follow_up",
+          entity_type: "estimate",
+          entity_id: est.id,
+        })
+        : null;
+      if (est.customer_phone && !smsBody) {
         logger.warn(
-          `[est-followup] estimate_followup_deposit template missing/disabled — skipping est ${est.id} without claiming`,
+          `[est-followup] estimate_followup_deposit template missing/disabled — continuing without SMS for est ${est.id}`,
+        );
+      }
+      // At least one deliverable leg or skip WITHOUT claiming — a claim with
+      // zero legs would permanently mark the stage sent while sending nothing
+      // (the exact silent-skip this stage used to have).
+      const emailLeg = est.customer_email
+        ? {
+          templateKey: "estimate.deposit_abandoned",
+          stage: "deposit_abandoned",
+          payload: estimateEmailPayload(est, firstName, emailUrl, {
+            deposit_amount: depositAmountText,
+          }),
+        }
+        : null;
+      if (!smsBody && !emailLeg) {
+        logger.warn(
+          `[est-followup] Deposit-abandoned skip ${est.id}: no deliverable channel (SMS template off, no email)`,
         );
         continue;
       }
@@ -388,7 +404,10 @@ async function checkDepositAbandoned(now = new Date()) {
         continue;
       }
       claimed = true;
-      const ok = await sendDualChannel(est, { sms: smsBody });
+      const ok = await sendDualChannel(est, {
+        sms: smsBody || undefined,
+        email: emailLeg || undefined,
+      });
       if (ok) {
         await db("estimates")
           .where({ id: est.id })

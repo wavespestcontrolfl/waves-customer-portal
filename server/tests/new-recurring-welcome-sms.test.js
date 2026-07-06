@@ -103,6 +103,15 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: mockGetTemplate,
 }));
+// Email twin of the welcome: SendGrid configured so the leg runs;
+// sendTemplate captured.
+const mockSendTemplate = jest.fn(async () => ({ sent: true }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => true),
+}));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: (...args) => mockSendTemplate(...args),
+}));
 
 describe('new recurring welcome SMS', () => {
   let service;
@@ -384,7 +393,7 @@ describe('new recurring welcome SMS', () => {
       step: 0,
       metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
     }];
-    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234', email: 'ada@example.com' };
     mockScheduledServiceRow = { status: 'cancelled' };
 
     const results = await service.processDueWelcomes();
@@ -392,11 +401,82 @@ describe('new recurring welcome SMS', () => {
     expect(results.sent).toBe(0);
     expect(results.skipped).toBe(1);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    // No welcome at all for a cancelled appointment — email leg included.
+    expect(mockSendTemplate).not.toHaveBeenCalled();
     expect(mockUpdates).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'sms_sequences',
         data: expect.objectContaining({ status: 'cancelled' }),
       }),
     ]));
+  });
+
+  test('delivery fires the welcome email twin alongside the SMS', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(1);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Direct sender (NOT the gated automation executor); once-ever per
+    // customer via the idempotency key the draft automation row specified.
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'welcome.new_recurring',
+      to: 'ada@example.com',
+      recipientId: 'customer-1',
+      idempotencyKey: 'welcome.new_recurring:customer-1',
+      payload: expect.objectContaining({ first_name: 'Ada' }),
+    }));
+  });
+
+  test('phoneless customer with an email still gets the welcome email; sequence settles', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'sms_sequences',
+        data: expect.objectContaining({ status: 'cancelled' }),
+      }),
+    ]));
+  });
+
+  test('no email on the customer: SMS-only welcome, no sendTemplate call', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+
+    await service.processDueWelcomes();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 });

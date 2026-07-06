@@ -16,6 +16,8 @@ const MAX_DELIVERY_ATTEMPTS = 3;
 // settled by the recovery pass (completed if a provider row proves the text
 // left, released for retry otherwise). Must comfortably exceed one dispatch.
 const STALE_CLAIM_MINUTES = 30;
+// Email twin of the welcome, sent directly at the same delivery moment.
+const TEMPLATE_EMAIL_KEY = 'welcome.new_recurring';
 
 async function isNewRecurringSignupCandidate(customerId) {
   if (!customerId) return false;
@@ -159,6 +161,42 @@ async function sendNewRecurringWelcome({
 // Deliver one due queue row. Re-reads the customer at send time (phone may
 // have changed since booking) and skips permanently when the anchoring
 // appointment was cancelled inside the delay window.
+// Direct-send the welcome.new_recurring email (library template; the row's
+// status is the kill switch — archive/pause makes sendTemplate throw
+// 'active template not found', caught by the caller). Idempotency key
+// matches the once-ever-per-customer design the draft automation row
+// specified (welcome.new_recurring:{customer_id}), so retries of the SMS
+// delivery loop dedupe instead of double-sending.
+async function sendWelcomeEmail(customer) {
+  const email = String(customer.email || '').trim();
+  if (!email) return;
+  const sendgrid = require('./sendgrid-mail');
+  if (!sendgrid.isConfigured()) {
+    logger.warn(`[new-recurring-welcome] welcome email skipped for customer ${customer.id} — SendGrid not configured`);
+    return;
+  }
+  const EmailTemplateLibrary = require('./email-template-library');
+  const result = await EmailTemplateLibrary.sendTemplate({
+    templateKey: TEMPLATE_EMAIL_KEY,
+    to: email,
+    payload: {
+      first_name: String(customer.first_name || '').trim() || 'there',
+    },
+    recipientType: 'customer',
+    recipientId: customer.id,
+    triggerEventId: `${TEMPLATE_EMAIL_KEY}:${customer.id}`,
+    idempotencyKey: `${TEMPLATE_EMAIL_KEY}:${customer.id}`,
+    categories: ['welcome_new_recurring'],
+  });
+  if (result?.blocked) {
+    logger.warn(`[new-recurring-welcome] welcome email suppressed for customer ${customer.id}: ${result.reason || 'suppressed'}`);
+  } else if (result?.deduped) {
+    logger.info(`[new-recurring-welcome] welcome email deduped for customer ${customer.id}`);
+  } else {
+    logger.info(`[new-recurring-welcome] welcome email sent for customer ${customer.id}`);
+  }
+}
+
 async function deliverQueuedWelcome(row) {
   const meta = parseMetadata(row);
   const scheduledServiceId = meta.scheduled_service_id || null;
@@ -172,8 +210,8 @@ async function deliverQueuedWelcome(row) {
   };
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
-  if (!customer || !customer.phone) {
-    await finish('cancelled', { skip_reason: customer ? 'no_phone' : 'customer_missing' });
+  if (!customer) {
+    await finish('cancelled', { skip_reason: 'customer_missing' });
     return { sent: false, skipped: true };
   }
 
@@ -187,6 +225,25 @@ async function deliverQueuedWelcome(row) {
       logger.info(`[new-recurring-welcome] appointment cancelled before delivery; welcome dropped for customer ${row.customer_id}`);
       return { sent: false, skipped: true };
     }
+  }
+
+  // Email twin of the welcome (owner go 2026-07-06) — a DIRECT sender like
+  // the other lifecycle emails, NOT the automation executor (whose master
+  // gate is off in prod; its draft welcome automation row is vestigial).
+  // Best-effort and idempotent per customer, so SMS retries can't double it
+  // and an email failure never blocks the text. Fires at the same +1h
+  // delivery moment as the SMS. Kill switch = the welcome.new_recurring
+  // email template row.
+  await sendWelcomeEmail(customer).catch((err) => {
+    logger.warn(`[new-recurring-welcome] welcome email failed for customer ${customer.id}: ${err.message}`);
+  });
+
+  if (!customer.phone) {
+    // Email-only customer: the email above is their welcome; the SMS leg
+    // settles the sequence exactly as before (the once-ever guard reads any
+    // row, so the status value carries no extra meaning).
+    await finish('cancelled', { skip_reason: 'no_phone' });
+    return { sent: false, skipped: true };
   }
 
   const body = await renderWelcomeBody(customer);
