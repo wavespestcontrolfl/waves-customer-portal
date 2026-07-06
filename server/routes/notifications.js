@@ -86,8 +86,8 @@ const PREF_SELECT = [
   'service_reminder_24h_channel',
 ];
 
-function channelValue(value) {
-  return CHANNEL_VALUES.includes(value) ? value : 'sms';
+function channelValue(value, fallback = 'sms') {
+  return CHANNEL_VALUES.includes(value) ? value : fallback;
 }
 
 // Delivery channels are an account-level preference resolved from the primary
@@ -118,6 +118,10 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
       serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
       serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+      // Seasonal tips have BOTH a real email sender (irrigation weekly) and a
+      // real SMS sender (seasonal alerts); an unset column means both send,
+      // so the portal shows 'both' until the customer narrows it.
+      seasonalTipsChannel: channelValue(prefs.seasonal_channel, 'both'),
     } : {}),
   };
 }
@@ -160,6 +164,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
   if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
+  if (updates.seasonalTipsChannel !== undefined) dbUpdates.seasonal_channel = channelValue(updates.seasonalTipsChannel, 'both');
   return dbUpdates;
 }
 
@@ -183,6 +188,7 @@ const ACCOUNT_PREF_LABELS = {
   appointmentConfirmationChannel: 'New Appointment Confirmation — Delivery',
   serviceReminder72hChannel: '72-Hour Appointment Reminder — Delivery',
   serviceReminder24hChannel: '24-Hour Service Reminder — Delivery',
+  seasonalTipsChannel: 'Seasonal Lawn Tips — Delivery',
 };
 
 // Preference keys whose value is a delivery channel (sms | email | both)
@@ -191,6 +197,7 @@ const CHANNEL_PREF_KEYS = new Set([
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
+  'seasonalTipsChannel',
 ]);
 
 const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email' };
@@ -215,6 +222,7 @@ const DB_FIELD_BY_PREF = {
   appointmentConfirmationChannel: 'appointment_confirmation_channel',
   serviceReminder72hChannel: 'service_reminder_72h_channel',
   serviceReminder24hChannel: 'service_reminder_24h_channel',
+  seasonalTipsChannel: 'seasonal_channel',
 };
 
 function prefDisplayValue(key, value) {

@@ -306,6 +306,10 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     // dedicated opt-out is honored too (the SMS tip path gates on the same
     // pref in twilio.js).
     .whereRaw('np.seasonal_tips IS DISTINCT FROM false')
+    // Delivery-channel preference: 'sms' means the customer opted out of the
+    // email leg specifically (NULL/'both'/'email' all keep it — an unset
+    // column preserves the historical both-channels behavior).
+    .whereRaw("(np.seasonal_channel IS NULL OR np.seasonal_channel <> 'sms')")
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .whereNotNull('c.email')

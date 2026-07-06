@@ -2958,8 +2958,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
                 // Kept as the customer's only in-portal opt-out: the irrigation
                 // weekly email, seasonal SMS alerts, and the retention/marketing
-                // policy all key on notification_prefs.seasonal_tips.
-                { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
+                // policy all key on notification_prefs.seasonal_tips. Both a real
+                // email sender and a real SMS sender exist, so this row gets the
+                // delivery-channel select (seasonal_channel, default 'both').
+                { key: 'seasonalTips', channelKey: 'seasonalTipsChannel', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
               ];
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
@@ -3010,7 +3012,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
                       width: 44, height: 24, borderRadius: 12,
                       cursor: p.locked ? 'default' : 'pointer',
-                      background: isOn ? (p.locked ? B.green : B.blueDeeper) : '#D8D0C0',
+                      // Gold = on, light blue = off (owner directive 2026-07-06)
+                      background: isOn ? B.yellow : `${B.wavesBlue}55`,
                       position: 'relative', transition: 'background 0.3s',
                       opacity: p.locked ? 0.85 : 1,
                     }}>
@@ -4134,7 +4137,7 @@ function BillingTab({ customer }) {
             aria-label={`Billing reminder texts ${billingSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
               width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
-              background: billingSmsEnabled ? B.green : B.grayLight,
+              background: billingSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
               position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
@@ -4162,7 +4165,7 @@ function BillingTab({ customer }) {
             aria-label={`Payment confirmation texts ${paymentSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
               width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
-              background: paymentSmsEnabled ? B.green : B.grayLight,
+              background: paymentSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
               position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
