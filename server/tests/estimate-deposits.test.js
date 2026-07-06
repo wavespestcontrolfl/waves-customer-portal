@@ -584,7 +584,7 @@ describe('webhook + invoice credit', () => {
   // and writes the SAME row across several queries, so the mock must carry
   // state. Conditional updates (status / whereIn) only land when the live
   // row matches — mirroring knex affected-row semantics.
-  function statefulWebhookDb({ estimateRow, customerRow = null, initialDepositRow = null, onEstimateRead = null }) {
+  function statefulWebhookDb({ estimateRow, customerRow = null, prefsRow = null, initialDepositRow = null, onEstimateRead = null }) {
     const state = {
       row: initialDepositRow ? { credited_amount: 0, refunded_amount: 0, ...initialDepositRow } : null,
       inserts: [],
@@ -596,6 +596,9 @@ describe('webhook + invoice credit', () => {
       }
       if (table === 'customers') {
         return { where: () => ({ first: async () => customerRow } ) };
+      }
+      if (table === 'notification_prefs') {
+        return { where: () => ({ first: async () => prefsRow }) };
       }
       if (table === 'sms_log') {
         return { insert: async (row) => { state.smsLogInserts = (state.smsLogInserts || []).concat(row); return [row]; } };
@@ -757,6 +760,27 @@ describe('webhook + invoice credit', () => {
     expect(JSON.parse(state.smsLogInserts[0].metadata).refresh_customer_phone).toBe(true);
     renderSmsTemplate.mockResolvedValue(null);
     sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('skips the receipt SMS when the customer chose email-only receipts', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+      // The policy layer enforces the payment_receipt TOGGLE but not the
+      // channel column — this path must honor the channel itself.
+      prefsRow: { payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.smsLogInserts).toBeUndefined();
   });
 
   it('requeues on CONSENT_LOOKUP_FAILED with a default delay — a DB blip must not eat the only receipt', async () => {

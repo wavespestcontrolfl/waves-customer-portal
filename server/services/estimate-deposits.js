@@ -406,6 +406,24 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
   const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
   if (!phone) return;
 
+  // Honor the customer's receipt CHANNEL choice — the messaging policy layer
+  // enforces the payment_receipt toggle but not payment_receipt_channel, so
+  // an email-only customer would still get texted here. Same sms/both check
+  // the no-show fee receipt uses (estimate-card-holds.sendNoShowFeeReceipt).
+  // No deposit receipt email exists yet (deferred behind the email stack),
+  // so email-only customers get no deposit receipt for now — deliberate.
+  if (estimate.customer_id) {
+    const prefs = await db('notification_prefs')
+      .where({ customer_id: estimate.customer_id })
+      .first('payment_receipt_channel')
+      .catch(() => null);
+    const channel = prefs?.payment_receipt_channel || 'sms';
+    if (channel !== 'sms' && channel !== 'both') {
+      logger.info(`[estimate-deposits] deposit receipt SMS skipped for estimate ${estimateId} — customer receipt channel is "${channel}"`);
+      return;
+    }
+  }
+
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
     || String(estimate.customer_name || '').trim().split(/\s+/)[0]
