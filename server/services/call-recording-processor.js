@@ -3537,14 +3537,20 @@ const CallRecordingProcessor = {
             }
           } catch { parsedDate = extracted.preferred_date_time; }
 
-          smsBody = await renderSmsTemplate('appointment_call_confirmed', {
+          // Call bookings confirm through the shared appointment_confirmation
+          // template (appointment_call_confirmed retired 2026-07-06). The
+          // schedule row doesn't exist yet at render time, so the self-serve
+          // reschedule link can't be minted — pass an empty clause; the
+          // template renders clean without it.
+          smsBody = await renderSmsTemplate('appointment_confirmation', {
             first_name: firstName,
             service_type: serviceType,
             date_time: extracted.preferred_date_time,
             date: parsedDate,
             time: parsedTime,
+            reschedule_line: '',
           }, {
-            workflow: 'appointment_call_confirmed',
+            workflow: 'call_booking_confirmation',
             entity_type: 'customer',
             entity_id: customer.id,
           });
@@ -3943,7 +3949,7 @@ const CallRecordingProcessor = {
                 windowStart: windowStartForLog,
               };
             } else if (!smsBody) {
-              logger.warn(`[call-proc] appointment_call_confirmed template missing/disabled; appointment SMS skipped for customer ${customerId}`);
+              logger.warn(`[call-proc] appointment_confirmation template missing/disabled; appointment SMS skipped for customer ${customerId}`);
               appointmentResult = {
                 smsSent: false,
                 smsSkippedReason: 'missing_sms_template',

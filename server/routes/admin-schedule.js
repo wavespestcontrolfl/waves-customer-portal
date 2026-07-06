@@ -4646,19 +4646,8 @@ router.put('/:id/status', async (req, res, next) => {
         }
       } catch (e) { logger.error(`[post-service] Time tracking require failed: ${e.message}`); }
 
-      // 4. Schedule upsell evaluation (24hr delay)
-      try {
-        const upsellTrigger = require('../services/workflows/upsell-trigger');
-        if (upsellTrigger.checkAfterService) {
-          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-          const upsellCustomerId = svc.customer_id;
-          setTimeout(() => {
-            upsellTrigger.checkAfterService(upsellCustomerId).catch(err =>
-              logger.error(`[post-service] Upsell evaluation failed: ${err.message}`)
-            );
-          }, TWENTY_FOUR_HOURS);
-        }
-      } catch (e) { logger.error(`[post-service] Upsell trigger require failed: ${e.message}`); }
+      // 4. (Removed 2026-07-06) Post-service WaveGuard upsell evaluation —
+      // the upsell-trigger workflow and its waveguard_upsell SMS are retired.
 
       // 4b. Recurring plan: auto-extend (Ongoing) or flag end-of-plan (Fixed)
       try {

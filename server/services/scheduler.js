@@ -1329,6 +1329,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Deliver queued new-recurring welcome texts. Booking paths
+  // enqueue the welcome (sms_sequences, ~1h delay) so it never lands
+  // back-to-back with the appointment confirmation; this tick sends the ones
+  // whose delay has elapsed. runExclusive: overlapping deploy instances
+  // would double-text the same queued row.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('new-recurring-welcome-queue', async () => {
+        const { processDueWelcomes } = require('./new-recurring-welcome-sms');
+        const result = await processDueWelcomes();
+        if (result.sent > 0 || result.errors > 0) {
+          logger.info(`New-recurring welcome queue: ${result.sent} sent, ${result.skipped} skipped, ${result.errors} errors`);
+        }
+      });
+    } catch (err) {
+      logger.error(`New-recurring welcome queue failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Storm watch. Probes the NWS hourly forecast at the
   // CUSTOMER coordinates of each tech's upcoming stops and nudges the
   // tech (tech_notifications, same channel as geofence prompts) when

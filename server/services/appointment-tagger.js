@@ -199,9 +199,14 @@ class AppointmentTagger {
     }
   }
 
-  // Pest prep — email prep guide (prep.cockroach / prep.bed_bug automations)
-  // plus the legacy SMS companion if an SMS template exists.
+  // Pest prep — email prep guide (prep.cockroach / prep.bed_bug / prep.flea
+  // automations) plus the SMS companion (auto_bed_bug / auto_cockroach /
+  // auto_flea templates). First-time treatments only (owner directive
+  // 2026-07-06): a follow-up booking in the same infestation series must not
+  // re-send "let's get started" prep messaging.
   async triggerPestPrep(service, pestType) {
+    if (await this.hasPriorSameTypeBooking(service, pestType)) return;
+
     await this.triggerPrepEmailGuide(service, pestType);
 
     const prepSMS = await this.getPrepSMS(pestType, service);
@@ -314,35 +319,52 @@ class AppointmentTagger {
     }
   }
 
-  async getPrepSMS(pestType, service) {
-    // Knex returns DATE columns as Date objects at UTC midnight — formatting
-    // that directly in ET names the previous day. Recover the calendar date
-    // string and anchor at noon (same as the string branch), guarding both
-    // shapes so the template never renders "Invalid Date" in a customer SMS.
-    let date = '';
+  // True when this customer already had an earlier booking of the same pest
+  // family — the prep messaging is for first-time treatments only. Prior rows
+  // carry the appointment_type tag this tagger stamped when they were booked
+  // (german_roach and cockroach are the same family for prep purposes).
+  // Cancelled rows don't count (the customer never got that visit);
+  // rescheduled placeholders and completed visits do.
+  async hasPriorSameTypeBooking(service, pestType) {
+    const PREP_FAMILY_TAGS = {
+      cockroach: ['german_roach', 'cockroach'],
+      bed_bug: ['bed_bug'],
+      flea: ['flea'],
+    };
+    const tags = PREP_FAMILY_TAGS[pestType];
+    if (!service?.customer_id || !tags) return false;
     try {
-      const raw = service.scheduled_date instanceof Date
-        ? service.scheduled_date.toISOString().split('T')[0]
-        : service.scheduled_date;
-      const d = raw ? new Date(String(raw).split('T')[0] + 'T12:00:00') : null;
-      if (d && !isNaN(d.getTime())) {
-        date = d.toLocaleDateString('en-US', {
-          weekday: 'long', month: 'short', day: 'numeric',
-          timeZone: 'America/New_York',
-        });
-      }
-    } catch { date = ''; }
-    if (!date) date = 'your scheduled date';
+      const prior = await db('scheduled_services')
+        .where({ customer_id: service.customer_id })
+        .whereIn('appointment_type', tags)
+        .whereNot('id', service.id)
+        .whereNotIn('status', ['cancelled'])
+        .where('created_at', '<', service.created_at || new Date())
+        .first('id');
+      return !!prior;
+    } catch (err) {
+      // Fail open (treat as first-time) — a lookup hiccup must not silently
+      // drop prep messaging for a genuine first treatment.
+      logger.warn(`[appointment-tagger] prior-booking lookup failed for service ${service.id}: ${err.message}`);
+      return false;
+    }
+  }
 
+  async getPrepSMS(pestType, service) {
+    // Deliberately date-free: the pest_prep_* predecessors embedded the
+    // visit date, which went stale whenever the appointment moved (the
+    // reason 20260602000002 removed them). The auto_* copy references the
+    // emailed treatment guide instead.
     const templateKey = pestType === 'cockroach'
-      ? 'pest_prep_cockroach'
+      ? 'auto_cockroach'
       : pestType === 'bed_bug'
-        ? 'pest_prep_bed_bug'
-        : null;
+        ? 'auto_bed_bug'
+        : pestType === 'flea'
+          ? 'auto_flea'
+          : null;
     if (!templateKey) return null;
     const body = await renderSmsTemplate(templateKey, {
       first_name: service.first_name || 'there',
-      service_date: date,
     }, {
       workflow: 'appointment_tagger_prep',
       entity_type: 'scheduled_service',

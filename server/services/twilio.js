@@ -915,43 +915,8 @@ const TwilioService = {
     });
   },
 
-  /**
-   * Send seasonal tip / pest alert
-   */
-  async sendSeasonalAlert(customerId, subject, tip) {
-    const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
-    if (!customer || !prefs?.seasonal_tips || !prefs?.sms_enabled) return;
-
-    const body =
-      typeof smsTemplatesRouter.getTemplate === "function"
-        ? await smsTemplatesRouter.getTemplate("seasonal_alert", {
-            first_name: customer.first_name || "",
-            tip,
-          }, { workflow: "seasonal_alert", entity_type: "customer", entity_id: customerId })
-        : null;
-    if (!body) {
-      logger.warn(
-        `[twilio] seasonal_alert template missing/disabled — skipping for customer ${customerId}`,
-      );
-      return;
-    }
-
-    return sendCustomerPolicySms({
-      to: customer.phone,
-      body,
-      purpose: "marketing",
-      customerId,
-      consentBasis: {
-        status: "opted_in",
-        source: "notification_prefs.seasonal_tips",
-        capturedAt: prefs.updated_at || prefs.created_at || undefined,
-      },
-      messageType: "seasonal_alert",
-    });
-  },
+  // sendSeasonalAlert removed 2026-07-06 — the seasonal_alert template and
+  // its tip-blast flow are retired (seasonal_reactivation is separate).
 };
 
 // Helper

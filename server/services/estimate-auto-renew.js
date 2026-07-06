@@ -7,7 +7,8 @@
  *   - hasn't already been auto-renewed (renewal_count < 1)
  *
  * extend expires_at by 7 days, bump renewal_count, and notify the customer
- * via SMS + email so they know it's still good. We only auto-renew once —
+ * by email so they know it's still good (the SMS leg was retired 2026-07-06).
+ * We only auto-renew once —
  * if the customer still hasn't moved after the second 7-day window, the
  * estimate dies naturally and lead-follow-up picks up the relationship.
  */
@@ -17,27 +18,13 @@ const EmailService = require('./email');
 const EmailTemplateLibrary = require('./email-template-library');
 const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
 const sendgrid = require('./sendgrid-mail');
-const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
 const RENEWAL_DAYS = 7;
-
-async function renderTemplate(templateKey, vars, context = {}) {
-  try {
-    if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
-      if (body && !body.includes('{first_name}')) return body;
-    }
-  } catch (err) {
-    throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
-  }
-  throw new Error(`SMS template ${templateKey} is missing or inactive`);
-}
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
@@ -72,42 +59,9 @@ const EstimateAutoRenew = {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
-          let smsBody = null;
-          if (est.customer_phone) {
-            try {
-              smsBody = await renderTemplate('estimate_auto_renewed',
-                { first_name: firstName, estimate_url: url },
-                { workflow: 'estimate_auto_renew', entity_type: 'estimate', entity_id: est.id },
-              );
-            } catch (e) {
-              logger.warn(`[est-auto-renew] SMS template unavailable for estimate ${est.id}: ${e.message}`);
-            }
-          }
-
-          if (est.customer_phone && smsBody) {
-            try {
-              const smsResult = await sendCustomerMessage({
-                to: est.customer_phone,
-                body: smsBody,
-                channel: 'sms',
-                audience: est.customer_id ? 'customer' : 'lead',
-                purpose: 'estimate_followup',
-                customerId: est.customer_id || undefined,
-                estimateId: est.id,
-                identityTrustLevel: est.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-                consentBasis: est.customer_id ? undefined : {
-                  status: 'transactional_allowed',
-                  source: 'estimate_auto_renew',
-                  capturedAt: est.created_at || new Date().toISOString(),
-                },
-                entryPoint: 'estimate_auto_renew',
-                metadata: { original_message_type: 'estimate_auto_renewed' },
-              });
-              if (!smsResult.sent) {
-                logger.warn(`[est-auto-renew] SMS blocked/failed for estimate ${est.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-              }
-            } catch (e) { logger.error(`[est-auto-renew] SMS failed: ${e.message}`); }
-          }
+          // Customer SMS removed 2026-07-06 — the estimate_auto_renewed
+          // template is retired; the renewal still extends expires_at and
+          // notifies by email below.
           if (est.customer_email) {
             try {
               let sentWithTemplateLibrary = false;

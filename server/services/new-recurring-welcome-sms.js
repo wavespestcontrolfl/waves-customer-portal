@@ -5,6 +5,14 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const TEMPLATE_KEY = 'auto_new_recurring';
 const SEQUENCE_TYPE = 'new_customer_welcome';
 
+// Booking already texts the appointment confirmation; sending the welcome in
+// the same moment double-buzzes the customer (owner directive 2026-07-06).
+// Queue it and let the scheduler deliver once the confirmation has landed.
+const WELCOME_DELAY_MINUTES = 60;
+// A queued row that keeps erroring is abandoned after this many attempts so
+// the processor can't retry forever.
+const MAX_DELIVERY_ATTEMPTS = 3;
+
 async function isNewRecurringSignupCandidate(customerId) {
   if (!customerId) return false;
 
@@ -26,6 +34,8 @@ async function isNewRecurringSignupCandidate(customerId) {
   }
 }
 
+// Any row of this sequence type — queued, sent, or abandoned — blocks a new
+// enqueue, keeping the once-ever guarantee across every booking path.
 async function hasWelcomeSequence(customerId) {
   if (!customerId) return false;
 
@@ -38,39 +48,6 @@ async function hasWelcomeSequence(customerId) {
   } catch (err) {
     logger.warn(`[new-recurring-welcome] sequence lookup failed for customer ${customerId}: ${err.message}`);
     return false;
-  }
-}
-
-async function markWelcomeSequenceSent({ customerId, scheduledServiceId, sendResult }) {
-  if (!customerId) return;
-
-  try {
-    if (!(await db.schema.hasTable('sms_sequences'))) return;
-    if (await hasWelcomeSequence(customerId)) return;
-
-    const cols = await db('sms_sequences').columnInfo();
-    const data = {
-      customer_id: customerId,
-      sequence_type: SEQUENCE_TYPE,
-      status: 'completed',
-    };
-
-    if (cols.step) data.step = 1;
-    if (cols.current_step) data.current_step = 1;
-    if (cols.total_steps) data.total_steps = 1;
-    if (cols.metadata) {
-      data.metadata = JSON.stringify({
-        template_key: TEMPLATE_KEY,
-        scheduled_service_id: scheduledServiceId || null,
-        audit_log_id: sendResult?.auditLogId || null,
-        provider_message_id: sendResult?.providerMessageId || null,
-        sent_at: new Date().toISOString(),
-      });
-    }
-
-    await db('sms_sequences').insert(data);
-  } catch (err) {
-    logger.warn(`[new-recurring-welcome] sequence mark failed for customer ${customerId}: ${err.message}`);
   }
 }
 
@@ -114,6 +91,19 @@ async function renderWelcomeBody(customer) {
   }
 }
 
+function parseMetadata(row) {
+  if (!row?.metadata) return {};
+  if (typeof row.metadata === 'object') return row.metadata;
+  try { return JSON.parse(row.metadata); } catch { return {}; }
+}
+
+/**
+ * Queue the welcome text for a new recurring customer. Keeps the historical
+ * name because every booking path calls it fire-and-forget — but since
+ * 2026-07-06 it enqueues an sms_sequences row for the scheduler to deliver
+ * ~1 hour later instead of texting inline (see WELCOME_DELAY_MINUTES).
+ * Idempotent: any existing new_customer_welcome row blocks a second enqueue.
+ */
 async function sendNewRecurringWelcome({
   customer,
   scheduledServiceId,
@@ -126,14 +116,80 @@ async function sendNewRecurringWelcome({
     logger.info(`[new-recurring-welcome] skipping customer ${customer.id}: no phone`);
     return { sent: false, skipped: true, reason: 'no_phone' };
   }
+  if (!(await db.schema.hasTable('sms_sequences'))) {
+    logger.warn(`[new-recurring-welcome] sms_sequences table missing; welcome not queued for customer ${customer.id}`);
+    return { sent: false, skipped: true, reason: 'no_sequence_table' };
+  }
   if (await hasWelcomeSequence(customer.id)) {
     return { sent: false, skipped: true, reason: 'already_sent' };
   }
 
+  try {
+    const cols = await db('sms_sequences').columnInfo();
+    const data = {
+      customer_id: customer.id,
+      sequence_type: SEQUENCE_TYPE,
+      status: 'active',
+    };
+    if (cols.step) data.step = 0;
+    if (cols.next_send_at) data.next_send_at = new Date(Date.now() + WELCOME_DELAY_MINUTES * 60 * 1000);
+    if (cols.metadata) {
+      data.metadata = JSON.stringify({
+        template_key: TEMPLATE_KEY,
+        scheduled_service_id: scheduledServiceId || null,
+        recurring_pattern: recurringPattern || null,
+        entry_point: entryPoint,
+        admin_user_id: adminUserId || null,
+        queued_at: new Date().toISOString(),
+      });
+    }
+    await db('sms_sequences').insert(data);
+    logger.info(`[new-recurring-welcome] welcome queued for customer ${customer.id} (+${WELCOME_DELAY_MINUTES}m)`);
+    return { sent: false, queued: true };
+  } catch (err) {
+    logger.warn(`[new-recurring-welcome] enqueue failed for customer ${customer.id}: ${err.message}`);
+    return { sent: false, skipped: true, reason: 'enqueue_failed' };
+  }
+}
+
+// Deliver one due queue row. Re-reads the customer at send time (phone may
+// have changed since booking) and skips permanently when the anchoring
+// appointment was cancelled inside the delay window.
+async function deliverQueuedWelcome(row) {
+  const meta = parseMetadata(row);
+  const scheduledServiceId = meta.scheduled_service_id || null;
+
+  const finish = async (status, extra = {}) => {
+    await db('sms_sequences').where({ id: row.id }).update({
+      status,
+      metadata: JSON.stringify({ ...meta, ...extra }),
+      updated_at: new Date(),
+    });
+  };
+
+  const customer = await db('customers').where({ id: row.customer_id }).first();
+  if (!customer || !customer.phone) {
+    await finish('cancelled', { skip_reason: customer ? 'no_phone' : 'customer_missing' });
+    return { sent: false, skipped: true };
+  }
+
+  if (scheduledServiceId) {
+    const svc = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('status');
+    const status = String(svc?.status || '').toLowerCase();
+    if (!svc || ['cancelled', 'canceled'].includes(status)) {
+      await finish('cancelled', { skip_reason: 'appointment_cancelled' });
+      logger.info(`[new-recurring-welcome] appointment cancelled before delivery; welcome dropped for customer ${row.customer_id}`);
+      return { sent: false, skipped: true };
+    }
+  }
+
   const body = await renderWelcomeBody(customer);
   if (!body) {
-    logger.info(`[new-recurring-welcome] ${TEMPLATE_KEY} missing, disabled, or invalid; skipping customer ${customer.id}`);
-    return { sent: false, skipped: true, reason: 'template_unavailable' };
+    await finish('cancelled', { skip_reason: 'template_unavailable' });
+    logger.info(`[new-recurring-welcome] ${TEMPLATE_KEY} missing, disabled, or invalid; welcome dropped for customer ${row.customer_id}`);
+    return { sent: false, skipped: true };
   }
 
   const sendResult = await sendCustomerMessage({
@@ -145,44 +201,90 @@ async function sendNewRecurringWelcome({
     customerId: customer.id,
     appointmentId: scheduledServiceId || null,
     identityTrustLevel: 'service_contact_authorized',
-    entryPoint,
+    entryPoint: meta.entry_point || 'new_recurring_welcome',
     metadata: {
       original_message_type: TEMPLATE_KEY,
       template_key: TEMPLATE_KEY,
-      scheduled_service_id: scheduledServiceId || null,
-      recurring_pattern: recurringPattern || null,
-      ...(adminUserId ? { adminUserId } : {}),
+      scheduled_service_id: scheduledServiceId,
+      recurring_pattern: meta.recurring_pattern || null,
+      ...(meta.admin_user_id ? { adminUserId: meta.admin_user_id } : {}),
     },
   });
 
   if (!sendResult.sent) {
+    // Consent blocks and landlines won't heal on retry — mark them done.
+    await finish('cancelled', {
+      skip_reason: `send_${sendResult.code || sendResult.reason || 'failed'}`,
+    });
     logger.warn(`[new-recurring-welcome] SMS blocked/failed for customer ${customer.id}: ${sendResult.code || sendResult.reason || 'unknown'}`);
     return sendResult;
   }
 
-  await markWelcomeSequenceSent({
-    customerId: customer.id,
-    scheduledServiceId,
-    sendResult,
+  await finish('completed', {
+    audit_log_id: sendResult?.auditLogId || null,
+    provider_message_id: sendResult?.providerMessageId || null,
+    sent_at: new Date().toISOString(),
   });
   await recordWelcomeInteraction({
     customerId: customer.id,
     scheduledServiceId,
-    adminUserId,
+    adminUserId: meta.admin_user_id || null,
   });
 
   return sendResult;
 }
 
+/**
+ * Scheduler entry point — deliver every queued welcome whose delay has
+ * elapsed. Attempt counting rides the `step` column so a row that throws
+ * repeatedly (e.g. transient Twilio outage) is abandoned after
+ * MAX_DELIVERY_ATTEMPTS instead of retrying forever.
+ */
+async function processDueWelcomes() {
+  const results = { sent: 0, skipped: 0, errors: 0 };
+  try {
+    if (!(await db.schema.hasTable('sms_sequences'))) return results;
+    const due = await db('sms_sequences')
+      .where({ sequence_type: SEQUENCE_TYPE, status: 'active' })
+      .whereNotNull('next_send_at')
+      .where('next_send_at', '<=', new Date())
+      .limit(25);
+
+    for (const row of due) {
+      try {
+        const attempts = (parseInt(row.step, 10) || 0) + 1;
+        await db('sms_sequences').where({ id: row.id }).update({ step: attempts, updated_at: new Date() });
+        if (attempts > MAX_DELIVERY_ATTEMPTS) {
+          await db('sms_sequences').where({ id: row.id }).update({ status: 'cancelled', updated_at: new Date() });
+          results.skipped++;
+          logger.warn(`[new-recurring-welcome] abandoned after ${MAX_DELIVERY_ATTEMPTS} attempts for customer ${row.customer_id}`);
+          continue;
+        }
+        const outcome = await deliverQueuedWelcome(row);
+        if (outcome?.sent) results.sent++;
+        else results.skipped++;
+      } catch (err) {
+        results.errors++;
+        logger.error(`[new-recurring-welcome] delivery failed for sequence ${row.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[new-recurring-welcome] queue scan failed: ${err.message}`);
+  }
+  return results;
+}
+
 module.exports = {
   TEMPLATE_KEY,
   SEQUENCE_TYPE,
+  WELCOME_DELAY_MINUTES,
   isNewRecurringSignupCandidate,
   sendNewRecurringWelcome,
+  processDueWelcomes,
   _internals: {
     isNewRecurringSignupCandidate,
     hasWelcomeSequence,
-    markWelcomeSequenceSent,
+    deliverQueuedWelcome,
     recordWelcomeInteraction,
     renderWelcomeBody,
   },

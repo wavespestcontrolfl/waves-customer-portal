@@ -312,17 +312,13 @@ const MSG_TYPE_TO_TEMPLATE = {
   review_followup: 'review_request_followup',
   referral_nudge: 'referral_nudge',
   referral_invite: 'referral_nudge',
-  retention: 'health_retention_offer',
-  retention_outreach: 'health_retention_offer',
   renewal: 'renewal_reminder',
-  upsell: 'waveguard_upsell',
   autopay_pre_charge: 'autopay_pre_charge',
   payment_method_expiry: 'payment_method_expiry',
   lead_response: 'lead_auto_reply_biz',
   auto_reply: 'lead_auto_reply_biz',
   estimate_sent: 'estimate_sent',
   estimate_accepted_onetime: 'estimate_accepted_onetime',
-  estimate_auto_renewed: 'estimate_auto_renewed',
   estimate_followup: 'estimate_followup_unviewed',
   reactivation: 'seasonal_reactivation',
 };
@@ -351,7 +347,10 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
       return null;
     }
     if (t.is_active === false) {
-      auditSmsTemplateIssue(templateKey, 'inactive_template', 'template inactive', context);
+      // An inactive template is a deliberate admin toggle, not a defect —
+      // skip the send silently instead of flooding the template-issues feed
+      // (owner directive 2026-07-06). missing/unresolved/render errors below
+      // still audit because those ARE defects.
       return null;
     }
     const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
