@@ -3,7 +3,9 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
+import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
@@ -78,6 +80,12 @@ function getServiceSelection(serviceType) {
 
 export default function RatePage() {
   const { token } = useParams();
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
+  // keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -398,7 +406,7 @@ export default function RatePage() {
               <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.45, color: MUTED, textAlign: 'center' }}>
                 Public Google reviews help local neighbors choose a provider.
               </div>
-              <button onClick={handleHappyReviewStart} disabled={generating} style={{
+              <button onClick={handleHappyReviewStart} disabled={generating} data-glass-accent="" style={{
                 ...(generating ? disabledActionStyle : primaryActionStyle),
                 width: '100%', marginTop: 12,
               }}>
@@ -432,6 +440,7 @@ export default function RatePage() {
             variant="primary"
             onClick={handleHighlightsNext}
             disabled={submitting}
+            data-glass-accent=""
             style={{ ...primaryActionStyle, fontSize: 16 }}
             icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#FFFFFF"/></svg>}
             iconPosition="left"
@@ -501,7 +510,7 @@ export default function RatePage() {
               </div>
 
               {/* Generate button */}
-              <button onClick={() => handleGenerateReview()} disabled={selectedServices.length === 0} style={{
+              <button onClick={() => handleGenerateReview()} disabled={selectedServices.length === 0} data-glass-accent="" style={{
                 ...(selectedServices.length === 0 ? disabledActionStyle : primaryActionStyle),
                 width: '100%', padding: 14, fontSize: 16,
                 opacity: selectedServices.length === 0 ? 0.5 : 1,
@@ -524,7 +533,7 @@ export default function RatePage() {
               padding: 14, color: TEXT, fontSize: 14, lineHeight: 1.5, fontWeight: 700,
             }}>
               {reviewError}
-              <button onClick={handleSkipToGoogle} style={{
+              <button onClick={handleSkipToGoogle} data-glass-accent="" style={{
                 ...primaryActionStyle,
                 display: 'block', width: '100%', marginTop: 12, padding: 12,
               }}>
@@ -556,6 +565,7 @@ export default function RatePage() {
               <Button
                 variant="primary"
                 onClick={handlePostOnGoogle}
+                data-glass-accent=""
                 style={{ ...primaryActionStyle, width: '100%', fontSize: 16 }}
               >
                 Copy & Open Google
@@ -618,6 +628,7 @@ export default function RatePage() {
             variant="primary"
             onClick={handleSubmit}
             disabled={submitting}
+            data-glass-accent=""
             style={{ ...primaryActionStyle, width: '100%', fontSize: 16, marginTop: 12 }}
           >
             {submitting ? 'Sending...' : 'Send Feedback'}
@@ -652,12 +663,19 @@ export default function RatePage() {
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100dvh', background: PAGE_BG, display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
-      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 8, border: `1px solid ${CARD_BORDER}`, boxShadow: 'none', overflow: 'hidden', marginTop: 'clamp(20px, 8dvh, 64px)' }}>
+    <div data-glass-clear="" style={{ minHeight: '100dvh', background: PAGE_BG, display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
+      <div data-glass="card" style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 8, border: `1px solid ${CARD_BORDER}`, boxShadow: 'none', overflow: 'hidden', marginTop: 'clamp(20px, 8dvh, 64px)' }}>
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${CARD_BORDER}`, display: 'flex', justifyContent: 'center' }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, display: 'block' }} />
         </div>
-        <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>{children}</div>
+        <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>
+          {children}
+        </div>
+      </div>
+      {/* Footer lives OUTSIDE the overflow:hidden card so tall states (AI
+          review writer, feedback form) scroll instead of clipping it. */}
+      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, paddingBottom: 24 }}>
+        <BrandFooter />
       </div>
       {/* Anton / Montserrat / Inter load globally via client/index.html */}
     </div>

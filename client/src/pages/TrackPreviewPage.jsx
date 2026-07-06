@@ -11,8 +11,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { COLORS, FONTS } from '../theme-brand';
+import BrandFooter from '../components/BrandFooter';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_SMS_TEL,
@@ -49,10 +51,14 @@ function mockData(state) {
   const base = {
     state,
     customerFirstName: 'Sarah',
+    customer: {
+      name: 'Sarah Mitchell',
+      email: 's•••@example.com',
+      phone: '(•••) •••-0182',
+    },
     tech: {
-      firstName: 'Bryan',
+      firstName: 'Adam',
       photoUrl: null,
-      yearsWithWaves: 4,
     },
     window: {
       start: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
@@ -61,11 +67,13 @@ function mockData(state) {
     property: {
       ...MOCK_PROPERTY_COORDS,
       addressLine1: '1234 Bayshore Dr',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
     },
     service: {
       type: 'Quarterly Pest Control',
       estimatedDurationMin: 60,
-      summary: 'Interior/exterior perimeter treatment targeting roaches, ants, spiders, silverfish, and occasional invaders.',
     },
     vehicle: null,
     summary: null,
@@ -162,8 +170,9 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
+        <BrandFooter />
       </div>
     </WavesShell>
   );
@@ -171,7 +180,7 @@ function Page({ children }) {
 
 function Card({ children, accent }) {
   return (
-    <div style={{
+    <div data-glass="card" style={{
       background: TRACK_SURFACE.surface,
       borderRadius: 8,
       padding: 24,
@@ -187,7 +196,7 @@ function Card({ children, accent }) {
 
 function StatusPill({ label, color }) {
   return (
-    <div style={{
+    <div data-glass="chip" data-glass-pill="" style={{
       display: 'inline-block',
       fontSize: 12,
       fontWeight: 700,
@@ -265,7 +274,7 @@ function TrackerMap({ tech, property }) {
   // the rest of the en-route card still works without a map key.
   if (!MAPS_KEY || loadError) {
     return (
-      <div style={{
+      <div data-glass="soft" style={{
         marginTop: 20,
         height: 240,
         borderRadius: 8,
@@ -379,95 +388,44 @@ function TechBlock({ tech, size = 'md' }) {
         <div style={{ fontSize: 18, fontWeight: 700, color: TRACK_SURFACE.text, lineHeight: 1.2 }}>
           {tech.firstName}
         </div>
-        {tech.yearsWithWaves ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 2 }}>
-            {tech.yearsWithWaves}+ years with Waves
-          </div>
-        ) : null}
       </div>
     </div>
   );
 }
 
-function ServiceMeta({ data }) {
-  const window = formatWindow(data.window?.start, data.window?.end);
-  const addr = data.property?.addressLine1;
-  const summary = data.service?.summary;
+// Client identity block (owner spec 2026-07-06): replaces the old
+// "Today's visit" service-description/window/address meta — the card
+// shows WHO the visit is for (name, address, email, phone).
+function ClientMeta({ data }) {
+  const c = data.customer || {};
+  const p = data.property || {};
+  const cityLine = [p.city, [p.state, p.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const addrLines = [p.addressLine1, p.addressLine2, cityLine].filter(Boolean);
+  if (!c.name && addrLines.length === 0 && !c.email && !c.phone) return null;
   return (
     <div style={{
       marginTop: 16,
       paddingTop: 16,
       borderTop: `1px solid ${TRACK_SURFACE.border}`,
     }}>
-      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 4 }}>Today's visit</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>
-        {data.service?.type}
-      </div>
-      {summary ? (
-        <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
-          {summary}
+      {c.name ? (
+        <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{c.name}</div>
+      ) : null}
+      {addrLines.length > 0 ? (
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
+          {addrLines.map((line, i) => <div key={i}>{line}</div>)}
         </div>
       ) : null}
-      {window ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>{window}</div>
+      {c.email ? (
+        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{c.email}</div>
       ) : null}
-      {addr ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 2 }}>{addr}</div>
+      {c.phone ? (
+        <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>{c.phone}</div>
       ) : null}
     </div>
   );
 }
 
-function PrepChecklist() {
-  const [open, setOpen] = useState(false);
-  const items = [
-    'Gates unlocked',
-    'Pets inside or secured',
-    'Sprinklers off until tonight',
-  ];
-  return (
-    <div style={{
-      marginTop: 16,
-      padding: '14px 18px',
-      background: TRACK_SURFACE.surface,
-      borderRadius: 8,
-      border: `1px solid ${TRACK_SURFACE.border}`,
-    }}>
-      <button
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        style={{
-          width: '100%',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          fontFamily: FONTS.body,
-          fontSize: 16,
-          fontWeight: 600,
-          color: TRACK_SURFACE.text,
-          padding: 0,
-        }}
-      >
-        <span>Quick prep</span>
-        <span style={{ fontSize: 14, color: TRACK_SURFACE.muted }}>{open ? '▴' : '▾'}</span>
-      </button>
-      {open ? (
-        <ul style={{
-          margin: '12px 0 0',
-          paddingLeft: 22,
-          fontSize: 15,
-          color: TRACK_SURFACE.body,
-          lineHeight: 1.7,
-        }}>
-          {items.map((t) => <li key={t}>{t}</li>)}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
 
 // ── State cards ──────────────────────────────────────────────────
 function ScheduledCard({ data }) {
@@ -530,7 +488,7 @@ function EnRouteCard({ data }) {
             ) : null}
           </>
         ) : (
-          <div style={{
+          <div data-glass="soft" style={{
             marginTop: 20, padding: 14, background: TRACK_SURFACE.soft,
             borderRadius: 8, fontSize: 14, color: TRACK_SURFACE.body,
           }}>
@@ -545,17 +503,17 @@ function EnRouteCard({ data }) {
           <TechBlock tech={data.tech} size="lg" />
         </div>
 
-        <ServiceMeta data={data} />
+        <ClientMeta data={data} />
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
+          data-glass-accent=""
           style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
-          TEXT WAVES
+          TEXT {(data.tech?.firstName || 'ADAM').toUpperCase()}
         </a>
       </Card>
 
-      <PrepChecklist />
     </>
   );
 }
@@ -575,7 +533,7 @@ function OnPropertyCard({ data }) {
       <div style={{ marginTop: 20 }}>
         <TechBlock tech={data.tech} size="lg" />
       </div>
-      <ServiceMeta data={data} />
+      <ClientMeta data={data} />
     </Card>
   );
 }
@@ -600,6 +558,7 @@ function CompleteCard({ data }) {
       </div>
       <a
         href={data.summary?.reviewUrl || '#'}
+        data-glass-accent=""
         style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 24, boxSizing: 'border-box' }}
       >
         LEAVE A 5-STAR REVIEW
@@ -612,7 +571,7 @@ function CompleteCard({ data }) {
 function StateSwitcher({ value, onChange }) {
   const states = ['scheduled', 'en_route', 'on_property', 'complete'];
   return (
-    <div style={{
+    <div data-glass="soft" style={{
       display: 'flex',
       gap: 6,
       flexWrap: 'wrap',
@@ -654,6 +613,13 @@ function StateSwitcher({ value, onChange }) {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPreviewPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
+
   const [params, setParams] = useSearchParams();
   const state = params.get('state') || 'en_route';
   const data = useMemo(() => mockData(state), [state]);

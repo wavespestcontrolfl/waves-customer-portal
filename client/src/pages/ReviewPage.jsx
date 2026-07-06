@@ -4,10 +4,17 @@ import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import { COLORS, FONTS } from '../theme-brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 export default function ReviewPage() {
   const { token } = useParams();
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
+  // keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -66,14 +73,14 @@ export default function ReviewPage() {
 
   // ── Loading ──
   if (loading) return (
-    <div style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div data-glass-clear="" style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.blueDark, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
     </div>
   );
 
   if (error || !data) return (
-    <div style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+    <div data-glass-clear="" style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}></div>
         <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: COLORS.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
@@ -88,9 +95,9 @@ export default function ReviewPage() {
     : null;
 
   return (
-    <div style={{ minHeight: '100vh', background: COLORS.offWhite, fontFamily: FONTS.body }}>
+    <div data-glass-clear="" style={{ minHeight: '100vh', background: COLORS.offWhite, fontFamily: FONTS.body }}>
       {/* Header — brand fonts loaded globally via client/index.html */}
-      <div style={{ background: `linear-gradient(135deg, ${COLORS.wavesBlue} 0%, ${COLORS.blueDeeper} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+      <div data-glass-ink="light" style={{ background: `linear-gradient(135deg, ${COLORS.wavesBlue} 0%, ${COLORS.blueDeeper} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
         {/* Hero video — waves-hero-service.mp4 */}
         <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
@@ -146,7 +153,7 @@ export default function ReviewPage() {
 
         {/* ── Rating Phase ── */}
         {phase === 'rate' && (
-          <div style={{ background: COLORS.white, borderRadius: 20, border: `1px solid ${COLORS.grayLight}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
+          <div data-glass="card" style={{ background: COLORS.white, borderRadius: 20, border: `1px solid ${COLORS.grayLight}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
             <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>
               How was your experience?
             </div>
@@ -188,7 +195,7 @@ export default function ReviewPage() {
 
         {/* ── Submitting ── */}
         {phase === 'submitting' && (
-          <div style={{ background: COLORS.white, borderRadius: 20, padding: 40, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
+          <div data-glass="card" style={{ background: COLORS.white, borderRadius: 20, padding: 40, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
             <div style={{ width: 36, height: 36, border: `3px solid ${COLORS.grayLight}`, borderTopColor: COLORS.green, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 16px' }} />
             <div style={{ fontSize: 15, color: COLORS.textBody }}>Submitting your rating...</div>
           </div>
@@ -215,7 +222,7 @@ export default function ReviewPage() {
 
         {/* ── Feedback Form (low scores) ── */}
         {phase === 'feedback' && (
-          <div style={{ background: COLORS.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
+          <div data-glass="card" style={{ background: COLORS.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}></div>
             <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
               We appreciate your honesty
@@ -238,11 +245,13 @@ export default function ReviewPage() {
                 variant="primary"
                 onClick={handleFeedback}
                 disabled={submittingFeedback}
+                data-glass-accent=""
                 style={{ flex: 1, cursor: submittingFeedback ? 'wait' : 'pointer' }}
               >
                 {submittingFeedback ? 'Sending...' : 'Send Feedback'}
               </Button>
               <button onClick={() => setPhase('thankyou')}
+                data-glass="chip"
                 style={{
                   padding: '14px 20px', borderRadius: 12, border: `1px solid ${COLORS.grayLight}`,
                   background: 'transparent', color: COLORS.textCaption, fontSize: 14, cursor: 'pointer',

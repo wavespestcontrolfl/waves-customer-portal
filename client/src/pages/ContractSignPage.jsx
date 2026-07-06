@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
+import BrandFooter from '../components/BrandFooter';
 import {
   WavesShell,
   BrandCard,
@@ -8,6 +9,7 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -25,8 +27,11 @@ function StatusPill({ tone = 'neutral', children }) {
     signed: { bg: '#F0FDF4', color: '#047857', border: '#BBF7D0' },
   };
   const t = tones[tone] || tones.neutral;
+  // Neutral is a flat warm wash — let the glass scene through. Ready/signed
+  // tones carry meaning and keep their colors.
+  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
   return (
-    <span style={{
+    <span {...glassClear} style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 6,
@@ -109,6 +114,13 @@ const inputStyle = {
 
 export default function ContractSignPage() {
   const { token } = useParams();
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence. BrandCard /
+  // BrandButton / WavesShell already emit their own data-glass markup.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
   const [contract, setContract] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -432,6 +444,8 @@ export default function ContractSignPage() {
             )}
           </BrandCard>
         </div>
+
+        <BrandFooter />
       </div>
     </WavesShell>
   );

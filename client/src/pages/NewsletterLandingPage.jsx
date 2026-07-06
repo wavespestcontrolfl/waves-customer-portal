@@ -13,6 +13,7 @@ import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -39,6 +40,7 @@ const VALUE_PROPS = [
 function Hero() {
   return (
     <section
+      data-glass-ink="light"
       style={{
         background: `linear-gradient(180deg, ${B.blueDeeper} 0%, ${B.wavesBlue} 100%)`,
         color: '#fff',
@@ -124,7 +126,7 @@ function Hero() {
 
 function ValueProps() {
   return (
-    <section style={{ background: B.sand, padding: 'clamp(48px, 7vw, 80px) 24px' }}>
+    <section data-glass-clear="" style={{ background: B.sand, padding: 'clamp(48px, 7vw, 80px) 24px' }}>
       <div style={{ maxWidth: 880, margin: '0 auto' }}>
         <h2
           style={{
@@ -149,6 +151,7 @@ function ValueProps() {
           {VALUE_PROPS.map((v) => (
             <div
               key={v.label}
+              data-glass="card"
               style={{
                 background: '#fff',
                 border: `1px solid ${B.grayLight}`,
@@ -258,13 +261,14 @@ function PastIssue({ post }) {
         href={safeHref}
         target="_blank"
         rel="noopener noreferrer"
+        data-glass="card"
         style={cardStyle}
         onMouseEnter={(e) => { e.currentTarget.style.borderColor = B.wavesBlue; }}
         onMouseLeave={(e) => { e.currentTarget.style.borderColor = B.grayLight; }}
       >{inner}</a>
     );
   }
-  return <div style={cardStyle}>{inner}</div>;
+  return <div data-glass="card" style={cardStyle}>{inner}</div>;
 }
 
 function PastIssues() {
@@ -282,7 +286,7 @@ function PastIssues() {
   if (!loading && !posts.length) return null;
 
   return (
-    <section style={{ background: '#fff', padding: 'clamp(48px, 7vw, 80px) 24px' }}>
+    <section data-glass-clear="" style={{ background: '#fff', padding: 'clamp(48px, 7vw, 80px) 24px' }}>
       <div style={{ maxWidth: 880, margin: '0 auto' }}>
         <h2
           style={{
@@ -327,12 +331,19 @@ function PastIssues() {
 }
 
 export default function NewsletterLandingPage() {
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
+
   return (
-    <div style={{ background: '#fff', minHeight: '100vh' }}>
+    <div data-glass-clear="" style={{ background: '#fff', minHeight: '100vh' }}>
       <Hero />
       <ValueProps />
       <PastIssues />
-      <div style={{ background: B.sand, padding: '24px 24px 48px' }}>
+      <div data-glass-clear="" style={{ background: B.sand, padding: '24px 24px 48px' }}>
         <div style={{ maxWidth: 880, margin: '0 auto' }}>
           <BrandFooter />
         </div>

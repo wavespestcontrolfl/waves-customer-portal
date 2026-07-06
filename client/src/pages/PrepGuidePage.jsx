@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -50,7 +52,7 @@ function BlockRenderer({ blocks }) {
         );
       case 'details':
         return (
-          <div key={i} style={{
+          <div key={i} data-glass="soft" style={{
             background: SURFACE.detailBg, borderRadius: 8,
             padding: '14px 18px', margin: '0 0 20px',
           }}>
@@ -111,6 +113,7 @@ function NotFound() {
       </p>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass-accent=""
         style={{
           display: 'inline-block', padding: '12px 28px',
           background: SURFACE.text, color: '#fff', borderRadius: 8,
@@ -125,6 +128,12 @@ function NotFound() {
 
 export default function PrepGuidePage() {
   const { token } = useParams();
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
+  // keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
   const [data, setData] = useState(null);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -155,6 +164,7 @@ export default function PrepGuidePage() {
         <div style={{ padding: '24px 16px 40px', maxWidth: 560, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
           <div
             className="prep-card"
+            data-glass="card"
             style={{
               background: SURFACE.card, borderRadius: 12,
               border: `1px solid ${SURFACE.border}`,
@@ -189,6 +199,7 @@ export default function PrepGuidePage() {
           <div className="prep-no-print" style={{ textAlign: 'center', marginTop: 20 }}>
             <button
               onClick={() => window.print()}
+              data-glass="chip"
               style={{
                 background: 'transparent', border: `1px solid ${SURFACE.border}`,
                 borderRadius: 8, padding: '10px 24px', cursor: 'pointer',
@@ -207,8 +218,11 @@ export default function PrepGuidePage() {
       <style>{PRINT_STYLE}</style>
       <meta name="robots" content="noindex, nofollow" />
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
+        <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
+          <div className="prep-no-print" style={{ maxWidth: 560, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+            <BrandFooter />
+          </div>
         </div>
       </WavesShell>
     </>
