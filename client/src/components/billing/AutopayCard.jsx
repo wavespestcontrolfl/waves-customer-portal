@@ -555,7 +555,7 @@ function Modal({ title, children, onClose }) {
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }} onClick={onClose}>
-      <div data-glass="" onClick={(e) => e.stopPropagation()} style={{
+      <div data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
         background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,

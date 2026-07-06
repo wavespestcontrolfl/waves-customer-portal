@@ -48,6 +48,73 @@ export function glassReleaseActive(glassDefault) {
 }
 
 /**
+ * Portal/app release gate (GATE_PORTAL_GLASS). The portal shell and login
+ * page have no per-page data payload to ride, so the server flag arrives via
+ * GET /api/public/ui-flags and is cached in localStorage — repeat visits
+ * mount glass synchronously with no legacy flash; a first visit (or a gate
+ * flip) applies when the fetch resolves. ?glass=1 / ?glass=0 keep param
+ * precedence via glassReleaseActive.
+ */
+const PORTAL_GLASS_CACHE_KEY = 'waves_portal_glass_default';
+// Same base the API client uses (client/src/utils/api.js) — the bundled
+// Capacitor apps build with VITE_API_URL, where a bare '/api/...' request
+// would hit the static bundle's origin instead of the backend.
+const UI_FLAGS_URL = `${import.meta.env.VITE_API_URL || '/api'}/public/ui-flags`;
+
+export function portalGlassInitial() {
+  let cached = false;
+  try {
+    cached = localStorage.getItem(PORTAL_GLASS_CACHE_KEY) === '1';
+  } catch {
+    /* storage unavailable (private mode) — param can still force on */
+  }
+  return glassReleaseActive(cached);
+}
+
+export function watchPortalGlassDefault(onChange) {
+  let alive = true;
+  // Fail-closed contract: any response that reaches the server but doesn't
+  // affirm the flag (non-OK, or an unexpected body — e.g. a rollback where
+  // the SPA catch-all serves index.html with a 200) clears the cache and
+  // reverts stale clients, so unsetting GATE_PORTAL_GLASS stays a working
+  // kill switch. Only a pure network failure (offline PWA / Capacitor
+  // session that can't reach the server at all) keeps the last-known value —
+  // no gate state could be learned there either way, and flipping the theme
+  // on a flaky connection would thrash offline users.
+  const failClosed = () => {
+    try {
+      localStorage.setItem(PORTAL_GLASS_CACHE_KEY, '0');
+    } catch {
+      /* storage unavailable */
+    }
+    if (alive) onChange(glassReleaseActive(false));
+  };
+  fetch(UI_FLAGS_URL)
+    .then(async (r) => {
+      if (!r.ok) return failClosed();
+      let d = null;
+      try {
+        d = await r.json();
+      } catch {
+        return failClosed();
+      }
+      if (!d || typeof d.portalGlass !== 'boolean') return failClosed();
+      try {
+        localStorage.setItem(PORTAL_GLASS_CACHE_KEY, d.portalGlass ? '1' : '0');
+      } catch {
+        /* storage unavailable — flag still applies this session */
+      }
+      if (alive) onChange(glassReleaseActive(d.portalGlass));
+    })
+    .catch(() => {
+      /* network failure only — keep last-known cached value */
+    });
+  return () => {
+    alive = false;
+  };
+}
+
+/**
  * Mounts the scene: html attribute, mesh background, and (full variant only)
  * the parallax orbs + film grain. Returns the orb container for pointer FX
  * plus a cleanup that restores everything it changed.

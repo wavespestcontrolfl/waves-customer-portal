@@ -426,6 +426,15 @@ const gates = {
   // per-link escape hatch). Kill switch: unset GATE_REPORT_GLASS.
   reportGlassTheme: isProd ? process.env.GATE_REPORT_GLASS === 'true' : true,
 
+  // Liquid-glass portal shell + login page — makes glass the DEFAULT render
+  // for the customer portal SPA (and the Capacitor apps, which load the same
+  // web bundle). Served to the client via GET /api/public/ui-flags because
+  // the shell has no per-page token payload to ride. Off = pre-glass portal
+  // (glass still reachable per-link via ?glass=1); on = glass for every
+  // customer (?glass=0 stays as the per-link escape hatch).
+  // Kill switch: unset GATE_PORTAL_GLASS.
+  portalGlassTheme: isProd ? process.env.GATE_PORTAL_GLASS === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in
