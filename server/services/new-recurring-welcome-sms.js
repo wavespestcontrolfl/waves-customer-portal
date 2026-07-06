@@ -218,9 +218,13 @@ async function deliverQueuedWelcome(row) {
   if (!sendResult.sent) {
     // A retryable provider failure (429/5xx) stays queued — push next_send_at
     // out and let the next tick retry; the attempts counter still caps total
-    // tries. Consent blocks and landlines won't heal on retry — mark those
-    // done so hasWelcomeSequence's once-ever guard holds.
-    if (sendResult.retryable || sendResult.deferred) {
+    // tries. CONSENT_LOOKUP_FAILED is a transient prefs/customer lookup DB
+    // blip — retry-advised by contract but carrying no retry metadata — and
+    // must not become the permanent once-ever cancel (same handling as the
+    // scheduled-SMS and deposit-receipt rails). Consent BLOCKS and landlines
+    // won't heal on retry — mark those done so hasWelcomeSequence's
+    // once-ever guard holds.
+    if (sendResult.retryable || sendResult.deferred || sendResult.code === 'CONSENT_LOOKUP_FAILED') {
       // Quiet-hours/holiday holds carry nextAllowedAt — schedule exactly
       // there and refund the attempt (a legal-window hold isn't a failure;
       // blind +15m retries would burn MAX_DELIVERY_ATTEMPTS overnight and

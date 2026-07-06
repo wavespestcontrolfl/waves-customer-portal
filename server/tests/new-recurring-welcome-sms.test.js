@@ -278,6 +278,31 @@ describe('new recurring welcome SMS', () => {
     expect(requeue.data.status).toBe('active');
   });
 
+  test('processDueWelcomes retries CONSENT_LOOKUP_FAILED instead of burning the once-ever guard', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    // Transient prefs/customer lookup DB blip — retry-advised by contract but
+    // carries no retryable/deferred/nextAllowedAt metadata.
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, code: 'CONSENT_LOOKUP_FAILED' });
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    // Released for retry — a cancelled row would permanently block the
+    // welcome via hasWelcomeSequence's once-ever guard.
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
+    const requeue = mockUpdates.find((u) => u.table === 'sms_sequences' && 'next_send_at' in u.data);
+    expect(requeue.data.next_send_at).toBeInstanceOf(Date);
+  });
+
   test('processDueWelcomes schedules quiet-hours holds at nextAllowedAt without burning an attempt', async () => {
     mockDueSequences = [{
       id: 'seq-1',
