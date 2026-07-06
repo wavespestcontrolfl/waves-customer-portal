@@ -504,11 +504,17 @@ Return a JSON object with:
     const stats = { created: 0, updated: 0, errors: 0 };
 
     try {
+      // Only the clean brain crosses into Claudeopedia: trusted pages
+      // (auto/approved — red pages awaiting review are excluded), with real
+      // content. Everything agents read from the KB side inherits this gate.
       const wikiEntries = await db('knowledge_entries')
         .where('data_point_count', '>', 0)
+        .whereIn('review_status', TRUSTED_STATUSES)
         .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content', 'review_status');
 
-      for (const wiki of wikiEntries) {
+      const syncable = wikiEntries.filter((w) => !(w.content || '').includes('*Pending AI generation'));
+
+      for (const wiki of syncable) {
         try {
           const kbSlug = `outcomes-${wiki.slug.replace(/\//g, '-')}`;
 
@@ -577,6 +583,38 @@ Return a JSON object with:
       logger.error(`[knowledge-bridge] syncToClaudeopedia failed: ${err.message}`);
       return stats;
     }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // syncToClaudeopediaIfDue — daily cron entry point with a weekly guard
+  // (same self-healing pattern as the wiki's weeklyRefreshIfDue: a single
+  // weekly fire time misses whole weeks when the process isn't up at that
+  // exact minute).
+  // ────────────────────────────────────────────────────────────
+  async syncToClaudeopediaIfDue() {
+    try {
+      const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+      const recentRun = await db('knowledge_update_log')
+        .where({ trigger_type: 'kb_sync' })
+        .where('created_at', '>', sixDaysAgo)
+        .first('id');
+      if (recentRun) return { skipped: true };
+    } catch (err) {
+      logger.error(`[knowledge-bridge] syncIfDue guard query failed: ${err.message}`);
+    }
+
+    const stats = await KnowledgeBridge.syncToClaudeopedia();
+    try {
+      await db('knowledge_update_log').insert({
+        action: stats.errors ? 'error' : 'sync',
+        entry_slug: null,
+        description: `Wiki→KB trusted sync: ${stats.created} created, ${stats.updated} updated, ${stats.errors} errors`,
+        trigger_type: stats.errors ? 'kb_sync_error' : 'kb_sync',
+      });
+    } catch (err) {
+      logger.error(`[knowledge-bridge] Failed to log sync: ${err.message}`);
+    }
+    return stats;
   },
 
   // ────────────────────────────────────────────────────────────

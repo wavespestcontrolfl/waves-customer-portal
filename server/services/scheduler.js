@@ -3062,6 +3062,24 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 6:40AM — Trusted wiki→Knowledge Base sync (weekly cadence via
+  // syncToClaudeopediaIfDue guard; runs after the 6:10 wiki refresh so a
+  // freshly refreshed page syncs the same morning). Only trusted pages
+  // (review_status auto/approved) cross — the exception-based review gate
+  // controls what feeds agents.
+  // =========================================================================
+  cron.schedule('40 6 * * *', async () => {
+    try {
+      const KnowledgeBridge = require('./knowledge-bridge');
+      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      if (result.skipped) return;
+      logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
+    } catch (err) {
+      logger.error(`Wiki→KB sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Health scoring runs inside the 3AM Customer Intelligence Pipeline (above)
   // as its sole nightly invocation — the former standalone 2:15AM job was
   // removed so signals are detected before the score is computed.
