@@ -241,9 +241,6 @@ button, input, select, textarea, optgroup {
   column-gap: 18px;
 }
 
-.help-phone-compact {
-  display: none;
-}
 
 @media (max-width: 820px) {
   :root {
@@ -294,9 +291,5 @@ button, input, select, textarea, optgroup {
 
   .help-phone-full {
     display: none;
-  }
-
-  .help-phone-compact {
-    display: inline;
   }
 }

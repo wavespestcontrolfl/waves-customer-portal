@@ -296,25 +296,6 @@ function TrackerMap({ tech, property }) {
   );
 }
 
-function PrepLink({ prepToken }) {
-  if (!prepToken) return null;
-  return (
-    <a
-      href={`/prep/${prepToken}`}
-      data-glass="chip"
-      style={{
-        display: 'block', marginTop: 16, padding: '12px 20px',
-        background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
-        textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 14,
-        textDecoration: 'none', border: `1px solid ${TRACK_SURFACE.border}`,
-        fontFamily: FONT_BODY,
-      }}
-    >
-      View prep instructions
-    </a>
-  );
-}
-
 function Card({ children, accent }) {
   return (
     <div data-glass="card" style={{
@@ -368,29 +349,36 @@ function TechBlock({ tech, size = 'md' }) {
         <div style={{ fontSize: size === 'lg' ? 22 : 18, fontWeight: 600, color: TRACK_SURFACE.text }}>
           {tech.firstName || 'Your technician'}
         </div>
-        {tech.yearsWithWaves ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted }}>
-            {tech.yearsWithWaves}+ years with Waves
-          </div>
-        ) : null}
       </div>
     </div>
   );
 }
 
-function ServiceMeta({ data }) {
-  const window = formatWindow(data.window?.start, data.window?.end);
+// Client identity block (owner spec 2026-07-06): replaces the old
+// "Today's visit" service-description/window/address meta — the card
+// shows WHO the visit is for (name, address, email, phone).
+function ClientMeta({ data }) {
+  const c = data.customer || {};
   const addrLines = fullAddressLines(data.property);
+  if (!c.name && addrLines.length === 0 && !c.email && !c.phone) return null;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
-      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 4 }}>Today's visit</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{data.service?.type}</div>
-      {window ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>{window}</div>
+      {c.name ? (
+        <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{c.name}</div>
       ) : null}
       {addrLines.length > 0 ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 4, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
           {addrLines.map((line, i) => <div key={i}>{line}</div>)}
+        </div>
+      ) : null}
+      {c.email ? (
+        <div style={{ fontSize: 14, marginTop: 6 }}>
+          <a href={`mailto:${c.email}`} style={{ color: TRACK_SURFACE.body, textDecoration: 'none' }}>{c.email}</a>
+        </div>
+      ) : null}
+      {c.phone ? (
+        <div style={{ fontSize: 14, marginTop: 4 }}>
+          <a href={`tel:${c.phone}`} style={{ color: TRACK_SURFACE.body, textDecoration: 'none' }}>{c.phone}</a>
         </div>
       ) : null}
     </div>
@@ -413,16 +401,7 @@ function ScheduledCard({ data }) {
       <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
-      {(() => {
-        const lines = fullAddressLines(data.property);
-        if (lines.length === 0) return null;
-        return (
-          <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 16, lineHeight: 1.5 }}>
-            {lines.map((line, i) => <div key={i}>{line}</div>)}
-          </div>
-        );
-      })()}
-      <PrepLink prepToken={data.prepToken} />
+      <ClientMeta data={data} />
     </Card>
   );
 }
@@ -473,7 +452,7 @@ function EnRouteCard({ data }) {
           <TechBlock tech={data.tech} size="lg" />
         </div>
 
-        <ServiceMeta data={data} />
+        <ClientMeta data={data} />
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
@@ -482,8 +461,7 @@ function EnRouteCard({ data }) {
         >
           TEXT {techFirst.toUpperCase()}
         </a>
-        <PrepLink prepToken={data.prepToken} />
-      </Card>
+        </Card>
     </>
   );
 }
@@ -505,8 +483,7 @@ function OnPropertyCard({ data }) {
           On site for {elapsed}.
         </div>
       ) : null}
-      <ServiceMeta data={data} />
-      <PrepLink prepToken={data.prepToken} />
+      <ClientMeta data={data} />
     </Card>
   );
 }

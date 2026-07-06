@@ -301,6 +301,9 @@ router.get('/:token', async (req, res, next) => {
         's.cancellation_reason',
         's.track_token_expires_at',
         'c.first_name as cust_first_name',
+        'c.last_name as cust_last_name',
+        'c.email as cust_email',
+        'c.phone as cust_phone',
         'c.address_line1',
         'c.address_line2',
         'c.city',
@@ -388,6 +391,14 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
+      // Client identity block for the card (name/address/email/phone).
+      // Same trusted track-token boundary as the full property address
+      // above — the customer is viewing their own appointment.
+      customer: {
+        name: [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null,
+        email: row.cust_email || null,
+        phone: row.cust_phone || null,
+      },
       prepToken: null,
       meta: {
         pollIntervalSeconds: customerState === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
