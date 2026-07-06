@@ -12,6 +12,8 @@ keep it truthful, compliant with owner directives, and SEO-safe must be
 applied at write time. The astro repo's own `CLAUDE.md` is authoritative for
 build mechanics (tokens, collections, redirects, sitemap) — this skill
 layers the business rules and cross-repo workflow on top; don't duplicate it.
+Brand voice, positioning, and conversion-writing reference: `EXAMPLES.md` in
+this skill.
 
 ## When to Use
 - Authoring/editing anything in the astro repo's `src/content/` or the
