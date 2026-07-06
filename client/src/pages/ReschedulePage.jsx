@@ -417,7 +417,7 @@ export default function ReschedulePage() {
               onClick={showAllTimes}
               style={{
                 justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
-                color: COLORS.blueDeeper, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                 textDecoration: 'underline',
               }}
             >
