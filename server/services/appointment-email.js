@@ -285,6 +285,14 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     : {
       service_type: clean(serviceLabel) || 'service',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      // Composed clause for the 24h opening sentence (migration
+      // 20260705010020): "…scheduled for tomorrow{{appointment_when}}."
+      // Composed HERE so fallback sends with no reconstructable
+      // appointment time degrade to the clean "…tomorrow." sentence
+      // instead of stranding empty per-field variables in prose.
+      appointment_when: apptTime
+        ? `, ${formatETDay(apptTime)}, ${formatETDate(apptTime)}, starting at ${formatETTime(apptTime)}`
+        : '',
       reschedule_url: clean(rescheduleUrl),
     };
   return sendTemplate({

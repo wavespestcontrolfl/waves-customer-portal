@@ -6,7 +6,9 @@ const {
   wrapNewsletter,
   ensureLegalTextFooter,
   ctaButton,
+  ctaChip,
   blockPalette,
+  stripeFooterLine,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
@@ -258,6 +260,11 @@ function renderBlocks(blocks, payload) {
   const htmlParts = [];
   const textParts = [];
   const B = blockPalette();
+  // Only the FIRST rendered CTA gets the primary button; later CTA
+  // blocks render as quiet chips (owner ask 2026-07-05 — templates like
+  // appointment.confirmation carry reschedule + view, and two stacked
+  // primary buttons read as competing asks).
+  let renderedCtaCount = 0;
 
   for (const block of normalizeBlocks(blocks)) {
     if (block.type === 'heading') {
@@ -297,7 +304,9 @@ function renderBlocks(blocks, payload) {
       const href = block.url_variable ? textFor(payload, block.url_variable) : block.url;
       if (href) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
-        htmlParts.push(`<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(href), escapeHtml(label))}</div>`);
+        const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
+        renderedCtaCount += 1;
+        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0' : '12px 0 24px 0'};text-align:center;">${render(escapeHtml(href), escapeHtml(label))}</div>`);
         textParts.push(`${label}: ${href}`);
       }
     } else if (block.type === 'image') {
@@ -484,9 +493,19 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
     bodyText = [bodyText, defaultCta.bodyText].filter(Boolean).join('\n\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
+  // Billing-family templates carry the Stripe trust line (owner scope
+  // 2026-07-05): invoice.sent / invoice.receipt / invoice.followup_*,
+  // the billing_late_payment_* dunning series, and payer.statement.*
+  // NET statements. This renderer is the path production sends actually
+  // take, so the line must live here, not only in invoice-email.js's
+  // SMTP fallback.
+  const templateKey = String(template.template_key || '');
+  const isInvoiceTemplate = templateKey.startsWith('invoice.')
+    || templateKey.startsWith('billing_late_payment')
+    || templateKey.startsWith('payer.statement');
   const footerNote = mode === 'marketing'
     ? null
-    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
+    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.${isInvoiceTemplate ? stripeFooterLine() : ''}`;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
