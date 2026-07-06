@@ -57,14 +57,17 @@ what needs a professional) · environmental impact (honest IPM philosophy).
 ## Conversion-writing fodder
 
 **Objection → answer:**
-- "Why not the big company (Terminix/Orkin)?" → Local, owner-operated, you
-  talk to real people; same or better products.
+- "Why not the big company (Terminix/Orkin)?" → Local and owner-operated —
+  you talk to real people and the owner stands behind the work. Say what
+  Waves does (premium products at correct rates, science-based protocols);
+  never assert claims about the competitor's products or practices.
 - "Why recurring service?" → Florida's subtropical climate = year-round pest
   pressure; one-time treatments don't hold.
 - "Can't I DIY the lawn?" → SWFL turf needs specific timing, products, and
   rotation protocols that are hard to get right alone.
-- "Why more than the $29/month guys?" → Bait-and-switch lead-gen outfits;
-  Waves uses premium products at correct rates and actually solves it.
+- "Why more than the rock-bottom monthly offers?" → Those are typically
+  bait-and-switch lead-gen plays; Waves uses premium products at correct
+  rates and actually solves the problem. (No dollar figures in copy — ever.)
 - "Do I need a WDO inspection?" → Required for most FL real-estate
   transactions; protects the buyer from hidden termite damage.
 
