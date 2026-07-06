@@ -90,10 +90,8 @@ function enqueue(table, cfg) {
   (queues[table] = queues[table] || []).push(cfg);
 }
 
-// 11:00 ET on a Wednesday — inside the 9a-5p send window.
+// Fixed clock so age-window assertions are deterministic.
 const NOW = new Date('2026-06-10T15:00:00Z');
-// 19:30 ET — outside the window.
-const QUIET_NOW = new Date('2026-06-10T23:30:00Z');
 
 function baseEstimate(overrides = {}) {
   return {
@@ -324,17 +322,6 @@ describe('checkDepositAbandoned', () => {
 
     expect(sent).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('quiet hours skip: never texts outside 9a-5p ET', async () => {
-    enqueue('estimate_deposits', {});
-    enqueue('estimates', { rows: [baseEstimate()] });
-
-    const sent = await _private.checkDepositAbandoned(QUIET_NOW);
-
-    expect(sent).toBe(0);
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(updates).toEqual([]);
   });
 
   test('recently-opened skip: customer may be mid-payment right now', async () => {

@@ -378,6 +378,7 @@ app.use('/api/admin/email-templates', require('./routes/admin-email-templates'))
 app.use('/api/admin/notification-events', require('./routes/admin-notification-events'));
 app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
+app.use('/api/public/ui-flags', require('./routes/public-ui-flags'));
 app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
@@ -844,6 +845,22 @@ httpServer.listen(PORT, () => {
             });
           } catch (err) {
             logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+
+        // Daily lifecycle email sweeps (termite bond renewals) — 10:05 AM
+        // ET so renewal notices land during the day. Self-healing: each
+        // run syncs termite_bonds rows from newly completed bond visits
+        // before checking the 30-day pre-renewal window.
+        cron.schedule('5 10 * * *', async () => {
+          try {
+            await runExclusive('lifecycle-email-sweeps-daily', async () => {
+              const sweeps = require('./services/lifecycle-email-sweeps');
+              const results = await sweeps.runDailySweeps();
+              logger.info(`[cron] Lifecycle email sweeps complete: ${JSON.stringify(results)}`);
+            });
+          } catch (err) {
+            logger.error(`[cron] Lifecycle email sweeps failed: ${err.message}`);
           }
         }, { timezone: 'America/New_York' });
       }

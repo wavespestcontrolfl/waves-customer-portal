@@ -181,8 +181,11 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(result).toEqual({ entry: existing, writeState: 'failed' });
-    expect(state.updates.knowledge_entries).toBeUndefined();
+    expect(result.writeState).toBe('failed');
+    expect(result.entry.content).toBe(existing.content);
+    // the failure path may re-resolve review fields, but must never touch content
+    const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
+    expect(contentPatch).toBeUndefined();
     const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'error');
     expect(errorLog).toBeTruthy();
     expect(errorLog.description).toMatch(/existing content preserved/);
@@ -217,7 +220,10 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(result).toEqual({ entry: existing, writeState: 'skipped' });
+    // the returned entry carries the POST-update review fields on top of the
+    // existing row (callers act on its trust)
+    expect(result.writeState).toBe('skipped');
+    expect(result.entry).toEqual(expect.objectContaining({ id: 'ke-1', content: existing.content }));
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
     // last_data_update advances so the page doesn't get re-marked stale and
     // re-skipped on every subsequent weekly refresh
@@ -347,20 +353,21 @@ describe('updateProductPage', () => {
 
     expect(state.deletes.knowledge_entries).toBe(1);
     // dangling knowledge_base pointer re-pointed at the canonical entry
-    expect(state.updates.knowledge_base).toEqual([
+    // (the update list also carries syncKbCopyTrust status flips)
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
       expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
-    ]);
+    ]));
     // bridge links move to the canonical page instead of dying to the FK
     // cascade, and the denormalized wiki_slug follows
-    expect(state.updates.knowledge_bridge).toEqual([
+    expect(state.updates.knowledge_bridge).toEqual(expect.arrayContaining([
       expect.objectContaining({
         wiki_entry_id: expect.stringContaining('knowledge_entries-'),
         wiki_slug: 'product/lesco-high-manganese-combo',
       }),
-    ]);
-    expect(state.updates.knowledge_contradictions).toEqual([
+    ]));
+    expect(state.updates.knowledge_contradictions).toEqual(expect.arrayContaining([
       expect.objectContaining({ wiki_entry_id: expect.stringContaining('knowledge_entries-') }),
-    ]);
+    ]));
     const mergeLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'merge');
     expect(mergeLog).toBeTruthy();
   });

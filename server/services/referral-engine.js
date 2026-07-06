@@ -367,6 +367,53 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   return { ...referral, lead_id: leadId, status: smsSent ? 'contacted' : 'sms_failed', sms_sent: smsSent };
 }
 
+// Email twin of the reward SMS (referral.reward_earned template) — fired
+// from the SAME two moments as the SMS: immediately at conversion when
+// require_service_completion is off, or at first-service credit when it's
+// on. Best-effort and idempotent per referral, so the two call sites can
+// never double-send. Promoters aren't always customers, so the send goes
+// straight to promoter.customer_email.
+async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
+  try {
+    const email = String(promoter?.customer_email || '').trim();
+    if (!email || !email.includes('@')) return;
+    const EmailTemplateLibrary = require('./email-template-library');
+    await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'referral.reward_earned',
+      to: email,
+      payload: {
+        first_name: String(promoter.first_name || '').trim() || 'there',
+        referred_first_name: referral.referee_name || referral.referral_first_name || 'your friend',
+        // The deferred first-service path issues the reward as an ACCOUNT
+        // credit (postCreditMovement), not referral balance — the email must
+        // point the promoter at the right ledger.
+        reward_line: destination === 'account_credit'
+          ? `Your $${Math.round(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
+          : `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
+        // CTA points at the ledger the reward actually landed in: account
+        // credits live on the billing tab, referral balance on the refer tab.
+        cta_label: destination === 'account_credit' ? 'View my account credit' : 'View my referral balance',
+        customer_portal_url: destination === 'account_credit'
+          ? `${FALLBACK_PORTAL_HOME_URL}/?tab=billing`
+          : `${FALLBACK_PORTAL_HOME_URL}/?tab=refer`,
+      },
+      recipientType: 'referral_promoter',
+      recipientId: promoter.id,
+      idempotencyKey: `referral.reward_earned:${referral.id}`,
+      triggerEventId: `referral.reward_earned:${referral.id}`,
+      categories: ['referral_reward'],
+      // SendGrid 4xx bodies can echo the recipient address — keep provider
+      // errors out of the logs and log a redacted reason below.
+      suppressProviderErrorLog: true,
+    });
+  } catch (err) {
+    const reason = err.status
+      ? `SendGrid ${err.status}`
+      : require('./email-template-library').redactEmailAddresses(err.message);
+    logger.warn(`[ReferralEngine] reward email failed for referral ${referral?.id}: ${reason}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 3. convertReferral
 // ---------------------------------------------------------------------------
@@ -458,22 +505,39 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
       const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
       if (promoter) {
         if (!settings.require_service_completion && promoter.customer_phone) {
-          const rewardSms = await renderReferralSms('referral_reward', {
-            referrer_name: promoter.first_name,
-            referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-            reward_amount: `$${Math.round(rewardDollars)}`,
-          }, settings.reward_sms_template, {
-            workflow: 'referral_reward',
-            entity_type: 'referral',
-            entity_id: referral.id,
-          });
-          await sendSMS(promoter.customer_phone, rewardSms, {
-            customerId: promoter.customer_id,
-            messageType: 'referral_reward',
-            referralId: referral.id,
-            promoterId: promoter.id,
-            entryPoint: 'referral_engine_convert',
-          });
+          // Own try: the reward is already committed — an SMS render/send
+          // failure must not jump to the outer catch and skip the email leg.
+          try {
+            const rewardSms = await renderReferralSms('referral_reward', {
+              referrer_name: promoter.first_name,
+              referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
+              reward_amount: `$${Math.round(rewardDollars)}`,
+            }, settings.reward_sms_template, {
+              workflow: 'referral_reward',
+              entity_type: 'referral',
+              entity_id: referral.id,
+            });
+            await sendSMS(promoter.customer_phone, rewardSms, {
+              customerId: promoter.customer_id,
+              messageType: 'referral_reward',
+              referralId: referral.id,
+              promoterId: promoter.id,
+              entryPoint: 'referral_engine_convert',
+            });
+          } catch (smsErr) {
+            logger.warn(`[ReferralEngine] reward SMS leg failed for referral ${referral.id}: ${smsErr.message}`);
+          }
+        }
+        if (!settings.require_service_completion) {
+          // Email leg mirrors the immediate-earned SMS above — but sends
+          // even when the promoter has no usable phone. Own try: an SMS
+          // render/send failure above must not swallow the reward email
+          // (the reward is already committed at this point).
+          try {
+            await sendRewardEarnedEmail(promoter, referral, rewardDollars);
+          } catch (emailErr) {
+            logger.warn(`[ReferralEngine] reward email leg failed for referral ${referral.id}: ${emailErr.message}`);
+          }
         }
         if (outcome.milestoneAward) {
           await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
@@ -759,6 +823,9 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     try {
       const promoter = await db('referral_promoters').where({ id: outcome.referral.promoter_id }).first();
       if (promoter && promoter.customer_phone) {
+        // Own try: the credit is already posted — an SMS failure must not
+        // skip the reward email below.
+        try {
         const rewardSms = await renderReferralSms('referral_reward', {
           referrer_name: promoter.first_name,
           referee_name: outcome.referral.referee_name || outcome.referral.referral_first_name || 'your friend',
@@ -775,6 +842,22 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
           promoterId: promoter.id,
           entryPoint: 'referral_engine_first_service',
         });
+        } catch (smsErr) {
+          logger.warn(`[ReferralEngine] reward SMS leg failed for referral ${outcome.referral.id}: ${smsErr.message}`);
+        }
+      }
+      if (promoter) {
+        // Email leg for the deferred-earned path — same moment the money
+        // is actually issued; idempotency key keeps it single-send even
+        // if a conversion-time email ever fired for this referral. This path
+        // pays out as an account credit, so the copy must say so. Own try:
+        // an SMS failure above must not swallow the email for a reward that
+        // has already been committed.
+        try {
+          await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars, 'account_credit');
+        } catch (emailErr) {
+          logger.warn(`[ReferralEngine] reward email leg failed for referral ${outcome.referral.id}: ${emailErr.message}`);
+        }
       }
     } catch (smsErr) {
       logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);

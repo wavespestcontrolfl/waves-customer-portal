@@ -4,6 +4,7 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
@@ -21,11 +22,12 @@ const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+// Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_BUTTON_BG = B.blueDeeper;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';

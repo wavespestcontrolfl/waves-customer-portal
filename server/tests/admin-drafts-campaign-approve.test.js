@@ -9,8 +9,8 @@
  *    a customer is resolved, with the stored-preference marketing consentBasis
  *    for marketing-grade purposes (the validators enforce; the route no longer
  *    bypasses them as 'conversational')
- *  - a QUIET_HOURS_HOLD block surfaces code + held + nextAllowedAt in the API
- *    response (instead of swallowing them) and releases the draft claim
+ *  - a blocked send surfaces its code in the API response (instead of
+ *    swallowing it) and releases the draft claim
  *  - the SHARED pre-send gate (campaign-drafts-gate.js) re-runs at send time
  *    with the draft's own row excluded from the cooldown; terminal verdicts
  *    retire the draft (rejected + flags.campaign_rejected_reason), cooldown
@@ -377,38 +377,7 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(updates.find((u) => u.payload.status === 'rejected')).toBeUndefined();
   });
 
-  test('QUIET_HOURS_HOLD surfaces code + held + nextAllowedAt and releases the claim', async () => {
-    const draft = campaignDraft();
-    enqueueApproveHappyPath(draft);
-    sendCustomerMessage.mockResolvedValue({
-      sent: false,
-      blocked: true,
-      code: 'QUIET_HOURS_HOLD',
-      reason: 'Florida quiet hours (8pm-8am ET) — held',
-      retryable: true,
-      deferred: true,
-      nextAllowedAt: '2026-07-05T12:00:00.000Z',
-    });
-
-    let body;
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
-      expect(res.status).toBe(422);
-      body = await res.json();
-    });
-
-    expect(body.code).toBe('QUIET_HOURS_HOLD');
-    expect(body.held).toBe(true);
-    expect(body.nextAllowedAt).toBe('2026-07-05T12:00:00.000Z');
-    expect(body.error).toMatch(/quiet hours/i);
-
-    // Draft released back to pending so the owner can re-approve after 8am.
-    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
-    expect(release).toBeTruthy();
-    expect(release.payload.approved_by).toBeNull();
-  });
-
-  test('non-retryable block still 422s with its code and no held flag', async () => {
+  test('blocked send 422s with its code and releases the claim', async () => {
     const draft = campaignDraft();
     enqueueApproveHappyPath(draft);
     sendCustomerMessage.mockResolvedValue({
@@ -426,8 +395,12 @@ describe('PUT /admin/drafts/:id/approve', () => {
     });
 
     expect(body.code).toBe('NO_MARKETING_CONSENT');
-    expect(body.held).toBeUndefined();
     expect(body.nextAllowedAt).toBeUndefined();
+
+    // Draft released back to pending so the owner can fix and re-approve.
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release).toBeTruthy();
+    expect(release.payload.approved_by).toBeNull();
   });
 
   test('template-disabled sentinel is NOT a send: 422, claim released, draft not finalized, no pitched flip', async () => {

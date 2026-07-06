@@ -33,6 +33,10 @@ function assessmentAnalytics() {
   return require('./assessment-analytics');
 }
 
+function agronomicWiki() {
+  return require('./agronomic-wiki');
+}
+
 // ══════════════════════════════════════════════════════════════
 // 1. FAWN WEATHER CONTEXT
 // ══════════════════════════════════════════════════════════════
@@ -299,14 +303,30 @@ If no contradictions, return: { "contradictions": [] }`
               .where({ kb_entry_id: kb.id, wiki_entry_id: wiki.id, contradiction_type: c.type, resolved: false })
               .first();
             if (!existing) {
-              await db('knowledge_contradictions').insert({
+              const [inserted] = await db('knowledge_contradictions').insert({
                 kb_entry_id: kb.id,
                 wiki_entry_id: wiki.id,
                 kb_claim: (c.kb_claim || '').substring(0, 500),
                 wiki_evidence: (c.wiki_evidence || '').substring(0, 500),
                 contradiction_type: c.type || 'efficacy',
                 severity: c.severity || 'moderate',
-              });
+              }).returning('id');
+              const insertedId = inserted?.id ?? inserted;
+              // Trusted reads gate on the page's cached review_status — flip
+              // the page and its KB mirror now, not at the next regeneration.
+              // Passing the just-inserted id keeps the gate closed even if
+              // the recompute's own contradiction lookup transiently fails.
+              try {
+                await agronomicWiki().recomputeEntryReviewGate(wiki.id, {
+                  assumeOpenIds: [insertedId],
+                });
+              } catch (gateErr) {
+                // Roll the insert back: the existing-row dedupe would
+                // otherwise skip this contradiction on every later run,
+                // leaving the page trusted with no retry path.
+                try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                throw gateErr;
+              }
               stats.found++;
             }
           }

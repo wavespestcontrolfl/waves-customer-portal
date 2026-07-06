@@ -33,8 +33,8 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
   // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
-  // own quiet-enforced purpose, not fall through to conversational — the
-  // quiet-hours re-check at dispatch is what keeps a re-queued row honest.
+  // own purpose, not fall through to conversational, so the policy re-check at
+  // dispatch keeps a re-queued row honest.
   if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
   return 'conversational';
 }
@@ -1616,7 +1616,7 @@ function initScheduledJobs() {
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
-            // quiet-hours-held voicemail text-back persists transactional_allowed)
+            // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
             // NO_CONSENT_RECORD. Safe to forward blindly: the consent validator
             // only honors a consentBasis on transactional-grade policies for the
@@ -1687,20 +1687,12 @@ function initScheduledJobs() {
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
-          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
-            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-              status: 'scheduled',
-              scheduled_for: new Date(smsResult.nextAllowedAt),
-              updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quiet_hours_held_at', ?::timestamptz, 'quiet_hours_reason', ?)", [completedAt, smsResult.reason || null]),
-            });
-            logger.info(`[scheduled-sms] Held scheduled SMS ${msg.id} until ${smsResult.nextAllowedAt}`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // Transient provider failure (Twilio 429/5xx/timeout) or a DB
             // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
             // no retry metadata but is retry-advised by contract): re-queue
-            // like a quiet-hours hold so the next cron tick retries it,
+            // so the next cron tick retries it,
             // instead of marking it permanently blocked and dropping it
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
@@ -2028,7 +2020,7 @@ function initScheduledJobs() {
   // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
-  // ~1h first-touch SMS responsive. Quiet hours + suppression are enforced in
+  // ~1h first-touch SMS responsive. Suppression is enforced in
   // the service + the messaging validator. Ships LIVE; kill switch is
   // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
   // =========================================================================
@@ -3099,8 +3091,8 @@ function initScheduledJobs() {
   // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
-  // preview/dev env with live creds can't text/email real customers. Quiet
-  // hours, suppression, and per-customer prefs still apply at the send site.
+  // preview/dev env with live creds can't text/email real customers.
+  // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
   cron.schedule('*/30 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
@@ -3119,19 +3111,66 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:10AM — Agronomic Wiki refresh (stale pages + seasonal), weekly
-  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard.
+  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard,
+  // then the trusted wiki→KB sync chained after it (own weekly guard).
   // The former single Sunday-6AM fire time missed whole weeks whenever the
   // process wasn't up at that exact minute (update-log lint rows show 3 runs
   // in 3 months); a daily check self-heals after any missed fire.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
+    let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
       const result = await wiki.weeklyRefreshIfDue();
-      if (result.skipped) return;
-      logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      if (result?.error) refreshFailed = true;
+      else if (!result.skipped) {
+        logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      }
     } catch (err) {
+      refreshFailed = true;
       logger.error(`Agronomic wiki refresh failed: ${err.message}`);
+    }
+
+    // Trusted wiki→Knowledge Base sync, CHAINED strictly after the refresh
+    // (weekly cadence via syncToClaudeopediaIfDue's own guard; invoked daily
+    // so an error day self-heals tomorrow). A fixed-offset cron could fire
+    // mid-refresh and write its weekly marker before the freshly refreshed
+    // rows exist — missing them until the guard expires. A FAILED refresh
+    // skips the sync entirely: syncing now would stamp the weekly kb_sync
+    // marker, and tomorrow's successful refresh retry would find its fresh
+    // rows locked out of the KB by that marker. Refresh-skip days still
+    // sync (the refresh is done for the week; the sync self-heals its own
+    // misses). Only trusted pages (review_status auto/approved) cross —
+    // the exception-based review gate controls what feeds agents.
+    if (refreshFailed) {
+      logger.warn('Wiki→KB sync skipped: wiki refresh failed — both retry tomorrow');
+      return;
+    }
+    try {
+      const KnowledgeBridge = require('./knowledge-bridge');
+      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      if (!result.skipped) {
+        logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
+      }
+    } catch (err) {
+      logger.error(`Wiki→KB sync failed: ${err.message}`);
+    }
+
+    // Yellow-digest email to the owner, CHAINED as leg 3 for the same reason
+    // the sync is leg 2: a fixed-offset cron could fire mid-refresh, digest
+    // the pre-refresh queue, and stamp its weekly marker — suppressing a
+    // corrected digest for six days. Weekly cadence + the dark-ship gate live
+    // inside sendYellowDigestIfDue; the failed-refresh early-return above
+    // already keeps it off stale-state days. Runs even if the KB sync leg
+    // errored — the digest reports review state, which the sync doesn't change.
+    try {
+      const YellowDigest = require('./wiki-yellow-digest');
+      const result = await YellowDigest.sendYellowDigestIfDue();
+      if (result.sent) {
+        logger.info(`Wiki yellow digest sent: ${result.pendingCount} blocked, ${result.yellowCount} yellow`);
+      }
+    } catch (err) {
+      logger.error(`Wiki yellow digest failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

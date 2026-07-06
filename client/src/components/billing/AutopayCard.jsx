@@ -44,7 +44,9 @@
 //   the UI can surface ("too many changes, try again in a minute"),
 //   not a generic 429 that looks like a network failure.
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { COLORS as B, FONTS } from '../../theme-brand';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
 import api from '../../utils/api';
 import { etDateString, addETDays } from '../../lib/timezone';
 import { getStripe } from '../../lib/stripeLoader';
@@ -58,17 +60,9 @@ import {
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 
-const PORTAL_BILLING = {
-  surface: '#FFFFFF',
-  page: '#FAF8F3',
-  border: '#E7E2D7',
-  borderStrong: '#D8D0C0',
-  soft: '#F8FCFE',
-  softBorder: '#CFE7F5',
-  text: '#1B2C5B',
-  body: '#3F4A65',
-  muted: '#6B7280',
-};
+// Local alias kept for the many call sites below; values come from the
+// shared customer palette (this used to be a hand-copied hex block).
+const PORTAL_BILLING = CUSTOMER_SURFACE;
 
 const AUTOPAY_CARD_STYLE = {
   background: PORTAL_BILLING.surface,
@@ -87,7 +81,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
     ? { background: `${B.red}10`, color: B.red }
     : { background: PORTAL_BILLING.soft, color: PORTAL_BILLING.text };
   return (
-    <div style={AUTOPAY_CARD_STYLE}>
+    <div data-glass="card" style={AUTOPAY_CARD_STYLE}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
         <span style={{
           width: 38,
@@ -116,7 +110,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
         </div>
       </div>
       {actionLabel && onAction && (
-        <button type="button" onClick={onAction} style={{
+        <button type="button" onClick={onAction} data-glass="chip" style={{
           alignSelf: 'flex-start',
           minHeight: 36,
           padding: '9px 13px',
@@ -239,14 +233,21 @@ export default function AutopayCard({ onStateChange }) {
   const state = ['active', 'paused', 'disabled'].includes(rawState) ? rawState : 'disabled';
   const { next_charge_date, next_charge_amount, monthly_rate, payment_methods = [], paused_until } = data;
   const nextChargeAmount = Number(next_charge_amount ?? monthly_rate ?? 0);
+  // Surcharge disclosure lives here now that the healthy-state banner above is
+  // hidden — this card is the only place an active autopay customer sees the
+  // base + credit-card-surcharge breakdown before the charge runs.
+  const nextChargeBase = Number(data.next_charge_base_amount ?? 0);
+  const nextChargeSurcharge = Number(data.next_charge_surcharge_amount ?? 0);
   const activeCard = payment_methods.find((p) => p.id === data.autopay_payment_method_id)
     || payment_methods.find((p) => p.is_default)
     || payment_methods[0];
 
+  // Status dot is a live indicator (owner directive 2026-07-06): blinking
+  // green = charges are running automatically, solid red = they are not.
   const themeMap = {
     active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
-    paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.orange, label: 'Paused' },
-    disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: PORTAL_BILLING.muted, label: 'Off' },
+    paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.red, label: 'Paused' },
+    disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: B.red, label: 'Off' },
   };
   const theme = themeMap[state];
 
@@ -369,6 +370,11 @@ export default function AutopayCard({ onStateChange }) {
 
   const card = AUTOPAY_CARD_STYLE;
 
+  // Glass tags for the two button kinds — inert while no glass theme is
+  // mounted on <html>, so gate-off rendering is untouched.
+  const btnGlass = (kind = 'primary') =>
+    kind === 'primary' ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' };
+
   const btn = (kind = 'primary') => ({
     padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 800,
     cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1,
@@ -386,12 +392,13 @@ export default function AutopayCard({ onStateChange }) {
   ) : null;
 
   return (
-    <div style={card}>
+    <div data-glass="card" style={card}>
+      <style>{`@keyframes autopayDotPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.25); } }`}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block' }} />
-            <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block', animation: state === 'active' ? 'autopayDotPulse 2s ease-in-out infinite' : 'none' }} />
+            <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Auto Pay / {theme.label}
             </span>
           </div>
@@ -402,6 +409,11 @@ export default function AutopayCard({ onStateChange }) {
                 ? `Paused until ${formatDate(paused_until)}`
                 : 'Auto Pay is off. Charges will not run automatically.'}
           </div>
+          {state === 'active' && nextChargeSurcharge > 0 && (
+            <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
+              ${nextChargeBase.toFixed(2)} + ${nextChargeSurcharge.toFixed(2)} credit card surcharge
+            </div>
+          )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
               Charging {activeCard.brand || 'card'} ending in {activeCard.last4}
@@ -414,31 +426,37 @@ export default function AutopayCard({ onStateChange }) {
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
         {state === 'active' && (
-          <>
-            <button type="button" style={btn('secondary')} disabled={saving} onClick={() => setModal('pause')}>Pause</button>
-            <button type="button" style={btn('secondary')} disabled={saving} onClick={() => setModal('card')}>Change card</button>
-            <button type="button" style={btn('secondary')} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
-            <button type="button" style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
-          </>
+          <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving} onClick={() => setModal('manage')}>
+            Manage Auto Pay
+          </button>
         )}
         {state === 'paused' && (
           <>
-            <button type="button" style={btn('primary')} disabled={saving} onClick={submitResume}>Resume now</button>
-            <button type="button" style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
+            <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving} onClick={submitResume}>Resume now</button>
+            <button type="button" {...btnGlass('secondary')} style={btn('secondary')} disabled={saving} onClick={toggleAutopay}>Turn off</button>
           </>
         )}
         {state === 'disabled' && (
-          <button type="button" style={btn('primary')} disabled={saving} onClick={enableAutopay}>Turn on Auto Pay</button>
+          <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving} onClick={enableAutopay}>Turn on Auto Pay</button>
         )}
       </div>
 
       {modal && (
         <Modal title={
+          modal === 'manage' ? 'Manage Auto Pay' :
           modal === 'pause' ? 'Pause Auto Pay' :
           modal === 'card' ? (state === 'disabled' ? 'Set up Auto Pay' : 'Change Auto Pay card') :
           'Change billing day'
         } onClose={() => { setModal(null); setErr(''); }}>
           {errorBanner}
+          {modal === 'manage' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('pause')}>Pause payments</button>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('card')}>Change card</button>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off Auto Pay</button>
+            </div>
+          )}
           {modal === 'pause' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <label style={{ fontSize: 14, color: PORTAL_BILLING.body, fontWeight: 600 }}>Pause until</label>
@@ -450,8 +468,8 @@ export default function AutopayCard({ onStateChange }) {
                 placeholder="e.g. Out of town for the month"
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8, fontFamily: FONTS.body }} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
-                <button type="button" style={btn('primary')} disabled={saving || !pauseUntil} onClick={submitPause}>
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || !pauseUntil} onClick={submitPause}>
                   {saving ? 'Saving...' : 'Pause'}
                 </button>
               </div>
@@ -481,13 +499,13 @@ export default function AutopayCard({ onStateChange }) {
                   </label>
                 ))
               )}
-              <button type="button" style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
                 Add new card
               </button>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
                 {payment_methods.length > 0 && (
-                  <button type="button" style={btn('primary')} disabled={saving || !selectedCard}
+                  <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || !selectedCard}
                     onClick={() => runUpdate({
                       autopay_payment_method_id: selectedCard,
                       ...(state === 'disabled' ? { autopay_enabled: true } : {}),
@@ -508,8 +526,8 @@ export default function AutopayCard({ onStateChange }) {
                   reflects the copy the customer saw. */}
               <SaveCardConsent locked onChange={() => {}} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
-                <button type="button" style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
+                <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
                   {saving ? 'Saving...' : 'Save card'}
                 </button>
               </div>
@@ -526,8 +544,8 @@ export default function AutopayCard({ onStateChange }) {
                 Auto Pay runs on this day each month. Max is the 28th so every month is covered.
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
-                <button type="button" style={btn('primary')} disabled={saving || selectedDay < 1 || selectedDay > 28}
+                <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
+                <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || selectedDay < 1 || selectedDay > 28}
                   onClick={() => runUpdate({ billing_day: selectedDay })}>
                   {saving ? 'Saving...' : 'Save'}
                 </button>
@@ -541,12 +559,15 @@ export default function AutopayCard({ onStateChange }) {
 }
 
 function Modal({ title, children, onClose }) {
-  return (
-    <div style={{
+  // Portaled to <body>: under glass the host card carries backdrop-filter
+  // (and a hover transform), which turns it into the containing block for
+  // position:fixed children — the scrim would cover only the card.
+  return createPortal(
+    <div data-glass-scrim="" style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{
+      <div data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
         background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,
@@ -554,7 +575,7 @@ function Modal({ title, children, onClose }) {
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>
-          <button type="button" aria-label="Close" onClick={onClose} style={{
+          <button type="button" aria-label="Close" onClick={onClose} data-glass="chip" style={{
             background: PORTAL_BILLING.surface,
             border: `1px solid ${PORTAL_BILLING.borderStrong}`,
             borderRadius: 8,
@@ -571,6 +592,7 @@ function Modal({ title, children, onClose }) {
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

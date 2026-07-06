@@ -24,6 +24,7 @@
  */
 import Icon from '../components/Icon';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
@@ -69,12 +70,14 @@ const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
-const ESTIMATE_CHROME = '#F7F5EE';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+// muted was gray-500 #6B7280 here while the portal used slate-600 #475569 —
+// same constant name, drifted value. Normalized to the portal gray.
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
+const ESTIMATE_CHROME = CUSTOMER_SURFACE.chrome;
 const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
 
 // Universal hero headline (owner directive 2026-07-03). The eyebrow line

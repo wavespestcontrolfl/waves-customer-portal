@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
@@ -270,7 +271,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           : fmtMoney(cadencePrice)}
         </span>
         {!quoteRequired ? (
-          <span style={{ fontSize: 14, fontWeight: 500, color: '#6B7280', whiteSpace: 'nowrap' }}>{periodLabel}</span>
+          <span style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, whiteSpace: 'nowrap' }}>{periodLabel}</span>
         ) : null}
         {waveGuardTier ? (
           <span style={{
@@ -300,7 +301,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           its annual band, since the ranged /mo figure alone understates
           the commitment being confirmed on site. */}
       {!quoteRequired && annual && showLowConfidenceRange ? (
-        <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
           {`${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`}
         </div>
       ) : null}
@@ -339,7 +340,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       ) : null}
 
       {dayPrice && !showLowConfidenceRange ? (
-        <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 15, color: CUSTOMER_SURFACE.muted, marginTop: 8, lineHeight: 1.5 }}>
           {(wording?.dayLineByKey?.[billingKey] || wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}

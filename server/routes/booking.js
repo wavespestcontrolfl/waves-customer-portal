@@ -481,6 +481,9 @@ router.get('/config', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {};
     res.json({
       enabled: isEnabled('selfBooking') && config.enabled !== false,
+      // Marketing-site (astro /book) AI search bar — fail-closed dark-ship
+      // flag; the portal's own booking surfaces don't read this.
+      ai_search: isEnabled('bookAiSearch'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
