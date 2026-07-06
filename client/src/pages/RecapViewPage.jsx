@@ -5,6 +5,7 @@
 import { useParams } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { COLORS, FONTS } from '../theme-brand';
+import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -91,6 +92,10 @@ export default function RecapViewPage() {
           <a style={btn(true)} data-glass-accent="" href={reportUrl}>Open your service report</a>
         </>
       )}
+
+      <div style={{ width: '100%', maxWidth: 360 }}>
+        <BrandFooter variant={glassActive ? undefined : 'dark'} />
+      </div>
     </div>
   );
 }

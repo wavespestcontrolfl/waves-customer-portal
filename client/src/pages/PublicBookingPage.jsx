@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
@@ -1025,6 +1026,7 @@ export default function PublicBookingPage() {
           </div>
         )}
 
+        <BrandFooter />
       </div>
     </WavesShell>
   );

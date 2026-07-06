@@ -3,6 +3,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
+import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
@@ -667,7 +668,10 @@ function Page({ children }) {
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${CARD_BORDER}`, display: 'flex', justifyContent: 'center' }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, display: 'block' }} />
         </div>
-        <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>{children}</div>
+        <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>
+          {children}
+          <BrandFooter />
+        </div>
       </div>
       {/* Anton / Montserrat / Inter load globally via client/index.html */}
     </div>

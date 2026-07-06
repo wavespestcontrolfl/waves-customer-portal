@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { COLORS, FONTS } from '../theme-brand';
+import BrandFooter from '../components/BrandFooter';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
@@ -165,6 +166,7 @@ function Page({ children }) {
     <WavesShell variant="customer" topBar="solid">
       <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
+        <BrandFooter />
       </div>
     </WavesShell>
   );

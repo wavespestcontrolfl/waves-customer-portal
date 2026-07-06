@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
+import BrandFooter from "../components/BrandFooter";
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from "../glass/glass-engine";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -218,6 +219,10 @@ export default function ServiceOutlinePage() {
             )}
           </div>
         </section>
+
+        <div className="mx-auto max-w-6xl px-4 pb-10">
+          <BrandFooter />
+        </div>
       </main>
     </div>
   );

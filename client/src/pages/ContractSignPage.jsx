@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
+import BrandFooter from '../components/BrandFooter';
 import {
   WavesShell,
   BrandCard,
@@ -443,6 +444,8 @@ export default function ContractSignPage() {
             )}
           </BrandCard>
         </div>
+
+        <BrandFooter />
       </div>
     </WavesShell>
   );

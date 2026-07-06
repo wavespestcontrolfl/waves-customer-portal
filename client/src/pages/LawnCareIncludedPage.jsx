@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPinned, ShieldCheck, Sprout } from "lucide-react";
+import BrandFooter from "../components/BrandFooter";
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from "../glass/glass-engine";
 
 const TURF_SECTIONS = [
@@ -231,6 +232,10 @@ export default function LawnCareIncludedPage() {
             ))}
           </div>
         </section>
+
+        <div className="mx-auto max-w-6xl px-4 pb-10">
+          <BrandFooter />
+        </div>
       </main>
     </div>
   );

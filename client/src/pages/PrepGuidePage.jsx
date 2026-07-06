@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
@@ -219,6 +220,9 @@ export default function PrepGuidePage() {
       <WavesShell variant="customer" topBar="solid">
         <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
+          <div className="prep-no-print" style={{ maxWidth: 560, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+            <BrandFooter />
+          </div>
         </div>
       </WavesShell>
     </>
