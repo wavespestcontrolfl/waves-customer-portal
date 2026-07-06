@@ -453,7 +453,14 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
     // consent basis for lead rows (see purposeForScheduledMessageType).
     // original_message_type keeps the deposit_receipt row as the kill
     // switch. Mirrors the twilio-webhook AI-reply requeue.
-    if (result.retryable && result.nextAllowedAt) {
+    // CONSENT_LOOKUP_FAILED is a transient DB blip during the consent
+    // lookup — retry-advised by contract but carries no retry metadata, so
+    // give it a default delay instead of dropping the only receipt.
+    const isRetryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
+    const retryAt = result.nextAllowedAt
+      ? new Date(result.nextAllowedAt)
+      : (result.code === 'CONSENT_LOOKUP_FAILED' ? new Date(Date.now() + 15 * 60 * 1000) : null);
+    if (isRetryable && retryAt) {
       try {
         // sms_log.from_phone is NOT NULL — resolve the same location number
         // the immediate send would have used (twilio.js falls back to the
@@ -470,7 +477,7 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
           to_phone: phone,
           message_body: body,
           status: 'scheduled',
-          scheduled_for: new Date(result.nextAllowedAt),
+          scheduled_for: retryAt,
           message_type: 'deposit_receipt',
           metadata: JSON.stringify({
             entry_point: 'estimate_deposit_receipt_requeue',
@@ -489,7 +496,7 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
             }),
           }),
         });
-        logger.info(`[estimate-deposits] deposit receipt re-queued for estimate ${estimateId} (retry at ${result.nextAllowedAt})`);
+        logger.info(`[estimate-deposits] deposit receipt re-queued for estimate ${estimateId} (retry at ${retryAt.toISOString()})`);
         return;
       } catch (requeueErr) {
         logger.error(`[estimate-deposits] deposit receipt re-queue failed for estimate ${estimateId}: ${requeueErr.message}`);

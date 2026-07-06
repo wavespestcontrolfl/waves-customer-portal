@@ -53,17 +53,20 @@ describe('resolveScheduledRecipient', () => {
     )).resolves.toBe('(941) 555-0100');
   });
 
-  test('falls back to the queued number when the customer has no phone or the lookup fails', async () => {
+  test('returns null when the current phone cannot be verified — never the frozen snapshot', async () => {
+    // The snapshot is exactly the staleness the flag exists to prevent —
+    // sending to it under phone_matches_customer trust would be wrong, so
+    // the cron retries the row instead.
     mockCustomerLookup({ phone: '   ' });
     await expect(resolveScheduledRecipient(
       { to_phone: '(941) 555-0100', customer_id: 'cust-1' },
       { refresh_customer_phone: true },
-    )).resolves.toBe('(941) 555-0100');
+    )).resolves.toBeNull();
 
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(resolveScheduledRecipient(
       { to_phone: '(941) 555-0100', customer_id: 'cust-1' },
       { refresh_customer_phone: true },
-    )).resolves.toBe('(941) 555-0100');
+    )).resolves.toBeNull();
   });
 });

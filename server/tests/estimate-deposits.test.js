@@ -759,6 +759,35 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
+  it('requeues on CONSENT_LOOKUP_FAILED with a default delay — a DB blip must not eat the only receipt', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    // CONSENT_LOOKUP_FAILED is retry-advised by contract but carries no
+    // retryable/nextAllowedAt metadata.
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'CONSENT_LOOKUP_FAILED' });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    const before = Date.now();
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({ message_type: 'deposit_receipt', status: 'scheduled' });
+    const scheduledFor = state.smsLogInserts[0].scheduled_for.getTime();
+    expect(scheduledFor).toBeGreaterThanOrEqual(before + 14 * 60 * 1000);
+    expect(scheduledFor).toBeLessThanOrEqual(Date.now() + 16 * 60 * 1000);
+    expect(JSON.parse(state.smsLogInserts[0].metadata).original_failure_code).toBe('CONSENT_LOOKUP_FAILED');
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
   it('converts the originating lead to won when an eligible deposit is recorded', async () => {
     mockIsEstimateAcceptActive.mockReturnValue(true);
     mockConvertLeadFromEvent.mockClear();

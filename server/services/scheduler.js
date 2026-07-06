@@ -43,15 +43,18 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
 // the customer's CURRENT phone at send time — the queued number was frozen at
 // hold time, and the phone_matches_customer trust the cron asserts for
 // customer rows must ride a number that still comes from the customer row,
-// not a snapshot the customer may have since changed.
+// not a snapshot the customer may have since changed. Returns null when the
+// refresh is required but the current phone can't be verified (lookup error
+// or the customer no longer has one) — falling back to the snapshot would
+// reintroduce exactly the staleness the flag exists to prevent, so the cron
+// retries the row instead of sending.
 async function resolveScheduledRecipient(msg, claimMeta) {
   if (claimMeta?.refresh_customer_phone !== true || !msg.customer_id) return msg.to_phone;
   try {
     const freshCustomer = await db('customers').where({ id: msg.customer_id }).first('phone');
-    const freshPhone = String(freshCustomer?.phone || '').trim();
-    return freshPhone || msg.to_phone;
+    return String(freshCustomer?.phone || '').trim() || null;
   } catch {
-    return msg.to_phone; // fall back to the queued number
+    return null;
   }
 }
 
@@ -1555,6 +1558,25 @@ function initScheduledJobs() {
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
+          if (!toPhone) {
+            // Refresh-required row whose current customer phone can't be
+            // verified right now — retry on the bounded attempt rail rather
+            // than sending to the frozen snapshot under customer trust.
+            const completedAt = new Date();
+            if ((Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'scheduled',
+                scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                updated_at: completedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('recipient_refresh_failed_at', ?::timestamptz)", [completedAt]),
+              });
+              logger.warn(`[scheduled-sms] Could not verify current customer phone for ${msg.id}; retrying (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
+            } else {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
+              logger.warn(`[scheduled-sms] Blocked scheduled SMS ${msg.id}: customer phone unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
+            }
+            continue;
+          }
           const smsResult = await sendCustomerMessage({
             to: toPhone,
             body: msg.message_body,
@@ -1644,21 +1666,26 @@ function initScheduledJobs() {
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quiet_hours_held_at', ?::timestamptz, 'quiet_hours_reason', ?)", [completedAt, smsResult.reason || null]),
             });
             logger.info(`[scheduled-sms] Held scheduled SMS ${msg.id} until ${smsResult.nextAllowedAt}`);
-          } else if (smsResult.retryable && smsResult.nextAllowedAt
+          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
-            // Transient provider failure (Twilio 429/5xx/timeout): re-queue
+            // Transient provider failure (Twilio 429/5xx/timeout) or a DB
+            // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
+            // no retry metadata but is retry-advised by contract): re-queue
             // like a quiet-hours hold so the next cron tick retries it,
             // instead of marking it permanently blocked and dropping it
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
             // parked decisions stay parked — we do NOT reopen them here.
+            const retryAt = smsResult.nextAllowedAt
+              ? new Date(smsResult.nextAllowedAt)
+              : new Date(Date.now() + 15 * 60 * 1000);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
-              scheduled_for: new Date(smsResult.nextAllowedAt),
+              scheduled_for: retryAt,
               updated_at: completedAt,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
             });
-            logger.warn(`[scheduled-sms] Provider failure on ${msg.id} (${smsResult.code}); retry at ${smsResult.nextAllowedAt} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
+            logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
