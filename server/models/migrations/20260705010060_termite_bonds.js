@@ -60,16 +60,26 @@ exports.up = async function up(knex) {
   const visits = await knex('scheduled_services')
     .where('status', 'completed')
     .where('service_type', 'ilike', BOND_MATCH)
-    .select('id', 'customer_id', 'service_type', 'completed_at', 'scheduled_date');
+    .select('id', 'customer_id', 'service_type', 'completed_at', 'actual_end_time', 'check_out_time', 'scheduled_date');
   for (const v of visits) {
     const existing = await knex('termite_bonds').where({ scheduled_service_id: v.id }).first('id');
     if (existing) continue;
-    const startedRaw = v.completed_at || v.scheduled_date;
-    if (!startedRaw || !v.customer_id) continue;
-    const started = new Date(startedRaw);
-    if (Number.isNaN(started.getTime())) continue;
+    if (!v.customer_id) continue;
+    // Same rule as the runtime sweep: real completion timestamps get the ET
+    // conversion; the DATE-only scheduled_date fallback is already a calendar
+    // date and must never pass through timezone math (it would shift back a day).
+    const completionTs = v.actual_end_time || v.check_out_time || v.completed_at;
+    let startedEt = null;
+    if (completionTs) {
+      const started = new Date(completionTs);
+      if (!Number.isNaN(started.getTime())) startedEt = etDateString(started);
+    } else if (v.scheduled_date) {
+      startedEt = typeof v.scheduled_date === 'string'
+        ? v.scheduled_date.slice(0, 10)
+        : new Date(v.scheduled_date).toISOString().slice(0, 10);
+    }
+    if (!startedEt) continue;
     const years = termYearsFrom(v.service_type);
-    const startedEt = etDateString(started);
     const [sy, sm, sd] = startedEt.split('-').map(Number);
     const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
     await knex('termite_bonds').insert({

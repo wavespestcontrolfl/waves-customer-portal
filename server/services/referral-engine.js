@@ -390,7 +390,12 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         reward_line: destination === 'account_credit'
           ? `Your $${Math.round(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
           : `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
-        customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/?tab=refer`,
+        // CTA points at the ledger the reward actually landed in: account
+        // credits live on the billing tab, referral balance on the refer tab.
+        cta_label: destination === 'account_credit' ? 'View my account credit' : 'View my referral balance',
+        customer_portal_url: destination === 'account_credit'
+          ? `${FALLBACK_PORTAL_HOME_URL}/?tab=billing`
+          : `${FALLBACK_PORTAL_HOME_URL}/?tab=refer`,
       },
       recipientType: 'referral_promoter',
       recipientId: promoter.id,

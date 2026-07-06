@@ -392,25 +392,37 @@ async function buildServiceLabel(scheduledServiceId, parentName) {
   }
 }
 
-function mergeServiceLabels(existingLabel, nextLabel) {
-  const existing = smsServiceLabelStored(existingLabel);
-  const next = smsServiceLabelStored(nextLabel);
-  if (!existing || existing === 'service') return next || 'service';
-  if (!next || next === 'service') return existing;
+async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }) {
+  // Rebuild the merged label from the PRISTINE service names of every
+  // reminder sharing this customer+slot — never parse a merged label back
+  // apart. Real service names contain both list delimiters (e.g. "Rodent
+  // Trapping, Exclusion & Sanitation Service", "Tree & Shrub Care"), so any
+  // string split corrupts them. Suppressed sibling rows keep their
+  // scheduled_service_id, which joins to the untouched source name;
+  // ar.service_type is only the fallback for legacy rows with no link.
+  const rows = await conn('appointment_reminders as ar')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .orderBy('ar.created_at', 'asc')
+    .select(conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
-  const existingLower = existing.toLowerCase();
-  const nextLower = next.toLowerCase();
-  if (existingLower.includes(nextLower)) return existing;
-  if (nextLower.includes(existingLower)) return next;
-
-  // List-style join (owner call 07-06): split any previously merged label
-  // back into its parts (handles both the current "A & B" form and legacy
-  // "A & B, and C" rows), add the new service, and re-join as
-  // "A, B & C" — commas between all but the last pair. Shared by SMS and
-  // email, so both channels read identically.
-  const parts = existing.split(/\s*(?:,\s*and\s+|,\s+|\s&\s)\s*/).filter(Boolean);
-  if (!parts.some((part) => part.toLowerCase() === nextLower)) parts.push(next);
+  const parts = [];
+  for (const raw of [...rows.map((r) => r.label), nextLabel]) {
+    const label = String(raw || '').trim();
+    if (!label) continue;
+    const lower = label.toLowerCase();
+    // Same containment semantics the pairwise merge had: skip a candidate an
+    // existing part already covers; a candidate that covers existing parts
+    // replaces them.
+    if (parts.some((part) => part.toLowerCase().includes(lower))) continue;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (lower.includes(parts[i].toLowerCase())) parts.splice(i, 1);
+    }
+    parts.push(label);
+  }
+  if (parts.length === 0) return String(nextLabel || '').trim();
   if (parts.length === 1) return parts[0];
+  // List-style join (owner call 07-06): "A, B & C".
   return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
 }
 
@@ -749,7 +761,7 @@ const AppointmentReminders = {
       ])
       .first();
     if (sameAppointment) {
-      const merged = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+      const merged = await buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel: serviceLabel });
       if (merged !== sameAppointment.service_type) {
         await conn('appointment_reminders')
           .where({ id: sameAppointment.id })
@@ -760,7 +772,9 @@ const AppointmentReminders = {
           scheduled_service_id: scheduledServiceId,
           customer_id: customerId,
           appointment_time: apptTime,
-          service_type: merged,
+          // The suppressed row keeps its own pristine label (it never sends;
+          // buildMergedServiceLabel reads per-row names, not the merged one).
+          service_type: serviceLabel,
           source: reminderSource,
           confirmation_sent: true,
           confirmation_sent_at: now,
@@ -848,7 +862,7 @@ const AppointmentReminders = {
           .first();
 
         if (sameAppointment) {
-          const mergedServiceLabel = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+          const mergedServiceLabel = await buildMergedServiceLabel(trx, { customerId, apptTime, nextLabel: serviceLabel });
           if (mergedServiceLabel !== sameAppointment.service_type) {
             await trx('appointment_reminders')
               .where({ id: sameAppointment.id })
@@ -860,7 +874,8 @@ const AppointmentReminders = {
             scheduled_service_id: scheduledServiceId,
             customer_id: customerId,
             appointment_time: apptTime,
-            service_type: mergedServiceLabel,
+            // Pristine per-row label — see buildMergedServiceLabel.
+            service_type: serviceLabel,
             source,
             confirmation_sent: true,
             confirmation_sent_at: now,

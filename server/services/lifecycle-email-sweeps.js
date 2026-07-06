@@ -56,21 +56,33 @@ async function syncTermiteBonds() {
       'scheduled_services.customer_id',
       'scheduled_services.service_type',
       'scheduled_services.completed_at',
+      'scheduled_services.actual_end_time',
+      'scheduled_services.check_out_time',
       'scheduled_services.scheduled_date',
     );
   let inserted = 0;
   for (const v of visits) {
-    const startedRaw = v.completed_at || v.scheduled_date;
-    if (!startedRaw || !v.customer_id) continue;
-    const started = new Date(startedRaw);
-    if (Number.isNaN(started.getTime())) continue;
+    if (!v.customer_id) continue;
+    // Completion timing lives in actual_end_time / check_out_time on the
+    // closeout path (completed_at is often null there). Real timestamps get
+    // the ET-calendar conversion — a visit completed after 8 PM Eastern is
+    // already on the next UTC day. The DATE-only scheduled_date fallback is
+    // already a calendar date: converting it through a timezone would shift
+    // it BACK a day (UTC midnight → 7/8 PM ET the previous evening), so it
+    // is used verbatim.
+    const completionTs = v.actual_end_time || v.check_out_time || v.completed_at;
+    let startedEt = null;
+    if (completionTs) {
+      const started = new Date(completionTs);
+      if (!Number.isNaN(started.getTime())) startedEt = etDateString(started);
+    } else if (v.scheduled_date) {
+      startedEt = typeof v.scheduled_date === 'string'
+        ? v.scheduled_date.slice(0, 10)
+        : new Date(v.scheduled_date).toISOString().slice(0, 10);
+    }
+    if (!startedEt) continue;
     const years = termYearsFrom(v.service_type);
-    // DATE columns must reflect the ET business calendar: a bond visit
-    // completed after 8 PM Eastern has a completed_at that is already the
-    // next UTC day, so UTC ISO slices would store (and later renew) a day
-    // late. Derive the calendar date in America/New_York, then add the term
-    // years with UTC-safe date math (Feb 29 normalizes to Mar 1).
-    const startedEt = etDateString(started);
+    // Add the term years with UTC-safe date math (Feb 29 normalizes to Mar 1).
     const [sy, sm, sd] = startedEt.split('-').map(Number);
     const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
     try {
