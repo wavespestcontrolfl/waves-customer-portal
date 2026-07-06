@@ -14,13 +14,18 @@ tone — warm but no-nonsense. Uses real product names, real science, real
 local references. Avoids generic "we're the best" language — **shows
 expertise instead of claiming it**.
 
-## Positioning
+## Positioning (internal framing — NOT publishable copy)
 
-The most technically knowledgeable, locally rooted pest control and lawn care
-operator in Southwest Florida. Not the cheapest. Not the biggest. The one
-that actually understands the science behind the service — and builds
-long-term protection instead of selling one-time band-aids. WaveGuard =
-comprehensive, tiered home protection (pests, turf, trees).
+Deeply technical, locally rooted pest control and lawn care in Southwest
+Florida. Not the cheapest. Not the biggest. Competes on understanding the
+science behind the service — building long-term protection instead of
+selling one-time band-aids. WaveGuard = comprehensive, tiered home
+protection (pests, turf, trees).
+
+Superlatives ("most", "best", "#1") do not pass the content pipeline's
+claims-ledger validator (`server/services/content/claims-ledger-validator.js`)
+— express this positioning in copy by SHOWING expertise (specific science,
+products, local conditions), never by asserting rank.
 
 ## Non-negotiables
 
@@ -65,11 +70,16 @@ what needs a professional) · environmental impact (honest IPM philosophy).
   pressure; one-time treatments don't hold.
 - "Can't I DIY the lawn?" → SWFL turf needs specific timing, products, and
   rotation protocols that are hard to get right alone.
-- "Why more than the rock-bottom monthly offers?" → Those are typically
-  bait-and-switch lead-gen plays; Waves uses premium products at correct
-  rates and actually solves the problem. (No dollar figures in copy — ever.)
-- "Do I need a WDO inspection?" → Required for most FL real-estate
-  transactions; protects the buyer from hidden termite damage.
+- "Why more than the rock-bottom monthly offers?" → Explain what a rock-
+  bottom price usually can't include — premium products at correct
+  application rates, protocol rotation, time on site — and what Waves does
+  instead. Don't characterize competitors' business practices, and no dollar
+  figures in copy — ever.
+- "Do I need a WDO inspection?" → Lenders (notably VA loans) and many buyers
+  require or expect a WDO report in Florida real-estate transactions; it
+  protects the buyer from hidden termite damage. Don't state it as a blanket
+  legal requirement — Florida law regulates the report when an inspection is
+  performed, it doesn't mandate one for every sale.
 
 **Trust signals:** licensed & insured (FDACS JB351547) · owner-operated, not
 a franchise — you can talk to the owner · science-based (UF/IFAS protocols,
