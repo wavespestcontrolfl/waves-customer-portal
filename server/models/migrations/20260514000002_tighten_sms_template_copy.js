@@ -693,14 +693,8 @@ const TEMPLATES = [
   },
   // reschedule_options_* removed by 20260706000010_sms_template_cleanup.js —
   // their sender was never wired; the rain-out engine owns weather moves.
-  {
-    template_key: 'self_booking_confirmation',
-    name: 'Self-Booking Confirmation (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Your Waves appointment is confirmed for {date}, {time} at {address}. Confirmation: {confirmation_code}.\n\nNeed to change it? Reply RESCHEDULE.',
-    variables: ['first_name', 'date', 'time', 'address', 'confirmation_code'],
-    sort_order: 19,
-  },
+  // self_booking_confirmation removed by 20260706000010_sms_template_cleanup.js —
+  // self-bookings confirm through the shared appointment_confirmation flow.
   {
     template_key: 'appointment_series_rescheduled',
     name: 'Appointment Series Rescheduled',

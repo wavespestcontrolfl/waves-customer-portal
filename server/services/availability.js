@@ -7,7 +7,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { renderSmsTemplate } = require('./sms-template-renderer');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 function bookingError(message, code, statusCode = 409) {
@@ -332,56 +331,24 @@ class AvailabilityEngine {
     const notify = async () => {
     try {
       const AppointmentReminders = require('./appointment-reminders');
+      // Confirms through the shared appointment_confirmation flow
+      // (prefs/channel-aware, email fallback, reschedule link) — the bespoke
+      // self_booking_confirmation template was retired 2026-07-06.
       await AppointmentReminders.registerAppointment(
         scheduled.id,
         customerId,
         `${dateStr}T${startTime || '08:00'}`,
         serviceType,
         'booking_new',
-        { sendConfirmation: false },
+        { sendConfirmation: true },
       );
     } catch (err) {
       logger.error(`[availability] Appointment reminder registration failed for ${scheduled.id}: ${err.message}`);
     }
 
-    // Send SMS notifications
+    // Customer confirmation is handled by registerAppointment above.
     try {
-      const TwilioService = require('./twilio');
       const dateLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
-      const timeLabel = `${this.minToTime12(this.timeToMin(startTime))} - ${this.minToTime12(this.timeToMin(endTime))}`;
-      const addressLabel = `${customer.address_line1}, ${customer.city}`;
-      const body = await renderSmsTemplate(
-        'self_booking_confirmation',
-        {
-          first_name: customer.first_name || 'there',
-          date: dateLabel,
-          time: timeLabel,
-          address: addressLabel,
-          confirmation_code: confCode,
-        },
-        { workflow: 'self_booking_confirmation', entity_type: 'scheduled_service', entity_id: scheduled.id }
-      );
-      if (!body) {
-        logger.warn(`[availability] self_booking_confirmation template missing/disabled for customer ${customerId}`);
-      } else {
-        // Customer confirmation
-        const smsResult = await sendCustomerMessage({
-          to: customer.phone,
-          body,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'appointment',
-          customerId: customer.id,
-          appointmentId: scheduled.id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'availability_self_book',
-          metadata: { original_message_type: 'booking_confirmation' },
-        });
-        if (!smsResult.sent) {
-          logger.warn(`Booking confirmation SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-        }
-      }
-
       // Adam notification
       if (process.env.ADAM_PHONE) {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,

@@ -17,6 +17,7 @@ const EXPECTED_REMOVED = [
   'reschedule_options_weather',
   'reschedule_options_access',
   'reschedule_options_general',
+  'self_booking_confirmation',
 ];
 
 const EXPECTED_REACTIVATED = [

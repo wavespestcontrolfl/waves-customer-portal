@@ -43,6 +43,10 @@ const REMOVED_TEMPLATE_KEYS = [
   'reschedule_options_weather',
   'reschedule_options_access',
   'reschedule_options_general',
+  // Self-bookings now confirm through the shared appointment_confirmation
+  // flow (registerAppointment sendConfirmation) — prefs/channel-aware with
+  // email fallback, replacing the bespoke code/address text.
+  'self_booking_confirmation',
 ];
 
 const REACTIVATED_TEMPLATE_KEYS = [

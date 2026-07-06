@@ -7,9 +7,6 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { renderSmsTemplate } = require('../services/sms-template-renderer');
-const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
@@ -1496,74 +1493,30 @@ async function createSelfBooking(payload = {}) {
                 ? row.scheduled_date.toISOString().slice(0, 10)
                 : String(row.scheduled_date || '').slice(0, 10));
         const windowStart = String(row.window_start || slot_start || '08:00').slice(0, 5);
+        // The primary visit confirms through the shared appointment_confirmation
+        // flow (prefs/channel-aware, email fallback, reschedule link) — the
+        // bespoke self_booking_confirmation template was retired 2026-07-06.
+        // Follow-up series rows stay confirmation-free as before.
         await AppointmentReminders.registerAppointment(
           row.id,
           custId,
           `${scheduledDate}T${windowStart}`,
           row.service_type || resolvedServiceType,
           row.id === serviceRow.id ? 'booking_new' : 'booking_followup',
-          { sendConfirmation: false },
+          { sendConfirmation: row.id === serviceRow.id },
         );
       }
     } catch (err) {
       logger.error(`[booking:confirm] Appointment reminder registration failed for ${serviceRow.id}: ${err.message}`);
     }
 
-    // SMS notifications (best-effort)
+    // Customer confirmation is handled by registerAppointment above
+    // (sendConfirmation: true on the primary row). Internal alert only here.
     try {
       const dateLabel = new Date(slotDateStr + 'T12:00:00').toLocaleDateString('en-US', {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
-      // {time} quotes the 2-hour arrival promise. endMin is the job-duration
-      // block that sized the scheduled_services window above — never the
-      // customer-facing window (see sms-time-format).
-      const arrivalEndLabel = minToTime12((timeToMin(slot_start) + ARRIVAL_WINDOW_MINUTES) % (24 * 60));
-      const timeLabel = `${startLabel} - ${arrivalEndLabel}`;
-      // line1 is street-only once units live in address_line2 — the
-      // confirmation must still show the apartment the visit is booked for,
-      // including a unit that only rides on this visit (no-backfill paths).
-      const addressLabel = `${[customer.address_line1, customer.address_line2 || visitUnit].filter(Boolean).join(', ')}, ${customer.city}`;
-      const smsBody = await renderSmsTemplate(
-        'self_booking_confirmation',
-        {
-          first_name: customer.first_name || 'there',
-          date: dateLabel,
-          time: timeLabel,
-          address: addressLabel,
-          confirmation_code: confCode,
-        },
-        { workflow: 'self_booking_confirmation', entity_type: 'scheduled_service', entity_id: serviceRow.id }
-      );
-      if (!smsBody) {
-        logger.warn(`[booking:confirm] self_booking_confirmation template missing/disabled — skipping SMS for customer ${custId}`);
-      }
-
-      // Honor the customer's account-level New Appointment Confirmation channel
-      // (sms | email | both). Default 'sms' keeps the exact prior send.
-      await AppointmentReminders.deliverConfirmationByChannel({
-        customerId: custId,
-        scheduledServiceId: serviceRow?.id,
-        serviceLabel: resolvedServiceType,
-        smsAttempt: async () => {
-          if (!smsBody) return false;
-          const customerSms = await sendCustomerMessage({
-            to: customer.phone,
-            body: smsBody,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'appointment_confirmation',
-            customerId: custId,
-            appointmentId: serviceRow?.id,
-            identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'booking_confirmation', source: source || 'portal' },
-          });
-          if (customerSms && !customerSms.sent) {
-            logger.warn(`[booking:confirm] Customer SMS blocked/failed for customer ${custId}: ${customerSms.code || customerSms.reason || 'unknown'}`);
-          }
-          return !!customerSms?.sent;
-        },
-      });
 
       if (process.env.ADAM_PHONE) {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
