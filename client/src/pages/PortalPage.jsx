@@ -4311,7 +4311,7 @@ function PillSelector({ options, value, onChange, multiple = false }) {
             letterSpacing: 0,
             boxShadow: 'none',
             background: active ? '#F8FCFE' : '#fff',
-            color: active ? B.blueDeeper : '#6B7280',
+            color: active ? B.blueDeeper : ESTIMATE_MUTED,
             border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
           }}>{o.label}</button>
         );
@@ -4442,7 +4442,7 @@ function ServicePrefsSection() {
                 height: 34,
                 borderRadius: 8,
                 background: on ? '#F8FCFE' : '#FAF8F3',
-                color: on ? B.blueDeeper : '#6B7280',
+                color: on ? B.blueDeeper : ESTIMATE_MUTED,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',

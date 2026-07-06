@@ -77,6 +77,7 @@
 // - Dispute webhook (dispute.created): must flag the customer for
 //   the operator to review before any further charges fire.
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
@@ -202,8 +203,8 @@ function annualPrepayCalloutText(prepay) {
 }
 
 const subtlePanel = {
-  background: '#FAF8F3',
-  border: '1px solid #E7E2D7',
+  background: CUSTOMER_SURFACE.page,
+  border: `1px solid ${CUSTOMER_SURFACE.border}`,
   borderRadius: 8,
 };
 
@@ -226,7 +227,7 @@ function cityStateZip(customer = {}) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
     due: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
     overdue: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
     secure: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
@@ -548,7 +549,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 padding: '12px 14px',
               },
               '.Input:focus': {
-                border: '1px solid #1B2C5B',
+                border: `1px solid ${CUSTOMER_SURFACE.text}`,
                 boxShadow: '0 0 0 3px rgba(27,44,91,0.18)',
               },
               '.Label': {
@@ -1063,8 +1064,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                   alignItems: 'center',
                   justifyContent: 'center',
                   flexShrink: 0,
-                  background: active ? '#FFFFFF' : '#FAF8F3',
-                  border: '1px solid #E7E2D7',
+                  background: active ? '#FFFFFF' : CUSTOMER_SURFACE.page,
+                  border: `1px solid ${CUSTOMER_SURFACE.border}`,
                   color: active ? COLORS.blueDeeper : 'var(--text-muted)',
                 }}>
                   <Icon name={method.icon} size={17} strokeWidth={2} />
@@ -1110,8 +1111,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       <div data-glass-clear="" style={{
         padding: 16,
         borderRadius: 8,
-        background: '#FAF8F3',
-        border: '1px solid #E7E2D7',
+        background: CUSTOMER_SURFACE.page,
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
         fontFamily: FONTS.mono,
         fontSize: 14,
       }}>
@@ -1780,8 +1781,8 @@ export default function PayPageV2() {
                     color: 'var(--text-muted)',
                     fontWeight: 850,
                     textTransform: 'uppercase',
-                    background: '#FAF8F3',
-                    borderBottom: '1px solid #E7E2D7',
+                    background: CUSTOMER_SURFACE.page,
+                    borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                   }}>
                     <div>Description</div>
                     <div style={{ textAlign: 'right' }}>Qty</div>

@@ -2065,7 +2065,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
           <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700, marginBottom: 2 }}>
+            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
             <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
