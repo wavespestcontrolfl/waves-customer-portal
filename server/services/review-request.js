@@ -831,6 +831,15 @@ const ReviewService = {
 
     await db("review_requests").where({ id: request.id }).update(updates);
 
+    // Referral invite on the warmest moment we have (owner trigger call
+    // 2026-07-06): a promoter-grade rating just came in. Fire-and-forget
+    // and once-per-customer-ever (the helper's idempotency key is
+    // customer-scoped), so repeat promoters aren't re-invited.
+    if (isPromoter && request.customer_id) {
+      const { sendReferralInviteEmail } = require('./referral-invite-email');
+      void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'positive_review' });
+    }
+
     // Also record in satisfaction_responses for backward compat
     try {
       const existing = await db("satisfaction_responses")

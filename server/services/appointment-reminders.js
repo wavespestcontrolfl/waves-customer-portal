@@ -403,9 +403,15 @@ function mergeServiceLabels(existingLabel, nextLabel) {
   if (existingLower.includes(nextLower)) return existing;
   if (nextLower.includes(existingLower)) return next;
 
-  return /(?:\s&\s|,\s)/.test(existing)
-    ? `${existing}, and ${next}`
-    : `${existing} & ${next}`;
+  // List-style join (owner call 07-06): split any previously merged label
+  // back into its parts (handles both the current "A & B" form and legacy
+  // "A & B, and C" rows), add the new service, and re-join as
+  // "A, B & C" — commas between all but the last pair. Shared by SMS and
+  // email, so both channels read identically.
+  const parts = existing.split(/\s*(?:,\s*and\s+|,\s+|\s&\s)\s*/).filter(Boolean);
+  if (!parts.some((part) => part.toLowerCase() === nextLower)) parts.push(next);
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
 }
 
 function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
@@ -1561,6 +1567,7 @@ const AppointmentReminders = {
           'scheduled_services.customer_id',
           'scheduled_services.scheduled_date',
           'scheduled_services.window_start',
+          'scheduled_services.service_type',
           'technicians.name as tech_name',
         )
         .first();
@@ -1613,6 +1620,26 @@ const AppointmentReminders = {
         // and 'appointment_no_show' is not a registered MessagePurpose).
       }, 'appointment_no_show', 'appointment_cancellation');
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      // Email twin (appointment.no_show template) — second channel like the
+      // other appointment notices. Best-effort: an email failure never
+      // fails the SMS leg or the status flip. `when` is the same composed
+      // same-day/back-dated phrase the SMS used; the fee outcome comes
+      // from the dispatch route (options.feeCharged) so the charge line
+      // is always truthful.
+      try {
+        const AppointmentEmail = require('./appointment-email');
+        await AppointmentEmail.sendAppointmentNoShowEmail({
+          customerId: svc.customer_id,
+          scheduledServiceId,
+          serviceLabel: svc.service_type,
+          missedWhen: when,
+          noShowReason: options.noShowReason || '',
+          feeCharged: options.feeCharged === true,
+        });
+      } catch (e) {
+        logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
+      }
 
       return { customer_id: svc.customer_id };
     } catch (err) {

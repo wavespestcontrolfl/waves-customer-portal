@@ -1718,10 +1718,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       // One-time card-on-file hold: a no-show triggers the flat fee against the
       // saved card (dark until ONE_TIME_CARD_HOLD; no-op when no hold exists).
-      // Best-effort — never fail the committed status flip.
+      // Best-effort — never fail the committed status flip. The outcome feeds
+      // the customer notice below so its charge line is truthful.
+      let noShowFeeCharged = false;
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+        const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+        noShowFeeCharged = feeResult?.charged === true;
       } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
 
       // Notify the customer we missed them and invite a reschedule.
@@ -1731,6 +1734,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleNoShow(svc.id, {
           sendNotification: notifyCustomer !== false,
+          feeCharged: noShowFeeCharged,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
 

@@ -7690,6 +7690,30 @@ router.put('/:token/accept', async (req, res, next) => {
       void sendNewRecurringWelcome(annualPrepayConversion.welcomeSms)
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
     }
+    // "You're booked — here's what happens next" onboarding email
+    // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
+    // idempotent per estimate so an accept retry can't double-send. The
+    // earliest visit the accept flow scheduled (if any) supplies the
+    // appointment line; the template degrades cleanly when none exists.
+    if (customerId) {
+      const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+      const firstAcceptedAppointment = [...acceptedAppointmentsToRegister].sort((a, b) => {
+        const ad = String(a?.scheduled_date || '');
+        const bd = String(b?.scheduled_date || '');
+        return ad === bd
+          ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
+          : ad.localeCompare(bd);
+      })[0] || null;
+      void sendEstimateAcceptedOnboarding({
+        customerId,
+        estimateId: estimate.id,
+        serviceLabel: firstAcceptedAppointment?.service_type
+          || invoiceServiceLabel
+          || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
+          || 'service',
+        appointment: firstAcceptedAppointment,
+      });
+    }
     if (customerId) {
       try {
         await markLinkedLeadEstimateAccepted({

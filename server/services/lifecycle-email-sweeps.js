@@ -1,0 +1,152 @@
+/**
+ * Daily lifecycle email sweeps (owner directives 2026-07-06). Runs from
+ * the index.js cron fleet (GATE_CRON_JOBS + runExclusive), 10:05 AM ET.
+ *
+ * Bond renewal (termite.bond_renewal template):
+ *   1. Sync: every COMPLETED visit whose service_type matches
+ *      "Termite Bond Service" gets a termite_bonds row (term parsed
+ *      from "(N-Year Term)", default 1; renews_at = completion + term).
+ *      Self-healing — no completion-path hooks required.
+ *   2. Notify: active bonds entering the 30-day pre-renewal window get
+ *      ONE email (renewal_notified_at stamps the send; the send itself
+ *      is also idempotent per bond + renewal date).
+ *
+ * The referral invite deliberately does NOT live here — it fires on
+ * positive review submission (review-request.js submitRating), the
+ * warmest moment, per the owner's trigger call.
+ */
+
+const db = require('../models/db');
+const logger = require('./logger');
+
+const BOND_MATCH = '%Termite Bond Service%';
+const RENEWAL_WINDOW_DAYS = 30;
+const GRACE_DAYS = 7; // still notify up to a week past renews_at (missed runs)
+
+const FALLBACK_PORTAL_HOME_URL = 'https://portal.wavespestcontrol.com';
+
+function termYearsFrom(serviceType) {
+  const m = String(serviceType || '').match(/(\d+)\s*-\s*Year/i);
+  return m ? Number(m[1]) : 1;
+}
+
+function displayDate(d) {
+  // DATE columns arrive as 'YYYY-MM-DD' (or Date at UTC midnight); parsing
+  // those through a TZ-aware formatter shifts them back a day in ET — the
+  // classic date-only trap. Format from the parts instead.
+  const s = d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  return `${MONTHS[Number(m[2]) - 1]} ${Number(m[3])}, ${Number(m[1])}`;
+}
+
+// Insert termite_bonds rows for completed bond visits that don't have one.
+async function syncTermiteBonds() {
+  if (!(await db.schema.hasTable('termite_bonds'))) return { inserted: 0 };
+  const visits = await db('scheduled_services')
+    .where('scheduled_services.status', 'completed')
+    .where('scheduled_services.service_type', 'ilike', BOND_MATCH)
+    .leftJoin('termite_bonds', 'termite_bonds.scheduled_service_id', 'scheduled_services.id')
+    .whereNull('termite_bonds.id')
+    .select(
+      'scheduled_services.id',
+      'scheduled_services.customer_id',
+      'scheduled_services.service_type',
+      'scheduled_services.completed_at',
+      'scheduled_services.scheduled_date',
+    );
+  let inserted = 0;
+  for (const v of visits) {
+    const startedRaw = v.completed_at || v.scheduled_date;
+    if (!startedRaw || !v.customer_id) continue;
+    const started = new Date(startedRaw);
+    if (Number.isNaN(started.getTime())) continue;
+    const years = termYearsFrom(v.service_type);
+    const renews = new Date(started);
+    renews.setFullYear(renews.getFullYear() + years);
+    try {
+      await db('termite_bonds').insert({
+        customer_id: v.customer_id,
+        scheduled_service_id: v.id,
+        service_type: v.service_type,
+        term_years: years,
+        started_at: started.toISOString().slice(0, 10),
+        renews_at: renews.toISOString().slice(0, 10),
+        status: 'active',
+      });
+      inserted += 1;
+    } catch (e) {
+      // Unique race with a concurrent run — fine, the row exists.
+      logger.warn(`[lifecycle-sweeps] bond insert skipped for visit ${v.id}: ${e.message}`);
+    }
+  }
+  if (inserted) logger.info(`[lifecycle-sweeps] synced ${inserted} new termite bond(s)`);
+  return { inserted };
+}
+
+async function runBondRenewalSweep() {
+  if (!(await db.schema.hasTable('termite_bonds'))) return { sent: 0 };
+  await syncTermiteBonds();
+
+  const today = new Date();
+  const windowEnd = new Date(today.getTime() + RENEWAL_WINDOW_DAYS * 86400000);
+  const graceStart = new Date(today.getTime() - GRACE_DAYS * 86400000);
+
+  const due = await db('termite_bonds')
+    .where('termite_bonds.status', 'active')
+    .whereNull('termite_bonds.renewal_notified_at')
+    .where('termite_bonds.renews_at', '<=', windowEnd.toISOString().slice(0, 10))
+    .where('termite_bonds.renews_at', '>=', graceStart.toISOString().slice(0, 10))
+    .join('customers', 'customers.id', 'termite_bonds.customer_id')
+    .select(
+      'termite_bonds.*',
+      'customers.first_name',
+      'customers.email',
+    );
+
+  let sent = 0;
+  for (const bond of due) {
+    const email = String(bond.email || '').trim();
+    if (!email || !email.includes('@')) {
+      logger.info(`[lifecycle-sweeps] bond ${bond.id}: no usable email; skipping`);
+      continue;
+    }
+    try {
+      const EmailTemplateLibrary = require('./email-template-library');
+      await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'termite.bond_renewal',
+        to: email,
+        payload: {
+          first_name: String(bond.first_name || '').trim() || 'there',
+          bond_term: bond.service_type,
+          renewal_date: displayDate(bond.renews_at),
+          renewal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
+          customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
+          company_phone: '(941) 297-5749',
+        },
+        recipientType: 'customer',
+        recipientId: bond.customer_id,
+        idempotencyKey: `termite.bond_renewal:${bond.id}:${String(bond.renews_at).slice(0, 10)}`,
+        triggerEventId: `termite.bond_renewal:${bond.id}`,
+        categories: ['termite_bond_renewal'],
+      });
+      await db('termite_bonds').where({ id: bond.id }).update({
+        renewal_notified_at: new Date(),
+        updated_at: new Date(),
+      });
+      sent += 1;
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] bond renewal email failed for bond ${bond.id}: ${err.message}`);
+    }
+  }
+  if (sent) logger.info(`[lifecycle-sweeps] sent ${sent} bond renewal notice(s)`);
+  return { sent };
+}
+
+async function runDailySweeps() {
+  const bond = await runBondRenewalSweep();
+  return { bondRenewalsSent: bond.sent };
+}
+
+module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, displayDate } };
