@@ -202,6 +202,13 @@ const CHANNEL_PREF_KEYS = new Set([
 
 const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email' };
 
+// An unset seasonal channel means 'both' (it has two real senders), while the
+// appointment channels default to 'sms' — the change log must compare against
+// the same default the payload displays or first-time changes mislabel.
+function channelFallbackFor(key) {
+  return key === 'seasonalTipsChannel' ? 'both' : 'sms';
+}
+
 const DB_FIELD_BY_PREF = {
   appointmentConfirmation: 'appointment_confirmation',
   serviceReminder72h: 'service_reminder_72h',
@@ -227,7 +234,7 @@ const DB_FIELD_BY_PREF = {
 
 function prefDisplayValue(key, value) {
   if (key === 'billingEmail' || key === 'billingContactName') return value || 'Not set';
-  if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value)];
+  if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value, channelFallbackFor(key))];
   return value === false ? 'Off' : 'On';
 }
 
@@ -241,7 +248,7 @@ function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, optio
     const oldRaw = dbField ? before?.[dbField] : undefined;
     let oldValue;
     if (key === 'billingEmail' || key === 'billingContactName') oldValue = oldRaw || '';
-    else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw);
+    else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw, channelFallbackFor(key));
     else oldValue = oldRaw !== false;
     const newValue = afterPrefs?.[key];
     if (prefDisplayValue(key, oldValue) === prefDisplayValue(key, newValue)) continue;

@@ -928,7 +928,24 @@ const TwilioService = {
     // the SMS leg specifically (NULL/'both'/'sms' all keep it). 'email' is
     // always an explicit portal choice — migration 20260706001000 nulled the
     // inert 'email' column default that predated any UI for this preference.
-    if (prefs?.seasonal_channel === 'email') return;
+    // The portal stores this account-level choice on the primary profile's
+    // row, so a secondary service property resolves the channel from the
+    // account primary (mirrors appointment-reminders getReminderPrefs).
+    let channelPrefs = prefs;
+    if (customer.is_primary_profile !== true && customer.account_id) {
+      const primary = await db("customers")
+        .where({ account_id: customer.account_id, is_primary_profile: true })
+        .first("id")
+        .catch(() => null);
+      if (primary && String(primary.id) !== String(customerId)) {
+        const ownerPrefs = await db("notification_prefs")
+          .where({ customer_id: primary.id })
+          .first()
+          .catch(() => null);
+        if (ownerPrefs) channelPrefs = ownerPrefs;
+      }
+    }
+    if (channelPrefs?.seasonal_channel === 'email') return;
 
     const body =
       typeof smsTemplatesRouter.getTemplate === "function"

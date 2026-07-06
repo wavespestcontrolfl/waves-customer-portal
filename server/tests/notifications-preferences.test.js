@@ -157,6 +157,39 @@ describe('notification preference updates', () => {
     }]);
   });
 
+  test('compares seasonal channel changes against the both default, not sms', () => {
+    // Unset column → 'Text & Email' baseline: narrowing to Email logs the
+    // real prior state instead of pretending the customer was on Text.
+    expect(preferenceChangeItems(
+      { seasonalTipsChannel: 'email' },
+      { seasonal_channel: null },
+      { seasonalTipsChannel: 'email' },
+      { scope: 'Account' },
+    )).toEqual([{
+      key: 'seasonalTipsChannel',
+      label: 'Seasonal Lawn Tips — Delivery',
+      oldValue: 'Text & Email',
+      newValue: 'Email',
+      scope: 'Account',
+    }]);
+
+    // Unset → 'sms' IS a change (both → Text) and must produce an item.
+    expect(preferenceChangeItems(
+      { seasonalTipsChannel: 'sms' },
+      { seasonal_channel: null },
+      { seasonalTipsChannel: 'sms' },
+      { scope: 'Account' },
+    )).toHaveLength(1);
+
+    // Unset → 'both' is a no-op display-wise: no change-log item.
+    expect(preferenceChangeItems(
+      { seasonalTipsChannel: 'both' },
+      { seasonal_channel: null },
+      { seasonalTipsChannel: 'both' },
+      { scope: 'Account' },
+    )).toEqual([]);
+  });
+
   test('labels a 72-hour reminder toggle for account.updated emails', () => {
     const items = preferenceChangeItems(
       { serviceReminder72h: false },

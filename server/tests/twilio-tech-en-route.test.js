@@ -532,6 +532,29 @@ describe("TwilioService legacy customer SMS helpers", () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test("sendSeasonalAlert honors the account primary profile's email-only choice for a secondary property", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({
+        id: "cust-2",
+        first_name: "Sam",
+        phone: "+15551112222",
+        account_id: "acct-1",
+        is_primary_profile: false,
+      }),
+    ).mockReturnValueOnce(
+      firstQuery({ seasonal_tips: true, sms_enabled: true, seasonal_channel: null }),
+    ).mockReturnValueOnce(
+      firstQuery({ id: "primary-1" }),
+    ).mockReturnValueOnce(
+      firstQuery({ seasonal_channel: "email" }),
+    );
+
+    const result = await TwilioService.sendSeasonalAlert("cust-2", "Mosquitoes", "Check standing water.");
+
+    expect(result).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test("sendSeasonalAlert keeps the SMS leg for both/sms/unset delivery channels", async () => {
     for (const seasonal_channel of ["both", "sms", null]) {
       jest.clearAllMocks();
