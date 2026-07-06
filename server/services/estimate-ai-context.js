@@ -385,6 +385,17 @@ async function searchKnowledgeBase(db, terms) {
       .where(function activeKnowledge() {
         this.where({ active: true }).orWhereNull('active');
       })
+      // Wiki-sync MIRRORS inherit the wiki's review gate: a KB row that
+      // mirrors an untrusted (red/blocked) wiki page must not reach the
+      // customer-facing estimate context through this branch either.
+      // Curated articles that are merely LINKED to a wiki page (createLink
+      // also sets wiki_entry_id) are not mirrors and stay visible.
+      .whereNot(function untrustedWikiMirror() {
+        this.where('source', 'wiki-sync').whereIn(
+          'wiki_entry_id',
+          db('knowledge_entries').select('id').whereNotIn('review_status', require('./agronomic-wiki').TRUSTED_STATUSES),
+        );
+      })
       .where(function relevantKnowledge() {
         for (const term of terms) {
           const like = `%${term}%`;
@@ -415,6 +426,9 @@ async function searchAgronomicWiki(db, terms) {
   if (!db || !terms.length) return [];
   try {
     const rows = await db('knowledge_entries')
+      // Estimate AI answers are customer-facing — only trusted pages
+      // (review_status auto/approved) may feed them.
+      .whereIn('review_status', require('./agronomic-wiki').TRUSTED_STATUSES)
       .where(function freshWiki() {
         this.where({ stale_flag: false }).orWhereNull('stale_flag');
       })

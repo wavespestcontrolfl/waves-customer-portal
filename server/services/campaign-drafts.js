@@ -6,7 +6,7 @@
  * owner approval in the drafts queue. The only send path is the operator's
  * explicit approve/revise click on /api/admin/drafts, which runs the full
  * messaging policy chain (marketing consent, seasonal_tips/sms_enabled prefs,
- * quiet hours, suppression).
+ * suppression).
  *
  * Gate: GATE_CAMPAIGN_DRAFTS (config/feature-gates.js `campaignDrafts`),
  * default OFF everywhere. Gate off = shadow mode: the generator computes the

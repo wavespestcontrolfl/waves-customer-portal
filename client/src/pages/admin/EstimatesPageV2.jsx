@@ -155,12 +155,7 @@ function summarizeEstimateSend(data) {
   return parts.join(" / ");
 }
 
-function isQuietHoursEstimateSend(data) {
-  const message = String(data?.channels?.sms?.error || data?.error || "");
-  return /quiet-hours|quiet hours|federal holidays/i.test(message);
-}
-
-async function sendEstimateFromPipeline(id, sendMethod = "both", options = {}) {
+async function sendEstimateFromPipeline(id, sendMethod = "both") {
   const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
     method: "POST",
     headers: {
@@ -169,7 +164,6 @@ async function sendEstimateFromPipeline(id, sendMethod = "both", options = {}) {
     },
     body: JSON.stringify({
       sendMethod,
-      quietHoursOverride: options.quietHoursOverride === true,
       idempotencyKey:
         globalThis.crypto?.randomUUID?.() ||
         `estimate-send-${Date.now()}-${Math.random()}`,
@@ -177,12 +171,6 @@ async function sendEstimateFromPipeline(id, sendMethod = "both", options = {}) {
   });
   const data = await r.json().catch(() => ({}));
   const summary = summarizeEstimateSend(data);
-  if (!options.quietHoursOverride && isQuietHoursEstimateSend(data)) {
-    const retry = window.confirm(`${summary}\n\nSend the SMS now anyway?`);
-    if (retry) {
-      return sendEstimateFromPipeline(id, "sms", { quietHoursOverride: true });
-    }
-  }
   if (!r.ok) throw new Error(summary || `HTTP ${r.status}`);
   if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
   return data;

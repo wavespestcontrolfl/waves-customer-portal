@@ -33,22 +33,6 @@ const { customerConvertedSince } = require("./estimate-conversion-guard");
 
 const TERMINAL_STATUSES = new Set(["declined", "accepted", "expired", "void"]);
 
-// 9a–5p America/New_York. Per Adam: never text a customer outside normal
-// business hours. Cron runs every 2h; sends blocked outside the window
-// will be re-evaluated at the next cron tick and fire then.
-function isQuietHours(now = new Date()) {
-  const hour = parseInt(
-    new Intl.DateTimeFormat("en-US", {
-      hour: "2-digit",
-      hour12: false,
-      timeZone: "America/New_York",
-    }).format(now),
-    10,
-  );
-  if (Number.isNaN(hour)) return false; // fail open — better to send than stall
-  return hour < 9 || hour >= 17;
-}
-
 // Engagement signal: if the customer opened the estimate within the last N
 // hours (default 2), skip the scheduled nudge. They're thinking about it
 // right now and don't need a poke.
@@ -97,7 +81,6 @@ async function hasRepliedRecently(est, days = 14) {
 async function safetyGate(est, now = new Date()) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
-  if (isQuietHours(now)) return { skip: true, reason: "quiet-hours" };
   if (wasRecentlyOpened(est, 2, now.getTime()))
     return { skip: true, reason: "recently-opened" };
   // Conversion guard: the customer already paid an invoice, booked an

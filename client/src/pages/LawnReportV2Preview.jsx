@@ -6,6 +6,7 @@
 
 import { useState } from 'react';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import {
   LawnSnapshotHero,
   LawnInsightCards,
@@ -198,7 +199,7 @@ export default function LawnReportV2Preview() {
     <div style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: '#3F4A65' }}>
       <header style={{ background: COLORS.white, borderBottom: `1px solid ${BORDER}`, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontFamily: FONTS.display, fontSize: 22, color: TEXT, letterSpacing: '0.01em' }}>Waves Pest Control &amp; Lawn</span>
-        <span style={{ fontSize: 12, color: '#6B7280' }}>Lawn Report V2 · preview</span>
+        <span style={{ fontSize: 12, color: CUSTOMER_SURFACE.muted }}>Lawn Report V2 · preview</span>
       </header>
 
       <div style={{ maxWidth: 720, margin: '0 auto', padding: '12px 16px 0', display: 'flex', gap: 8 }}>

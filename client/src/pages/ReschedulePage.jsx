@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -32,7 +33,7 @@ const S = {
   softBorder: '#CFE7F5',
   text: '#1B2C5B',
   body: '#3F4A65',
-  muted: '#6B7280',
+  muted: CUSTOMER_SURFACE.muted,
 };
 
 const PRIMARY_CTA = {

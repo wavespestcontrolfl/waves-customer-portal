@@ -210,6 +210,7 @@ function isServiceContactRole(role) {
 
 module.exports = {
   SERVICE_CONTACT_COLUMNS,
+  firstNameFrom,
   getPrimaryContact,
   getServiceContact,
   getServiceContactSlots,

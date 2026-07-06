@@ -70,6 +70,10 @@ function intervalPriceFromMonthly(monthlyAmount, frequencyKey) {
   return roundMoney(Number(monthlyAmount || 0) * billingIntervalMonthsForFrequencyKey(frequencyKey));
 }
 
+function intervalPriceFromAnnual(annualAmount, frequencyKey) {
+  return roundMoney((Number(annualAmount || 0) * billingIntervalMonthsForFrequencyKey(frequencyKey)) / 12);
+}
+
 function parseEstimateData(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -193,6 +197,7 @@ function displayForFrequencyKey(key) {
 
 function resolveBillingCadence({
   monthlyRate,
+  annualRate,
   frequencyKey,
   estimateData,
   fallbackFrequencyKey = 'monthly',
@@ -202,7 +207,20 @@ function resolveBillingCadence({
     || normalizeFrequencyKey(fallbackFrequencyKey)
     || 'monthly';
   const display = displayForFrequencyKey(normalized);
-  const amount = intervalPriceFromMonthly(monthlyRate, normalized);
+  // The engine's annual is the exact plan price (quarterly $392 = 4 x $98);
+  // the monthly is its rounded display ($32.67). Deriving the interval charge
+  // from the rounded monthly overbills by cents (32.67 * 3 = 98.01 vs the
+  // quoted 98.00), so when a caller supplies an annual that corresponds to
+  // this monthly (±$0.50 — a diverging annual is not this plan's recurring
+  // annual), the interval charge derives from the annual instead. Monthly
+  // cadence is unchanged either way: round(annual / 12) IS the rounded
+  // monthly the customer was quoted.
+  const annual = Number(annualRate || 0);
+  const monthly = Number(monthlyRate || 0);
+  const annualCorresponds = annual > 0 && monthly > 0 && Math.abs(annual - monthly * 12) <= 0.5;
+  const amount = annualCorresponds
+    ? intervalPriceFromAnnual(annual, normalized)
+    : intervalPriceFromMonthly(monthlyRate, normalized);
 
   return {
     frequencyKey: normalized,
@@ -224,6 +242,7 @@ module.exports = {
   displayForFrequencyKey,
   frequencyKeyFromVisitsPerYear,
   inferFrequencyKeyFromEstimateData,
+  intervalPriceFromAnnual,
   intervalPriceFromMonthly,
   normalizeFrequencyKey,
   parseEstimateData,
