@@ -33,7 +33,7 @@
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
 import { FONTS } from '../theme-brand';
-import { useGlassProGate } from '../components/estimate/glass/EstimateGlassTheme';
+import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -110,8 +110,9 @@ function StatusPill({ tone = 'neutral', children }) {
     neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
   };
   const t = tones[tone] || tones.neutral;
+  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
   return (
-    <span style={{
+    <span {...glassClear} style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 6,
@@ -197,7 +198,8 @@ function SuccessCheck({ size = 56 }) {
 
 export default function ReceiptPage() {
   // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
-  useGlassProGate();
+  // Native data-glass markup — no classify() walker on this page.
+  useGlassSurface(glassParamRequested(), 'pro');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -501,7 +503,7 @@ export default function ReceiptPage() {
             <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
           </div>
 
-          <div style={{
+          <div data-glass-clear="" style={{
             ...subtlePanel,
             padding: 18,
             marginBottom: 20,
@@ -519,7 +521,7 @@ export default function ReceiptPage() {
                 {statusDetail}
               </div>
             </div>
-            <span style={{
+            <span data-glass="soft" style={{
               width: 42,
               height: 42,
               borderRadius: 8,
@@ -597,7 +599,7 @@ export default function ReceiptPage() {
             <div style={{ marginBottom: 20 }}>
               <div style={{ ...eyebrow, marginBottom: 8 }}>Receipt items</div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                <div style={{
+                <div data-glass-clear="" style={{
                   display: 'grid',
                   gridTemplateColumns: '1fr auto auto',
                   gap: '0 14px',
@@ -638,7 +640,7 @@ export default function ReceiptPage() {
             </div>
           )}
 
-          <div style={{ ...subtlePanel, padding: 16 }}>
+          <div data-glass-clear="" style={{ ...subtlePanel, padding: 16 }}>
             <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
             {invoice.discountAmount > 0 && (
               <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -673,7 +675,7 @@ export default function ReceiptPage() {
           </div>
 
           {invoice.notes && (
-            <div style={{ marginTop: 18, ...subtlePanel, padding: 16 }}>
+            <div data-glass-clear="" style={{ marginTop: 18, ...subtlePanel, padding: 16 }}>
               <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
               <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                 {invoice.notes}
@@ -685,6 +687,7 @@ export default function ReceiptPage() {
             {hasReceiptPdf ? (
               <a
                 href={`${API_BASE}/receipt/${token}/pdf`}
+                data-glass="chip" data-glass-pill=""
                 style={{
                   minHeight: 40,
                   display: 'inline-flex',
@@ -711,6 +714,7 @@ export default function ReceiptPage() {
             <button
               type="button"
               onClick={() => window.print()}
+              data-glass="chip" data-glass-pill=""
               style={{
                 minHeight: 40,
                 display: 'inline-flex',

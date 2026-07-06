@@ -15,6 +15,23 @@ html[data-glass-theme] {
   --tt: rgba(12, 21, 40, 0.52);
   scroll-behavior: smooth;
   background-attachment: fixed;
+  /* Brand-token chrome (WavesShell pages): the page wash drops so the
+     scene shows through — same effect the estimate walker gets by
+     matching computed page colors. */
+  --page: transparent;
+}
+
+/* ---------- native-markup helpers ----------
+   Attribute hooks for surfaces that author data-glass markup natively
+   (no classify() walker). Inert without html[data-glass-theme]. */
+/* Warm/wash panels that should let the scene through under glass. */
+html[data-glass-theme] [data-glass-clear] {
+  background: transparent !important;
+}
+/* Small interactive chips read as pills under glass (walker parity for
+   buttons/links up to ~56px tall). */
+html[data-glass-theme] [data-glass-pill] {
+  border-radius: 999px !important;
 }
 
 /* ---------- type system ---------- */
