@@ -87,11 +87,11 @@ function GooglePlayBadgeSvg({ fill }) {
 function StoreBadges({ ctaColor }) {
   if (isNativeApp()) return null;
   return (
-    <>
-      <div style={{ fontSize: 13, fontWeight: 700, color: ctaColor, fontFamily: FONTS.heading, lineHeight: 1.6 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, flex: '1 1 200px', minWidth: 180 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: ctaColor, fontFamily: FONTS.heading, lineHeight: 1.6, maxWidth: 220 }}>
         Track your visits, pay, and message us — get the Waves app!
       </div>
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }}>
         <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download on the App Store" style={{ display: 'inline-block' }}>
           <AppStoreBadgeSvg fill={GLASS_INK} />
         </a>
@@ -99,7 +99,7 @@ function StoreBadges({ ctaColor }) {
           <GooglePlayBadgeSvg fill={GLASS_INK} />
         </a>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -207,7 +207,7 @@ export default function BrandFooter({ borderColor, variant }) {
       textAlign: 'center', marginTop: 32, padding: '20px 16px',
       borderTop: `1px solid ${borderColor || defaultBorder}`,
       fontFamily: FONTS.body,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16,
     }}>
       <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
         {socials.map(s => (
@@ -221,19 +221,28 @@ export default function BrandFooter({ borderColor, variant }) {
           </a>
         ))}
       </div>
-      <StoreBadges ctaColor={headingColor} />
-      <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity }} />
-      <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.4 }}>Waves Pest Control</div>
-      <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>
-      <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>
-        <a href={`mailto:${CONTACT_EMAIL}`} style={contactLink}>{CONTACT_EMAIL}</a>
-        {' '}{sep}{' '}
-        <a href={`tel:${CONTACT_PHONE_TEL}`} style={contactLink}>{CONTACT_PHONE_DISPLAY}</a>
-        {' '}{sep}{' '}
-        <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
-      </div>
-      <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>
-        <ServiceAreaLinks color={bodyColor} />
+      {/* App block and identity block sit side by side (owner spec: even
+          horizontal layout); flexWrap stacks them centered on mobile. */}
+      <div style={{
+        display: 'flex', flexWrap: 'wrap', justifyContent: 'center',
+        alignItems: 'center', gap: 20, width: '100%', maxWidth: 860,
+      }}>
+        <StoreBadges ctaColor={headingColor} />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, flex: '1 1 300px', minWidth: 280 }}>
+          <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity }} />
+          <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.4 }}>Waves Pest Control</div>
+          <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>
+          <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>
+            <a href={`mailto:${CONTACT_EMAIL}`} style={contactLink}>{CONTACT_EMAIL}</a>
+            {' '}{sep}{' '}
+            <a href={`tel:${CONTACT_PHONE_TEL}`} style={contactLink}>{CONTACT_PHONE_DISPLAY}</a>
+            {' '}{sep}{' '}
+            <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
+          </div>
+          <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>
+            <ServiceAreaLinks color={bodyColor} />
+          </div>
+        </div>
       </div>
     </div>
   );
