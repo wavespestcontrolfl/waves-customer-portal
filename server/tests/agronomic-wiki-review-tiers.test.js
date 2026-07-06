@@ -606,6 +606,31 @@ describe('contradiction gate recompute', () => {
     await wiki.recomputeEntryReviewGate(null);
     expect(state.updates.knowledge_entries).toBeUndefined();
   });
+
+  test('a FAILED contradiction lookup preserves the existing gate (fail closed)', async () => {
+    // The live query throws; the stored contradiction:kc-1 identity must be
+    // treated as still open — the page stays gated and the mirror flagged,
+    // instead of being silently trusted on lookup failure.
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'red', review_status: 'pending_review',
+        risk_flags: ['open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: () => { throw new Error('relation unavailable'); },
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    // same reconstructed flag set → no state change, and crucially no
+    // downgrade to auto/trusted
+    expect(state.updates.knowledge_entries).toBeUndefined();
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
+  });
 });
 
 describe('failed-retry stub gating', () => {
@@ -673,6 +698,25 @@ describe('review service methods', () => {
     expect(patch.reviewed_by).toBe('admin');
     const log = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'review');
     expect(log.trigger_type).toBe('human_review');
+  });
+
+  test('reviewPage refuses to approve a generation stub (but can still block it)', async () => {
+    const stub = {
+      id: 'ke-1', slug: 'product/talstar-p', human_notes: null,
+      content: '# Product: Talstar P\n\n*Pending AI generation — 30 data points available.*',
+      risk_flags: ['generation_stub'],
+    };
+    const state = useDb({ knowledge_entries: [stub], knowledge_base: [] });
+
+    await expect(wiki.reviewPage('product/talstar-p', { action: 'approve' }))
+      .rejects.toMatchObject({ isOperational: true, statusCode: 409 });
+    // nothing written, mirror untouched
+    expect(state.updates.knowledge_entries).toBeUndefined();
+    expect(state.updates.knowledge_base).toBeUndefined();
+
+    // blocking a stub is still a valid human judgment
+    const blocked = await wiki.reviewPage('product/talstar-p', { action: 'block' });
+    expect(blocked.review_status).toBe('blocked');
   });
 
   test('reviewPage rejects unknown actions and missing pages', async () => {

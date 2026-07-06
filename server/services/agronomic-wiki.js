@@ -193,7 +193,15 @@ function resolveReviewFields(existing, { confidence, content, hasOpenContradicti
   return { tier, flags, reviewStatus };
 }
 
-async function getOpenContradictionIdsFor(entryId) {
+// Contradiction identities already recorded in a page's risk flags — the
+// fail-closed fallback when the live lookup is unavailable.
+function storedContradictionIds(existing) {
+  return parseFlags(existing?.risk_flags)
+    .filter((f) => typeof f === 'string' && f.startsWith('contradiction:'))
+    .map((f) => f.slice('contradiction:'.length));
+}
+
+async function getOpenContradictionIdsFor(entryId, existing = null) {
   if (!entryId) return [];
   try {
     const rows = await db('knowledge_contradictions')
@@ -201,8 +209,14 @@ async function getOpenContradictionIdsFor(entryId) {
       .whereNotIn('status', ['resolved', 'dismissed'])
       .select('id');
     return rows.map((r) => r.id);
-  } catch {
-    return [];
+  } catch (err) {
+    // Fail CLOSED: an unavailable lookup must not clear an existing gate and
+    // silently trust the page. Fall back to the identities already recorded
+    // in the page's risk flags — a genuinely absent knowledge_contradictions
+    // table yields no stored ids (correctly []), while a transient query
+    // failure preserves the current contradiction gate untouched.
+    logger.error(`[agronomic-wiki] open-contradiction lookup failed for entry ${entryId}: ${err.message}`);
+    return storedContradictionIds(existing);
   }
 }
 
@@ -240,7 +254,7 @@ async function recomputeEntryReviewGate(entryId) {
     const review = resolveReviewFields(existing, {
       confidence: existing.confidence,
       content: existing.content,
-      openContradictionIds: await getOpenContradictionIdsFor(entryId),
+      openContradictionIds: await getOpenContradictionIdsFor(entryId, existing),
     });
     if (
       review.reviewStatus !== existing.review_status ||
@@ -545,7 +559,7 @@ const AgronomicWiki = {
         // The merge re-points variant contradictions onto the canonical page —
         // a page stamped trusted moments ago may have inherited an open
         // contradiction. Re-resolve so the gate reflects the post-merge state.
-        const inheritedContradictionIds = await getOpenContradictionIdsFor(entry.id);
+        const inheritedContradictionIds = await getOpenContradictionIdsFor(entry.id, entry);
         if (inheritedContradictionIds.length) {
           const review = resolveReviewFields(entry, {
             confidence: entry.confidence,
@@ -752,7 +766,7 @@ const AgronomicWiki = {
       // retried. last_data_update advances so the page doesn't get re-marked
       // stale (and re-skipped) on every subsequent refresh: it records "data
       // verified current", which is what this branch just did.
-      const openContradictionIds = await getOpenContradictionIdsFor(existing?.id);
+      const openContradictionIds = await getOpenContradictionIdsFor(existing?.id, existing);
 
       if (
         existing &&
@@ -1151,6 +1165,19 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
     }
     const page = await db('knowledge_entries').where({ slug }).first();
     if (!page) return null;
+
+    // A placeholder has nothing a human can meaningfully approve, and
+    // 'approved' would make the mirror agent-visible with stub text —
+    // reject instead of parking, so the queue shows WHY it can't clear.
+    if (
+      action === 'approve' &&
+      ((page.content || '').includes('*Pending AI generation') || parseFlags(page.risk_flags).includes('generation_stub'))
+    ) {
+      const err = new Error('Cannot approve a page whose content is still pending AI generation — retry generation first');
+      err.isOperational = true;
+      err.statusCode = 409;
+      throw err;
+    }
 
     const reviewStatus = action === 'approve' ? 'approved' : 'blocked';
     const [updated] = await db('knowledge_entries')
