@@ -19,6 +19,21 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// Email leg of the deposit receipt: SendGrid configured so the leg runs;
+// sendTemplate captured; recipient resolution mocked to the customer's own
+// email (the real helper's contact-slot logic is unit-tested elsewhere).
+const mockSendTemplate = jest.fn(async () => ({ message: { provider_message_id: 'sg-1' } }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => true),
+}));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: (...args) => mockSendTemplate(...args),
+}));
+jest.mock('../services/customer-contact', () => ({
+  getReceiptEmailRecipients: jest.fn((customer) => (customer?.email
+    ? [{ email: customer.email, name: customer.first_name || null }]
+    : [])),
+}));
 const mockRefundPaymentIntent = jest.fn();
 const mockIsEstimateAcceptActive = jest.fn(() => true);
 const mockFindLinkedAppt = jest.fn(async () => null);
@@ -762,15 +777,16 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
-  it('skips the receipt SMS when the customer chose email-only receipts', async () => {
+  it('email-only receipt channel: no SMS, sends the deposit.receipt email instead', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
     sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
     mockIsEstimateAcceptActive.mockReturnValue(true);
     const { handler, state } = statefulWebhookDb({
-      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
-      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', customer_email: 'stale@estimate.example', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice', email: 'sam@customer.example' },
       // The policy layer enforces the payment_receipt TOGGLE but not the
       // channel column — this path must honor the channel itself.
       prefsRow: { payment_receipt_channel: 'email' },
@@ -781,6 +797,136 @@ describe('webhook + invoice credit', () => {
 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(state.smsLogInserts).toBeUndefined();
+    // Email goes to the CUSTOMER's verified email (recipient helper), not
+    // the estimate's stored one; idempotency keys on the PaymentIntent so a
+    // post-refund second deposit still receipts.
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'deposit.receipt',
+      to: 'sam@customer.example',
+      recipientType: 'customer',
+      recipientId: 'cust-1',
+      idempotencyKey: 'deposit_receipt:pi_1',
+      triggerEventId: 'deposit_receipt:pi_1',
+      payload: expect.objectContaining({
+        first_name: 'Sam',
+        amount: '$70',
+        estimate_url: expect.stringContaining('/estimate/tok-1'),
+      }),
+    }));
+  });
+
+  it('receipt channel "both" sends the SMS and the email', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice', email: 'sam@customer.example' },
+      prefsRow: { payment_receipt_channel: 'both' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '(941) 555-0100' }));
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('default sms channel sends NO email; phoneless sms-channel customer falls back to email', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    // Default channel with a phone: SMS only.
+    let ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+
+    // sms channel but the customer row has NO usable phone: a receipt is the
+    // only proof of payment — email gap-fill fires.
+    sendCustomerMessage.mockClear();
+    ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '', first_name: 'Sam', email: 'sam@customer.example' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('leads: SMS when the estimate has a phone; email gap-fill when it only has an email', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    // Lead with a phone (and an email): SMS only — unchanged behavior.
+    let ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '(941) 555-0100', customer_name: 'Lead Person', customer_email: 'lead@example.com', token: 'tok-1' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+
+    // Email-only lead: previously got NOTHING — the email leg is the fix.
+    sendCustomerMessage.mockClear();
+    ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '', customer_name: 'Lead Person', customer_email: 'lead@example.com', token: 'tok-1' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'lead@example.com',
+      recipientType: 'lead',
+      recipientId: null,
+    }));
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('payment_receipt opt-out suppresses the email leg too', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      // Opted out of payment receipts entirely — the messaging policy blocks
+      // the SMS; the email leg must check the toggle explicitly.
+      prefsRow: { payment_receipt: false, payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
   it('requeues on CONSENT_LOOKUP_FAILED with a default delay — a DB blip must not eat the only receipt', async () => {

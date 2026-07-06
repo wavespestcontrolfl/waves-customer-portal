@@ -499,12 +499,13 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   // Billing-family templates carry the Stripe trust line (owner scope
   // 2026-07-05): invoice.sent / invoice.receipt / invoice.followup_*,
-  // the billing_late_payment_* dunning series, and payer.statement.*
-  // NET statements. This renderer is the path production sends actually
-  // take, so the line must live here, not only in invoice-email.js's
-  // SMTP fallback.
+  // deposit.* payment receipts, the billing_late_payment_* dunning series,
+  // and payer.statement.* NET statements. This renderer is the path
+  // production sends actually take, so the line must live here, not only
+  // in invoice-email.js's SMTP fallback.
   const templateKey = String(template.template_key || '');
   const isInvoiceTemplate = templateKey.startsWith('invoice.')
+    || templateKey.startsWith('deposit.')
     || templateKey.startsWith('billing_late_payment')
     || templateKey.startsWith('payer.statement');
   // Under glass (now the only email theme) the default "Questions?" line is

@@ -380,50 +380,73 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
   // single receipt text. Best-effort: a receipt failure must never fail
   // deposit recording.
   if ((Array.isArray(inserted) && inserted.length > 0) || updated > 0) {
-    await sendDepositReceiptSms({ estimateId, amountDollars }).catch((err) => {
-      logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
+    await sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt failed for estimate ${estimateId}: ${err.message}`);
     });
   }
 }
 
-// One SMS per received deposit: "we got your $X — applied toward your first
-// visit." The deposit intent is customerless and carries no receipt_email
-// (the idempotency key pins the create params), so without this the
-// customer's only proof of payment is the on-screen success state.
-// Kill switch = the deposit_receipt template row itself.
-async function sendDepositReceiptSms({ estimateId, amountDollars }) {
+// One receipt per received deposit — the deposit intent is customerless and
+// carries no receipt_email (the idempotency key pins the create params), so
+// without this the customer's only proof of payment is the on-screen
+// success state. Channel dispatch (same rules as the no-show fee receipt):
+//   customer-linked: notification_prefs.payment_receipt_channel —
+//     sms → text, email → email, both → both. payment_receipt === false
+//     opts out entirely (the messaging policy enforces it for the SMS leg;
+//     the email leg checks it explicitly). A channel-sms customer with no
+//     usable phone falls back to email — a receipt is the only proof of
+//     payment, so delivery beats channel pedantry (same gap-fill as leads).
+//   lead: text when the estimate has a phone (unchanged); email is the
+//     no-phone gap-fill (they paid through the tokened estimate page).
+// Kill switches: deposit_receipt SMS template row / deposit.receipt email
+// template row — each leg gates independently.
+async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }) {
   const estimate = await db('estimates')
     .where({ id: estimateId })
-    .first('id', 'customer_id', 'customer_phone', 'customer_name');
+    .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
   if (!estimate) return;
 
-  // For customer-linked estimates, text the CUSTOMER's verified phone — the
-  // estimate's stored phone can be stale or edited, and phone_matches_customer
-  // trust must only ride a number that actually comes from the customer row.
+  // For customer-linked estimates, contact the CUSTOMER's verified
+  // phone/email — the estimate's stored contact info can be stale or edited,
+  // and phone_matches_customer trust must only ride a number that actually
+  // comes from the customer row. Full row: the receipt-recipient helper
+  // resolves billing contact slots from it.
   const customer = estimate.customer_id
-    ? await db('customers').where({ id: estimate.customer_id }).first('id', 'phone', 'first_name', 'city')
+    ? await db('customers').where({ id: estimate.customer_id }).first()
     : null;
+  const prefs = estimate.customer_id
+    ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first().catch(() => null)
+    : null;
+  const receiptOptOut = prefs?.payment_receipt === false;
+  const channel = estimate.customer_id ? (prefs?.payment_receipt_channel || 'sms') : 'sms';
   const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
-  if (!phone) return;
+  const leadEmail = String(estimate.customer_email || '').trim();
 
-  // Honor the customer's receipt CHANNEL choice — the messaging policy layer
-  // enforces the payment_receipt toggle but not payment_receipt_channel, so
-  // an email-only customer would still get texted here. Same sms/both check
-  // the no-show fee receipt uses (estimate-card-holds.sendNoShowFeeReceipt).
-  // No deposit receipt email exists yet (deferred behind the email stack),
-  // so email-only customers get no deposit receipt for now — deliberate.
-  if (estimate.customer_id) {
-    const prefs = await db('notification_prefs')
-      .where({ customer_id: estimate.customer_id })
-      .first('payment_receipt_channel')
-      .catch(() => null);
-    const channel = prefs?.payment_receipt_channel || 'sms';
-    if (channel !== 'sms' && channel !== 'both') {
-      logger.info(`[estimate-deposits] deposit receipt SMS skipped for estimate ${estimateId} — customer receipt channel is "${channel}"`);
-      return;
-    }
+  const wantSms = estimate.customer_id
+    ? (channel === 'sms' || channel === 'both')
+    : true;
+  const wantEmail = estimate.customer_id
+    ? (!receiptOptOut && (channel === 'email' || channel === 'both' || (wantSms && !phone)))
+    : (!phone && !!leadEmail);
+
+  if (wantSms && phone) {
+    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
+    });
+  } else if (!wantSms) {
+    logger.info(`[estimate-deposits] deposit receipt SMS skipped for estimate ${estimateId} — customer receipt channel is "${channel}"`);
   }
 
+  if (wantEmail) {
+    await sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt email failed for estimate ${estimateId}: ${err.message}`);
+    });
+  }
+}
+
+// SMS leg. Kill switch = the deposit_receipt SMS template row.
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars }) {
+  const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
     || String(estimate.customer_name || '').trim().split(/\s+/)[0]
@@ -521,6 +544,76 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
       }
     }
     logger.warn(`[estimate-deposits] deposit receipt SMS blocked/failed for estimate ${estimateId}: ${result.code || result.reason || 'unknown'}`);
+  }
+}
+
+// Email leg. Kill switch = the deposit.receipt email template row (archiving
+// or pausing it makes sendTemplate throw 'active template not found', which
+// lands in the catch below). Exactly-once: markDepositReceived's transition
+// already guarantees a single dispatch per deposit; the per-PaymentIntent
+// idempotency key is belt-and-suspenders AND deliberately NOT per-estimate —
+// a refunded deposit replaced by a new PaymentIntent must still receipt.
+async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }) {
+  const estimateId = estimate.id;
+  const sendgrid = require('./sendgrid-mail');
+  if (!sendgrid.isConfigured()) {
+    logger.warn(`[estimate-deposits] deposit receipt email skipped for estimate ${estimateId} — SendGrid not configured`);
+    return;
+  }
+
+  // Customer-linked receipts resolve recipients the same way invoice
+  // receipts do (billing contact slots, primary fallback); leads paid
+  // through the tokened estimate page, so the estimate's stored email is
+  // the verified-enough recipient (same trust shape as the lead SMS leg).
+  let recipient;
+  if (customer) {
+    const { getReceiptEmailRecipients } = require('./customer-contact');
+    recipient = getReceiptEmailRecipients(customer, prefs || {})[0] || null;
+  } else {
+    const leadEmail = String(estimate.customer_email || '').trim();
+    recipient = leadEmail ? { email: leadEmail, name: String(estimate.customer_name || '').trim() || null } : null;
+  }
+  if (!recipient?.email) {
+    logger.info(`[estimate-deposits] deposit receipt email skipped for estimate ${estimateId} — no receipt email recipient`);
+    return;
+  }
+
+  const firstName = String(customer?.first_name || '').trim()
+    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
+    || 'there';
+  // Amount comes straight from the verified deposit ledger amount — never
+  // recomputed here (waves-billing rule 1).
+  const amount = `$${Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '')}`;
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const estimateUrl = `${publicPortalUrl()}/estimate/${estimate.token}`;
+
+  const EmailTemplateLibrary = require('./email-template-library');
+  try {
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'deposit.receipt',
+      to: recipient.email,
+      payload: {
+        first_name: firstName,
+        amount,
+        estimate_url: estimateUrl,
+      },
+      recipientType: customer ? 'customer' : 'lead',
+      recipientId: estimate.customer_id || null,
+      triggerEventId: `deposit_receipt:${paymentIntentId}`,
+      idempotencyKey: `deposit_receipt:${paymentIntentId}`,
+      categories: ['deposit_receipt'],
+    });
+    if (result?.blocked) {
+      logger.warn(`[estimate-deposits] deposit receipt email suppressed for estimate ${estimateId}: ${result.reason || 'suppressed'}`);
+      return;
+    }
+    if (result?.deduped) {
+      logger.info(`[estimate-deposits] deposit receipt email deduped for estimate ${estimateId} (pi=${paymentIntentId})`);
+      return;
+    }
+    logger.info(`[estimate-deposits] deposit receipt email sent for estimate ${estimateId}`);
+  } catch (err) {
+    logger.error(`[estimate-deposits] deposit receipt email send failed for estimate ${estimateId}: ${err.message}`);
   }
 }
 
