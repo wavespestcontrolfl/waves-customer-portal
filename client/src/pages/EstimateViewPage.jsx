@@ -48,7 +48,7 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   glassCopyActive,
-  glassCtaMicroFor,
+  glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassServiceSlug,
@@ -1206,15 +1206,17 @@ export function oneTimePriceCopy(breakdown = {}) {
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
 
-function SetupFeeCard({ fee }) {
+function SetupFeeCard({ fee, waiverBulletCovered = false }) {
   if (!fee) return null;
   // Under glass, a prepay-waivable setup fee is already stated inside the
   // pest offer stack ("$99 setup disappears with annual billing — waived
   // instantly", glassPestInclusions setup bullet, same waivedWithPrepay
   // eligibility) — rendering this card too said the same thing twice
-  // (owner directive 2026-07-05). Non-waivable fees keep the card; the
-  // bullet never covers those.
-  if (glassCopyActive() && fee.waivedWithPrepay) return null;
+  // (owner directive 2026-07-05). Hidden ONLY when that bullet actually
+  // renders (a pest section exists to carry it — codex rd2: a non-pest
+  // estimate with a waivable fee must keep the card or the fee vanishes);
+  // non-waivable fees always keep the card.
+  if (glassCopyActive() && fee.waivedWithPrepay && waiverBulletCovered) return null;
   return (
     <div style={{
       marginTop: 12,
@@ -2281,7 +2283,11 @@ export function ServiceSection({
   // tail (pest keeps its cadence-matched trio; other programs get their
   // service-matched line). Sections without a glass line — and every
   // section when glass is off — keep their server-provided wording.
-  const sectionSlug = section.isPest ? 'pest_control' : glassServiceSlug(section.key || section.label);
+  // Resolved from the section KEY, not isPest: the server's unsplittable
+  // multi-service section is keyed 'bundle' with isPest:true whenever pest
+  // is among the services, and that section must keep its server bundle
+  // wording rather than pest value copy (codex rd2).
+  const sectionSlug = glassServiceSlug(section.key || section.label);
   const glassDayLines = glassCopyActive() ? glassDayLinesFor(sectionSlug) : null;
   const priceWording = glassDayLines
     ? { ...copy.priceWording, dayLineByKey: glassDayLines }
@@ -2343,7 +2349,19 @@ export function ServiceSection({
           />
         ) : null}
 
-        {showGetServiceCta ? <GetServiceTodayCta showGuaranteeMicro slotMeta={ctaSlotMeta} microText={glassCtaMicroFor(sectionSlug)} /> : null}
+        {showGetServiceCta ? (
+          <GetServiceTodayCta
+            showGuaranteeMicro
+            slotMeta={ctaSlotMeta}
+            // Synthetic unsplit-bundle sections resolve their terms from the
+            // member services; a lone unresolvable key stays terms-neutral.
+            microText={glassCtaMicroForKeys(
+              Array.isArray(section.memberKeys) && section.memberKeys.length
+                ? section.memberKeys
+                : [section.key || section.label],
+            )}
+          />
+        ) : null}
       </div>
 
       {afterPrice}
@@ -3150,7 +3168,7 @@ export default function EstimateViewPage() {
               : [];
             const afterPrice = services.length === 1 ? (
               <>
-                {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
+                {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={section.isPest === true} />)}
                 {!estimate.showOneTimeOption ? (
                   <OneTimeBreakdownCard
                     breakdown={pricing.oneTimeBreakdown}
@@ -3205,13 +3223,13 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroFor(serviceCategory)} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
               ? pricing.firstVisitFees
               : (pricing.setupFee ? [pricing.setupFee] : [])
-            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)
+            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
           ) : null}
 
           {services.length > 1 && !estimate.showOneTimeOption ? (

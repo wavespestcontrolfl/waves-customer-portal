@@ -100,6 +100,11 @@ const GLASS_PEST = {
 // hardcoded copy would drift if the config changes.
 const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · Approve online in 60 seconds';
 
+// Terms-neutral micro line: used whenever we cannot verify that the
+// recurring contract/callback/guarantee terms apply to EVERY service the
+// CTA covers (rodent plans, unknown/mixed compositions).
+const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
+
 const GLASS_PACKS = {
   pest_control: GLASS_PEST,
   lawn_care: {
@@ -225,7 +230,7 @@ const GLASS_PACKS = {
       'Is the inspection fee credited?',
       'How long until they’re gone?',
     ],
-    ctaMicro: 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready',
+    ctaMicro: NEUTRAL_CTA_MICRO,
   },
   bundle: {
     heroH1: '{first}, your complete home protection plan is ready.',
@@ -259,6 +264,25 @@ export function glassCtaMicroFor(serviceCategory) {
   const category = serviceCategory === 'rodent_bait' ? 'rodent' : serviceCategory;
   const pack = GLASS_PACKS[category];
   return pack?.ctaMicro || GLASS_COPY.ctaMicro;
+}
+
+// Micro line for a CTA that covers MULTIPLE services (combined bundle CTA,
+// or a synthetic unsplit-bundle section resolved via its memberKeys). The
+// recurring terms line renders only when every covered service carries
+// those terms; any override (rodent) or unresolvable key (synthetic
+// 'bundle' with unknown composition) demotes to the terms-neutral line —
+// a split rodent+lawn bundle must not advertise callback terms the rodent
+// copy deliberately avoids (codex rd2).
+export function glassCtaMicroForKeys(keys) {
+  const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
+  if (!list.length) return NEUTRAL_CTA_MICRO;
+  const micros = list.map((key) => {
+    const slug = glassServiceSlug(String(key));
+    return slug ? glassCtaMicroFor(slug) : null;
+  });
+  if (micros.includes(null)) return NEUTRAL_CTA_MICRO;
+  const distinct = [...new Set(micros)];
+  return distinct.length === 1 ? distinct[0] : NEUTRAL_CTA_MICRO;
 }
 
 // Section-key → glass slug. Same substring vocabulary as PriceCard's

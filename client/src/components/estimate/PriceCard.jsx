@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { glassCopyActive, glassRowInclusions, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
@@ -383,8 +383,16 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                 {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
               <RowInclusions
-                items={(glass && glassRowInclusions(serviceKey(row), row.visitsPerYear, glassSetupBullet))
-                  || serviceInclusions(row)}
+                // Glass classifies via glassServiceSlug, not serviceKey():
+                // lawn_pest_* rows are PEST (server recurringServiceKey
+                // semantics) but serviceKey checks 'lawn' first — the glass
+                // stack must match the priced service (codex rd2). Null
+                // slug → baseline list, unchanged.
+                items={(glass && glassRowInclusions(
+                  glassServiceSlug(String(row.service || row.key || row.label || '')),
+                  row.visitsPerYear,
+                  glassSetupBullet,
+                )) || serviceInclusions(row)}
                 collapsible={glass}
               />
             </div>

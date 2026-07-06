@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   glassCopyActive,
   glassCtaMicroFor,
+  glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassPestInclusions,
@@ -101,6 +102,22 @@ describe('glassCtaMicroFor', () => {
     // Row-slug spelling of rodent resolves to the rodent pack's line.
     expect(glassCtaMicroFor('rodent_bait')).toBe(glassCtaMicroFor('rodent'));
     expect(glassCtaMicroFor('rodent')).not.toMatch(/callbacks/);
+  });
+});
+
+describe('glassCtaMicroForKeys', () => {
+  it('keeps recurring terms only when every covered service carries them', () => {
+    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care'])).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroForKeys(['lawn_care'])).toBe(GLASS_COPY.ctaMicro);
+    // A rodent section in a split bundle demotes the combined CTA to the
+    // terms-neutral line — no callback terms rodent copy avoids (codex rd2).
+    expect(glassCtaMicroForKeys(['rodent_bait', 'lawn_care'])).not.toMatch(/callbacks/);
+    expect(glassCtaMicroForKeys(['rodent_bait', 'lawn_care'])).toMatch(/Satisfaction guaranteed/);
+    // Unresolvable composition (synthetic unsplit 'bundle' key) is neutral.
+    expect(glassCtaMicroForKeys(['bundle'])).not.toMatch(/callbacks/);
+    expect(glassCtaMicroForKeys([])).not.toMatch(/callbacks/);
+    // memberKeys resolution: unsplit pest+lawn keeps the full recurring line.
+    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care', 'lawn_pest_control'])).toBe(GLASS_COPY.ctaMicro);
   });
 });
 
