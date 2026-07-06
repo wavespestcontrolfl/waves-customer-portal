@@ -148,6 +148,43 @@ function sameFlagSets(a, b) {
   return setA.size === setB.size && [...setA].every((f) => setB.has(f));
 }
 
+// Resolve a page's review fields from fresh inputs, honoring the state
+// machine: manual pins survive, human blocks hold, approval is sticky only
+// while the risk reasons are unchanged. Used by BOTH the write path and the
+// unchanged-data skip path — a new contradiction must re-gate a page even
+// when its outcome data didn't change.
+function resolveReviewFields(existing, { confidence, content, hasOpenContradiction }) {
+  const existingFlags = parseFlags(existing?.risk_flags);
+  if (existingFlags.includes('manual_override')) {
+    return {
+      tier: existing.review_tier,
+      flags: existingFlags,
+      reviewStatus: existing.review_status,
+    };
+  }
+  const { tier, flags } = classifyReviewTier({ confidence, content, hasOpenContradiction });
+  let reviewStatus = 'auto';
+  if (tier === 'red') {
+    const stickyApproval = existing?.review_status === 'approved' && sameFlagSets(existing.risk_flags, flags);
+    reviewStatus = stickyApproval ? 'approved' : 'pending_review';
+  }
+  if (existing?.review_status === 'blocked') reviewStatus = 'blocked';
+  return { tier, flags, reviewStatus };
+}
+
+async function hasOpenContradictionFor(entryId) {
+  if (!entryId) return false;
+  try {
+    const contradiction = await db('knowledge_contradictions')
+      .where({ wiki_entry_id: entryId })
+      .whereNotIn('status', ['resolved', 'dismissed'])
+      .first('id');
+    return !!contradiction;
+  } catch {
+    return false;
+  }
+}
+
 async function callClaude(systemPrompt, userPrompt) {
   if (!Anthropic) {
     logger.warn('[agronomic-wiki] Anthropic SDK not available — skipping AI generation');
@@ -604,15 +641,27 @@ const AgronomicWiki = {
       // retried. last_data_update advances so the page doesn't get re-marked
       // stale (and re-skipped) on every subsequent refresh: it records "data
       // verified current", which is what this branch just did.
+      const hasOpenContradiction = await hasOpenContradictionFor(existing?.id);
+
       if (
         existing &&
         !existing.content.includes('*Pending AI generation') &&
         existing.data_point_count === dataPointCount &&
         sameSourceIds(existing.source_treatment_ids, sourceIds)
       ) {
+        // Data unchanged, but the review state may not be: a contradiction
+        // that appeared since the last write must re-gate the page here too.
+        const review = resolveReviewFields(existing, { confidence, content: existing.content, hasOpenContradiction });
         await db('knowledge_entries')
           .where({ id: existing.id })
-          .update({ stale_flag: false, last_data_update: new Date(), updated_at: new Date() });
+          .update({
+            stale_flag: false,
+            last_data_update: new Date(),
+            updated_at: new Date(),
+            review_tier: review.tier,
+            review_status: review.reviewStatus,
+            risk_flags: JSON.stringify(review.flags),
+          });
         await logUpdate('skip', slug, `Skipped ${category} page: ${title} — no new data since last generation (${dataPointCount} data points)`, {
           triggerType: 'wiki_generation',
         });
@@ -670,41 +719,10 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         ? result.text
         : `# ${title}\n\n*Pending AI generation — ${dataPointCount} data points available.*`;
 
-      // Classify the fresh content into a review tier. Open contradictions
-      // against this page force red regardless of confidence.
-      let hasOpenContradiction = false;
-      if (existing) {
-        try {
-          const contradiction = await db('knowledge_contradictions')
-            .where({ wiki_entry_id: existing.id })
-            .whereNotIn('status', ['resolved', 'dismissed'])
-            .first('id');
-          hasOpenContradiction = !!contradiction;
-        } catch { /* table may not exist */ }
-      }
-
-      const existingFlags = parseFlags(existing?.risk_flags);
-      let tier;
-      let flags;
-      let reviewStatus;
-      if (existingFlags.includes('manual_override')) {
-        // A human pinned this page's tier — regeneration must not clobber it.
-        tier = existing.review_tier;
-        flags = existingFlags;
-        reviewStatus = existing.review_status;
-      } else {
-        ({ tier, flags } = classifyReviewTier({ confidence, content, hasOpenContradiction }));
-        reviewStatus = 'auto';
-        if (tier === 'red') {
-          // Approval is sticky while the risk reasons are unchanged — new data
-          // on an already-reviewed page shouldn't re-block it, but a NEW risk
-          // reason (e.g. a contradiction appearing) must.
-          const stickyApproval = existing?.review_status === 'approved' && sameFlagSets(existing.risk_flags, flags);
-          reviewStatus = stickyApproval ? 'approved' : 'pending_review';
-        }
-        // A human block always holds until a human lifts it.
-        if (existing?.review_status === 'blocked') reviewStatus = 'blocked';
-      }
+      // Classify the fresh content into a review tier (open contradictions
+      // force red regardless of confidence; pins/blocks/sticky approval are
+      // handled inside the shared resolver).
+      const { tier, flags, reviewStatus } = resolveReviewFields(existing, { confidence, content, hasOpenContradiction });
 
       const entryData = {
         slug,
@@ -1064,6 +1082,7 @@ function extractSummary(content) {
     const t = l.trim();
     if (!t || t.startsWith('#')) return false;
     if (/^\*\*[^*]+:\*\*/.test(t)) return false; // "**Label:** value" metadata
+    if (/^\*[^*].*\*$/.test(t)) return false; // full-line italics (field-intelligence banner, stubs)
     if (/^[->|]/.test(t)) return false; // blockquote callouts, list bullets, tables
     if (/^-{3,}$/.test(t)) return false; // horizontal rules
     return true;

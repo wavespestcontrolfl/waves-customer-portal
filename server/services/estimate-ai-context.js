@@ -385,6 +385,15 @@ async function searchKnowledgeBase(db, terms) {
       .where(function activeKnowledge() {
         this.where({ active: true }).orWhereNull('active');
       })
+      // Wiki-sync copies inherit the wiki's review gate: a KB row that
+      // mirrors an untrusted (red/blocked) wiki page must not reach the
+      // customer-facing estimate context through this branch either.
+      .where(function trustedWikiCopies() {
+        this.whereNull('wiki_entry_id').orWhereIn(
+          'wiki_entry_id',
+          db('knowledge_entries').select('id').whereIn('review_status', require('./agronomic-wiki').TRUSTED_STATUSES),
+        );
+      })
       .where(function relevantKnowledge() {
         for (const term of terms) {
           const like = `%${term}%`;

@@ -6,7 +6,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const wiki = require('../services/agronomic-wiki');
 
@@ -87,13 +87,13 @@ router.get('/review/queue', async (req, res, next) => {
 // POST /review/:slug(*) — approve or block a page awaiting review
 // Body: { action: 'approve' | 'block', notes? }
 // =========================================================================
-router.post('/review/:slug(*)', async (req, res, next) => {
+router.post('/review/:slug(*)', requireAdmin, async (req, res, next) => {
   try {
     const { action, notes } = req.body || {};
     if (!['approve', 'block'].includes(action)) {
       return res.status(400).json({ error: "action must be 'approve' or 'block'" });
     }
-    const page = await wiki.reviewPage(req.params.slug, { action, notes, reviewedBy: 'admin' });
+    const page = await wiki.reviewPage(req.params.slug, { action, notes, reviewedBy: req.technician?.name || 'admin' });
     if (!page) return res.status(404).json({ error: 'Page not found' });
     res.json({ success: true, page });
   } catch (err) {
@@ -106,13 +106,13 @@ router.post('/review/:slug(*)', async (req, res, next) => {
 // generator respects the pin on subsequent regenerations)
 // Body: { tier: 'green' | 'yellow' | 'red' }
 // =========================================================================
-router.put('/tier/:slug(*)', async (req, res, next) => {
+router.put('/tier/:slug(*)', requireAdmin, async (req, res, next) => {
   try {
     const { tier } = req.body || {};
     if (!['green', 'yellow', 'red'].includes(tier)) {
       return res.status(400).json({ error: "tier must be 'green', 'yellow' or 'red'" });
     }
-    const page = await wiki.setTierOverride(req.params.slug, tier, { reviewedBy: 'admin' });
+    const page = await wiki.setTierOverride(req.params.slug, tier, { reviewedBy: req.technician?.name || 'admin' });
     if (!page) return res.status(404).json({ error: 'Page not found' });
     res.json({ success: true, page });
   } catch (err) {

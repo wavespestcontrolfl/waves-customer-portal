@@ -213,6 +213,48 @@ describe('generatePage review stamping', () => {
   });
 });
 
+describe('skip-path reclassification', () => {
+  test('a new contradiction re-gates a trusted page even when data is unchanged', async () => {
+    const existing = {
+      id: 'ke-1', slug: 'track/st-augustine',
+      content: '# Track\n\nReal content.', data_point_count: 22,
+      source_treatment_ids: ['o1', 'o2'], stale_flag: false,
+      review_tier: 'green', review_status: 'auto', risk_flags: [],
+    };
+    const state = useDb({
+      knowledge_entries: [existing],
+      knowledge_contradictions: [{ id: 'kc-1' }], // appeared since last write
+    });
+
+    // same ids/count → skip path, but the review state must still update
+    await wiki.generatePage('track/st-augustine', 'track', {
+      outcomes: [{ id: 'o1' }, { id: 'o2' }],
+      totalOutcomeCount: 22,
+      allOutcomeIds: ['o1', 'o2'],
+    }, 'Track st_augustine Performance');
+
+    expect(global.__anthropicCreate).not.toHaveBeenCalled(); // still skipped
+    const patch = state.updates.knowledge_entries[0];
+    expect(patch.review_tier).toBe('red');
+    expect(patch.review_status).toBe('pending_review');
+    expect(JSON.parse(patch.risk_flags)).toContain('open_contradiction');
+  });
+});
+
+describe('extractSummary disclaimer handling', () => {
+  test('the field-intelligence banner never becomes the summary', () => {
+    const { extractSummary } = wiki.__private;
+    const content = [
+      '# Product: K-Flow',
+      '',
+      '*Field intelligence from Waves treatment outcomes — not label guidance.*',
+      '',
+      'Potassium-only base through the summer window.',
+    ].join('\n');
+    expect(extractSummary(content)).toBe('Potassium-only base through the summer window.');
+  });
+});
+
 // ── review service methods ─────────────────────────────────────────────────
 
 describe('review service methods', () => {

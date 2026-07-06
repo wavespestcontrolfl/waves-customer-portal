@@ -216,12 +216,22 @@ const KnowledgeBridge = {
     const limit = Math.min(options.limit || 20, 50);
 
     // Search Claudeopedia
-    const claudeopedia = await db('knowledge_base')
+    let claudeopediaQuery = db('knowledge_base')
       .where(function () {
         this.where('title', 'ilike', term)
           .orWhere('content', 'ilike', term);
       })
-      .where({ status: 'active' })
+      .where({ status: 'active' });
+    if (options.trustedOnly) {
+      // Wiki-sync copies inherit the wiki's review gate on agent-facing reads
+      claudeopediaQuery = claudeopediaQuery.where(function trustedWikiCopies() {
+        this.whereNull('wiki_entry_id').orWhereIn(
+          'wiki_entry_id',
+          db('knowledge_entries').select('id').whereIn('review_status', TRUSTED_STATUSES),
+        );
+      });
+    }
+    const claudeopedia = await claudeopediaQuery
       .orderBy('updated_at', 'desc')
       .limit(limit)
       .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
@@ -375,6 +385,13 @@ const KnowledgeBridge = {
       const protocolEntries = await db('knowledge_base')
         .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
         .where({ status: 'active' })
+        // Wiki-sync copies inherit the wiki's review gate (customer-visible recs)
+        .where(function trustedWikiCopies() {
+          this.whereNull('wiki_entry_id').orWhereIn(
+            'wiki_entry_id',
+            db('knowledge_entries').select('id').whereIn('review_status', TRUSTED_STATUSES),
+          );
+        })
         .where(function () {
           this.where('content', 'ilike', `%${grassType}%`)
             .orWhere('category', 'seasonal');
