@@ -56,6 +56,10 @@ export function glassReleaseActive(glassDefault) {
  * precedence via glassReleaseActive.
  */
 const PORTAL_GLASS_CACHE_KEY = 'waves_portal_glass_default';
+// Same base the API client uses (client/src/utils/api.js) — the bundled
+// Capacitor apps build with VITE_API_URL, where a bare '/api/...' request
+// would hit the static bundle's origin instead of the backend.
+const UI_FLAGS_URL = `${import.meta.env.VITE_API_URL || '/api'}/public/ui-flags`;
 
 export function portalGlassInitial() {
   let cached = false;
@@ -69,10 +73,32 @@ export function portalGlassInitial() {
 
 export function watchPortalGlassDefault(onChange) {
   let alive = true;
-  fetch('/api/public/ui-flags')
-    .then((r) => (r.ok ? r.json() : null))
-    .then((d) => {
-      if (!d || typeof d.portalGlass !== 'boolean') return;
+  // Fail-closed contract: any response that reaches the server but doesn't
+  // affirm the flag (non-OK, or an unexpected body — e.g. a rollback where
+  // the SPA catch-all serves index.html with a 200) clears the cache and
+  // reverts stale clients, so unsetting GATE_PORTAL_GLASS stays a working
+  // kill switch. Only a pure network failure (offline PWA / Capacitor
+  // session that can't reach the server at all) keeps the last-known value —
+  // no gate state could be learned there either way, and flipping the theme
+  // on a flaky connection would thrash offline users.
+  const failClosed = () => {
+    try {
+      localStorage.setItem(PORTAL_GLASS_CACHE_KEY, '0');
+    } catch {
+      /* storage unavailable */
+    }
+    if (alive) onChange(glassReleaseActive(false));
+  };
+  fetch(UI_FLAGS_URL)
+    .then(async (r) => {
+      if (!r.ok) return failClosed();
+      let d = null;
+      try {
+        d = await r.json();
+      } catch {
+        return failClosed();
+      }
+      if (!d || typeof d.portalGlass !== 'boolean') return failClosed();
       try {
         localStorage.setItem(PORTAL_GLASS_CACHE_KEY, d.portalGlass ? '1' : '0');
       } catch {
@@ -80,7 +106,9 @@ export function watchPortalGlassDefault(onChange) {
       }
       if (alive) onChange(glassReleaseActive(d.portalGlass));
     })
-    .catch(() => {});
+    .catch(() => {
+      /* network failure only — keep last-known cached value */
+    });
   return () => {
     alive = false;
   };
