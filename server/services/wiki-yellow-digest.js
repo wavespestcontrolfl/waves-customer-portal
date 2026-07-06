@@ -14,11 +14,16 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { runExclusive } = require('../utils/cron-lock');
 
 // Dark-ship gate: inert until the owner flips it. When off we still compute
 // and shadow-log what WOULD have been sent, so the flip is a known quantity.
 const digestEnabled = () => process.env.GATE_WIKI_YELLOW_DIGEST === 'true';
-const digestEmail = () => process.env.WIKI_DIGEST_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
+// Recipient is deliberately independent of SENDGRID_FROM_EMAIL: the sender
+// identity is commonly a newsletter/automations mailbox, and falling back to
+// it would land the review queue in the wrong inbox. Owner address or an
+// explicit WIKI_DIGEST_EMAIL only.
+const digestEmail = () => process.env.WIKI_DIGEST_EMAIL || 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
@@ -99,7 +104,18 @@ function composeYellowDigest(queue) {
 // NOT stamp the marker — the first exception after a quiet stretch goes out
 // the next 6:10 rather than waiting for an arbitrary weekly slot.
 // `opts.sendgrid` and `opts.wiki` are injectable for tests.
+//
+// The whole body runs under the cron advisory lock: during a Railway deploy
+// the old and new instances overlap on the same 6:10 tick, and the
+// guard-check → send → marker sequence is not atomic — both could pass the
+// guard before either stamps the marker and the owner would get the digest
+// twice. The lock serializes across instances; the marker then makes the
+// second (later) run skip.
 async function sendYellowDigestIfDue(opts = {}) {
+  return runExclusive('wiki-yellow-digest', () => sendYellowDigestLocked(opts));
+}
+
+async function sendYellowDigestLocked(opts = {}) {
   try {
     const recentRun = await db('knowledge_update_log')
       .where({ trigger_type: GUARD_TRIGGER })

@@ -13,8 +13,12 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true), sendOne: jest.fn() }));
+// Pass-through advisory lock — the "uses the lock" test asserts on this mock;
+// the lease-held test overrides it per-call.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, fn) => fn()) }));
 
 const logger = require('../services/logger');
+const { runExclusive } = require('../utils/cron-lock');
 const { sendYellowDigestIfDue, composeYellowDigest } = require('../services/wiki-yellow-digest');
 
 function makeDb(responses = {}) {
@@ -89,6 +93,29 @@ afterEach(() => {
   }
 });
 
+describe('sendYellowDigestIfDue — cross-instance serialization', () => {
+  test('the whole body runs under the wiki-yellow-digest advisory lock', async () => {
+    useDb({ knowledge_update_log: [] });
+    await sendYellowDigestIfDue({ wiki: mockWiki({ pending: [], blocked: [], recentYellow: [] }), sendgrid: mockMailer() });
+    expect(runExclusive).toHaveBeenCalledTimes(1);
+    expect(runExclusive).toHaveBeenCalledWith('wiki-yellow-digest', expect.any(Function));
+  });
+
+  test('lease held elsewhere: nothing runs — no queue read, no send, no marker', async () => {
+    runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+    const state = useDb({ knowledge_update_log: [] });
+    const wiki = mockWiki({ pending: [redPage()], blocked: [], recentYellow: [] });
+    const mailer = mockMailer();
+
+    const result = await sendYellowDigestIfDue({ wiki, sendgrid: mailer });
+
+    expect(result).toEqual({ skipped: true, reason: 'lease_held' });
+    expect(wiki.getReviewQueue).not.toHaveBeenCalled();
+    expect(mailer.sendOne).not.toHaveBeenCalled();
+    expect(state.inserts.knowledge_update_log).toBeUndefined();
+  });
+});
+
 describe('sendYellowDigestIfDue — weekly guard', () => {
   test('skips without touching the queue when a digest ran in the last 6 days', async () => {
     const state = useDb({ knowledge_update_log: [{ id: 7 }] });
@@ -157,6 +184,21 @@ describe('sendYellowDigestIfDue — send path', () => {
     const markers = state.inserts.knowledge_update_log;
     expect(markers).toHaveLength(1);
     expect(markers[0].trigger_type).toBe('yellow_digest');
+  });
+
+  test('recipient stays the owner address even when SENDGRID_FROM_EMAIL is an automations mailbox', async () => {
+    process.env.SENDGRID_FROM_EMAIL = 'automations@wavespestcontrol.com';
+    useDb({ knowledge_update_log: [] });
+    const mailer = mockMailer();
+
+    await sendYellowDigestIfDue({
+      wiki: mockWiki({ pending: [redPage()], blocked: [], recentYellow: [] }),
+      sendgrid: mailer,
+    });
+
+    const msg = mailer.sendOne.mock.calls[0][0];
+    expect(msg.to).toBe('contact@wavespestcontrol.com');
+    expect(msg.fromEmail).toBe('automations@wavespestcontrol.com');
   });
 
   test('a failed send logs a yellow_digest_error row and never the success marker', async () => {
