@@ -3082,6 +3082,23 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Wiki→KB sync failed: ${err.message}`);
     }
+
+    // Yellow-digest email to the owner, CHAINED as leg 3 for the same reason
+    // the sync is leg 2: a fixed-offset cron could fire mid-refresh, digest
+    // the pre-refresh queue, and stamp its weekly marker — suppressing a
+    // corrected digest for six days. Weekly cadence + the dark-ship gate live
+    // inside sendYellowDigestIfDue; the failed-refresh early-return above
+    // already keeps it off stale-state days. Runs even if the KB sync leg
+    // errored — the digest reports review state, which the sync doesn't change.
+    try {
+      const YellowDigest = require('./wiki-yellow-digest');
+      const result = await YellowDigest.sendYellowDigestIfDue();
+      if (result.sent) {
+        logger.info(`Wiki yellow digest sent: ${result.pendingCount} blocked, ${result.yellowCount} yellow`);
+      }
+    } catch (err) {
+      logger.error(`Wiki yellow digest failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // Health scoring runs inside the 3AM Customer Intelligence Pipeline (above)
