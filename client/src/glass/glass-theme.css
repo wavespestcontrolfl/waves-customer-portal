@@ -24,6 +24,16 @@ html[data-glass-theme] {
 /* ---------- native-markup helpers ----------
    Attribute hooks for surfaces that author data-glass markup natively
    (no classify() walker). Inert without html[data-glass-theme]. */
+/* Glass hosts anchor their own ::before/::after sheen overlays (and any
+   absolutely-positioned children). The classifier set position:relative
+   inline on every element it tagged; native surfaces get it here. In
+   browsers with backdrop-filter this is a no-op — the filter already
+   makes each glass element a containing block — but where the filter is
+   unsupported the sheen must not spill outside the card. Inline
+   position styles (fixed scrims, sticky headers) still win over this. */
+html[data-glass-theme] [data-glass] {
+  position: relative;
+}
 /* Warm/wash panels that should let the scene through under glass. */
 html[data-glass-theme] [data-glass-clear] {
   background: transparent !important;
