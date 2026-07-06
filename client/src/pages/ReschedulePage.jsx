@@ -10,12 +10,18 @@
  *
  * Styling follows the customer-facing brand idiom used by TrackPage
  * (WavesShell customer variant + warm surface palette + inline styles).
+ * Under the portal glass release (GATE_PORTAL_GLASS via /api/public/ui-flags,
+ * same rider as LoginPage/PortalPage; ?glass=1 forces on, ?glass=0 escapes)
+ * the page mounts the glass scene and its native data-glass markup restyles
+ * the cards — the inline styles below remain the non-glass rendering.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -66,7 +72,7 @@ function Page({ children }) {
 
 function Card({ children, style }) {
   return (
-    <div style={{ background: S.surface, border: `1px solid ${S.border}`, borderRadius: 12, padding: 24, marginBottom: 16, ...style }}>
+    <div data-glass="card" style={{ background: S.surface, border: `1px solid ${S.border}`, borderRadius: 12, padding: 24, marginBottom: 16, ...style }}>
       {children}
     </div>
   );
@@ -75,9 +81,10 @@ function Card({ children, style }) {
 function ContactRow() {
   return (
     <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
-      <a href={WAVES_SUPPORT_SMS_TEL} style={{ ...PRIMARY_CTA, flex: 1 }}>Text us</a>
+      <a href={WAVES_SUPPORT_SMS_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Text us</a>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass="chip"
         style={{ ...PRIMARY_CTA, flex: 1, background: S.surface, color: COLORS.blueDeeper, border: `1px solid ${COLORS.blueDeeper}` }}
       >
         Call {WAVES_SUPPORT_PHONE_DISPLAY}
@@ -143,7 +150,7 @@ function SkeletonCard() {
 function NotFoundCard() {
   return (
     <Card>
-      <div style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+      <div data-gt="h3x" style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
         We couldn't find that appointment
       </div>
       <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
@@ -166,7 +173,7 @@ function IneligibleCard({ data }) {
   const reasonCopy = INELIGIBLE_COPY[data?.reason] || INELIGIBLE_COPY.not_available;
   return (
     <Card>
-      <div style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+      <div data-gt="h3x" style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
         {data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}we can't move this one online
       </div>
       <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
@@ -181,6 +188,7 @@ function SlotButton({ slot, selected, onSelect }) {
   return (
     <button
       type="button"
+      {...(selected ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
       onClick={() => onSelect(slot)}
       style={{
         textAlign: 'left',
@@ -206,7 +214,7 @@ function DayGroup({ day, selectedSlot, onSelect }) {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
         <div style={{ fontSize: 15, fontWeight: 800, fontFamily: FONTS.heading }}>{day.fullDate}</div>
         {day.nearby ? (
-          <span style={{
+          <span data-glass="chip" style={{
             fontSize: 12, fontWeight: 700, color: COLORS.green,
             background: '#DCFCE7', padding: '2px 8px', borderRadius: 999,
           }}>
@@ -231,13 +239,13 @@ function DayGroup({ day, selectedSlot, onSelect }) {
 function SuccessCard({ result, service }) {
   return (
     <Card>
-      <div style={{
+      <div data-glass="chip" style={{
         display: 'inline-block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase',
         color: COLORS.green, background: '#DCFCE7', padding: '6px 12px', borderRadius: 9999, marginBottom: 12,
       }}>
         Rescheduled
       </div>
-      <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+      <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
         You're all set
       </div>
       <div style={{ fontSize: 15, color: S.body, lineHeight: 1.6 }}>
@@ -259,6 +267,20 @@ export default function ReschedulePage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [result, setResult] = useState(null);
+  // True while the day list shows an AI search's results instead of the full
+  // window — gates the "Show all open times" reset.
+  const [aiFiltered, setAiFiltered] = useState(false);
+  // Bumped on a successful reset; keys the search bar so its internal
+  // query/summary recap clears with the filter — a stale "Two openings
+  // Tuesday afternoon" line must not sit above the unfiltered day list.
+  const [aiSession, setAiSession] = useState(0);
+
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1 / ?glass=0
+  // keep param precedence — same rider as LoginPage/PortalPage.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
+  useGlassSurface(glassActive, 'full');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -279,6 +301,42 @@ export default function ReschedulePage() {
   }, [token]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Waves AI date/time search — replaces the day list with the matching
+  // window's slots (same availability shape the GET returns) and hands the
+  // summary line back to the bar. Throwing lets the bar show its own
+  // call-us fallback line.
+  const runAiSearch = async (query) => {
+    const res = await fetch(`${API_BASE}/public/reschedule/${token}/find-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || 'search failed');
+    if (body.availability) {
+      setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+      setSelectedSlot(null);
+      setSubmitError(null);
+      setAiFiltered(true);
+    }
+    return { summary: body.summary };
+  };
+
+  // Back to the full window after a search — quiet refetch (no skeleton
+  // flash) so the list is fresh. aiFiltered only clears once the full-window
+  // response is applied: on failure the filtered list is still what's on
+  // screen, so the reset link must survive for another try.
+  const showAllTimes = async () => {
+    setSelectedSlot(null);
+    try {
+      const res = await fetch(`${API_BASE}/public/reschedule/${token}`);
+      if (!res.ok) return;
+      setData(await res.json());
+      setAiFiltered(false);
+      setAiSession((n) => n + 1); // remount the bar → clears its recap/query
+    } catch { /* keep the filtered list + reset link */ }
+  };
 
   const confirm = async () => {
     if (!selectedSlot || submitting) return;
@@ -302,6 +360,8 @@ export default function ReschedulePage() {
       }
       if (body.code === 'SLOT_TAKEN') {
         setSelectedSlot(null);
+        setAiFiltered(false); // refreshed availability spans the full window
+        setAiSession((n) => n + 1); // remount the bar — its recap is stale too
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
         } else {
@@ -329,7 +389,7 @@ export default function ReschedulePage() {
   return (
     <Page>
       <Card>
-        <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 6 }}>
+        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 6 }}>
           {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
         </div>
         <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
@@ -338,7 +398,7 @@ export default function ReschedulePage() {
           {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
         </div>
         {data.isRecurring ? (
-          <div style={{
+          <div data-glass="soft" style={{
             marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
             borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
           }}>
@@ -355,6 +415,27 @@ export default function ReschedulePage() {
           Tap a time, then confirm. Your technician arrives within the window shown.
         </div>
 
+        <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
+          <WavesAIScheduleSearch
+            key={aiSession}
+            theme={{ accent: COLORS.blueDeeper, accentText: COLORS.white, text: S.text, muted: S.muted, border: S.softBorder, surface: S.surface, inputBg: S.soft }}
+            onSearch={runAiSearch}
+          />
+          {aiFiltered ? (
+            <button
+              type="button"
+              onClick={showAllTimes}
+              style={{
+                justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
+                color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              Show all open times
+            </button>
+          ) : null}
+        </div>
+
         {submitError ? (
           <div style={{
             background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8,
@@ -366,8 +447,10 @@ export default function ReschedulePage() {
 
         {days.length === 0 ? (
           <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
-            We don't have open times to offer online right now. Text or call us and we'll find a time that works.
-            <ContactRow />
+            {aiFiltered
+              ? 'No open times match that search — try another day, or show all open times above.'
+              : "We don't have open times to offer online right now. Text or call us and we'll find a time that works."}
+            {aiFiltered ? null : <ContactRow />}
           </div>
         ) : (
           <>
@@ -376,6 +459,7 @@ export default function ReschedulePage() {
             ))}
             <button
               type="button"
+              data-glass-accent=""
               onClick={confirm}
               disabled={!selectedSlot || submitting}
               style={{

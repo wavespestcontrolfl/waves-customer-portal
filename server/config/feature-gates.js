@@ -447,6 +447,14 @@ const gates = {
   // Kill switch: unset GATE_PORTAL_GLASS.
   portalGlassTheme: isProd ? process.env.GATE_PORTAL_GLASS === 'true' : true,
 
+  // Waves AI schedule search on the wavespestcontrol.com /book page (astro
+  // island). Exposed to the marketing site via GET /api/booking/config as
+  // `ai_search`, so the island fails closed: the search bar only renders when
+  // the portal affirms the flag. The portal's own /book page and the estimate
+  // page are NOT behind this gate — their bars are already live.
+  // Kill switch: unset GATE_BOOK_AI_SEARCH.
+  bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in

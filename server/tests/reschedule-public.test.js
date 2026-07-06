@@ -13,7 +13,7 @@ const { smsLineFor } = require('../services/reschedule-link');
 const smsMigration = require('../models/migrations/20260702000011_reschedule_link_sms_templates');
 const emailMigration = require('../models/migrations/20260702000012_reschedule_link_email_templates');
 
-const { eligibility, bookingRange, apptDateStr, label12 } = reschedulePublicRouter._test;
+const { eligibility, bookingRange, searchParseOpts, apptDateStr, label12 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
 const NOW = new Date('2026-07-02T16:00:00.000Z');
@@ -89,6 +89,27 @@ describe('reschedule-public booking window', () => {
   test('defaults match the public /book funnel defaults', () => {
     const range = bookingRange({}, NOW);
     expect(range).toEqual({ rangeFrom: '2026-07-03', rangeTo: '2026-07-16' });
+  });
+});
+
+describe('reschedule-public AI search window', () => {
+  test('parseWhen opts clamp BOTH ends to the reschedule window — no 90-day reach', () => {
+    const opts = searchParseOpts({ advance_days_min: 1, advance_days_max: 14 }, NOW);
+    expect(opts).toEqual({ now: NOW, minDaysOut: 1, maxDaysOut: 14, defaultWindowDays: 14 });
+  });
+
+  test('defaults mirror bookingRange defaults so search never exceeds the slot list', () => {
+    const opts = searchParseOpts({}, NOW);
+    expect(opts.minDaysOut).toBe(1);
+    expect(opts.maxDaysOut).toBe(14);
+    expect(opts.defaultWindowDays).toBe(14);
+  });
+
+  test('a widened booking_config widens the search window in lockstep', () => {
+    const opts = searchParseOpts({ advance_days_min: 2, advance_days_max: 21 }, NOW);
+    expect(opts.minDaysOut).toBe(2);
+    expect(opts.maxDaysOut).toBe(21);
+    expect(opts.defaultWindowDays).toBe(21);
   });
 });
 

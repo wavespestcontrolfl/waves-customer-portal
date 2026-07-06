@@ -440,9 +440,10 @@ finding and warns on P1. Reviewers must return JSON matching
   `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
-  `/api/public/reschedule/:token` (GET + POST; customer self-serve single-visit
-  reschedule linked from appointment confirmation/72h/24h texts + reminder
-  emails. `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
+  `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
+  customer self-serve single-visit reschedule linked from appointment
+  confirmation/72h/24h texts + reminder emails.
+  `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
   is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
   GET returns the appointment summary (customer first name, service type,
   current date/window, recurring flag) + live open slots from the /book
@@ -452,8 +453,21 @@ finding and warns on P1. Reviewers must return JSON matching
   reserve, self-book day caps re-checked server-side); the commit goes through
   `SmartRebooker.reschedule` (advisory lock + tech-route overlap conflict
   check + `reschedule_log` audit as `customer_self_serve` + escalation
-  flagging). Generic 404 for bad/unknown tokens. Treat the reschedule token
-  and any change to this route's payload or commit path as security-critical).
+  flagging). Generic 404 for bad/unknown tokens.
+  `POST /:token/find-slots` is the Waves AI date/time search for this page:
+  model-backed (free-text "when" → date window via `parseWhen`, the same
+  parser the /book and estimate searches use) and READ-ONLY — it returns
+  availability in the same shape as the GET and never books or mutates. Same
+  64-hex token format gate + generic 404, same eligibility guards as the
+  commit POST (409 for non-reschedulable visits), its own 15 req/min limiter
+  (mirrors the estimate find-slots budget), and no raw query logging (the
+  route logs only service id + error message; parse-when logs only failure
+  messages). The parse window is clamped on BOTH ends to the booking_config
+  reschedule range (`advance_days_min..advance_days_max`) with no
+  expandOpenDays, so it can never offer a date or synthetic slot the GET list
+  and the POST commit revalidation would not themselves offer.
+  Treat the reschedule token and any change to this route family's payload
+  or commit path as security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).

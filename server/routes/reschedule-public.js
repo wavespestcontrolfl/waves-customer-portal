@@ -13,6 +13,12 @@
  *   window, with the appointment's own row excluded from the occupied-route
  *   set so it doesn't block the slot it is moving out of.
  *
+ * POST /:token/find-slots — Waves AI date/time search. Same natural-language
+ *   parser the public /book funnel and the estimate page use (parseWhen),
+ *   but clamped to the reschedule window [advance_days_min, advance_days_max]
+ *   — the AI must never surface a date the page's own slot list wouldn't
+ *   offer, so there is no 90-day specific-date reach here.
+ *
  * POST /:token  — commit. The requested slot is re-validated against a fresh
  *   single-day availability run (a customer can only commit a slot the engine
  *   still offers — lunch/cap/route rules included), then committed through
@@ -57,6 +63,16 @@ const commitLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many attempts. Please try again in a minute.' },
+});
+
+// AI search spends a model call per request — same budget as the estimate
+// page's find-slots limiter.
+const findSlotsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
 function apptDateStr(scheduledDate) {
@@ -148,7 +164,21 @@ function bookingRange(config, now = new Date()) {
   };
 }
 
-async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config }) {
+// parseWhen options for the AI search: clamped to the reschedule window on
+// BOTH ends — unlike /book's find-slots (which opens the horizon to
+// MAX_BOOKING_HORIZON_DAYS for a named date), the search here never surfaces
+// a date the page's own slot list wouldn't offer, because POST /:token
+// rejects anything outside bookingRange().
+function searchParseOpts(config, now = new Date()) {
+  return {
+    now,
+    minDaysOut: config.advance_days_min ?? 1,
+    maxDaysOut: config.advance_days_max ?? 14,
+    defaultWindowDays: config.advance_days_max ?? 14,
+  };
+}
+
+async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
 
@@ -172,6 +202,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config }) 
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
+    ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
 
@@ -223,6 +254,72 @@ router.get('/:token', async (req, res, next) => {
           rangeTo: range.rangeTo,
         }
         : null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Waves AI date/time search — parses the customer's natural-language "when"
+// and returns matching open slots in the same shape GET's `availability`
+// uses, so the page can splice the results straight into its day list.
+router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const query = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
+  if (!query) return res.status(400).json({ error: 'query required' });
+  if (query.length > 500) return res.status(400).json({ error: 'query too long' });
+
+  try {
+    const svc = await loadByToken(req.params.token);
+    if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+
+    const elig = eligibility(svc);
+    if (!elig.ok) {
+      return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
+    }
+
+    const booking = require('./booking');
+    const config = await booking._internals.loadBookingConfig();
+    const range = bookingRange(config);
+
+    const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
+    const when = await parseWhen(query, searchParseOpts(config));
+
+    let availability = null;
+    try {
+      // No expandOpenDays here (unlike /book's find-slots): the search must be
+      // a pure filter over what this page's GET list and the POST commit
+      // revalidation offer — synthetic open-day windows would 409 SLOT_TAKEN
+      // at commit because the single-day revalidation doesn't expand either.
+      availability = await buildAvailabilityForService(svc, {
+        rangeFrom: when.dateFrom,
+        rangeTo: when.dateTo,
+        config,
+        timeOfDay: when.timeOfDay,
+      });
+    } catch (err) {
+      logger.error(`[reschedule-public] find-slots availability failed for ${svc.id}: ${err.message}`);
+    }
+    if (!availability) {
+      return res.status(503).json({ error: 'Slot search is unavailable right now. Please pick from the times below.' });
+    }
+
+    const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
+    return res.json({
+      summary: summarizeWindow(when, { count: slotCount, nearby: availability.nearby }),
+      understood: when.understood,
+      window: { date_from: when.dateFrom, date_to: when.dateTo },
+      time_of_day: when.timeOfDay,
+      availability: {
+        slots: availability.slots,
+        days: availability.days,
+        nearby: availability.nearby,
+        rangeFrom: range.rangeFrom,
+        rangeTo: range.rangeTo,
+      },
     });
   } catch (err) {
     next(err);
@@ -389,6 +486,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 router._test = {
   eligibility,
   bookingRange,
+  searchParseOpts,
   apptDateStr,
   label12,
 };
