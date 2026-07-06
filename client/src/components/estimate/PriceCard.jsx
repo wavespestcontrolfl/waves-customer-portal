@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { glassCopyActive, glassPestInclusions, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
@@ -366,19 +366,34 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                 <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, lineHeight: 1.35 }}>
                   {row.label || 'Service application'}
                 </div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap' }}>
-                  {fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span>
-                </div>
+                {/* Single-service glass cards quote ONE price — the header
+                    cadence price. Restating it per-application here showed a
+                    second, independently-rounded figure next to the real one
+                    ($94 vs $93.99; owner directive 2026-07-05). Multi-row
+                    breakdowns keep per-row prices — there the split IS the
+                    information. */}
+                {glass && treatmentRows.length === 1 ? null : (
+                  <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap' }}>
+                    {fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span>
+                  </div>
+                )}
               </div>
               <div style={{ marginTop: 3, fontSize: 12, color: W.textCaption, lineHeight: 1.4 }}>
                 {Number(row.visitsPerYear) > 0 ? `${row.visitsPerYear} applications/year` : 'Service applications/year'}
                 {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
               <RowInclusions
-                items={glass && serviceKey(row) === 'pest_control'
-                  ? glassPestInclusions(row.visitsPerYear, glassSetupBullet)
-                  : serviceInclusions(row)}
-                collapsible={glass && serviceKey(row) === 'pest_control'}
+                // Glass classifies via glassServiceSlug, not serviceKey():
+                // lawn_pest_* rows are PEST (server recurringServiceKey
+                // semantics) but serviceKey checks 'lawn' first — the glass
+                // stack must match the priced service (codex rd2). Null
+                // slug → baseline list, unchanged.
+                items={(glass && glassRowInclusions(
+                  glassServiceSlug(String(row.service || row.key || row.label || '')),
+                  row.visitsPerYear,
+                  glassSetupBullet,
+                )) || serviceInclusions(row)}
+                collapsible={glass}
               />
             </div>
           ))}
