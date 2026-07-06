@@ -113,7 +113,7 @@ describe('classifyReviewTier', () => {
   });
 
   test('compliance signals force red at any confidence', () => {
-    for (const phrase of ['the June blackout window', 'per county ordinance', 'local ordinances require', 'REI is 12 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
+    for (const phrase of ['the June blackout window', 'per county ordinance', 'local ordinances require', 'REI is 12 hours', 'rei is 12 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
       const { tier, flags } = classifyReviewTier({ confidence: 'very_high', content: phrase });
       expect(tier).toBe('red');
       expect(flags).toContain('compliance_content');
@@ -394,6 +394,68 @@ describe('skip-path reclassification', () => {
     expect(patch.review_tier).toBe('red');
     expect(patch.review_status).toBe('pending_review');
     expect(JSON.parse(patch.risk_flags)).toContain('open_contradiction');
+  });
+
+  test('the skip path returns the POST-update review fields, not the stale row', async () => {
+    // Page was gated by a contradiction that has since been resolved: the
+    // skip path reclassifies it back to trusted. Callers (post-merge mirror
+    // alignment) act on the returned entry's trust — a stale pre-update row
+    // would immediately re-flag the mirror this skip pass just reactivated.
+    const existing = {
+      id: 'ke-1', slug: 'track/st-augustine',
+      content: '# Track\n\nReal content.', data_point_count: 22,
+      source_treatment_ids: ['o1', 'o2'], stale_flag: false,
+      review_tier: 'red', review_status: 'pending_review',
+      risk_flags: ['open_contradiction'],
+    };
+    const state = useDb({
+      knowledge_entries: [existing],
+      knowledge_contradictions: [], // resolved since the last write
+      knowledge_base: [],
+    });
+
+    const result = await wiki.generatePage('track/st-augustine', 'track', {
+      outcomes: [{ id: 'o1' }, { id: 'o2' }],
+      totalOutcomeCount: 22,
+      allOutcomeIds: ['o1', 'o2'],
+    }, 'Track st_augustine Performance');
+
+    expect(result.writeState).toBe('skipped');
+    expect(result.entry.review_status).toBe('auto');
+    expect(result.entry.review_tier).toBe('green');
+    // and the skip path itself re-trusted the mirror
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'active', active: true }),
+    ]));
+  });
+});
+
+describe('contradiction-insert re-gating', () => {
+  test('regateEntryForContradiction flips a trusted page and its KB mirror immediately', async () => {
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'green', review_status: 'auto', risk_flags: [],
+      }],
+      knowledge_base: [],
+    });
+
+    await wiki.regateEntryForContradiction('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_tier).toBe('red');
+    expect(patch.review_status).toBe('pending_review');
+    expect(JSON.parse(patch.risk_flags)).toContain('open_contradiction');
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
+  });
+
+  test('regateEntryForContradiction is a no-op without an entry id', async () => {
+    const state = useDb({ knowledge_entries: [] });
+    await wiki.regateEntryForContradiction(null);
+    expect(state.updates.knowledge_entries).toBeUndefined();
   });
 });
 

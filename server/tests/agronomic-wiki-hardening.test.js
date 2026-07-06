@@ -220,7 +220,10 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(result).toEqual({ entry: existing, writeState: 'skipped' });
+    // the returned entry carries the POST-update review fields on top of the
+    // existing row (callers act on its trust)
+    expect(result.writeState).toBe('skipped');
+    expect(result.entry).toEqual(expect.objectContaining({ id: 'ke-1', content: existing.content }));
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
     // last_data_update advances so the page doesn't get re-marked stale and
     // re-skipped on every subsequent weekly refresh

@@ -107,7 +107,7 @@ const TRUSTED_STATUSES = ['auto', 'approved'];
 const COMPLIANCE_PATTERNS = [
   /\bblackout\b/i,
   /\bordinances?\b/i,
-  /\bREI\b/,
+  /\brei\b/i,
   /re-entry interval/i,
   /\bdo[- ]not[- ]apply\b/i,
   /phytotox/i,
@@ -199,6 +199,41 @@ async function syncKbCopyTrust(entryId, trusted) {
       .where({ wiki_entry_id: entryId, source: 'wiki-sync' })
       .update({ status: trusted ? 'active' : 'flagged', active: trusted, updated_at: new Date() });
   } catch { /* knowledge_base may not exist */ }
+}
+
+// Called by the contradiction detectors right after inserting a new
+// knowledge_contradictions row against a wiki page. Trusted reads gate on the
+// page's cached review_status, so without this an already-generated page
+// keeps feeding recommendations/estimate context until its next refresh
+// happens to re-resolve it. Pins, blocks, and sticky approval are honored by
+// the shared resolver (a genuinely NEW contradiction changes the flag set, so
+// sticky approval correctly does not apply).
+async function regateEntryForContradiction(entryId) {
+  if (!entryId) return;
+  try {
+    const existing = await db('knowledge_entries').where({ id: entryId }).first();
+    if (!existing) return;
+    const review = resolveReviewFields(existing, {
+      confidence: existing.confidence,
+      content: existing.content,
+      hasOpenContradiction: true,
+    });
+    if (
+      review.reviewStatus !== existing.review_status ||
+      review.tier !== existing.review_tier ||
+      !sameFlagSets(existing.risk_flags, review.flags)
+    ) {
+      await db('knowledge_entries').where({ id: entryId }).update({
+        review_tier: review.tier,
+        review_status: review.reviewStatus,
+        risk_flags: JSON.stringify(review.flags),
+        updated_at: new Date(),
+      });
+    }
+    await syncKbCopyTrust(entryId, TRUSTED_STATUSES.includes(review.reviewStatus));
+  } catch (err) {
+    logger.error(`[agronomic-wiki] regateEntryForContradiction failed for entry ${entryId}: ${err.message}`);
+  }
 }
 
 async function callClaude(systemPrompt, userPrompt) {
@@ -711,7 +746,18 @@ const AgronomicWiki = {
           triggerType: 'wiki_generation',
         });
         logger.info(`[agronomic-wiki] Skipped page ${slug} — data unchanged (${dataPointCount} pts)`);
-        return { entry: existing, writeState: 'skipped' };
+        // Merge the review fields just written — callers act on the returned
+        // entry's trust (post-merge mirror alignment), and the stale pre-update
+        // row could re-flag a mirror this branch just reactivated.
+        return {
+          entry: {
+            ...existing,
+            review_tier: review.tier,
+            review_status: review.reviewStatus,
+            risk_flags: JSON.stringify(review.flags),
+          },
+          writeState: 'skipped',
+        };
       }
 
       const systemPrompt = `You are maintaining an agronomic knowledge wiki for Waves Pest Control in Southwest Florida. You write technically accurate, data-driven content based on real treatment outcomes. Never fabricate data. Only make claims supported by the provided data points. When data is limited, say so explicitly. When data contradicts existing claims, flag it clearly. Write in markdown format.
@@ -776,7 +822,15 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
           triggerType: 'wiki_generation',
         });
         logger.warn(`[agronomic-wiki] Generation failed for ${slug} — existing content preserved`);
-        return { entry: { ...existing, review_tier: review.tier, review_status: review.reviewStatus }, writeState: 'failed' };
+        return {
+          entry: {
+            ...existing,
+            review_tier: review.tier,
+            review_status: review.reviewStatus,
+            risk_flags: JSON.stringify(review.flags),
+          },
+          writeState: 'failed',
+        };
       }
 
       const content = result?.text?.trim()
@@ -1287,6 +1341,7 @@ function aggregateOutcomes(outcomes) {
 module.exports = AgronomicWiki;
 
 module.exports.TRUSTED_STATUSES = TRUSTED_STATUSES;
+module.exports.regateEntryForContradiction = regateEntryForContradiction;
 
 // Exposed for unit tests only.
 module.exports.__private = {

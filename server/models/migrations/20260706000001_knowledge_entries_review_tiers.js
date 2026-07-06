@@ -18,7 +18,7 @@
 const COMPLIANCE_PATTERNS = [
   /\bblackout\b/i,
   /\bordinances?\b/i,
-  /\bREI\b/,
+  /\brei\b/i,
   /re-entry interval/i,
   /\bdo[- ]not[- ]apply\b/i,
   /phytotox/i,

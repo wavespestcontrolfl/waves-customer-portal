@@ -33,6 +33,10 @@ function assessmentAnalytics() {
   return require('./assessment-analytics');
 }
 
+function agronomicWiki() {
+  return require('./agronomic-wiki');
+}
+
 // ══════════════════════════════════════════════════════════════
 // 1. FAWN WEATHER CONTEXT
 // ══════════════════════════════════════════════════════════════
@@ -308,6 +312,9 @@ If no contradictions, return: { "contradictions": [] }`
                 severity: c.severity || 'moderate',
               });
               stats.found++;
+              // Trusted reads gate on the page's cached review_status — flip
+              // the page and its KB mirror now, not at the next regeneration.
+              await agronomicWiki().regateEntryForContradiction(wiki.id);
             }
           }
         } catch (aiErr) {

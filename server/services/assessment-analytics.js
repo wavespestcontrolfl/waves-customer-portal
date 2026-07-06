@@ -16,6 +16,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-context');
+const { regateEntryForContradiction } = require('./agronomic-wiki');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -698,6 +699,9 @@ async function detectContradictions() {
             if (!existing) {
               await db('knowledge_contradictions').insert(contradiction);
               found.push(contradiction);
+              // Trusted reads gate on the page's cached review_status — flip
+              // the page and its KB mirror now, not at the next regeneration.
+              await regateEntryForContradiction(contradiction.wiki_entry_id);
             }
           }
         }
