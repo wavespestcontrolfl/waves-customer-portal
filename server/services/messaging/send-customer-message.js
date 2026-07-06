@@ -44,19 +44,13 @@ const { loadSuppressionState, checkSuppression } = require('./validators/suppres
 const { checkLineType } = require('./validators/line-type');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
-const { checkFloridaQuietHours } = require('./quiet-hours');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
 const { isEnabled } = require('../../config/feature-gates');
 
-const RETRYABLE_BLOCK_CODES = new Set(['QUIET_HOURS_HOLD']);
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
-
-function isRetryableBlockedResult(result) {
-  return !!(result && result.blocked && RETRYABLE_BLOCK_CODES.has(result.code));
-}
 
 function nextProviderRetryAt(providerOutcome, now = new Date()) {
   if (!providerOutcome || !providerOutcome.retryable) return null;
@@ -159,7 +153,6 @@ async function sendCustomerMessage(input) {
     { name: 'check_consent_for_purpose',  fn: () => checkConsentForPurpose(sendInput, policy, contactState) },
     { name: 'check_contact_compliance',   fn: () => checkContactCompliance(sendInput, policy) },
     { name: 'check_autopay_sms_gate',      fn: () => checkAutopayCustomerSmsGate(sendInput) },
-    { name: 'check_florida_quiet_hours',  fn: () => checkFloridaQuietHours(sendInput, policy) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
     // Last: only pay for a Twilio line-type Lookup when the message would
@@ -179,7 +172,6 @@ async function sendCustomerMessage(input) {
         code: result.code,
         reason: result.reason,
         validator: step.name,
-        nextAllowedAt: result.nextAllowedAt || null,
       };
       break;
     }
@@ -204,9 +196,6 @@ async function sendCustomerMessage(input) {
       blocked: true,
       code: blockedBy.code,
       reason: blockedBy.reason,
-      retryable: RETRYABLE_BLOCK_CODES.has(blockedBy.code),
-      deferred: RETRYABLE_BLOCK_CODES.has(blockedBy.code),
-      nextAllowedAt: blockedBy.nextAllowedAt ? blockedBy.nextAllowedAt.toISOString() : undefined,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
@@ -315,12 +304,10 @@ async function dispatchToProvider(input) {
 
 module.exports = {
   sendCustomerMessage,
-  isRetryableBlockedResult,
   // Exposed for tests
   _internals: {
     validateContract,
     normalizeRecipient,
-    isRetryableBlockedResult,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

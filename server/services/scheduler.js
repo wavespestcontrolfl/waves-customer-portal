@@ -27,8 +27,8 @@ function purposeForScheduledMessageType(messageType) {
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
   // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
-  // own quiet-enforced purpose, not fall through to conversational — the
-  // quiet-hours re-check at dispatch is what keeps a re-queued row honest.
+  // own purpose, not fall through to conversational, so the policy re-check at
+  // dispatch keeps a re-queued row honest.
   if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
   return 'conversational';
 }
@@ -1521,7 +1521,7 @@ function initScheduledJobs() {
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
-            // quiet-hours-held voicemail text-back persists transactional_allowed)
+            // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
             // NO_CONSENT_RECORD. Safe to forward blindly: the consent validator
             // only honors a consentBasis on transactional-grade policies for the
@@ -1592,18 +1592,10 @@ function initScheduledJobs() {
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
-          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
-            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-              status: 'scheduled',
-              scheduled_for: new Date(smsResult.nextAllowedAt),
-              updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quiet_hours_held_at', ?::timestamptz, 'quiet_hours_reason', ?)", [completedAt, smsResult.reason || null]),
-            });
-            logger.info(`[scheduled-sms] Held scheduled SMS ${msg.id} until ${smsResult.nextAllowedAt}`);
           } else if (smsResult.retryable && smsResult.nextAllowedAt
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // Transient provider failure (Twilio 429/5xx/timeout): re-queue
-            // like a quiet-hours hold so the next cron tick retries it,
+            // so the next cron tick retries it,
             // instead of marking it permanently blocked and dropping it
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
@@ -1928,7 +1920,7 @@ function initScheduledJobs() {
   // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
-  // ~1h first-touch SMS responsive. Quiet hours + suppression are enforced in
+  // ~1h first-touch SMS responsive. Suppression is enforced in
   // the service + the messaging validator. Ships LIVE; kill switch is
   // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
   // =========================================================================
@@ -3026,8 +3018,8 @@ function initScheduledJobs() {
   // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
-  // preview/dev env with live creds can't text/email real customers. Quiet
-  // hours, suppression, and per-customer prefs still apply at the send site.
+  // preview/dev env with live creds can't text/email real customers.
+  // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
   cron.schedule('*/30 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;

@@ -221,7 +221,7 @@ describe('late-payment checker email sidecar', () => {
     const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
 
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', retryable: true, deferred: true,
+      sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, deferred: true,
     });
 
     setDbQueues({

@@ -154,10 +154,7 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 }
 
 function retryAtForDeferredSend(result) {
-  if (
-    !result ||
-    !(result.retryable || result.deferred || result.code === "QUIET_HOURS_HOLD")
-  ) {
+  if (!result || !(result.retryable || result.deferred)) {
     return null;
   }
   const nextAllowedAt = result.nextAllowedAt
@@ -1316,7 +1313,7 @@ const ReviewService = {
     // chosen template defaults to the standard friendly ask (audit P1). Email
     // touches always render the review_request_email DB template, so we record
     // THAT for honest per-template attribution. An edited SMS body is persisted
-    // (custom_body) so a quiet-hours/provider retry re-sends the operator's copy
+    // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
@@ -1434,7 +1431,7 @@ const ReviewService = {
         `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
       );
       // Only a SENT result must avoid retry (would double-send). A not-sent
-      // result (quiet-hours hold / rate-limit / transient provider failure) has
+      // result (rate-limit / transient provider failure) has
       // NO duplicate-send risk, so keep it retryable — don't drop the manual
       // retry or stop the cadence over a bookkeeping blip.
       return result?.sent
@@ -1577,8 +1574,8 @@ const ReviewService = {
       return { started: false, reason: "cooldown" };
     }
 
-    // Supersede any already-queued ASK (post-service auto, or a quiet-hours
-    // deferral): otherwise processScheduled() would fire it AND the cadence's
+    // Supersede any already-queued ASK (post-service auto, or a deferred
+    // retry): otherwise processScheduled() would fire it AND the cadence's
     // Day-0 touch → a duplicate review request. Only ASKS are superseded — a
     // queued private no-link check-in (ASK_TOUCH_SQL excludes it) is left alone.
     // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and

@@ -815,8 +815,8 @@ const TwilioService = {
 
     // Nothing delivered. Distinguish a RETRYABLE miss from deterministic
     // suppression so the caller knows whether to release its arrival guard:
-    //  - retryable: a quiet-hours hold or a transient provider failure (both
-    //    carry retryable:true from sendCustomerMessage), or the template was
+    //  - retryable: a transient provider failure (carries
+    //    retryable:true from sendCustomerMessage), or the template was
     //    missing for every contact (results empty → re-seed fixes it).
     //  - suppressed: every attempt was blocked/terminal for a deterministic
     //    reason (STOP/wrong-number/manual-DNC suppression, consent, a non-mobile
