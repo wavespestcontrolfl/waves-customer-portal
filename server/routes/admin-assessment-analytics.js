@@ -10,6 +10,7 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const analytics = require('../services/assessment-analytics');
+const { recomputeEntryReviewGate } = require('../services/agronomic-wiki');
 const db = require('../models/db');
 
 router.use(adminAuthenticate);
@@ -213,6 +214,12 @@ router.patch('/contradictions/:id', async (req, res, next) => {
       .where({ id: req.params.id })
       .update(update)
       .returning('*');
+    // Any status change can open or clear a page's gating exception —
+    // resolving the last open contradiction must un-gate the linked wiki
+    // page (and its KB mirror) now, not at some future regeneration.
+    if (updated?.wiki_entry_id) {
+      await recomputeEntryReviewGate(updated.wiki_entry_id);
+    }
     res.json({ success: true, contradiction: updated });
   } catch (err) { next(err); }
 });

@@ -43,19 +43,31 @@ exports.up = async function up(knex) {
     .select('id', 'confidence', 'content');
 
   // Pre-existing open contradictions must gate their pages from day one —
-  // the trusted-read filters go live with this deploy.
-  let contradictedIds = new Set();
+  // the trusted-read filters go live with this deploy. Per-id flags mirror
+  // the runtime classifier: sticky approval compares flag sets, so each
+  // contradiction's identity has to be part of the risk state.
+  const contradictionsByEntry = new Map();
   if (await knex.schema.hasTable('knowledge_contradictions')) {
     const contradicted = await knex('knowledge_contradictions')
       .whereNotIn('status', ['resolved', 'dismissed'])
       .whereNotNull('wiki_entry_id')
-      .select('wiki_entry_id');
-    contradictedIds = new Set(contradicted.map((c) => c.wiki_entry_id));
+      .select('id', 'wiki_entry_id');
+    for (const c of contradicted) {
+      if (!contradictionsByEntry.has(c.wiki_entry_id)) contradictionsByEntry.set(c.wiki_entry_id, []);
+      contradictionsByEntry.get(c.wiki_entry_id).push(c.id);
+    }
   }
 
   for (const row of rows) {
     const flags = [];
-    if (contradictedIds.has(row.id)) flags.push('open_contradiction');
+    const openIds = contradictionsByEntry.get(row.id) || [];
+    if (openIds.length) {
+      flags.push('open_contradiction');
+      for (const id of [...openIds].sort()) flags.push(`contradiction:${id}`);
+    }
+    // Placeholder stubs are never trusted, whatever their data-point
+    // confidence — the runtime gates newly-created stubs the same way.
+    if ((row.content || '').includes('*Pending AI generation')) flags.push('generation_stub');
     if (COMPLIANCE_PATTERNS.some((p) => p.test(row.content || ''))) flags.push('compliance_content');
     if (row.confidence === 'low') flags.push('low_confidence');
     else if (row.confidence === 'moderate') flags.push('moderate_confidence');
@@ -63,7 +75,7 @@ exports.up = async function up(knex) {
 
     let tier = 'green';
     if (flags.includes('moderate_confidence') || flags.includes('unclassified_confidence')) tier = 'yellow';
-    if (flags.includes('low_confidence') || flags.includes('compliance_content') || flags.includes('open_contradiction')) tier = 'red';
+    if (flags.includes('low_confidence') || flags.includes('compliance_content') || flags.includes('open_contradiction') || flags.includes('generation_stub')) tier = 'red';
 
     await knex('knowledge_entries').where({ id: row.id }).update({
       review_tier: tier,

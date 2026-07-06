@@ -314,7 +314,7 @@ If no contradictions, return: { "contradictions": [] }`
               stats.found++;
               // Trusted reads gate on the page's cached review_status — flip
               // the page and its KB mirror now, not at the next regeneration.
-              await agronomicWiki().regateEntryForContradiction(wiki.id);
+              await agronomicWiki().recomputeEntryReviewGate(wiki.id);
             }
           }
         } catch (aiErr) {

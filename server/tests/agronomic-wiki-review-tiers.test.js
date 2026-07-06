@@ -430,32 +430,135 @@ describe('skip-path reclassification', () => {
   });
 });
 
-describe('contradiction-insert re-gating', () => {
-  test('regateEntryForContradiction flips a trusted page and its KB mirror immediately', async () => {
+describe('contradiction gate recompute', () => {
+  test('recomputeEntryReviewGate flips a trusted page and its KB mirror on a new contradiction', async () => {
     const state = useDb({
       knowledge_entries: [{
         id: 'ke-1', slug: 'product/prodiamine',
         content: '# Product\n\nClean prose.', confidence: 'high',
         review_tier: 'green', review_status: 'auto', risk_flags: [],
       }],
+      knowledge_contradictions: [{ id: 'kc-1' }],
       knowledge_base: [],
     });
 
-    await wiki.regateEntryForContradiction('ke-1');
+    await wiki.recomputeEntryReviewGate('ke-1');
 
     const patch = (state.updates.knowledge_entries || [])[0];
     expect(patch.review_tier).toBe('red');
     expect(patch.review_status).toBe('pending_review');
-    expect(JSON.parse(patch.risk_flags)).toContain('open_contradiction');
+    expect(JSON.parse(patch.risk_flags)).toEqual(expect.arrayContaining(['open_contradiction', 'contradiction:kc-1']));
     expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
       expect.objectContaining({ status: 'flagged', active: false }),
     ]));
   });
 
-  test('regateEntryForContradiction is a no-op without an entry id', async () => {
+  test('a SECOND contradiction re-gates a page approved despite the first one', async () => {
+    // Approval was granted while kc-1 was open (its identity is in the risk
+    // state). kc-2 arriving changes the flag set, so sticky approval must
+    // not absorb it.
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'red', review_status: 'approved',
+        risk_flags: ['open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: [{ id: 'kc-1' }, { id: 'kc-2' }],
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_status).toBe('pending_review');
+    expect(JSON.parse(patch.risk_flags)).toContain('contradiction:kc-2');
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
+  });
+
+  test('approval stays sticky while the SAME contradictions are open', async () => {
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'red', review_status: 'approved',
+        risk_flags: ['open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    expect(state.updates.knowledge_entries).toBeUndefined(); // no state change
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'active', active: true }), // approved = trusted
+    ]));
+  });
+
+  test('clearing the last contradiction un-gates the page and mirror immediately', async () => {
+    const state = useDb({
+      knowledge_entries: [{
+        id: 'ke-1', slug: 'product/prodiamine',
+        content: '# Product\n\nClean prose.', confidence: 'high',
+        review_tier: 'red', review_status: 'pending_review',
+        risk_flags: ['open_contradiction', 'contradiction:kc-1'],
+      }],
+      knowledge_contradictions: [], // resolved/dismissed via the PATCH route
+      knowledge_base: [],
+    });
+
+    await wiki.recomputeEntryReviewGate('ke-1');
+
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_tier).toBe('green');
+    expect(patch.review_status).toBe('auto');
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'active', active: true }),
+    ]));
+  });
+
+  test('recomputeEntryReviewGate is a no-op without an entry id', async () => {
     const state = useDb({ knowledge_entries: [] });
-    await wiki.regateEntryForContradiction(null);
+    await wiki.recomputeEntryReviewGate(null);
     expect(state.updates.knowledge_entries).toBeUndefined();
+  });
+});
+
+describe('failed-retry stub gating', () => {
+  test('a preserved placeholder stub is never trusted when the retry fails', async () => {
+    const existing = {
+      id: 'ke-1', slug: 'product/talstar-p',
+      content: '# Product: Talstar P\n\n*Pending AI generation — 20 data points available.*',
+      data_point_count: 10, source_treatment_ids: ['o1'],
+      confidence: 'high',
+      review_tier: 'red', review_status: 'pending_review', risk_flags: ['generation_stub'],
+    };
+    const state = useDb({
+      knowledge_entries: [existing],
+      knowledge_contradictions: [],
+      knowledge_base: [],
+    });
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    const result = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: Array.from({ length: 20 }, (_, i) => ({ id: `o${i}` })),
+      totalOutcomeCount: 20,
+      allOutcomeIds: Array.from({ length: 20 }, (_, i) => `o${i}`),
+    }, 'Product: Talstar P');
+
+    // stub + failed retry: high data-point confidence must NOT re-trust it
+    expect(result.writeState).toBe('failed');
+    expect(result.entry.review_tier).toBe('red');
+    expect(result.entry.review_status).toBe('pending_review');
+    expect(JSON.parse(result.entry.risk_flags)).toContain('generation_stub');
+    const patch = (state.updates.knowledge_entries || [])[0];
+    expect(patch.review_status).toBe('pending_review');
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
   });
 });
 

@@ -114,10 +114,17 @@ const COMPLIANCE_PATTERNS = [
   /restricted[- ]use\b/i,
 ];
 
-function classifyReviewTier({ confidence, content, hasOpenContradiction = false, externalSource = false }) {
+function classifyReviewTier({ confidence, content, hasOpenContradiction = false, openContradictionIds = [], externalSource = false }) {
   const flags = [];
   if (externalSource) flags.push('external_source');
-  if (hasOpenContradiction) flags.push('open_contradiction');
+  if (hasOpenContradiction || openContradictionIds.length) {
+    flags.push('open_contradiction');
+    // Identity flags, one per open contradiction: sticky approval compares
+    // flag SETS, so a NEW contradiction must change the set even when
+    // 'open_contradiction' was already present at approval time — otherwise
+    // an approved-despite-contradiction page silently absorbs later ones.
+    for (const id of [...openContradictionIds].sort()) flags.push(`contradiction:${id}`);
+  }
   if (COMPLIANCE_PATTERNS.some((p) => p.test(content || ''))) flags.push('compliance_content');
   if (confidence === 'low') flags.push('low_confidence');
   else if (confidence === 'moderate') flags.push('moderate_confidence');
@@ -153,7 +160,7 @@ function sameFlagSets(a, b) {
 // while the risk reasons are unchanged. Used by BOTH the write path and the
 // unchanged-data skip path — a new contradiction must re-gate a page even
 // when its outcome data didn't change.
-function resolveReviewFields(existing, { confidence, content, hasOpenContradiction }) {
+function resolveReviewFields(existing, { confidence, content, hasOpenContradiction, openContradictionIds }) {
   const existingFlags = parseFlags(existing?.risk_flags);
   if (existingFlags.includes('manual_override')) {
     return {
@@ -162,7 +169,7 @@ function resolveReviewFields(existing, { confidence, content, hasOpenContradicti
       reviewStatus: existing.review_status,
     };
   }
-  const { tier, flags } = classifyReviewTier({ confidence, content, hasOpenContradiction });
+  const { tier, flags } = classifyReviewTier({ confidence, content, hasOpenContradiction, openContradictionIds });
   let reviewStatus = 'auto';
   if (tier === 'red') {
     const stickyApproval = existing?.review_status === 'approved' && sameFlagSets(existing.risk_flags, flags);
@@ -172,16 +179,16 @@ function resolveReviewFields(existing, { confidence, content, hasOpenContradicti
   return { tier, flags, reviewStatus };
 }
 
-async function hasOpenContradictionFor(entryId) {
-  if (!entryId) return false;
+async function getOpenContradictionIdsFor(entryId) {
+  if (!entryId) return [];
   try {
-    const contradiction = await db('knowledge_contradictions')
+    const rows = await db('knowledge_contradictions')
       .where({ wiki_entry_id: entryId })
       .whereNotIn('status', ['resolved', 'dismissed'])
-      .first('id');
-    return !!contradiction;
+      .select('id');
+    return rows.map((r) => r.id);
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -201,14 +208,17 @@ async function syncKbCopyTrust(entryId, trusted) {
   } catch { /* knowledge_base may not exist */ }
 }
 
-// Called by the contradiction detectors right after inserting a new
-// knowledge_contradictions row against a wiki page. Trusted reads gate on the
-// page's cached review_status, so without this an already-generated page
-// keeps feeding recommendations/estimate context until its next refresh
-// happens to re-resolve it. Pins, blocks, and sticky approval are honored by
-// the shared resolver (a genuinely NEW contradiction changes the flag set, so
-// sticky approval correctly does not apply).
-async function regateEntryForContradiction(entryId) {
+// Recompute a page's review gate from the CURRENT open-contradiction state
+// and align its KB mirror. Called by the contradiction detectors right after
+// inserting a new knowledge_contradictions row (trusted reads gate on the
+// page's cached review_status, so an already-generated page must be flipped
+// at insert time, not at its next refresh) AND by the contradiction
+// resolve/dismiss route (clearing the last blocker must un-gate the page
+// without waiting for a future regeneration). Pins, blocks, and sticky
+// approval are honored by the shared resolver; per-id contradiction flags
+// mean a genuinely NEW contradiction changes the flag set, so a stale
+// approval never absorbs it.
+async function recomputeEntryReviewGate(entryId) {
   if (!entryId) return;
   try {
     const existing = await db('knowledge_entries').where({ id: entryId }).first();
@@ -216,7 +226,7 @@ async function regateEntryForContradiction(entryId) {
     const review = resolveReviewFields(existing, {
       confidence: existing.confidence,
       content: existing.content,
-      hasOpenContradiction: true,
+      openContradictionIds: await getOpenContradictionIdsFor(entryId),
     });
     if (
       review.reviewStatus !== existing.review_status ||
@@ -232,7 +242,7 @@ async function regateEntryForContradiction(entryId) {
     }
     await syncKbCopyTrust(entryId, TRUSTED_STATUSES.includes(review.reviewStatus));
   } catch (err) {
-    logger.error(`[agronomic-wiki] regateEntryForContradiction failed for entry ${entryId}: ${err.message}`);
+    logger.error(`[agronomic-wiki] recomputeEntryReviewGate failed for entry ${entryId}: ${err.message}`);
   }
 }
 
@@ -521,12 +531,12 @@ const AgronomicWiki = {
         // The merge re-points variant contradictions onto the canonical page —
         // a page stamped trusted moments ago may have inherited an open
         // contradiction. Re-resolve so the gate reflects the post-merge state.
-        const inheritedContradiction = await hasOpenContradictionFor(entry.id);
-        if (inheritedContradiction) {
+        const inheritedContradictionIds = await getOpenContradictionIdsFor(entry.id);
+        if (inheritedContradictionIds.length) {
           const review = resolveReviewFields(entry, {
             confidence: entry.confidence,
             content: entry.content,
-            hasOpenContradiction: true,
+            openContradictionIds: inheritedContradictionIds,
           });
           if (review.reviewStatus !== entry.review_status || review.tier !== entry.review_tier) {
             await db('knowledge_entries')
@@ -720,7 +730,7 @@ const AgronomicWiki = {
       // retried. last_data_update advances so the page doesn't get re-marked
       // stale (and re-skipped) on every subsequent refresh: it records "data
       // verified current", which is what this branch just did.
-      const hasOpenContradiction = await hasOpenContradictionFor(existing?.id);
+      const openContradictionIds = await getOpenContradictionIdsFor(existing?.id);
 
       if (
         existing &&
@@ -730,7 +740,7 @@ const AgronomicWiki = {
       ) {
         // Data unchanged, but the review state may not be: a contradiction
         // that appeared since the last write must re-gate the page here too.
-        const review = resolveReviewFields(existing, { confidence, content: existing.content, hasOpenContradiction });
+        const review = resolveReviewFields(existing, { confidence, content: existing.content, openContradictionIds });
         await db('knowledge_entries')
           .where({ id: existing.id })
           .update({
@@ -804,7 +814,15 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         // even when the refresh itself failed.
         // Classify with the FRESH confidence — the new source set may have
         // shrunk below the trust threshold even though this refresh failed.
-        const review = resolveReviewFields(existing, { confidence, content: existing.content, hasOpenContradiction });
+        const review = resolveReviewFields(existing, { confidence, content: existing.content, openContradictionIds });
+        // A preserved page may itself still be the placeholder stub (stubs are
+        // always retried, so a retry that fails lands here) — a stub is never
+        // trusted, whatever its data-point confidence.
+        if (existing.content.includes('*Pending AI generation')) {
+          review.tier = 'red';
+          review.flags = [...new Set([...review.flags, 'generation_stub'])];
+          if (review.reviewStatus !== 'blocked') review.reviewStatus = 'pending_review';
+        }
         try {
           await db('knowledge_entries')
             .where({ id: existing.id })
@@ -842,7 +860,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // handled inside the shared resolver). A placeholder stub is never
       // trusted, whatever its data-point confidence — 'Pending AI generation'
       // must not reach estimates as field intelligence.
-      let { tier, flags, reviewStatus } = resolveReviewFields(existing, { confidence, content, hasOpenContradiction });
+      let { tier, flags, reviewStatus } = resolveReviewFields(existing, { confidence, content, openContradictionIds });
       if (!result?.text?.trim()) {
         tier = 'red';
         flags = [...new Set([...flags, 'generation_stub'])];
@@ -1341,7 +1359,7 @@ function aggregateOutcomes(outcomes) {
 module.exports = AgronomicWiki;
 
 module.exports.TRUSTED_STATUSES = TRUSTED_STATUSES;
-module.exports.regateEntryForContradiction = regateEntryForContradiction;
+module.exports.recomputeEntryReviewGate = recomputeEntryReviewGate;
 
 // Exposed for unit tests only.
 module.exports.__private = {
