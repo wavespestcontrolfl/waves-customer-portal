@@ -418,6 +418,14 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_GLASS.
   estimateGlassTheme: isProd ? process.env.GATE_ESTIMATE_GLASS === 'true' : true,
 
+  // Liquid-glass email chrome (glass rollout Phase 3) — switches every
+  // email wrapper in services/email-template.js (transactional, service,
+  // newsletter) from the warm sand palette to the glass language: cool
+  // gradient wash, #04395E ink, system font stack, gold gradient CTA.
+  // Off = the pre-glass chrome, byte-for-byte. Kill switch: unset
+  // GATE_EMAIL_GLASS.
+  emailGlassTheme: isProd ? process.env.GATE_EMAIL_GLASS === 'true' : true,
+
   // Liquid-glass customer service-report experience — makes glass the DEFAULT
   // render for the React report viewer (live mode only: pdf/static/sms_preview
   // renders never mount the scene, so the print pipeline and cached artifacts
