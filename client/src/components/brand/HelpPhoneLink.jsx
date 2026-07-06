@@ -50,12 +50,12 @@ export default function HelpPhoneLink({ tone = 'dark', compact, inline = false }
         color,
         fontFamily: "'Inter', system-ui, sans-serif",
         fontSize: 'var(--text-md)',
-        fontWeight: 500,
+        fontWeight: 700,
         textDecoration: 'none',
         lineHeight: 1,
       }}
     >
-      <Phone size={16} strokeWidth={1.75} aria-hidden="true" />
+      <Phone size={16} fill="currentColor" strokeWidth={0} aria-hidden="true" />
       <span className="help-phone-full" style={compact ? { display: 'none' } : {}}>
         {HELP_NUMBER}
       </span>
