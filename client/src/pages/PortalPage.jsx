@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
 import { formatAddress } from '../utils/format-address';
@@ -20,7 +20,14 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp } from '../native/platform';
 import { captureCameraPhoto } from '../native/camera';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+
+// Portal glass state, readable from any tab component. Warm #FAF8F3
+// sub-panels turn whisper-white under glass (the report-glass idiom) so
+// solid beige tiles never sit on top of translucent cards.
+const PortalGlassContext = createContext(false);
+const usePortalGlass = () => useContext(PortalGlassContext);
+const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -1533,6 +1540,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 // SERVICES TAB
 // =========================================================================
 function ServicesTab() {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1578,7 +1586,7 @@ function ServicesTab() {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -2170,6 +2178,7 @@ const APPOINTMENT_CHANNEL_KEYS = [
 ];
 
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
@@ -2394,7 +2403,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -3065,6 +3074,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // BILLING TAB
 // =========================================================================
 function BillingTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
@@ -3233,7 +3243,7 @@ function BillingTab({ customer }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -4290,6 +4300,7 @@ function ServicePrefsSection() {
 }
 
 function PropertyTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4352,7 +4363,7 @@ function PropertyTab({ customer }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -5031,6 +5042,7 @@ const ARTICLES = [
 ];
 
 function WeatherPestWidget({ customer, nextService }) {
+  const portalGlass = usePortalGlass();
   const [weather, setWeather] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -5048,7 +5060,7 @@ function WeatherPestWidget({ customer, nextService }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
 
   if (loading) return (
     <PortalStatePanel
@@ -5424,6 +5436,7 @@ function ContentCard({ post, large, compact }) {
 }
 
 function LearnTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
@@ -5456,7 +5469,7 @@ function LearnTab({ customer }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -6413,7 +6426,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         padding: compact ? 0 : 20,
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" data-glass="" style={{
+      <div role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" data-glass="modal" style={{
         position: 'relative',
         width: '100%',
         maxWidth: 860,
@@ -6698,6 +6711,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 // MY PLAN TAB
 // =========================================================================
 function MyPlanTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const [expandedService, setExpandedService] = useState(null);
   const [hoveredCalendarItem, setHoveredCalendarItem] = useState(null);
   const [nextService, setNextService] = useState(null);
@@ -6990,7 +7004,7 @@ function MyPlanTab({ customer }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -8198,6 +8212,7 @@ function ServiceTracker() {
 const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_failed'];
 
 function ReferTab({ customer, onSwitchTab }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -8316,7 +8331,7 @@ function ReferTab({ customer, onSwitchTab }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -8811,6 +8826,7 @@ function ReferTab({ customer, onSwitchTab }) {
 // DOCUMENTS TAB
 // =========================================================================
 function DocumentsTab({ customer, onSwitchTab }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [docs, setDocs] = useState({});
   const [totalDocs, setTotalDocs] = useState(0);
@@ -8829,7 +8845,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     position: 'relative',
   };
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -9380,9 +9396,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
 }
 
 function DocumentSection({ section, items, emptyMessage, onDownload, onShare, onShareWithRealtor, shareStatus, getExpirationBadge, formatDate, relativeTime, formatSize, customer, compact }) {
+  const portalGlass = usePortalGlass();
   const [open, setOpen] = useState(true);
   const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -9818,7 +9835,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         aria-modal="true"
         aria-label="New request"
         data-request-overlay
-        data-glass=""
+        data-glass="modal"
         style={{
           position: 'relative',
           width: '100%',
@@ -10561,7 +10578,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="More navigation" data-glass="" style={{
+      <div role="dialog" aria-modal="true" aria-label="More navigation" data-glass="modal" style={{
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
         position: 'relative',
@@ -10994,7 +11011,11 @@ export default function PortalPage() {
   // Glass dark-launch: same ?glass=1 gate as the estimate/pay pages, read
   // once at mount. Home is the hero surface (full scene with orbs); every
   // other tab keeps the quiet pro wash so utility work stays composed.
-  const [glassActive] = useState(glassParamRequested);
+  // GATE_PORTAL_GLASS release switch: cached server default (localStorage)
+  // resolves synchronously, the ui-flags fetch keeps it fresh, and ?glass=1 /
+  // ?glass=0 keep param precedence (glassReleaseActive inside both helpers).
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
   useGlassSurface(glassActive, activeTab === 'dashboard' ? 'full' : 'pro');
 
   // Close menu on outside click
@@ -11054,6 +11075,7 @@ export default function PortalPage() {
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (
+    <PortalGlassContext.Provider value={glassActive}>
     <div style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
@@ -11496,5 +11518,6 @@ export default function PortalPage() {
         customer={customer}
       />
     </div>
+    </PortalGlassContext.Provider>
   );
 }

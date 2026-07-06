@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
 import Icon from '../components/Icon';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
 
 const SUPPORT_LINKS = [
   { label: 'Call', href: 'tel:+19412975749', icon: 'phone' },
@@ -41,9 +41,11 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
-  // Glass dark-launch (?glass=1): the login page is the app's front door,
-  // so it gets the full scene like the estimate hero.
-  const [glassActive] = useState(glassParamRequested);
+  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
+  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
+  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
+  const [glassActive, setGlassActive] = useState(portalGlassInitial);
+  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
