@@ -7,10 +7,10 @@
  *      IS the reachback for a voicemail) — call-recording-processor.js.
  *   2. The messaging policy registry: missed_call_followup must be a known
  *      purpose (MESSAGE_PURPOSES — a miss means CONTRACT_VIOLATION on every
- *      send), resolvable for the lead audience, and quiet-hours-enforced.
- *   3. The scheduled-SMS rail's purpose map: a quiet-hours-deferred
+ *      send) and resolvable for the lead audience.
+ *   3. The scheduled-SMS rail's purpose map: a deferred
  *      voicemail_quote_link row must re-send under missed_call_followup, not
- *      fall through to conversational (which is NOT quiet-enforced).
+ *      fall through to conversational.
  */
 
 jest.mock('node-cron', () => ({ schedule: jest.fn() }));
@@ -25,7 +25,6 @@ jest.mock('../config/feature-gates', () => ({
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const policy = require('../services/messaging/policy');
-const { shouldEnforceQuietHours } = require('../services/messaging/quiet-hours');
 
 const { hasWorkableLeadSignal } = CallRecordingProcessor._test;
 
@@ -103,12 +102,6 @@ describe('missed_call_followup policy registry', () => {
     }));
   });
 
-  test('is quiet-hours enforced for SMS (8a–8p ET window applies)', () => {
-    expect(shouldEnforceQuietHours(
-      { channel: 'sms', audience: 'lead', purpose: 'missed_call_followup' },
-      policy.resolvePolicy('lead', 'missed_call_followup'),
-    )).toBe(true);
-  });
 });
 
 describe('scheduled-SMS rail purpose map', () => {

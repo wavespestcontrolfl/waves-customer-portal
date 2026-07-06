@@ -92,7 +92,7 @@ describe('classifyArrivalSend — the suppressed-vs-retryable rule, in one place
     ['sms disabled', { success: false, suppressed: true, reason: 'sms_disabled' }, 'suppressed'],
     ['no SMS-capable contact', { success: false, suppressed: true, reason: 'no_contacts' }, 'suppressed'],
     ['all sends blocked terminally (DNC / non-mobile)', { success: false, suppressed: true, reason: 'blocked' }, 'suppressed'],
-    ['provider/quiet-hours miss', { success: false }, 'retry'],
+    ['transient provider miss', { success: false }, 'retry'],
     ['template missing (empty results)', { success: false, results: [] }, 'retry'],
     ['undefined (threw / no return)', undefined, 'retry'],
     ['null', null, 'retry'],
@@ -182,7 +182,7 @@ describe('arrival SMS funnel — markOnProperty fires through one self-serializi
   });
 
   test('retryable miss: releases the claim back to NULL so a later signal retries', async () => {
-    sendTechArrived.mockResolvedValue({ success: false }); // provider/quiet-hours
+    sendTechArrived.mockResolvedValue({ success: false }); // transient provider miss
     const release = query(1);
     db
       .mockReturnValueOnce(query(scheduled())) // loadService

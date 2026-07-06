@@ -272,7 +272,7 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
   });
 
-  test("sendTechArrived stays retryable (not suppressed) on a quiet-hours / transient miss", async () => {
+  test("sendTechArrived stays retryable (not suppressed) on a transient miss", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
     ).mockReturnValueOnce(
@@ -282,18 +282,18 @@ describe("TwilioService.sendTechEnRoute", () => {
       { phone: "+15551112222", name: "Sam", role: "primary" },
     ]);
     smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
-    // Quiet-hours hold is explicitly retryable.
+    // A transient provider failure is explicitly retryable.
     sendCustomerMessage.mockResolvedValue({
       sent: false,
-      blocked: true,
-      code: "QUIET_HOURS_HOLD",
+      blocked: false,
+      code: "PROVIDER_FAILURE",
       retryable: true,
     });
 
     const result = await TwilioService.sendTechArrived("cust-1", "Bryan");
 
     // A retryable miss must NOT be marked suppressed — the caller releases the
-    // guard so a later signal can try again once the hold clears.
+    // guard so a later signal can try again once the failure clears.
     expect(result.success).toBe(false);
     expect(result.suppressed).toBeFalsy();
   });

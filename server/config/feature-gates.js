@@ -492,8 +492,8 @@ const gates = {
   // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
   // This lane NEVER auto-sends: the only send path is the operator's explicit
   // approve/revise click on /api/admin/drafts, which runs the full messaging
-  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs, quiet
-  // hours). With the gate OFF the generators only shadow-log candidate counts —
+  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs).
+  // With the gate OFF the generators only shadow-log candidate counts —
   // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
   // too) so campaign drafts never accumulate silently in a preview/dev queue.
   campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',

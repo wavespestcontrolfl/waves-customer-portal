@@ -95,7 +95,7 @@ async function releaseDraftClaim(draftId, fields = {}) {
 // Send-policy mapping for owner-approved drafts. Click-followup drafts are
 // PROACTIVE estimate nudges, so they must ride the same policy rails as
 // every other estimate follow-up SMS: purpose 'estimate_followup'
-// (transactional consent + quiet hours enforced by the messaging
+// (transactional consent enforced by the messaging
 // validators), estimateId threaded, and the same consentBasis shape
 // estimate-follow-up.js passes for lead-only contacts. They carry no
 // message_drafts.purpose value, so the intent branch runs FIRST; every
@@ -257,16 +257,14 @@ function draftSendPolicyFields(draft, recipient) {
 
 /**
  * 422 body for a blocked/failed send. Surfaces the block code and — for
- * retryable holds like QUIET_HOURS_HOLD — the nextAllowedAt timestamp, so the
- * operator sees "held until 8am" instead of an opaque failure. The draft has
+ * retryable provider failures — the nextAllowedAt timestamp. The draft has
  * already been released back to pending, so it can simply be approved again
- * after the window opens.
+ * later.
  */
 function blockedSendResponse(res, smsResult) {
   return res.status(422).json({
     error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
     code: smsResult.code,
-    held: smsResult.code === 'QUIET_HOURS_HOLD' ? true : undefined,
     nextAllowedAt: smsResult.nextAllowedAt,
   });
 }

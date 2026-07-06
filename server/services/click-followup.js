@@ -11,8 +11,7 @@
  * messaging send pipeline (the NO-SEND test pins this at the source level) —
  * the draft row is the terminal artifact, and the only path to a customer is
  * the owner approving the draft in /admin/drafts (which runs the full
- * messaging policy pipeline at send time). Because nothing sends, there is
- * no quiet-hours gate here either.
+ * messaging policy pipeline at send time).
  *
  * Candidate = a human click, 4h–72h old (fresher than 4h: they may still be
  * reading; older than 72h: the moment is gone), on a short link with

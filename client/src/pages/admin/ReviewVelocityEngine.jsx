@@ -596,8 +596,8 @@ export default function ReviewVelocityEngine() {
   }, []);
 
   // Send a real review request via the server, using the chosen template/body
-  // (audit O2). Handles the accurate send-status responses (sent / deferred
-  // during quiet hours / queued on a transient failure) instead of treating a
+  // (audit O2). Handles the accurate send-status responses (sent / deferred /
+  // queued on a transient failure) instead of treating a
   // non-200 as a hard failure (audit O7).
   const sendReviewRequest = useCallback(
     async (customer, opts = {}) => {
@@ -723,8 +723,8 @@ export default function ReviewVelocityEngine() {
     const result = await sendReviewRequest(c);
     if (result.ok) {
       if (result.deferred) {
-        addLog("stage", `Queued for ${c.name} (quiet hours) → ${c.gbpName}`);
-        showToast(result.message || `Queued for ${c.name} — sends when the window opens`);
+        addLog("stage", `Queued for ${c.name} → ${c.gbpName}`);
+        showToast(result.message || `Queued for ${c.name} — sends automatically on retry`);
       } else if (result.queued) {
         addLog("stage", `Queued for retry: ${c.name}`);
         showToast(result.message || `Queued for retry: ${c.name}`);

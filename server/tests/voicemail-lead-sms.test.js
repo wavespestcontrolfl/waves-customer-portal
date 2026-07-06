@@ -5,7 +5,7 @@
  * per-phone-ever sms_log dedupe (read failure = fail closed), the atomic
  * per-lead claim, the landline pre-check (fails open on lookup errors), the
  * no-token-secret fail-closed, the template kill switch, and the three
- * sendCustomerMessage outcomes (sent / quiet-hours re-queue onto the
+ * sendCustomerMessage outcomes (sent / retryable re-queue onto the
  * scheduled-SMS rail / terminal block keeps the claim). Mirrors the
  * booking-abandon-recovery mock harness.
  */
@@ -314,10 +314,10 @@ describe('voicemail lead text-back send outcomes', () => {
     }), expect.any(Object));
   });
 
-  test('quiet-hours hold re-queues onto the scheduled-SMS rail for the next allowed morning', async () => {
+  test('retryable provider failure re-queues onto the scheduled-SMS rail for the next allowed time', async () => {
     const nextAllowedAt = '2026-07-02T12:00:00.000Z';
     sendCustomerMessage.mockResolvedValue({
-      sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt,
+      sent: false, blocked: false, retryable: true, code: 'PROVIDER_FAILURE', nextAllowedAt,
     });
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, scheduled: true, nextAllowedAt });
@@ -342,7 +342,7 @@ describe('voicemail lead text-back send outcomes', () => {
 
   test('re-queue insert failure downgrades to failed (never throws into call processing)', async () => {
     sendCustomerMessage.mockResolvedValue({
-      sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: '2026-07-02T12:00:00.000Z',
+      sent: false, blocked: false, retryable: true, code: 'PROVIDER_FAILURE', nextAllowedAt: '2026-07-02T12:00:00.000Z',
     });
     state.insertError.sms_log = new Error('insert failed');
     const result = await sendVoicemailQuoteLink(args());
