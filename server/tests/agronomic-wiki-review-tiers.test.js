@@ -213,6 +213,79 @@ describe('generatePage review stamping', () => {
   });
 });
 
+describe('KB-copy trust propagation', () => {
+  test('reviewPage block flips the synced KB copy to flagged', async () => {
+    const page = { id: 'ke-1', slug: 'product/talstar-p', human_notes: null };
+    const state = useDb({ knowledge_entries: [page], knowledge_base: [] });
+
+    await wiki.reviewPage('product/talstar-p', { action: 'block', reviewedBy: 'admin' });
+
+    expect(state.updates.knowledge_base).toEqual([
+      expect.objectContaining({ status: 'flagged' }),
+    ]);
+    const kbCall = state.calls.knowledge_base[0];
+    const whereObj = kbCall.ops.find(([m, a]) => m === 'where' && typeof a[0] === 'object')[1][0];
+    expect(whereObj).toEqual({ wiki_entry_id: 'ke-1', source: 'wiki-sync' });
+  });
+
+  test('reviewPage approve flips the synced KB copy back to active', async () => {
+    const page = { id: 'ke-1', slug: 'product/talstar-p', human_notes: null };
+    const state = useDb({ knowledge_entries: [page], knowledge_base: [] });
+
+    await wiki.reviewPage('product/talstar-p', { action: 'approve', reviewedBy: 'admin' });
+
+    expect(state.updates.knowledge_base).toEqual([
+      expect.objectContaining({ status: 'active' }),
+    ]);
+  });
+
+  test('AI failure on a page with a new contradiction re-gates it and flags the KB copy', async () => {
+    const existing = {
+      id: 'ke-1', slug: 'track/st-augustine',
+      content: '# Track\n\nReal content.', data_point_count: 22, confidence: 'high',
+      source_treatment_ids: ['o1'], stale_flag: false,
+      review_tier: 'green', review_status: 'auto', risk_flags: [],
+    };
+    const state = useDb({
+      knowledge_entries: [existing],
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_base: [],
+    });
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    // different ids → not the skip path; failure path must still re-resolve
+    const result = await wiki.generatePage('track/st-augustine', 'track', {
+      outcomes: [{ id: 'oX' }], totalOutcomeCount: 23, allOutcomeIds: ['oX'],
+    }, 'Track st_augustine Performance');
+
+    expect(result.writeState).toBe('failed');
+    expect(result.entry.review_status).toBe('pending_review');
+    const patch = state.updates.knowledge_entries.find((u) => u.review_status);
+    expect(patch.review_status).toBe('pending_review');
+    expect(state.updates.knowledge_base).toEqual([
+      expect.objectContaining({ status: 'flagged' }),
+    ]);
+  });
+
+  test('a generation stub is never trusted, whatever its confidence', async () => {
+    const state = useDb({ knowledge_entries: [], knowledge_base: [] });
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    // 60 data points → very_high confidence, but the content is a stub
+    await wiki.generatePage('track/st-augustine', 'track', {
+      outcomes: Array.from({ length: 50 }, (_, i) => ({ id: `o${i}` })),
+      totalOutcomeCount: 60,
+      allOutcomeIds: Array.from({ length: 60 }, (_, i) => `o${i}`),
+    }, 'Track st_augustine Performance');
+
+    const row = state.inserts.knowledge_entries[0];
+    expect(row.content).toContain('Pending AI generation');
+    expect(row.review_tier).toBe('red');
+    expect(row.review_status).toBe('pending_review');
+    expect(JSON.parse(row.risk_flags)).toContain('generation_stub');
+  });
+});
+
 describe('skip-path reclassification', () => {
   test('a new contradiction re-gates a trusted page even when data is unchanged', async () => {
     const existing = {

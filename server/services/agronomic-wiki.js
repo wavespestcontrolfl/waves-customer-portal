@@ -185,6 +185,20 @@ async function hasOpenContradictionFor(entryId) {
   }
 }
 
+// The wiki page is the source of truth for trust, but syncToClaudeopedia
+// mirrors pages into knowledge_base rows that EVERY KB reader (search,
+// assistant search, wiki Q&A) serves by status alone. Flip the mirrored
+// copy's status whenever the source page's trusted-ness changes, so the
+// shared KB layer inherits the gate without per-reader predicates.
+async function syncKbCopyTrust(entryId, trusted) {
+  if (!entryId) return;
+  try {
+    await db('knowledge_base')
+      .where({ wiki_entry_id: entryId, source: 'wiki-sync' })
+      .update({ status: trusted ? 'active' : 'flagged', updated_at: new Date() });
+  } catch { /* knowledge_base may not exist */ }
+}
+
 async function callClaude(systemPrompt, userPrompt) {
   if (!Anthropic) {
     logger.warn('[agronomic-wiki] Anthropic SDK not available — skipping AI generation');
@@ -662,6 +676,7 @@ const AgronomicWiki = {
             review_status: review.reviewStatus,
             risk_flags: JSON.stringify(review.flags),
           });
+        await syncKbCopyTrust(existing.id, TRUSTED_STATUSES.includes(review.reviewStatus));
         await logUpdate('skip', slug, `Skipped ${category} page: ${title} — no new data since last generation (${dataPointCount} data points)`, {
           triggerType: 'wiki_generation',
         });
@@ -708,11 +723,28 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // placeholder stub — keep the current content and surface the failure
       // in the update log instead.
       if (!result?.text?.trim() && existing) {
+        // Content is preserved, but the review state must still advance — a
+        // contradiction that appeared since the last write re-gates the page
+        // even when the refresh itself failed.
+        const review = resolveReviewFields(existing, { confidence: existing.confidence, content: existing.content, hasOpenContradiction });
+        try {
+          await db('knowledge_entries')
+            .where({ id: existing.id })
+            .update({
+              review_tier: review.tier,
+              review_status: review.reviewStatus,
+              risk_flags: JSON.stringify(review.flags),
+              updated_at: new Date(),
+            });
+          await syncKbCopyTrust(existing.id, TRUSTED_STATUSES.includes(review.reviewStatus));
+        } catch (reviewErr) {
+          logger.error(`[agronomic-wiki] Failed to update review state for ${slug}: ${reviewErr.message}`);
+        }
         await logUpdate('error', slug, `Generation failed for ${category} page: ${title} — existing content preserved`, {
           triggerType: 'wiki_generation',
         });
         logger.warn(`[agronomic-wiki] Generation failed for ${slug} — existing content preserved`);
-        return { entry: existing, writeState: 'failed' };
+        return { entry: { ...existing, review_tier: review.tier, review_status: review.reviewStatus }, writeState: 'failed' };
       }
 
       const content = result?.text?.trim()
@@ -721,8 +753,15 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
 
       // Classify the fresh content into a review tier (open contradictions
       // force red regardless of confidence; pins/blocks/sticky approval are
-      // handled inside the shared resolver).
-      const { tier, flags, reviewStatus } = resolveReviewFields(existing, { confidence, content, hasOpenContradiction });
+      // handled inside the shared resolver). A placeholder stub is never
+      // trusted, whatever its data-point confidence — 'Pending AI generation'
+      // must not reach estimates as field intelligence.
+      let { tier, flags, reviewStatus } = resolveReviewFields(existing, { confidence, content, hasOpenContradiction });
+      if (!result?.text?.trim()) {
+        tier = 'red';
+        flags = [...new Set([...flags, 'generation_stub'])];
+        if (reviewStatus !== 'blocked') reviewStatus = 'pending_review';
+      }
 
       const entryData = {
         slug,
@@ -762,6 +801,8 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
           tokens: result?.tokens || null,
         },
       );
+
+      await syncKbCopyTrust(entry?.id, TRUSTED_STATUSES.includes(reviewStatus));
 
       logger.info(`[agronomic-wiki] ${existing ? 'Updated' : 'Created'} page: ${slug} (${dataPointCount} pts, ${confidence})`);
       return { entry, writeState: result?.text?.trim() ? 'generated' : 'stub' };
@@ -997,6 +1038,8 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       })
       .returning('*');
 
+    await syncKbCopyTrust(page.id, reviewStatus === 'approved');
+
     await logUpdate('review', slug, `${action === 'approve' ? 'Approved' : 'Blocked'} by ${reviewedBy}${notes ? ` — ${String(notes).substring(0, 200)}` : ''}`, {
       triggerType: 'human_review',
     });
@@ -1025,6 +1068,8 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         updated_at: new Date(),
       })
       .returning('*');
+
+    await syncKbCopyTrust(page.id, tier !== 'red');
 
     await logUpdate('review', slug, `Tier pinned to ${tier} by ${reviewedBy}`, { triggerType: 'human_review' });
     return updated;

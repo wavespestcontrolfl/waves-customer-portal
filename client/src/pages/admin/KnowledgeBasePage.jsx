@@ -1427,10 +1427,12 @@ function FieldIntelligenceTab({ showToast, isMobile }) {
   };
 
   const handleReview = async (slug, action) => {
-    const notes =
-      action === "block"
-        ? prompt("Why is this page blocked? (stored as review notes)") || undefined
-        : undefined;
+    let notes;
+    if (action === "block") {
+      const answer = prompt("Why is this page blocked? (stored as review notes)");
+      if (answer === null) return; // cancelled — never block on a misclick
+      notes = answer || undefined;
+    }
     setBusySlug(slug);
     try {
       await adminFetch(`/admin/wiki/review/${slug}`, {
