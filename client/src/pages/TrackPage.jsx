@@ -7,7 +7,7 @@ import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell } from '../components/brand';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -642,12 +642,7 @@ function NotFoundCard() {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
 
   const { token } = useParams();
   const [data, setData] = useState(null);

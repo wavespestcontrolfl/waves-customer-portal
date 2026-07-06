@@ -18,7 +18,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import { useParams } from "react-router-dom";
 import { COLORS, FONTS } from "../theme-brand";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
@@ -269,9 +269,9 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 }
 
 export default function StatementPayPage() {
-  // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
+  // Liquid-glass 'pro' variant (visual only).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(glassParamRequested(), 'pro');
+  useGlassSurface(true, 'pro');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

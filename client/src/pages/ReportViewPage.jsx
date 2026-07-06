@@ -28,7 +28,7 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import ActivityCard from '../components/ActivityCard';
 
@@ -4573,14 +4573,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
   const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
 
-  // Liquid-glass theme gate (GATE_REPORT_GLASS → /data glassDefault): live
-  // view only — PDF / static / sms_preview renders never mount the scene, so
-  // the Playwright print pipeline and cached artifacts stay byte-identical.
-  // ?glass=1 still forces on (preview), ?glass=0 is the per-link escape hatch
-  // back to the old page, and otherwise the server's release flag decides.
-  // ServiceReportV1 mounts only after /data resolves, so glassDefault is
-  // already in the payload on first render.
-  const glassActive = mode === 'live' && glassReleaseActive(data.glassDefault);
+  // Liquid-glass theme — live view only: PDF / static / sms_preview renders
+  // never mount the scene, so the Playwright print pipeline and cached
+  // artifacts stay byte-identical.
+  const glassActive = mode === 'live';
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
@@ -7271,9 +7267,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .pressure-trend-chart { justify-self: stretch; max-width: none; }
           .review-request-card { grid-template-columns: 1fr; }
         }
-        /* ---------- liquid glass (?glass=1, live mode only) ----------
+        /* ---------- liquid glass (live mode only) ----------
            useGlassSurface sets html[data-glass-theme]; every rule below is
-           scoped under it so the un-gated report stays pixel-identical.
+           scoped under it so the non-glass report stays pixel-identical.
            Card material comes from glass-theme.css via data-glass attrs —
            this block only remaps the page's own tokens + inner surfaces. */
         html[data-glass-theme] .service-report-v1 {
@@ -7335,13 +7331,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #04395E !important;
         }
         /* inline #1B2C5B stragglers (typed-findings dd, photo summary) — the
-           inline styles stay untouched for gate-off purity; .sr-ink remaps
+           inline styles stay untouched for non-glass purity; .sr-ink remaps
            them to the glass navy only while the theme is mounted */
         html[data-glass-theme] .service-report-v1 .sr-ink {
           color: #04395E !important;
         }
         @media print {
-          /* a customer printing a ?glass=1 view still gets the paper document */
+          /* a customer printing the glass view still gets the paper document */
           html[data-glass-theme] .service-report-v1 { background: #fff; }
           html[data-glass-theme] .service-report-v1 [data-glass],
           html[data-glass-theme] .service-report-v1 [data-glass-accent] {

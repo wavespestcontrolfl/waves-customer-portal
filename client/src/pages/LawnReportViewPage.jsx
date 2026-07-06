@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, glassReleaseActive } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 
@@ -31,9 +31,9 @@ const SEVERITY_DOT = { mild: COLORS.green, moderate: COLORS.orange, severe: COLO
 function Page({ children }) {
   return (
     <div className="lawn-report-page" style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
-      {/* ---------- liquid glass (?glass=1 only) ----------
+      {/* ---------- liquid glass ----------
           useGlassSurface sets html[data-glass-theme]; every rule below is
-          scoped under it so the un-gated page stays pixel-identical. Card
+          scoped under it so the non-glass page stays pixel-identical. Card
           material comes from glass-theme.css via the data-glass attributes —
           this block only clears the page wash and adds the print reset. */}
       <style>{`
@@ -41,7 +41,7 @@ function Page({ children }) {
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .lawn-report-page [data-glass] { position: relative; }
         @media print {
-          /* printing a ?glass=1 view still yields the paper document */
+          /* printing the glass view still yields the paper document */
           html[data-glass-theme] .lawn-report-page { background: #fff !important; }
           html[data-glass-theme] .lawn-report-page [data-glass],
           html[data-glass-theme] .lawn-report-page [data-glass-accent] {
@@ -66,7 +66,7 @@ function Page({ children }) {
 }
 
 function SectionCard({ children, style }) {
-  // data-glass is inert without html[data-glass-theme] — gate-off unchanged.
+  // data-glass is inert without html[data-glass-theme] — the non-glass render is unchanged.
   return (
     <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
       {children}
@@ -166,11 +166,9 @@ export default function LawnReportViewPage() {
   const [notFound, setNotFound] = useState(false);
   const [glassDefault, setGlassDefault] = useState(false);
 
-  // Liquid-glass release: follows GATE_REPORT_GLASS via the payload's
-  // glassDefault (like /report/:token), with ?glass=1 / ?glass=0 as the
-  // per-link force-on / escape hatch. This page has no pdf/static render
-  // modes — the route only ever serves the live customer view.
-  const glassActive = glassReleaseActive(glassDefault);
+  // Liquid-glass theme — now unconditional. This page has no pdf/static
+  // render modes — the route only ever serves the live customer view.
+  const glassActive = true;
   useGlassSurface(glassActive, 'full');
 
   const load = useCallback(async () => {

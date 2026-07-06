@@ -21,7 +21,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp } from '../native/platform';
 import { captureCameraPhoto } from '../native/camera';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 
 // Portal glass state, readable from any tab component. Warm #FAF8F3
 // sub-panels turn whisper-white under glass (the report-glass idiom) so
@@ -1172,7 +1172,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   };
 
   // position:relative lets the glass specular pseudo-elements anchor to each
-  // card; inert without the glass gate (no offsets, no stacking context).
+  // card; inert without the glass theme mounted (no offsets, no stacking context).
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
   const subtle = PORTAL_SHELL.page;
@@ -11203,15 +11203,9 @@ export default function PortalPage() {
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
-  // Glass dark-launch: same ?glass=1 gate as the estimate/pay pages, read
-  // once at mount. Home is the hero surface (full scene with orbs); every
-  // other tab keeps the quiet pro wash so utility work stays composed.
-  // GATE_PORTAL_GLASS release switch: cached server default (localStorage)
-  // resolves synchronously, the ui-flags fetch keeps it fresh, and ?glass=1 /
-  // ?glass=0 keep param precedence (glassReleaseActive inside both helpers).
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  // Home is the hero surface (full scene with orbs). Glass is the unconditional
+  // portal theme now, so the scene always mounts.
+  useGlassSurface(true, 'full');
 
   // Close menu on outside click
   useEffect(() => {
@@ -11270,12 +11264,12 @@ export default function PortalPage() {
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (
-    <PortalGlassContext.Provider value={glassActive}>
+    <PortalGlassContext.Provider value={true}>
     <div style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
       // opaque page wash here would occlude it.
-      background: glassActive ? 'transparent' : PORTAL_SHELL.page,
+      background: 'transparent',
       fontFamily: FONTS.body,
       color: PORTAL_SHELL.body,
     }}>

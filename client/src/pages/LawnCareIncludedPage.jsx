@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPinned, ShieldCheck, Sprout } from "lucide-react";
 import BrandFooter from "../components/BrandFooter";
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from "../glass/glass-engine";
+import { useGlassSurface } from "../glass/glass-engine";
 
 const TURF_SECTIONS = [
   {
@@ -68,12 +68,7 @@ function CheckItem({ children }) {
 }
 
 export default function LawnCareIncludedPage() {
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, "full");
+  useGlassSurface(true, "full");
 
   useEffect(() => {
     document.title = "What's Included in Lawn Care Service? | Waves Lawn Care";

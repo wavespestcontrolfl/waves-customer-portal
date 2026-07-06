@@ -10,10 +10,9 @@
  *
  * Styling follows the customer-facing brand idiom used by TrackPage
  * (WavesShell customer variant + warm surface palette + inline styles).
- * Under the portal glass release (GATE_PORTAL_GLASS via /api/public/ui-flags,
- * same rider as LoginPage/PortalPage; ?glass=1 forces on, ?glass=0 escapes)
- * the page mounts the glass scene and its native data-glass markup restyles
- * the cards — the inline styles below remain the non-glass rendering.
+ * The page mounts the glass scene (now the unconditional theme) and its
+ * native data-glass markup restyles the cards — the inline styles below
+ * remain the base non-glass rendering.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
@@ -21,7 +20,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -262,12 +261,7 @@ function SuccessCard({ result, service }) {
 
 export default function ReschedulePage() {
   const { token } = useParams();
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
-  // keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);

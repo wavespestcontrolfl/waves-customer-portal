@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
 import BrandFooter from "../components/BrandFooter";
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from "../glass/glass-engine";
+import { useGlassSurface } from "../glass/glass-engine";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -48,12 +48,7 @@ function Section({ section }) {
 
 export default function ServiceOutlinePage() {
   const { token } = useParams();
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, "full");
+  useGlassSurface(true, "full");
   const [packet, setPacket] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

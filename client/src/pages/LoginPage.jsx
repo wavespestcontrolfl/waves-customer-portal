@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import { isNativeApp } from '../native/platform';
 
 const SUPPORT_LINKS = [
@@ -43,12 +43,7 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
 
   useEffect(() => {
     if (isAuthenticated) navigate(nextPath, { replace: true });
@@ -112,7 +107,7 @@ export default function LoginPage() {
         '--login-soft': '#F8FCFE',
         '--login-soft-border': '#CFE7F5',
         // Under glass the fixed scene on <html> is the backdrop.
-        '--login-bg': glassActive ? 'transparent' : '#FAF8F3',
+        '--login-bg': 'transparent',
         '--login-card': B.white,
         '--login-red': B.red,
         fontFamily: FONTS.body,

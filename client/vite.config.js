@@ -20,6 +20,12 @@ const capShimAlias = capShim ? {
 export default defineConfig({
   plugins: [react()],
   resolve: { alias: { ...capShimAlias } },
+  // Vitest reads this block. The global setup shims window.matchMedia (jsdom
+  // omits it) so tests can mount the liquid-glass scene, which now renders on
+  // every customer surface.
+  test: {
+    setupFiles: ['./src/test-setup.js'],
+  },
   server: {
     port: 5173,
     proxy: {

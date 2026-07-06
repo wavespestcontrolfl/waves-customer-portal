@@ -6,7 +6,7 @@ import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault, fireGlassConfetti } from '../glass/glass-engine';
+import { useGlassSurface, fireGlassConfetti } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 
@@ -70,12 +70,7 @@ function captureBookingAttribution() {
 }
 
 export default function PublicBookingPage() {
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
 
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';

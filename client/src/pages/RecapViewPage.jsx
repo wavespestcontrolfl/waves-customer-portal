@@ -6,18 +6,13 @@ import { useParams } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { COLORS, FONTS } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 export default function RecapViewPage() {
   const { token } = useParams();
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
-  // keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
   const [status, setStatus] = useState('loading'); // loading | ready | notready | error
   const [copied, setCopied] = useState(false);
 
@@ -44,15 +39,14 @@ export default function RecapViewPage() {
     try { await navigator.clipboard.writeText(pageUrl); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* ignore */ }
   };
 
-  // The legacy page is a dark blue gradient with light text; the glass scene
-  // is LIGHT, so under glass the root goes transparent with the dark-navy
-  // text treatment the other glass pages use. Gate off = today's exact look.
-  const ink = glassActive ? COLORS.blueDeeper : COLORS.white;
+  // The glass scene is LIGHT, so the root goes transparent with the dark-navy
+  // text treatment the other glass pages use.
+  const ink = COLORS.blueDeeper;
   // Root is top-aligned + scrollable; the content stack centers itself via
   // flex:1 when short. Keeps the footer out of the centered group so a tall
   // video + footer scrolls instead of pushing content above the viewport.
   const wrap = {
-    minHeight: '100vh', background: glassActive ? 'transparent' : `linear-gradient(170deg, ${COLORS.blueDeeper}, ${COLORS.wavesBlue})`,
+    minHeight: '100vh', background: 'transparent',
     display: 'flex', flexDirection: 'column', alignItems: 'center',
     padding: '28px 18px', fontFamily: FONTS.body, color: ink, textAlign: 'center',
   };
@@ -64,7 +58,7 @@ export default function RecapViewPage() {
   const wordmark = { fontFamily: FONTS.heading, fontWeight: 900, fontSize: 22, letterSpacing: 4, color: ink };
   const btn = (solid) => ({
     padding: '13px 22px', borderRadius: 999, fontSize: 15, fontWeight: 700, cursor: 'pointer',
-    border: solid ? 'none' : `1.5px solid ${glassActive ? 'rgba(4,57,94,.5)' : 'rgba(255,255,255,.6)'}`,
+    border: solid ? 'none' : `1.5px solid rgba(4,57,94,.5)`,
     background: solid ? COLORS.white : 'transparent', color: solid ? COLORS.blueDeeper : ink,
     fontFamily: FONTS.heading, textDecoration: 'none', display: 'inline-block',
   });
@@ -104,7 +98,7 @@ export default function RecapViewPage() {
       </div>
 
       <div style={{ width: '100%', maxWidth: 360 }}>
-        <BrandFooter variant={glassActive ? undefined : 'dark'} />
+        <BrandFooter />
       </div>
     </div>
   );

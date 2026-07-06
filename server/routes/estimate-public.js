@@ -13044,23 +13044,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
-      // Glass release flag: when on, the React view renders the liquid-glass
-      // experience without needing ?glass=1. Absent (not false) while the
-      // gate is off so pre-release responses stay byte-identical. The
-      // optional category scope releases service-by-service (owner call
-      // 2026-07-05: pest + lawn first; other categories keep the old page
-      // until their glass copy packs are approved).
-      ...(featureGates.isEnabled('estimateGlassTheme')
+      // Estimate glass COPY release — category-scoped (owner call 2026-07-05:
+      // pest + lawn first; other categories keep the old copy until their glass
+      // copy packs are approved). NOTE: the glass THEME is unconditional on
+      // every estimate now (the GATE_ESTIMATE_GLASS theme gate was retired);
+      // only the marketing COPY still rides this per-category `glassDefault`.
+      ...(glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, [
         // The scope decision sees the RAW normalized rows unioned with the
         // bundle items: alignOneTimeChoiceBreakdown (show_one_time_option)
         // replaces raw rows with the synthetic choice + preserved pest/Bora
         // add-ons, which would drop an out-of-scope row (e.g. WDO) before the
         // fail-closed check could catch it. Union keeps both the dropped raw
         // rows and any bundle-only generated add-ons in view.
-        && glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, [
-          ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
-          ...(pricingBundle?.oneTimeBreakdown?.items || []),
-        ])
+        ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+        ...(pricingBundle?.oneTimeBreakdown?.items || []),
+      ])
         ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,

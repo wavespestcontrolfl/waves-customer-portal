@@ -13,10 +13,12 @@
  */
 import { etDateString } from './timezone';
 
-// Server-driven release state (GATE_ESTIMATE_GLASS → /data glassDefault).
-// Module-level on purpose: dozens of components consult glassCopyActive()
-// without prop threading, and the flag flips at most once per page load —
-// EstimateViewPage sets it from the payload before the loaded UI renders.
+// Estimate glass COPY release — category-scoped (pest + lawn shipped; other
+// categories follow once their copy packs are approved). NOTE: only the
+// marketing COPY still rides this flag; the glass THEME is now unconditional
+// on every estimate. The server sends glassDefault per eligible category and
+// EstimateViewPage calls setGlassDefault() from the /data payload before the
+// loaded UI renders. ?glass=1 previews the new copy; ?glass=0 keeps current.
 let glassDefaultReleased = false;
 
 export function setGlassDefault(on) {
@@ -26,8 +28,8 @@ export function setGlassDefault(on) {
 export function glassCopyActive() {
   try {
     const param = new URLSearchParams(window.location.search).get('glass');
-    if (param === '1') return true; // pre-release preview / force-on
-    if (param === '0') return false; // per-link escape hatch back to the old page
+    if (param === '1') return true; // preview the new copy
+    if (param === '0') return false; // keep the current copy
     return glassDefaultReleased;
   } catch {
     return glassDefaultReleased;

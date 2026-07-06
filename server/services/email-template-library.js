@@ -11,7 +11,6 @@ const {
   stripeFooterLine,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
-const { isEnabled } = require('../config/feature-gates');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -508,14 +507,10 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const isInvoiceTemplate = templateKey.startsWith('invoice.')
     || templateKey.startsWith('billing_late_payment')
     || templateKey.startsWith('payer.statement');
-  // Under glass the default "Questions?" line is dropped (owner call
-  // 07-06 — the pill header and fine print already carry the phone);
-  // billing templates keep the Stripe trust line. Classic output is
-  // unchanged.
-  const glassChrome = isEnabled('emailGlassTheme');
-  const serviceFooter = glassChrome
-    ? (isInvoiceTemplate ? stripeFooterLine() : null)
-    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.${isInvoiceTemplate ? stripeFooterLine() : ''}`;
+  // Under glass (now the only email theme) the default "Questions?" line is
+  // dropped (owner call 07-06 — the pill header and fine print already carry
+  // the phone); billing templates keep the Stripe trust line.
+  const serviceFooter = isInvoiceTemplate ? stripeFooterLine() : null;
   // A marketing-stream template pinned to service chrome (referral.invite)
   // is still a commercial email — the visible unsubscribe link must survive
   // the wrapper swap. unsubscribeUrl is only resolved for marketing-stream

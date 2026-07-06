@@ -14,7 +14,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_SMS_TEL,
@@ -613,12 +613,7 @@ function StateSwitcher({ value, onChange }) {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPreviewPage() {
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
 
   const [params, setParams] = useSearchParams();
   const state = params.get('state') || 'en_route';

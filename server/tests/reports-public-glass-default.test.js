@@ -1,13 +1,10 @@
 /**
- * Glass release flag on the report /data payload (GATE_REPORT_GLASS —
- * mirrors the estimate GATE_ESTIMATE_GLASS pattern from PR #2372):
- * - gate ON + live mode → glassDefault: true rides the payload, so the React
- *   viewer renders the liquid-glass experience without ?glass=1;
- * - gate OFF → the field is ABSENT (not false) so pre-release responses stay
- *   byte-identical;
- * - pdf / static / sms_preview modes NEVER carry it even with the gate on —
- *   the Playwright print pipeline and cached artifacts stay untouched.
- * Kill switch: unset GATE_REPORT_GLASS.
+ * Glass default flag on the report /data payload. Glass is the unconditional
+ * report theme now (the GATE_REPORT_GLASS release gate was retired):
+ * - live mode → glassDefault: true rides the payload, so the React viewer
+ *   renders the liquid-glass experience;
+ * - pdf / static / sms_preview modes NEVER carry it — the Playwright print
+ *   pipeline and cached artifacts stay untouched.
  */
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -51,7 +48,6 @@ jest.mock('../services/service-report/dynamic-context', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const featureGates = require('../config/feature-gates');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const reportsRouter = require('../routes/reports-public');
 
@@ -117,11 +113,7 @@ function mockDb() {
   return { serviceRead };
 }
 
-function setGate(on) {
-  featureGates.isEnabled.mockImplementation((gate) => gate === 'reportGlassTheme' && on);
-}
-
-describe('GET /reports/:token/data glass release flag (GATE_REPORT_GLASS)', () => {
+describe('GET /reports/:token/data glass default flag', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     buildReportV1Data.mockResolvedValue({
@@ -131,8 +123,7 @@ describe('GET /reports/:token/data glass release flag (GATE_REPORT_GLASS)', () =
     });
   });
 
-  test('gate ON + live mode → payload carries glassDefault: true', async () => {
-    setGate(true);
+  test('live mode → payload carries glassDefault: true', async () => {
     mockDb();
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
@@ -142,21 +133,9 @@ describe('GET /reports/:token/data glass release flag (GATE_REPORT_GLASS)', () =
     });
   });
 
-  test('gate OFF + live mode → field is absent (pre-release payloads stay byte-identical)', async () => {
-    setGate(false);
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
-      const body = await res.json();
-      expect(res.status).toBe(200);
-      expect('glassDefault' in body).toBe(false);
-    });
-  });
-
   test.each(['pdf', 'static', 'sms_preview'])(
-    'gate ON + mode=%s → never carries glassDefault (print pipeline untouched)',
+    'mode=%s → never carries glassDefault (print pipeline untouched)',
     async (mode) => {
-      setGate(true);
       mockDb();
       await withServer(async (baseUrl) => {
         const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=${mode}`);

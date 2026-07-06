@@ -14,7 +14,7 @@ import { Link, useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
@@ -80,12 +80,7 @@ function ArchiveBody({ html }) {
 
 export default function NewsletterArchivePage() {
   const { id } = useParams();
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
   const [post, setPost] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | notfound
 

@@ -411,41 +411,14 @@ const gates = {
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
 
-  // Liquid-glass estimate experience (docs/design/estimate-glass-plan.md) —
-  // makes glass the DEFAULT render for the React estimate view. Off = the
-  // pre-glass page (glass still reachable per-link via ?glass=1); on = glass
-  // for every customer (?glass=0 stays as the per-link escape hatch).
-  // Kill switch: unset GATE_ESTIMATE_GLASS.
-  estimateGlassTheme: isProd ? process.env.GATE_ESTIMATE_GLASS === 'true' : true,
-
-  // Liquid-glass email chrome (glass rollout Phase 3) — switches every
-  // email wrapper in services/email-template.js (transactional, service,
-  // newsletter) from the warm sand chrome to the glass LAYOUT (orb
-  // scene, floating pill header, hero on scene, frosted cards).
-  // Explicit opt-in in EVERY environment (unlike estimateGlassTheme's
-  // dev-open default): glass is a different DOM, so a dev-open gate
-  // would make jest and local [TEST] sends render glass while prod
-  // renders classic — the suite must exercise what prod sends.
-  // Off = the pre-glass chrome, byte-for-byte. Kill switch: unset
-  // GATE_EMAIL_GLASS.
-  emailGlassTheme: process.env.GATE_EMAIL_GLASS === 'true',
-
-  // Liquid-glass customer service-report experience — makes glass the DEFAULT
-  // render for the React report viewer (live mode only: pdf/static/sms_preview
-  // renders never mount the scene, so the print pipeline and cached artifacts
-  // stay untouched). Off = the pre-glass page (glass still reachable per-link
-  // via ?glass=1); on = glass for every customer (?glass=0 stays as the
-  // per-link escape hatch). Kill switch: unset GATE_REPORT_GLASS.
-  reportGlassTheme: isProd ? process.env.GATE_REPORT_GLASS === 'true' : true,
-
-  // Liquid-glass portal shell + login page — makes glass the DEFAULT render
-  // for the customer portal SPA (and the Capacitor apps, which load the same
-  // web bundle). Served to the client via GET /api/public/ui-flags because
-  // the shell has no per-page token payload to ride. Off = pre-glass portal
-  // (glass still reachable per-link via ?glass=1); on = glass for every
-  // customer (?glass=0 stays as the per-link escape hatch).
-  // Kill switch: unset GATE_PORTAL_GLASS.
-  portalGlassTheme: isProd ? process.env.GATE_PORTAL_GLASS === 'true' : true,
+  // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
+  // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
+  // 100% of customers. Glass is now the unconditional theme on every customer
+  // surface — estimate, service/lawn report, portal shell, login, booking,
+  // receipts, pay, statements, and emails — so the flags and their pre-glass
+  // code paths have been removed. (The estimate glass COPY packs still roll out
+  // per service category; that is a content flag carried in the /data payload,
+  // not a theme gate.)
 
   // Waves AI schedule search on the wavespestcontrol.com /book page (astro
   // island). Exposed to the marketing site via GET /api/booking/config as

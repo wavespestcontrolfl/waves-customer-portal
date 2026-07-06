@@ -7,7 +7,7 @@ import {
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
@@ -323,14 +323,14 @@ export default function ProjectReportViewPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Liquid-glass dark launch: ?glass=1 on the live HTML view only. This page
-  // has no client pdf/static render modes (the filed FDACS-13645 PDF is a
-  // server-side artifact linked below, never rendered here), but the
+  // Liquid-glass theme — now unconditional, except on the certificate view.
+  // This page has no client pdf/static render modes (the filed FDACS-13645
+  // PDF is a server-side artifact linked below, never rendered here), but the
   // pre-construction termite Certificate of Compliance IS a state compliance
   // document rendered on this page — it never mounts the scene, so the
-  // certificate stays the plain paper document regardless of the param.
+  // certificate stays the plain paper document.
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
-  const glassActive = !isCertificate && glassParamRequested();
+  const glassActive = !isCertificate;
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
@@ -423,9 +423,9 @@ export default function ProjectReportViewPage() {
       display: 'flex',
       flexDirection: 'column',
     }}>
-      {/* ---------- liquid glass (?glass=1, non-certificate only) ----------
+      {/* ---------- liquid glass (non-certificate only) ----------
           useGlassSurface sets html[data-glass-theme]; every rule below is
-          scoped under it so the un-gated report stays pixel-identical. Card
+          scoped under it so the non-glass report stays pixel-identical. Card
           material comes from glass-theme.css via the data-glass attributes —
           this block only clears the page wash and adds the print reset. */}
       <style>{`
@@ -433,7 +433,7 @@ export default function ProjectReportViewPage() {
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .project-report-page [data-glass] { position: relative; }
         @media print {
-          /* printing a ?glass=1 view still yields the paper document */
+          /* printing the glass view still yields the paper document */
           html[data-glass-theme] .project-report-page { background: #fff !important; }
           html[data-glass-theme] .project-report-page [data-glass],
           html[data-glass-theme] .project-report-page [data-glass-accent] {

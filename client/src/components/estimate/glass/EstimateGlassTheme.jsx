@@ -24,12 +24,11 @@
  * observers, listeners. Stray data attributes are inert without the html
  * attribute, so they are left in place rather than walked again.
  */
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import {
   applyGlassScene,
   attachGlassPointerFx,
   fireGlassConfetti,
-  glassParamRequested,
 } from '../../../glass/glass-engine';
 
 export { fireGlassConfetti };
@@ -285,15 +284,6 @@ export function useGlassTheme(active, variant = 'full') {
       sceneCleanup();
     };
   }, [active, variant]);
-}
-
-/**
- * One-liner for financial documents (invoices / receipts / statements):
- * reads the same ?glass=1 gate and applies the restrained 'pro' variant.
- */
-export function useGlassProGate() {
-  const requested = useMemo(() => glassParamRequested(), []);
-  useGlassTheme(requested, 'pro');
 }
 
 export default function EstimateGlassTheme({ active, variant = 'full' }) {

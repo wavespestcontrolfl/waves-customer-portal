@@ -9,7 +9,7 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -114,13 +114,8 @@ const inputStyle = {
 
 export default function ContractSignPage() {
   const { token } = useParams();
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence. BrandCard /
-  // BrandButton / WavesShell already emit their own data-glass markup.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  // BrandCard / BrandButton / WavesShell already emit their own data-glass markup.
+  useGlassSurface(true, 'full');
   const [contract, setContract] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
