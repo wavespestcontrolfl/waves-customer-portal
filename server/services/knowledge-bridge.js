@@ -599,6 +599,10 @@ Return a JSON object with:
     return stats;
     } catch (err) {
       logger.error(`[knowledge-bridge] syncToClaudeopedia failed: ${err.message}`);
+      // A run that died before/around the loop is an ERROR run — without
+      // this, syncToClaudeopediaIfDue records a kb_sync success marker and
+      // the six-day guard suppresses retries for a week with nothing synced.
+      stats.errors++;
       return stats;
     }
   },

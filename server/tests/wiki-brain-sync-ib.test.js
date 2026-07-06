@@ -101,6 +101,18 @@ describe('syncToClaudeopedia trust gate', () => {
     expect((state.inserts.knowledge_base || []).map((r) => r.slug)).toEqual(['outcomes-product-talstar-p']);
   });
 
+  test('a top-level sync failure counts as an error so the guard retries next day', async () => {
+    // knowledge_entries source query dies before the loop — the run must
+    // NOT come back errors:0, or the ifDue wrapper writes a kb_sync success
+    // marker and suppresses retries for six days with nothing synced.
+    useDb({ knowledge_entries: () => { throw new Error('relation unavailable'); } });
+
+    const stats = await KnowledgeBridge.syncToClaudeopedia();
+
+    expect(stats.errors).toBeGreaterThanOrEqual(1);
+    expect(stats.created).toBe(0);
+  });
+
   test('a failed reconciliation pass counts as a sync error so the guard retries next day', async () => {
     const inner = makeDb({ knowledge_entries: [], knowledge_base: [] });
     global.__syncDbMock = (table) => {

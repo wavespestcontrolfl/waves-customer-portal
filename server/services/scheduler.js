@@ -3046,7 +3046,8 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:10AM — Agronomic Wiki refresh (stale pages + seasonal), weekly
-  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard.
+  // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard,
+  // then the trusted wiki→KB sync chained after it (own weekly guard).
   // The former single Sunday-6AM fire time missed whole weeks whenever the
   // process wasn't up at that exact minute (update-log lint rows show 3 runs
   // in 3 months); a daily check self-heals after any missed fire.
@@ -3055,26 +3056,26 @@ function initScheduledJobs() {
     try {
       const wiki = require('./agronomic-wiki');
       const result = await wiki.weeklyRefreshIfDue();
-      if (result.skipped) return;
-      logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      if (!result.skipped) {
+        logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
+      }
     } catch (err) {
       logger.error(`Agronomic wiki refresh failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // DAILY 6:40AM — Trusted wiki→Knowledge Base sync (weekly cadence via
-  // syncToClaudeopediaIfDue guard; runs after the 6:10 wiki refresh so a
-  // freshly refreshed page syncs the same morning). Only trusted pages
-  // (review_status auto/approved) cross — the exception-based review gate
-  // controls what feeds agents.
-  // =========================================================================
-  cron.schedule('40 6 * * *', async () => {
+    // Trusted wiki→Knowledge Base sync, CHAINED strictly after the refresh
+    // (weekly cadence via syncToClaudeopediaIfDue's own guard; invoked daily
+    // so an error day self-heals tomorrow). A fixed-offset cron could fire
+    // mid-refresh and write its weekly marker before the freshly refreshed
+    // rows exist — missing them until the guard expires. Only trusted pages
+    // (review_status auto/approved) cross — the exception-based review gate
+    // controls what feeds agents.
     try {
       const KnowledgeBridge = require('./knowledge-bridge');
       const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
-      if (result.skipped) return;
-      logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
+      if (!result.skipped) {
+        logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
+      }
     } catch (err) {
       logger.error(`Wiki→KB sync failed: ${err.message}`);
     }
