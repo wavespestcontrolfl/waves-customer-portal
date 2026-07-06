@@ -78,6 +78,23 @@ function firstNameOf(fullName) {
   return trimmed.split(/\s+/)[0];
 }
 
+// Display masks for the tracker's client block: the token-only payload never
+// carries raw contact PII (a forwarded tracking SMS link must not become a
+// contact-info disclosure), but the customer still recognizes their own
+// details on the card.
+function maskEmail(email) {
+  const clean = String(email || '').trim();
+  const at = clean.indexOf('@');
+  if (at < 1) return null;
+  return `${clean[0]}•••@${clean.slice(at + 1)}`;
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 4) return null;
+  return `(•••) •••-${digits.slice(-4)}`;
+}
+
 function composeWindowIso(scheduledDate, windowTime) {
   // scheduled_date is a DATE; window_start/window_end are TIME.
   // Postgres returns scheduled_date as 'YYYY-MM-DD' string or Date; window_time
@@ -391,13 +408,15 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
-      // Client identity block for the card (name/address/email/phone).
-      // Same trusted track-token boundary as the full property address
-      // above — the customer is viewing their own appointment.
+      // Client identity block for the card. Name + address ride the same
+      // trusted track-token boundary the property address always used;
+      // email/phone are MASKED server-side (s•••@domain, last-4) so a
+      // forwarded or leaked tracking link never yields usable contact PII —
+      // the customer still recognizes their own details on the card.
       customer: {
         name: [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null,
-        email: row.cust_email || null,
-        phone: row.cust_phone || null,
+        email: maskEmail(row.cust_email),
+        phone: maskPhone(row.cust_phone),
       },
       prepToken: null,
       meta: {

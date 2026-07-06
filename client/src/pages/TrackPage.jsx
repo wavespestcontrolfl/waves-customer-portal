@@ -372,14 +372,10 @@ function ClientMeta({ data }) {
         </div>
       ) : null}
       {c.email ? (
-        <div style={{ fontSize: 14, marginTop: 6 }}>
-          <a href={`mailto:${c.email}`} style={{ color: TRACK_SURFACE.body, textDecoration: 'none' }}>{c.email}</a>
-        </div>
+        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{c.email}</div>
       ) : null}
       {c.phone ? (
-        <div style={{ fontSize: 14, marginTop: 4 }}>
-          <a href={`tel:${c.phone}`} style={{ color: TRACK_SURFACE.body, textDecoration: 'none' }}>{c.phone}</a>
-        </div>
+        <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>{c.phone}</div>
       ) : null}
     </div>
   );
