@@ -35,7 +35,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNotNull', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
       b[m] = (...args) => {
         rec.ops.push([m, args]);
         if (typeof args[0] === 'function') args[0].call(b);
@@ -99,6 +99,23 @@ describe('syncToClaudeopedia trust gate', () => {
     // only the real-content page synced; the stub was skipped
     expect(stats.created).toBe(1);
     expect((state.inserts.knowledge_base || []).map((r) => r.slug)).toEqual(['outcomes-product-talstar-p']);
+  });
+
+  test('a failed reconciliation pass counts as a sync error so the guard retries next day', async () => {
+    const inner = makeDb({ knowledge_entries: [], knowledge_base: [] });
+    global.__syncDbMock = (table) => {
+      const b = inner(table);
+      if (table === 'knowledge_base') {
+        b.update = () => ({ then: (res, rej) => Promise.reject(new Error('db down')).then(res, rej) });
+      }
+      return b;
+    };
+
+    const stats = await KnowledgeBridge.syncToClaudeopedia();
+
+    // errors > 0 → syncToClaudeopediaIfDue logs kb_sync_error, which the
+    // six-day guard ignores — the healing pass retries tomorrow
+    expect(stats.errors).toBe(1);
   });
 
   test('sync reconciles copies of no-longer-trusted pages to flagged', async () => {
@@ -172,6 +189,32 @@ describe('IB search_field_intelligence', () => {
     expect(result.knowledgeBase[0].snippet).toContain('potassium');
     expect(result.openContradictions).toHaveLength(1);
     expect(result.bridgedPairs).toBe(1);
+    spy.mockRestore();
+  });
+
+  test('a KB-only hit still surfaces contradictions (kb_entry_id + linked wiki id)', async () => {
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_base: [{ id: 'kb1', content: 'curated potassium article', wiki_entry_id: 'w9' }],
+      knowledge_contradictions: [{ contradiction_type: 'efficacy', description: 'label vs outcomes', severity: 0.5, status: 'open' }],
+    });
+    const spy = jest.spyOn(KnowledgeBridge, 'unifiedSearch').mockResolvedValue({
+      claudeopedia: [{ id: 'kb1', slug: 'k-flow', title: 'K-Flow', category: 'chemicals', confidence: 'high' }],
+      wiki: [], // no wiki hits — the KB row must still carry its warning
+      bridged: [],
+    });
+
+    const { executeTool } = require('../services/intelligence-bar/tools');
+    const result = await executeTool('search_field_intelligence', { query: 'k-flow' });
+
+    expect(result.openContradictions).toHaveLength(1);
+    // the lookup covered BOTH the KB id and the wiki page it links
+    const kcCall = state.calls.knowledge_contradictions.at(-1);
+    const orIns = kcCall.ops.filter(([m]) => m === 'orWhereIn').map(([, a]) => a);
+    expect(orIns).toEqual(expect.arrayContaining([
+      ['wiki_entry_id', ['w9']],
+      ['kb_entry_id', ['kb1']],
+    ]));
     spy.mockRestore();
   });
 

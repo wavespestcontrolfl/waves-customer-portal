@@ -591,6 +591,9 @@ Return a JSON object with:
         .update({ status: 'flagged', active: false, updated_at: new Date() });
     } catch (err) {
       logger.error(`[knowledge-bridge] Sync trust reconciliation failed: ${err.message}`);
+      // Count it: a run whose healing pass failed must log kb_sync_error so
+      // the six-day guard retries tomorrow instead of suppressing for a week.
+      stats.errors++;
     }
 
     return stats;

@@ -1347,19 +1347,30 @@ async function searchFieldIntelligence(input) {
   try {
     const kbIds = kbRows.map((k) => k.id).filter(Boolean);
     if (kbIds.length) {
-      const contents = await db('knowledge_base').whereIn('id', kbIds).select('id', 'content');
-      const byId = Object.fromEntries(contents.map((r) => [r.id, (r.content || '').substring(0, 500)]));
-      kbRows = kbRows.map((k) => ({ ...k, snippet: byId[k.id] || null }));
+      const contents = await db('knowledge_base').whereIn('id', kbIds).select('id', 'content', 'wiki_entry_id');
+      const byId = Object.fromEntries(contents.map((r) => [r.id, r]));
+      kbRows = kbRows.map((k) => ({
+        ...k,
+        snippet: (byId[k.id]?.content || '').substring(0, 500) || null,
+        wiki_entry_id: byId[k.id]?.wiki_entry_id ?? null,
+      }));
     }
   } catch { /* snippets optional */ }
 
-  // Open contradictions against the returned wiki pages — always surfaced.
+  // Open contradictions against EVERY returned hit — wiki pages, KB rows
+  // (contradictions also link by kb_entry_id), and the wiki pages that KB
+  // hits mirror/link. A KB-only hit must still carry its warning.
   let openContradictions = [];
   try {
-    const ids = wikiRows.map((w) => w.id).filter(Boolean);
-    if (ids.length) {
+    const wikiIds = new Set(wikiRows.map((w) => w.id).filter(Boolean));
+    for (const k of kbRows) if (k.wiki_entry_id) wikiIds.add(k.wiki_entry_id);
+    const kbIds = kbRows.map((k) => k.id).filter(Boolean);
+    if (wikiIds.size || kbIds.length) {
       openContradictions = await db('knowledge_contradictions')
-        .whereIn('wiki_entry_id', ids)
+        .where(function () {
+          if (wikiIds.size) this.orWhereIn('wiki_entry_id', [...wikiIds]);
+          if (kbIds.length) this.orWhereIn('kb_entry_id', kbIds);
+        })
         .whereNotIn('status', ['resolved', 'dismissed'])
         .select('contradiction_type', 'description', 'severity', 'status');
     }
