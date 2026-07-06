@@ -52,7 +52,9 @@ function fullName(customer = {}) {
 function propertyLabel(customer = {}) {
   const label = clean(customer.profile_label);
   if (label) return label;
-  const address = [customer.address_line1, customer.city].filter(Boolean).join(', ');
+  // Full address incl. state + zip (owner call 07-06).
+  const cityStateZip = [customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const address = [customer.address_line1, cityStateZip].filter(Boolean).join(', ');
   return address || 'Service property';
 }
 
@@ -267,9 +269,26 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
   });
 }
 
+// Assigned tech's first name for the reminder details card — self-contained
+// lookup so callers don't need to thread it; '' (suppressed row) when the
+// visit is unassigned or the lookup fails.
+async function technicianFirstName(scheduledServiceId) {
+  if (!scheduledServiceId) return '';
+  try {
+    const row = await db('scheduled_services')
+      .where({ 'scheduled_services.id': scheduledServiceId })
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .first('technicians.name as tech_name');
+    return firstToken(row?.tech_name);
+  } catch {
+    return '';
+  }
+}
+
 // kind: '72h' | '24h'
 async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
+  const techName = await technicianFirstName(scheduledServiceId);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
   // Empty reschedule_url hides the template's "Reschedule appointment" CTA
@@ -280,6 +299,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
     }
     : {
@@ -296,6 +316,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
       appointment_when: apptTime
         ? `, ${formatETDay(apptTime)}, ${formatETDate(apptTime)}, starting at ${formatETTime(apptTime)}`
         : '',
+      technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
     };
   return sendTemplate({

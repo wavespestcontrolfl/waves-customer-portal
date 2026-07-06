@@ -307,7 +307,7 @@ function renderBlocks(blocks, payload) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
         const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
         renderedCtaCount += 1;
-        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0' : '12px 0 24px 0'};text-align:center;">${render(escapeHtml(href), escapeHtml(label))}</div>`);
+        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0 9px 0' : '9px 0 24px 0'};text-align:center;">${render(escapeHtml(href), escapeHtml(label))}</div>`);
         textParts.push(`${label}: ${href}`);
       }
     } else if (block.type === 'image') {

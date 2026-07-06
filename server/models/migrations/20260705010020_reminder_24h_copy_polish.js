@@ -33,11 +33,11 @@ const OLD_ARRIVAL = 'Expect your technician to arrive within a two-hour window o
 const NEW_ARRIVAL = 'Expect your technician to arrive within a two-hour window of the scheduled start time. When your technician is on the way, we will send you a live tracking link so you can follow along.';
 
 const OLD_SIGNATURE = 'Thank you, The Waves Team';
-const NEW_SIGNATURE = 'We look forward to servicing your home.\n— The Waves Team';
+const NEW_SIGNATURE = 'We look forward to servicing your home.\n\n— The Waves Team';
 
-const NEW_VARIABLES = ['appointment_when', 'appointment_date'];
+const NEW_VARIABLES = ['appointment_when', 'appointment_date', 'technician_name'];
 
-const FIXTURE_SAMPLES = { appointment_when: ', Tuesday, July 8, 2026, starting at 8:00 AM', appointment_date: 'July 8, 2026' };
+const FIXTURE_SAMPLES = { appointment_when: ', Tuesday, July 8, 2026, starting at 8:00 AM', appointment_date: 'July 8, 2026', technician_name: 'Adam' };
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -83,6 +83,12 @@ function applyOwnerLayout(blocks) {
     if (idx === -1) return b;
     const rows = [...b.rows];
     rows.splice(idx, 0, { label: 'Date', value: '{{appointment_date}}' });
+    // Technician after Property (assigned tech; the row suppresses when
+    // the sender has no assignment to report).
+    if (!rows.some((r) => String(r.value || '').includes('technician_name'))) {
+      const propIdx = rows.findIndex((r) => String(r.label || '') === 'Property');
+      rows.splice(propIdx === -1 ? rows.length : propIdx + 1, 0, { label: 'Technician', value: '{{technician_name}}' });
+    }
     return { ...b, rows };
   });
 
