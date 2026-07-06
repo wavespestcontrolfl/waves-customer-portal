@@ -249,10 +249,12 @@ export default function AutopayCard({ onStateChange }) {
     || payment_methods.find((p) => p.is_default)
     || payment_methods[0];
 
+  // Status dot is a live indicator (owner directive 2026-07-06): blinking
+  // green = charges are running automatically, solid red = they are not.
   const themeMap = {
-    active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.blueDeeper, label: 'Active' },
-    paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.orange, label: 'Paused' },
-    disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: PORTAL_BILLING.muted, label: 'Off' },
+    active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
+    paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.red, label: 'Paused' },
+    disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: B.red, label: 'Off' },
   };
   const theme = themeMap[state];
 
@@ -398,10 +400,11 @@ export default function AutopayCard({ onStateChange }) {
 
   return (
     <div data-glass="card" style={card}>
+      <style>{`@keyframes autopayDotPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.25); } }`}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block' }} />
+            <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block', animation: state === 'active' ? 'autopayDotPulse 2s ease-in-out infinite' : 'none' }} />
             <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Auto Pay / {theme.label}
             </span>

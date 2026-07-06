@@ -1658,10 +1658,10 @@ function DashboardTab({ customer, onSwitchTab }) {
             <ShellIconTile icon="smartphone" size={38} />
             <div style={{ minWidth: 0, flex: 1 }}>
               <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
-                Take Waves with you
+                The Waves app
               </div>
               <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                Visit reminders, service reports, and one-tap payments — right on your phone.
+                Track your tech in real time, read every service report, and pay in seconds — wherever you are.
               </div>
             </div>
           </div>
