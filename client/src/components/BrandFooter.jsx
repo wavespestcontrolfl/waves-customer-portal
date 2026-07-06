@@ -88,10 +88,10 @@ function StoreBadges({ ctaColor }) {
   if (isNativeApp()) return null;
   return (
     <>
-      <div style={{ fontSize: 13, fontWeight: 700, color: ctaColor, fontFamily: FONTS.heading, marginBottom: 8 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: ctaColor, fontFamily: FONTS.heading, lineHeight: 1.6 }}>
         Track your visits, pay, and message us — get the Waves app!
       </div>
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 }}>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap' }}>
         <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download on the App Store" style={{ display: 'inline-block' }}>
           <AppStoreBadgeSvg fill={GLASS_INK} />
         </a>
@@ -196,19 +196,20 @@ export default function BrandFooter({ borderColor, variant }) {
 
   const socials = SOCIAL_ICON_PATHS;
 
-  // Uniform rhythm: 16px between sections, 6px between sibling lines,
-  // one body size (13) + one muted size (12), single weight step (700
-  // headings / 500 links / 400 body).
+  // One uniform vertical gap (10px, flex column) between every footer row —
+  // socials, app CTA, badges, wordmark block, contact, cities. No copyright
+  // line here; the legal line lives in WavesShell's TrustFooter.
   const sep = <span aria-hidden="true" style={{ margin: '0 6px', color: mutedColor }}>·</span>;
   const contactLink = { color: headingColor, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' };
 
   return (
     <div style={{
-      textAlign: 'center', marginTop: 32, padding: '20px 16px 0',
+      textAlign: 'center', marginTop: 32, padding: '20px 16px',
       borderTop: `1px solid ${borderColor || defaultBorder}`,
       fontFamily: FONTS.body,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
     }}>
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
         {socials.map(s => (
           <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
             width: 30, height: 30, borderRadius: '50%',
@@ -221,22 +222,19 @@ export default function BrandFooter({ borderColor, variant }) {
         ))}
       </div>
       <StoreBadges ctaColor={headingColor} />
-      <div style={{ marginTop: 16 }}>
-        <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity, marginBottom: 6 }} />
-        <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.6 }}>Waves Pest Control, LLC</div>
-        <div style={{ fontSize: 13, color: bodyColor, marginTop: 6, lineHeight: 1.6 }}>Family-owned pest control &amp; lawn care</div>
-        <div style={{ fontSize: 13, color: bodyColor, marginTop: 6, lineHeight: 1.6 }}>
-          <a href={`mailto:${CONTACT_EMAIL}`} style={contactLink}>{CONTACT_EMAIL}</a>
-          {' '}{sep}{' '}
-          <a href={`tel:${CONTACT_PHONE_TEL}`} style={contactLink}>{CONTACT_PHONE_DISPLAY}</a>
-          {' '}{sep}{' '}
-          <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
-        </div>
-        <div style={{ fontSize: 13, color: bodyColor, marginTop: 6, lineHeight: 1.6 }}>
-          <ServiceAreaLinks color={bodyColor} />
-        </div>
+      <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity }} />
+      <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.4 }}>Waves Pest Control</div>
+      <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>
+      <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>
+        <a href={`mailto:${CONTACT_EMAIL}`} style={contactLink}>{CONTACT_EMAIL}</a>
+        {' '}{sep}{' '}
+        <a href={`tel:${CONTACT_PHONE_TEL}`} style={contactLink}>{CONTACT_PHONE_DISPLAY}</a>
+        {' '}{sep}{' '}
+        <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
       </div>
-      <div style={{ fontSize: 12, color: mutedColor, marginTop: 16, paddingBottom: 20, lineHeight: 1.6 }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
+      <div style={{ fontSize: 13, color: bodyColor, lineHeight: 1.4 }}>
+        <ServiceAreaLinks color={bodyColor} />
+      </div>
     </div>
   );
 }
