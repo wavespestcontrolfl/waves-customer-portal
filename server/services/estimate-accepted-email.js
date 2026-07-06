@@ -72,11 +72,17 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       idempotencyKey: `estimate.accepted_onboarding:${estimateId}`,
       triggerEventId: `estimate.accepted_onboarding:${estimateId}`,
       categories: ['estimate_accepted_onboarding'],
+      // SendGrid 4xx bodies can echo the recipient address — keep provider
+      // errors out of the logs and log a redacted reason below.
+      suppressProviderErrorLog: true,
     });
     logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
     return result;
   } catch (err) {
-    logger.error(`[estimate-accepted-email] failed for estimate ${estimateId}: ${err.message}`);
+    const reason = err.status
+      ? `SendGrid ${err.status}`
+      : EmailTemplateLibrary.redactEmailAddresses(err.message);
+    logger.error(`[estimate-accepted-email] failed for estimate ${estimateId}: ${reason}`);
     return null;
   }
 }

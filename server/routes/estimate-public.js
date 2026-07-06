@@ -7806,9 +7806,20 @@ router.put('/:token/accept', async (req, res, next) => {
     // appointment line; the template degrades cleanly when none exists.
     if (customerId) {
       const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+      // DB-refreshed rows carry scheduled_date as a Date (pg materializes
+      // date columns at local midnight); freshly-built rows carry the
+      // 'YYYY-MM-DD' string. Normalize both to the calendar-date key so the
+      // sort is by date, not by "Tue Jul ..." weekday text.
+      const dateKey = (v) => {
+        if (!v) return '';
+        if (v instanceof Date) {
+          return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+        }
+        return String(v).slice(0, 10);
+      };
       const firstAcceptedAppointment = [...acceptedAppointmentsToRegister].sort((a, b) => {
-        const ad = String(a?.scheduled_date || '');
-        const bd = String(b?.scheduled_date || '');
+        const ad = dateKey(a?.scheduled_date);
+        const bd = dateKey(b?.scheduled_date);
         return ad === bd
           ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
           : ad.localeCompare(bd);

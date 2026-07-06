@@ -402,9 +402,15 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
       idempotencyKey: `referral.reward_earned:${referral.id}`,
       triggerEventId: `referral.reward_earned:${referral.id}`,
       categories: ['referral_reward'],
+      // SendGrid 4xx bodies can echo the recipient address — keep provider
+      // errors out of the logs and log a redacted reason below.
+      suppressProviderErrorLog: true,
     });
   } catch (err) {
-    logger.warn(`[ReferralEngine] reward email failed for referral ${referral?.id}: ${err.message}`);
+    const reason = err.status
+      ? `SendGrid ${err.status}`
+      : require('./email-template-library').redactEmailAddresses(err.message);
+    logger.warn(`[ReferralEngine] reward email failed for referral ${referral?.id}: ${reason}`);
   }
 }
 

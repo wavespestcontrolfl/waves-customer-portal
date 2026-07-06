@@ -61,11 +61,17 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
       idempotencyKey: `referral.invite:customer:${customerId}`,
       triggerEventId: `referral.invite:${trigger}:${customerId}`,
       categories: ['referral_invite'],
+      // SendGrid 4xx bodies can echo the recipient address — keep provider
+      // errors out of the logs and log a redacted reason below.
+      suppressProviderErrorLog: true,
     });
     logger.info(`[referral-invite-email] invite sent to customer ${customerId} (trigger=${trigger})`);
     return result;
   } catch (err) {
-    logger.warn(`[referral-invite-email] failed for customer ${customerId}: ${err.message}`);
+    const reason = err.status
+      ? `SendGrid ${err.status}`
+      : require('./email-template-library').redactEmailAddresses(err.message);
+    logger.warn(`[referral-invite-email] failed for customer ${customerId}: ${reason}`);
     return null;
   }
 }
