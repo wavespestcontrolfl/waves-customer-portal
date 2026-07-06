@@ -116,8 +116,20 @@ const TEMPLATES = [
     variables: ['first_name', 'invoice_number', 'amount', 'card_line', 'receipt_url'],
     sort_order: 17,
   },
-  // billing_reminder removed by 20260706000010_sms_template_cleanup.js —
-  // the WaveGuard monthly pre-charge text is retired.
+  // The WaveGuard monthly pre-charge CRON is retired
+  // (20260706000010_sms_template_cleanup.js), but this row survives as the
+  // isTemplateActive kill switch for manual Comms/IB billing texts — a
+  // missing row reads as ACTIVE. Seeded disabled so fresh environments
+  // match prod's safe posture.
+  {
+    template_key: 'billing_reminder',
+    name: 'Billing Reminder (WaveGuard Monthly)',
+    category: 'system',
+    body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.',
+    variables: ['first_name', 'waveguard_tier', 'amount', 'charge_date'],
+    sort_order: 18,
+    is_active: false,
+  },
   {
     template_key: 'invoice_followup_3day',
     name: 'Invoice — 3-Day Friendly Nudge (hardcoded)',
@@ -414,9 +426,31 @@ const TEMPLATES = [
   },
 
   // retention
-  // health_* outreach texts and waveguard_upsell removed by
+  // Most health_* outreach texts removed by
   // 20260706000010_sms_template_cleanup.js — health alerts stay admin-facing
   // (call actions only) and the post-service upsell workflow is retired.
+  // health_retention_offer and waveguard_upsell SURVIVE as isTemplateActive
+  // kill switches for still-live send paths (retention outreach approvals /
+  // campaign upsell drafts) — a missing row reads as ACTIVE. Seeded disabled
+  // so fresh environments match prod's safe posture.
+  {
+    template_key: 'health_retention_offer',
+    name: 'Health — Retention Offer',
+    category: 'system',
+    body: 'Hello {first_name}! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?',
+    variables: ['first_name'],
+    sort_order: 42,
+    is_active: false,
+  },
+  {
+    template_key: 'waveguard_upsell',
+    name: 'WaveGuard Plan Recommendation',
+    category: 'system',
+    body: 'Hello {first_name}! Based on your recent services, {tier_label} WaveGuard may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more.',
+    variables: ['first_name', 'tier_label'],
+    sort_order: 47,
+    is_active: false,
+  },
   {
     template_key: 'renewal_reminder',
     name: 'Renewal Reminder (hardcoded)',

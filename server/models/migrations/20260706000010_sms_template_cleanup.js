@@ -20,14 +20,14 @@ const REMOVED_TEMPLATE_KEYS = [
   // template (call-recording-processor rewire in this PR).
   'appointment_call_confirmed',
   // Health outreach texting retired; health alerts stay admin-facing.
+  // health_retention_offer is deliberately NOT here — see KILL_SWITCH_ROWS.
   'health_check_in',
-  'health_retention_offer',
   'health_rebook',
   'health_payment_reminder',
   'health_apology',
   'health_welcome_followup',
-  // Post-service WaveGuard upsell workflow removed.
-  'waveguard_upsell',
+  // Post-service WaveGuard upsell WORKFLOW removed; the waveguard_upsell
+  // ROW survives as a kill switch — see KILL_SWITCH_ROWS.
   // Seasonal tip blast retired (seasonal_reactivation is separate and kept).
   'seasonal_alert',
   // Estimates still auto-extend their expiry; the customer text is retired.
@@ -44,9 +44,9 @@ const REMOVED_TEMPLATE_KEYS = [
   'reschedule_options_weather',
   'reschedule_options_access',
   'reschedule_options_general',
-  // WaveGuard monthly pre-charge text retired — autopay customers already
-  // get the autopay pre-charge notice; the extra monthly text was noise.
-  'billing_reminder',
+  // The WaveGuard monthly pre-charge CRON is retired (code removed in this
+  // PR), but the billing_reminder ROW survives as a kill switch — see
+  // KILL_SWITCH_ROWS.
   // Its only sender (legacy admin-referrals.js) is not mounted — enrollment
   // is automatic (portal referrals tab / nudge workflow auto-enroll), so
   // there is no enrollment moment to text.
@@ -56,6 +56,19 @@ const REMOVED_TEMPLATE_KEYS = [
   // email fallback, replacing the bespoke code/address text.
   'self_booking_confirmation',
 ];
+
+// Rows whose SENDING workflow is retired but whose row is the
+// isTemplateActive kill switch for a send path that is still live. A missing
+// row defaults ACTIVE in isTemplateActive, and all three are DISABLED in
+// prod — deleting them would silently enable currently-blocked texts (the
+// same trap as the ai_* rows). is_active is deliberately left untouched;
+// only the description and category (→ system) change so the admin UI says
+// what the toggle now gates.
+const KILL_SWITCH_ROWS = {
+  waveguard_upsell: 'KILL SWITCH — gates approved upsell CAMPAIGN drafts (message type "upsell"). The retired post-service upsell workflow is gone; this toggle is what pauses campaign upsell texts. Never delete: a missing row reads as ACTIVE.',
+  health_retention_offer: 'KILL SWITCH — gates retention outreach sends (message types "retention" / "retention_outreach": customer-intel approvals and the retention agent). Health outreach texting is retired; this toggle is what pauses retention texts. Never delete: a missing row reads as ACTIVE.',
+  billing_reminder: 'KILL SWITCH — gates manual billing texts (Comms/Intelligence Bar message type "billing_reminder"). The monthly pre-charge cron is retired; this toggle is what pauses manual billing texts. Never delete: a missing row reads as ACTIVE.',
+};
 
 const REACTIVATED_TEMPLATE_KEYS = [
   // Public quote wizard booking invite — live send path in public-quote.js.
@@ -161,10 +174,14 @@ const RECATEGORIZED_TEMPLATE_KEYS = {
     'referral_nudge', 'referral_reward',
   ],
   reviews: ['review_request', 'review_request_followup'],
-  // Not message copy — these three rows are the ops kill switches the
-  // twilio send layer consults via isTemplateActive (AI conversational
-  // replies + draft-approval sends).
-  system: ['ai_assistant', 'ai_approved', 'ai_revised'],
+  // Not message copy — these rows are the ops kill switches the twilio
+  // send layer consults via isTemplateActive (AI conversational replies,
+  // draft-approval sends, campaign upsell, retention outreach, manual
+  // billing texts).
+  system: [
+    'ai_assistant', 'ai_approved', 'ai_revised',
+    'waveguard_upsell', 'health_retention_offer', 'billing_reminder',
+  ],
 };
 
 // Copy normalization (owner-directed 2026-07-06), applied to every row after
@@ -216,6 +233,15 @@ exports.up = async function up(knex) {
     .whereIn('template_key', REACTIVATED_TEMPLATE_KEYS)
     .where({ is_active: false })
     .update({ is_active: true, updated_at: new Date() });
+
+  // Kill-switch rows: description only — is_active is deliberately NOT
+  // touched (all three are disabled in prod; that disabled state is the
+  // point). Category moves to 'system' in the regroup below.
+  for (const [key, description] of Object.entries(KILL_SWITCH_ROWS)) {
+    await knex('sms_templates')
+      .where({ template_key: key })
+      .update({ description, updated_at: new Date() });
+  }
 
   for (const template of NEW_TEMPLATES) {
     const existing = await knex('sms_templates')

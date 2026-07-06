@@ -77,9 +77,13 @@ describe('remove new lead SMS template migration', () => {
     const defaultKeys = cleanTemplateSeed.TEMPLATES.map((template) => template.template_key);
 
     expect(defaultKeys).not.toContain(retiredKey);
-    // billing_reminder (the row this migration renamed) was itself retired by
-    // 20260706000010_sms_template_cleanup.js — it must stay out of the seed
-    // too, or the boot seeder would resurrect it.
-    expect(defaultKeys).not.toContain('billing_reminder');
+    // billing_reminder (the row this migration renamed) survives as an
+    // isTemplateActive KILL SWITCH for manual Comms/IB billing texts
+    // (20260706000010_sms_template_cleanup.js) — a missing row reads as
+    // ACTIVE. It must be seeded DISABLED so fresh environments match prod's
+    // safe posture.
+    const billingSeed = cleanTemplateSeed.TEMPLATES.find((t) => t.template_key === 'billing_reminder');
+    expect(billingSeed).toBeTruthy();
+    expect(billingSeed.is_active).toBe(false);
   });
 });

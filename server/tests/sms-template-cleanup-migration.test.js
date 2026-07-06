@@ -4,12 +4,10 @@ const migration = require('../models/migrations/20260706000010_sms_template_clea
 const EXPECTED_REMOVED = [
   'appointment_call_confirmed',
   'health_check_in',
-  'health_retention_offer',
   'health_rebook',
   'health_payment_reminder',
   'health_apology',
   'health_welcome_followup',
-  'waveguard_upsell',
   'seasonal_alert',
   'estimate_auto_renewed',
   'service_complete_concise',
@@ -17,9 +15,18 @@ const EXPECTED_REMOVED = [
   'reschedule_options_weather',
   'reschedule_options_access',
   'reschedule_options_general',
-  'billing_reminder',
   'referral_enrollment',
   'self_booking_confirmation',
+];
+
+// Rows whose sending workflow is retired but which gate still-live send
+// paths via isTemplateActive — a missing row reads as ACTIVE and all three
+// are disabled in prod, so deleting them would silently enable blocked
+// texts (campaign upsell drafts, retention outreach, manual billing texts).
+const EXPECTED_KILL_SWITCHES = [
+  'waveguard_upsell',
+  'health_retention_offer',
+  'billing_reminder',
 ];
 
 const EXPECTED_REACTIVATED = [
@@ -107,6 +114,36 @@ describe('sms template cleanup migration (20260706000010)', () => {
 
     expect(state.deletedTemplateKeys).toEqual(EXPECTED_REMOVED);
     expect(state.deletedVariantKeys).toEqual(EXPECTED_REMOVED);
+    // The kill-switch rows must never be in the delete set.
+    for (const key of EXPECTED_KILL_SWITCHES) {
+      expect(state.deletedTemplateKeys).not.toContain(key);
+    }
+  });
+
+  test('kill-switch rows get a description update ONLY — is_active untouched, bucketed system', async () => {
+    const { knex, state } = buildKnex();
+
+    await migration.up(knex);
+
+    for (const key of EXPECTED_KILL_SWITCHES) {
+      const update = state.updates.find((u) => u.where?.template_key === key && 'description' in u.data);
+      expect(update).toBeTruthy();
+      // Description only — flipping is_active here would either enable a
+      // blocked send path or pin the switch against the operator.
+      expect(Object.keys(update.data).sort()).toEqual(['description', 'updated_at']);
+      expect(update.data.description).toContain('KILL SWITCH');
+    }
+    const systemBucket = state.updates.find((u) => u.data.category === 'system');
+    expect(systemBucket.keys).toEqual(expect.arrayContaining(EXPECTED_KILL_SWITCHES));
+  });
+
+  test('kill-switch rows are seeded DISABLED for fresh environments', () => {
+    for (const key of EXPECTED_KILL_SWITCHES) {
+      const seed = cleanTemplateSeed.TEMPLATES.find((t) => t.template_key === key);
+      expect(seed).toBeTruthy();
+      expect(seed.is_active).toBe(false);
+      expect(seed.category).toBe('system');
+    }
   });
 
   test('reactivates live-send templates without touching their bodies', async () => {
