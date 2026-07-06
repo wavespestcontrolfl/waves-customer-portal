@@ -25,6 +25,7 @@ export default function BrandCard({
 
   return (
     <section
+      data-glass="card"
       {...rest}
       style={{
         background: 'var(--surface)',

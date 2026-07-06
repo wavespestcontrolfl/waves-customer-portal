@@ -8,7 +8,8 @@ shipping. Each rule cites the file it protects.
 Codex integration reference:
 <https://developers.openai.com/codex/integrations/github>
 
-The pre-push hook in `.git/hooks/pre-push` blocks pushes that contain any P0
+The pre-push hook at `scripts/hooks/pre-push` (wired via `core.hooksPath` by
+the npm `prepare` script) blocks pushes that contain any P0
 finding and warns on P1. Reviewers must return JSON matching
 `.github/codex-review-schema.json`. Cite `file:line` for every finding.
 
@@ -327,6 +328,14 @@ finding and warns on P1. Reviewers must return JSON matching
   is deliberately cacheable and indexable — it exposes only modeled,
   non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
   NOT apply here).
+  `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
+  access, no PII — returns only client release-switch booleans (currently
+  `{ portalGlass }` from the GATE_PORTAL_GLASS feature gate) so the portal
+  SPA shell and login page, which have no per-page token payload, can learn
+  a glass release. `Cache-Control: no-store` so gate flips propagate on the
+  next page load; inherits the global `/api/` IP rate limit. Invariant: this
+  surface must never grow beyond boolean/enum release flags — anything
+  per-customer, secret, or configurable belongs on an authenticated payload).
   `/api/public/social-feed` (read-only aggregate of already-public social
   posts for the marketing /social page — Instagram + Facebook Graph API,
   Google Business Profile localPosts, YouTube channel RSS; no tokens, no

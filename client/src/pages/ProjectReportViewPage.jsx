@@ -4,8 +4,10 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
+import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
@@ -20,11 +22,12 @@ const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+// Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_BUTTON_BG = B.blueDeeper;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
@@ -320,6 +323,16 @@ export default function ProjectReportViewPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Liquid-glass dark launch: ?glass=1 on the live HTML view only. This page
+  // has no client pdf/static render modes (the filed FDACS-13645 PDF is a
+  // server-side artifact linked below, never rendered here), but the
+  // pre-construction termite Certificate of Compliance IS a state compliance
+  // document rendered on this page — it never mounts the scene, so the
+  // certificate stays the plain paper document regardless of the param.
+  const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
+  const glassActive = !isCertificate && glassParamRequested();
+  useGlassSurface(glassActive, 'full');
+
   useEffect(() => {
     fetch(`${API_BASE}/reports/project/${token}/data`)
       .then(r => r.json())
@@ -360,7 +373,6 @@ export default function ProjectReportViewPage() {
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
-  const isCertificate = data.projectType === 'pre_treatment_termite_certificate';
   // The structured findings feed the AI writer, so when the report carries
   // the sectioned narrative (Customer Concern / What We Inspected / …) the
   // raw findings list would repeat the same content — the narrative is the
@@ -403,7 +415,7 @@ export default function ProjectReportViewPage() {
   ].map((line) => String(line || '').trim()).filter(Boolean);
 
   return (
-    <div style={{
+    <div className="project-report-page" style={{
       minHeight: '100vh',
       background: ESTIMATE_BG,
       fontFamily: FONT_BODY,
@@ -411,9 +423,33 @@ export default function ProjectReportViewPage() {
       display: 'flex',
       flexDirection: 'column',
     }}>
+      {/* ---------- liquid glass (?glass=1, non-certificate only) ----------
+          useGlassSurface sets html[data-glass-theme]; every rule below is
+          scoped under it so the un-gated report stays pixel-identical. Card
+          material comes from glass-theme.css via the data-glass attributes —
+          this block only clears the page wash and adds the print reset. */}
+      <style>{`
+        html[data-glass-theme] .project-report-page { background: transparent !important; }
+        /* the glass ::before/::after specular layers position against the card */
+        html[data-glass-theme] .project-report-page [data-glass] { position: relative; }
+        @media print {
+          /* printing a ?glass=1 view still yields the paper document */
+          html[data-glass-theme] .project-report-page { background: #fff !important; }
+          html[data-glass-theme] .project-report-page [data-glass],
+          html[data-glass-theme] .project-report-page [data-glass-accent] {
+            background: #fff !important;
+            border-color: #d4d4d4 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          html[data-glass-theme] .glass-scene-orbs,
+          html[data-glass-theme] .glass-scene-grain { display: none !important; }
+        }
+      `}</style>
       {/* Mirrors the pest/lawn service-report top bar (.sr-top): phone left,
           logo right, same 62px bar on the shared 960px grid. */}
-      <header style={{ background: B.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
+      <header data-glass="soft" style={{ background: B.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
           margin: '0 auto',
@@ -443,7 +479,7 @@ export default function ProjectReportViewPage() {
               is recorded — the bare type alone reads generic; the type still
               anchors the headline below. Mirrors the estimate's
               "Your estimate · {service}" kicker. */}
-          <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
+          <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>
             Project report{reportTitle ? ` · ${reportTitle}` : ''}
           </div>
           <h1 style={{
@@ -473,7 +509,7 @@ export default function ProjectReportViewPage() {
             section inside is non-cert), so no empty white card renders above
             the document. */}
         {!isCertificate && (
-        <div style={cardStyle}>
+        <div data-glass="card" style={cardStyle}>
           {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
           {/* Findings — suppressed whenever the AI-drafted sectioned
@@ -481,7 +517,7 @@ export default function ProjectReportViewPage() {
               of these fields — showing both reads twice). */}
           {!suppressFindingsForNarrative && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
-              <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
+              <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 10 }}>
                 Findings
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -532,8 +568,8 @@ export default function ProjectReportViewPage() {
         )}
 
         {data.projectType === 'wdo_inspection' && (
-          <div style={{ ...cardStyle, marginTop: 16 }}>
-            <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
+          <div data-glass="card" style={{ ...cardStyle, marginTop: 16 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>
               Official WDO Form
             </div>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
@@ -542,6 +578,7 @@ export default function ProjectReportViewPage() {
                 : 'This inspection follows Florida FDACS-13645, Wood-Destroying Organisms Inspection Report.'}
             </div>
             <a
+              data-glass="chip"
               href={data.fdacsPdfAvailable
                 ? `${API_BASE}/reports/project/${token}/fdacs-pdf`
                 : '/forms/fdacs-13645-wdo-inspection-report.pdf'}
@@ -572,7 +609,7 @@ export default function ProjectReportViewPage() {
 
         {/* Follow-up visit (bed bug) */}
         {(data.followupCompletedAt || data.followupFindings || followupPhotos.length > 0) && (
-          <div style={{ ...cardStyle, marginTop: 16 }}>
+          <div data-glass="card" style={{ ...cardStyle, marginTop: 16 }}>
             <div style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, color: ESTIMATE_TEXT }}>
               Follow-up visit
             </div>
@@ -603,10 +640,10 @@ export default function ProjectReportViewPage() {
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY }}>Questions about this report?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginTop: 10 }}>
-            <a href={`sms:${WAVES_PHONE_TEL}`} style={{
+            <a data-glass-accent="" href={`sms:${WAVES_PHONE_TEL}`} style={{
               ...primaryButtonStyle,
             }}><Icon name="message" size={16} strokeWidth={2} /> Text Us</a>
-            <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+            <a data-glass="chip" href={`tel:${WAVES_PHONE_TEL}`} style={{
               ...secondaryButtonStyle,
             }}><Icon name="phone" size={16} strokeWidth={2} /> Call Us</a>
           </div>
@@ -625,7 +662,7 @@ export default function ProjectReportViewPage() {
 function AtAGlance({ rows }) {
   return (
     <div style={{ marginTop: 16, padding: '14px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
-      <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
+      <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 10 }}>
         At a glance
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
@@ -1050,7 +1087,7 @@ function PhotoGrid({ title, photos, noCard }) {
   const content = (
     <div>
       {title && (
-        <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
+        <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 10 }}>
           {title}
         </div>
       )}
@@ -1104,7 +1141,7 @@ function PhotoGrid({ title, photos, noCard }) {
 
   if (noCard) return content;
   return (
-    <div style={{ ...cardStyle, marginTop: 16 }}>
+    <div data-glass="card" style={{ ...cardStyle, marginTop: 16 }}>
       {content}
     </div>
   );
@@ -1148,7 +1185,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
       <div style={{ marginTop: 16, padding: '18px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
         {sections.map((s, i) => (
           <div key={s.heading} style={{ marginTop: i === 0 ? 0 : 14 }}>
-            <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>
               {titleCase(s.heading)}
             </div>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
@@ -1160,7 +1197,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   }
   return (
     <div style={{ marginTop: 16, padding: '18px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
-      <div style={{ ...eyebrowStyle, marginBottom: 6 }}>Recommendations</div>
+      <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>Recommendations</div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
       {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>
@@ -1205,6 +1242,7 @@ function BookingCta({ upcomingAppointment, text }) {
   return (
     <div style={{ marginTop: 14, display: 'flex', justifyContent: 'center' }}>
       <a
+        data-glass-accent=""
         href={BOOK_URL}
         target="_blank"
         rel="noreferrer"

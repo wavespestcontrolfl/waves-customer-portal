@@ -20,11 +20,10 @@
  *      Twilio Lookup per uncached number (a voicemail caller can easily be on
  *      a landline — don't burn the one-shot on an undeliverable send).
  *   4. The sendCustomerMessage policy pipeline: suppression (STOP), consent
- *      (transactional basis — they called us about service), Florida quiet
- *      hours (purpose missed_call_followup is quiet-enforced, 8am–8pm ET).
- *      A quiet-hours hold or transient provider failure re-queues onto the
- *      scheduled-SMS rail (status='scheduled' + scheduled_for) so an evening
- *      voicemail gets its text the next allowed morning instead of never.
+ *      (transactional basis — they called us about service).
+ *      A transient provider failure re-queues onto the
+ *      scheduled-SMS rail (status='scheduled' + scheduled_for) so the
+ *      voicemail still gets its text on a later tick instead of never.
  *   5. Template kill switch — voicemail_quote_link is admin-editable and
  *      is_active-toggleable like every automated template.
  *
@@ -336,7 +335,7 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     return { sent: true };
   }
 
-  // Quiet-hours hold (evening/holiday voicemail) or transient provider
+  // Transient provider
   // failure → re-queue onto the scheduled-SMS rail for the next allowed time.
   if (result.retryable && result.nextAllowedAt) {
     try {

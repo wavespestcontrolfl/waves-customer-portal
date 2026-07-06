@@ -773,6 +773,16 @@ const TABS = [
   { key: "queries", label: "Recent Queries", Icon: Search },
 ];
 
+// The health endpoint is admin-only server-side (requireAdmin); showing the
+// tab to technicians would render a blank panel off its 403.
+function staffRole() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
+  } catch {
+    return null;
+  }
+}
+
 export default function KnowledgePage() {
   const [tab, setTab] = useState("articles");
   const [articles, setArticles] = useState([]);
@@ -839,7 +849,7 @@ export default function KnowledgePage() {
       <AdminCommandHeader
         title="Wiki"
         icon={BookOpen}
-        sections={TABS}
+        sections={staffRole() === "admin" ? TABS : TABS.filter((t) => t.key !== "health")}
         activeKey={tab}
         onSectionChange={setTab}
         action={{

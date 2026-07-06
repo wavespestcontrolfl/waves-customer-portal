@@ -76,6 +76,16 @@ const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMIN
 const OPENAI_BEST        = process.env.MODEL_OPENAI_BEST   || 'gpt-5.5';
 const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash';
 
+// SMS reply-drafting split (owner directive 2026-07-05):
+//   default auto-reply draft              → GPT-5.4-mini (high-volume lane)
+//   tone rewrite + save-the-sale replies  → Claude Sonnet 5 (warm customer voice)
+// "Save-the-sale" = retention-critical inbound (cancellation / complaint /
+// customer-issue intents) — matched by the drafter's SAVE_SALE_INTENT_RE.
+// The drafter's adversarial fact-check verifier intentionally stays on
+// FLAGSHIP: with a mini model drafting, the verify loop is the safety net.
+const OPENAI_SMS_DRAFT = process.env.MODEL_OPENAI_SMS_DRAFT || 'gpt-5.4-mini';
+const SMS_SONNET       = process.env.MODEL_SMS_SONNET       || 'claude-sonnet-5';
+
 // Gemini image-GENERATION models (the "Nano Banana" line) — consumed by
 // content/image-generator.js MODEL_MAP for the social creative engine's scene
 // backgrounds. BEST is the newest image model; STABLE is the GA fallback the
@@ -104,6 +114,9 @@ const ROUTES = Object.freeze({
   estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js — live, Claude fallback
   askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // ask-waves-intake.js — live, Claude fallback
   churnClassify:     Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // churn-classifier.js — live, Claude fallback
+  smsDraftDefault:   Object.freeze({ provider: PROVIDER.OPENAI,    model: OPENAI_SMS_DRAFT }), // sms-shadow-drafter default draft — live, FLAGSHIP fallback
+  smsDraftSaveSale:  Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // sms-shadow-drafter cancel/complaint drafts — FLAGSHIP fallback
+  smsToneRewrite:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // admin-communications /rewrite-sms — WORKHORSE fallback
 });
 
 module.exports = {
@@ -117,6 +130,8 @@ module.exports = {
   PROVIDER,
   ROUTES,
   OPENAI_BEST,
+  OPENAI_SMS_DRAFT,
+  SMS_SONNET,
   GEMINI_VISION_BEST,
   GEMINI_IMAGE_BEST,
   GEMINI_IMAGE_STABLE,

@@ -10,7 +10,7 @@
  *   - GATED dark behind GATE_PROACTIVE_LINETYPE_LOOKUP — zero lookups until the
  *     owner enables it.
  *   - Positioned LAST in the send pipeline, so we only pay for a lookup when the
- *     message would otherwise actually send (suppression / consent / quiet-hours
+ *     message would otherwise actually send (suppression / consent
  *     blocks short-circuit first).
  *   - Every result is cached in phone_line_types (phone-keyed → works for
  *     customers, leads, and service-contact numbers alike), so each number is
