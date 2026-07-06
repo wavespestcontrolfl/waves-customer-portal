@@ -1,8 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
-
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -56,8 +54,9 @@ class RetentionEngine {
     } catch { /* */ }
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      // Fallback: generate a template-based outreach
-      return this.templateOutreach(customer, health, riskFactors);
+      // The health_* SMS templates were retired 2026-07-06; without the AI
+      // drafter there is no outreach copy to propose, so skip drafting.
+      return null;
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -101,7 +100,9 @@ ${recentSMS || 'None'}`
     try {
       outreach = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
     } catch {
-      return this.templateOutreach(customer, health, riskFactors);
+      // Unparseable draft — skip rather than fall back to the retired
+      // health_* template copy (removed 2026-07-06).
+      return null;
     }
 
     const [saved] = await db('retention_outreach').insert({
@@ -125,44 +126,6 @@ ${recentSMS || 'None'}`
     }
 
     return saved;
-  }
-
-  async templateOutreach(customer, health, riskFactors) {
-    const topSignal = riskFactors[0]?.signal || '';
-    let strategy, templateKey;
-
-    if (topSignal.includes('PAYMENT')) {
-      strategy = 'service_recovery';
-      templateKey = 'health_payment_reminder';
-    } else if (topSignal.includes('SERVICE_GAP')) {
-      strategy = 'empathy_check_in';
-      templateKey = 'health_rebook';
-    } else if (topSignal.includes('COMPETITOR') || topSignal.includes('DOWNGRADE')) {
-      strategy = 'value_reminder';
-      templateKey = 'health_retention_offer';
-    } else {
-      strategy = 'empathy_check_in';
-      templateKey = 'health_check_in';
-    }
-    const message = await renderRequiredSmsTemplate(templateKey, {
-      first_name: customer.first_name || 'there',
-      waveguard_tier: customer.waveguard_tier || '',
-    }, {
-      workflow: 'retention_outreach',
-      entity_type: 'customer',
-      entity_id: customer.id,
-    });
-
-    // Save template outreach
-    db('retention_outreach').insert({
-      customer_id: customer.id,
-      outreach_type: health.churn_risk === 'critical' ? 'call' : 'sms',
-      outreach_strategy: strategy,
-      message_content: message,
-      status: 'pending_approval',
-    }).catch(err => logger.error(`Template outreach save failed: ${err.message}`));
-
-    return { outreach_type: health.churn_risk === 'critical' ? 'call' : 'sms', strategy, message };
   }
 
   /**

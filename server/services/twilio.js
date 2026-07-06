@@ -880,78 +880,11 @@ const TwilioService = {
     });
   },
 
-  /**
-   * Send monthly billing reminder
-   */
-  async sendBillingReminder(customerId, amount, date) {
-    const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
-    if (!customer || !prefs?.billing_reminder || !prefs?.sms_enabled) return;
+  // sendBillingReminder removed 2026-07-06 — the WaveGuard monthly
+  // pre-charge text is retired (autopay pre-charge notice covers it).
 
-    const body =
-      typeof smsTemplatesRouter.getTemplate === "function"
-        ? await smsTemplatesRouter.getTemplate("billing_reminder", {
-            first_name: customer.first_name || "",
-            waveguard_tier: customer.waveguard_tier || "",
-            amount: amount.toFixed(2),
-            charge_date: date,
-          }, { workflow: "billing_reminder", entity_type: "customer", entity_id: customerId })
-        : null;
-    if (!body) {
-      logger.warn(
-        `[twilio] billing_reminder template missing/disabled — skipping for customer ${customerId}`,
-      );
-      return;
-    }
-
-    return sendCustomerPolicySms({
-      to: customer.phone,
-      body,
-      purpose: "billing",
-      customerId,
-      messageType: "billing_reminder",
-    });
-  },
-
-  /**
-   * Send seasonal tip / pest alert
-   */
-  async sendSeasonalAlert(customerId, subject, tip) {
-    const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
-    if (!customer || !prefs?.seasonal_tips || !prefs?.sms_enabled) return;
-
-    const body =
-      typeof smsTemplatesRouter.getTemplate === "function"
-        ? await smsTemplatesRouter.getTemplate("seasonal_alert", {
-            first_name: customer.first_name || "",
-            tip,
-          }, { workflow: "seasonal_alert", entity_type: "customer", entity_id: customerId })
-        : null;
-    if (!body) {
-      logger.warn(
-        `[twilio] seasonal_alert template missing/disabled — skipping for customer ${customerId}`,
-      );
-      return;
-    }
-
-    return sendCustomerPolicySms({
-      to: customer.phone,
-      body,
-      purpose: "marketing",
-      customerId,
-      consentBasis: {
-        status: "opted_in",
-        source: "notification_prefs.seasonal_tips",
-        capturedAt: prefs.updated_at || prefs.created_at || undefined,
-      },
-      messageType: "seasonal_alert",
-    });
-  },
+  // sendSeasonalAlert removed 2026-07-06 — the seasonal_alert template and
+  // its tip-blast flow are retired (seasonal_reactivation is separate).
 };
 
 // Helper

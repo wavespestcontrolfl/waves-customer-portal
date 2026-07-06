@@ -8,6 +8,12 @@ jest.mock('../models/db', () => {
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
   return mock;
 });
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(async () => null),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -360,7 +366,17 @@ describe('ensureDepositSatisfied', () => {
         return total > 0 ? [{ amount: total, refunded_amount: 0 }] : [];
       },
       insert(payload) {
-        return { onConflict: () => ({ ignore: async () => { upserts.push(payload); } }) };
+        // ignore() is awaited directly by the claim path and chained with
+        // .returning() by markDepositReceived — support both shapes.
+        return {
+          onConflict: () => ({
+            ignore: () => {
+              const promise = (async () => { upserts.push(payload); return [{ id: 'dep-new' }]; })();
+              promise.returning = () => promise;
+              return promise;
+            },
+          }),
+        };
       },
     };
   }
@@ -568,7 +584,7 @@ describe('webhook + invoice credit', () => {
   // and writes the SAME row across several queries, so the mock must carry
   // state. Conditional updates (status / whereIn) only land when the live
   // row matches — mirroring knex affected-row semantics.
-  function statefulWebhookDb({ estimateRow, initialDepositRow = null, onEstimateRead = null }) {
+  function statefulWebhookDb({ estimateRow, customerRow = null, prefsRow = null, initialDepositRow = null, onEstimateRead = null }) {
     const state = {
       row: initialDepositRow ? { credited_amount: 0, refunded_amount: 0, ...initialDepositRow } : null,
       inserts: [],
@@ -577,6 +593,15 @@ describe('webhook + invoice credit', () => {
     const handler = (table) => {
       if (table === 'estimates') {
         return { where: () => ({ first: async () => { if (onEstimateRead) onEstimateRead(state); return estimateRow; } }) };
+      }
+      if (table === 'customers') {
+        return { where: () => ({ first: async () => customerRow } ) };
+      }
+      if (table === 'notification_prefs') {
+        return { where: () => ({ first: async () => prefsRow }) };
+      }
+      if (table === 'sms_log') {
+        return { insert: async (row) => { state.smsLogInserts = (state.smsLogInserts || []).concat(row); return [row]; } };
       }
       if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
       const q = { criteria: {}, inStatuses: null };
@@ -595,8 +620,19 @@ describe('webhook + invoice credit', () => {
         insert(payload) {
           return {
             onConflict: () => ({
-              ignore: async () => {
-                if (!state.row) { state.row = { credited_amount: 0, refunded_amount: 0, ...payload }; state.inserts.push(payload); }
+              // Awaited directly by the claim path, chained with .returning()
+              // by markDepositReceived — support both shapes.
+              ignore: () => {
+                const promise = (async () => {
+                  if (!state.row) {
+                    state.row = { credited_amount: 0, refunded_amount: 0, ...payload };
+                    state.inserts.push(payload);
+                    return [{ id: 'dep-new' }];
+                  }
+                  return [];
+                })();
+                promise.returning = () => promise;
+                return promise;
               },
               merge: async () => {
                 if (!state.row) { state.row = { credited_amount: 0, refunded_amount: 0, ...payload }; state.inserts.push(payload); }
@@ -626,6 +662,154 @@ describe('webhook + invoice credit', () => {
     expect(result.refunded).toBeUndefined();
     expect(state.row).toMatchObject({ estimate_id: 'est-1', amount: 70, status: 'received' });
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  it('texts the deposit receipt exactly once — first record only, never on replay', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received — applied toward your first visit.');
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      // The receipt must go to the CUSTOMER's verified phone, not the
+      // estimate's stored one.
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(renderSmsTemplate).toHaveBeenCalledWith('deposit_receipt', expect.objectContaining({
+      first_name: 'Sam',
+      amount: '70',
+    }), expect.any(Object));
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '(941) 555-0100',
+      purpose: 'payment_receipt',
+      identityTrustLevel: 'phone_matches_customer',
+    }));
+
+    // Webhook replay — the row is already received; no second text.
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '(941) 555-0100', customer_name: 'Sam Customer' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({
+      status: 'scheduled',
+      message_type: 'deposit_receipt',
+      to_phone: '(941) 555-0100',
+    });
+    expect(state.smsLogInserts[0].scheduled_for.toISOString()).toBe(nextAllowedAt);
+    // sms_log.from_phone is NOT NULL — the row must carry a real outbound
+    // number (location default) or the insert throws and the receipt is lost.
+    expect(state.smsLogInserts[0].from_phone).toEqual(expect.stringMatching(/^\+1\d{10}$/));
+    // Lead-only estimate — the replay consent basis must ride the metadata,
+    // and there is no customer row to refresh the recipient from.
+    const leadMeta = JSON.parse(state.smsLogInserts[0].metadata);
+    expect(leadMeta.consent_basis).toMatchObject({ status: 'transactional_allowed' });
+    expect(leadMeta.refresh_customer_phone).toBeUndefined();
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('customer-linked receipt retries carry the location from-number and flag recipient refresh', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({
+      customer_id: 'cust-1',
+      to_phone: '(941) 555-0100', // customer's verified phone, not the estimate's
+      from_phone: expect.stringMatching(/^\+1\d{10}$/), // Venice location line
+    });
+    // The cron re-reads customers.phone at nextAllowedAt so the
+    // phone_matches_customer trust it asserts is still true then.
+    expect(JSON.parse(state.smsLogInserts[0].metadata).refresh_customer_phone).toBe(true);
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('skips the receipt SMS when the customer chose email-only receipts', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+      // The policy layer enforces the payment_receipt TOGGLE but not the
+      // channel column — this path must honor the channel itself.
+      prefsRow: { payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.smsLogInserts).toBeUndefined();
+  });
+
+  it('requeues on CONSENT_LOOKUP_FAILED with a default delay — a DB blip must not eat the only receipt', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    // CONSENT_LOOKUP_FAILED is retry-advised by contract but carries no
+    // retryable/nextAllowedAt metadata.
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'CONSENT_LOOKUP_FAILED' });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    const before = Date.now();
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({ message_type: 'deposit_receipt', status: 'scheduled' });
+    const scheduledFor = state.smsLogInserts[0].scheduled_for.getTime();
+    expect(scheduledFor).toBeGreaterThanOrEqual(before + 14 * 60 * 1000);
+    expect(scheduledFor).toBeLessThanOrEqual(Date.now() + 16 * 60 * 1000);
+    expect(JSON.parse(state.smsLogInserts[0].metadata).original_failure_code).toBe('CONSENT_LOOKUP_FAILED');
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
   it('converts the originating lead to won when an eligible deposit is recorded', async () => {

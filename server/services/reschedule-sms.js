@@ -24,79 +24,10 @@ async function sendAppointmentSms({ to, body, customerId, messageType }) {
 }
 
 class RescheduleSMS {
-  async sendRescheduleRequest(serviceId, reasonCode, reasonText) {
-    const service = await db('scheduled_services')
-      .where('scheduled_services.id', serviceId)
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.id as cust_id')
-      .first();
-
-    if (!service) throw new Error('Service not found');
-
-    const options = await SmartRebooker.findRescheduleOptions(serviceId, reasonCode);
-    const opt1 = options[0];
-    const opt2 = options[1] || options[0];
-
-    // scheduled_date is a Postgres DATE — node-postgres returns it as a JS Date
-    // at UTC midnight, and formatting that in ET names the previous day.
-    // Recover the calendar date string and anchor at noon instead.
-    const originalDateStr = service.scheduled_date instanceof Date
-      ? service.scheduled_date.toISOString().split('T')[0]
-      : String(service.scheduled_date).split('T')[0];
-    const originalDate = new Date(originalDateStr + 'T12:00:00')
-      .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-    const serviceType = (service.service_type || 'service').toLowerCase();
-    const option1 = `${opt1.displayDate}, ${opt1.suggestedWindow.display}`;
-    const option2 = `${opt2.displayDate}, ${opt2.suggestedWindow.display}`;
-
-    const templateContext = { workflow: 'reschedule_options', entity_type: 'scheduled_service', entity_id: serviceId };
-    let smsBody;
-    let templateKey;
-    if (reasonCode.startsWith('weather')) {
-      templateKey = 'reschedule_options_weather';
-      smsBody = await renderSmsTemplate(templateKey, {
-        first_name: service.first_name, service_type: serviceType, original_date: originalDate, option_1: option1, option_2: option2,
-      }, templateContext);
-    } else if (reasonCode === 'customer_noshow' || reasonCode === 'gate_locked') {
-      const accessIssue = reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property";
-      templateKey = 'reschedule_options_access';
-      smsBody = await renderSmsTemplate(templateKey, {
-        first_name: service.first_name, service_type: serviceType, access_issue: accessIssue, option_1: option1, option_2: option2,
-      }, templateContext);
-    } else {
-      templateKey = 'reschedule_options_general';
-      smsBody = await renderSmsTemplate(templateKey, {
-        first_name: service.first_name, service_type: serviceType, original_date: originalDate, reason_text: reasonText ? ` ${reasonText}` : '', option_1: option1, option_2: option2,
-      }, templateContext);
-    }
-    if (!smsBody) {
-      logger.warn(`[reschedule-sms] template ${templateKey} missing/disabled — service ${serviceId}`);
-      return { success: false, reason: 'missing_template', templateKey };
-    }
-
-    await sendAppointmentSms({
-      to: service.phone,
-      body: smsBody,
-      customerId: service.cust_id || service.customer_id,
-      messageType: 'reschedule',
-    });
-
-    const [logEntry] = await db('reschedule_log').insert({
-      scheduled_service_id: serviceId,
-      customer_id: service.cust_id || service.customer_id,
-      original_date: service.scheduled_date,
-      reason_code: reasonCode,
-      initiated_by: reasonCode.startsWith('weather') ? 'weather_auto' : 'admin',
-      sms_sent_at: db.fn.now(),
-      notes: JSON.stringify({
-        option1: { date: opt1.date, window: opt1.suggestedWindow },
-        option2: { date: opt2.date, window: opt2.suggestedWindow },
-      }),
-    }).returning('id');
-
-    logger.info(`Reschedule SMS sent for customer ${service.cust_id || service.customer_id} for service ${serviceId}`);
-    return { success: true, options: [opt1, opt2], logId: logEntry.id || logEntry };
-  }
+  // sendRescheduleRequest removed 2026-07-06 — it had no callers and its
+  // reschedule_options_* templates never fired in prod; the rain-out engine
+  // owns weather moves with its own template. handleRescheduleReply below
+  // stays: it serves the live reply-1/2 webhook flow (rain-out, tech-track).
 
   async handleRescheduleReply(customerId, messageBody) {
     // Offers expire: with no age limit, a customer texting "1" weeks later
