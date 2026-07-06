@@ -148,7 +148,7 @@ export default function BookingPage() {
       `}</style>
 
       {/* ── Header ── */}
-      <div style={{
+      <div data-glass-ink="light" style={{
         position: 'relative', overflow: 'hidden',
         background: COLORS.blueDeeper,
         padding: "20px 24px",
