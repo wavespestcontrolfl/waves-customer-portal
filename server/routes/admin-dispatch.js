@@ -4958,6 +4958,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               entity_id: record.id,
             });
           }
+          // A toggled-off variant (e.g. service_report_v1_progress) must not
+          // cost the customer their completion text — fall back to the base
+          // report template before giving up (owner report 2026-07-06: the
+          // progress variant was inactive and progress visits would have
+          // texted nothing).
+          if (!body && sentSmsType !== 'service_report_v1') {
+            sentSmsType = 'service_report_v1';
+            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+              workflow: 'dispatch_service_complete',
+              entity_type: 'service_record',
+              entity_id: record.id,
+            });
+          }
           if (!body) throw new Error(`SMS template ${sentSmsType} is missing or inactive`);
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
