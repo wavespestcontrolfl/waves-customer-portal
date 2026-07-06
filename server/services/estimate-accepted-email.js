@@ -20,6 +20,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 function clean(value) {
   return String(value == null ? '' : value).trim();
@@ -64,6 +65,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
         service_type: clean(serviceLabel) || 'service',
         appointment_line: appointmentLineFor(appointment),
         customer_portal_url: portalUrl('/login'),
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
       recipientType: 'customer',
       recipientId: customerId,

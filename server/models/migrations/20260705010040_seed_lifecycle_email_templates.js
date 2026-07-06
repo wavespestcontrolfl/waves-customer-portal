@@ -102,7 +102,10 @@ const TEMPLATES = [
     // group (seeded 20260518000001, user-unsubscribable), so a referral
     // opt-out is honored at send time without touching service email,
     // and the body carries an explicit reply-to-opt-out line.
+    // layout 'service_pinned_v1' is the chrome pin sendTemplate honors —
+    // without it the marketing_referral stream forces the newsletter wrapper.
     stream: 'marketing_referral',
+    layout: 'service_pinned_v1',
     description: 'Invites a happy customer to refer neighbors; the reward line comes from the sender so amounts are never baked into copy.',
     required: ['first_name', 'referral_url', 'referral_reward_line'],
     optional: [],

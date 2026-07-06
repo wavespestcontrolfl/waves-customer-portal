@@ -1720,11 +1720,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // saved card (dark until ONE_TIME_CARD_HOLD; no-op when no hold exists).
       // Best-effort — never fail the committed status flip. The outcome feeds
       // the customer notice below so its charge line is truthful.
-      let noShowFeeCharged = false;
+      // 'none' | 'charged' | 'review' — charge_review means Stripe MAY have
+      // accepted the fee (ambiguous API error, parked for reconciliation), so
+      // the customer notice must not claim "no charge".
+      let noShowFeeOutcome = 'none';
       try {
         const CardHolds = require('../services/estimate-card-holds');
         const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
-        noShowFeeCharged = feeResult?.charged === true;
+        if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
+        else if (feeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
       } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
 
       // Notify the customer we missed them and invite a reschedule.
@@ -1734,7 +1738,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         const AppointmentReminders = require('../services/appointment-reminders');
         await AppointmentReminders.handleNoShow(svc.id, {
           sendNotification: notifyCustomer !== false,
-          feeCharged: noShowFeeCharged,
+          feeOutcome: noShowFeeOutcome,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
 

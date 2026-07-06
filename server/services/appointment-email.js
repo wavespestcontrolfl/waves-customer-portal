@@ -364,12 +364,17 @@ async function sendAppointmentNoShowEmail({
   serviceLabel,
   missedWhen,
   noShowReason,
-  feeCharged,
+  feeOutcome,
   idempotencyKey,
 } = {}) {
-  const chargeLine = feeCharged
+  // 'review' = the charge attempt hit an ambiguous Stripe error and was
+  // parked for reconciliation — the fee may still have been accepted, so
+  // neither "was charged" nor "no charge" is safe to claim.
+  const chargeLine = feeOutcome === 'charged'
     ? 'Per your booking terms, the missed-visit fee was charged to your card on file — it will show on your emailed receipt.'
-    : 'There’s no charge for the attempted visit.';
+    : feeOutcome === 'review'
+      ? 'If a missed-visit fee applies under your booking terms, it will appear on an emailed receipt.'
+      : 'There’s no charge for the attempted visit.';
   return sendTemplate({
     customerId,
     templateKey: 'appointment.no_show',

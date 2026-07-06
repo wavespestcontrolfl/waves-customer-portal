@@ -18,6 +18,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const BOND_MATCH = '%Termite Bond Service%';
 const RENEWAL_WINDOW_DAYS = 30;
@@ -63,16 +65,22 @@ async function syncTermiteBonds() {
     const started = new Date(startedRaw);
     if (Number.isNaN(started.getTime())) continue;
     const years = termYearsFrom(v.service_type);
-    const renews = new Date(started);
-    renews.setFullYear(renews.getFullYear() + years);
+    // DATE columns must reflect the ET business calendar: a bond visit
+    // completed after 8 PM Eastern has a completed_at that is already the
+    // next UTC day, so UTC ISO slices would store (and later renew) a day
+    // late. Derive the calendar date in America/New_York, then add the term
+    // years with UTC-safe date math (Feb 29 normalizes to Mar 1).
+    const startedEt = etDateString(started);
+    const [sy, sm, sd] = startedEt.split('-').map(Number);
+    const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
     try {
       await db('termite_bonds').insert({
         customer_id: v.customer_id,
         scheduled_service_id: v.id,
         service_type: v.service_type,
         term_years: years,
-        started_at: started.toISOString().slice(0, 10),
-        renews_at: renews.toISOString().slice(0, 10),
+        started_at: startedEt,
+        renews_at: renewsEt,
         status: 'active',
       });
       inserted += 1;
@@ -123,7 +131,7 @@ async function runBondRenewalSweep() {
           renewal_date: displayDate(bond.renews_at),
           renewal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
           customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
-          company_phone: '(941) 297-5749',
+          company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         },
         recipientType: 'customer',
         recipientId: bond.customer_id,

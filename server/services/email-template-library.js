@@ -811,12 +811,19 @@ async function sendTemplate({
     throw err;
   }
 
+  // A template may pin service chrome while riding a marketing_* suppression
+  // stream (referral.invite — owner directive 2026-07-06: user-unsubscribable
+  // via marketing_referral, rendered like the service emails). The pin is
+  // layout_wrapper_id === 'service_pinned_v1'; every other template keeps the
+  // stream-driven newsletter wrapper, and the unsubscribe/ASM requirements
+  // above are untouched (they key on isMarketingSend, not the wrapper).
+  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
   const rendered = renderTemplate({
     template,
     version,
     payload,
     unsubscribeUrl: effectiveUnsubscribeUrl,
-    modeOverride: isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null,
+    modeOverride: !pinsServiceChrome && isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null,
   });
   if (rendered.missingPayload.length) {
     const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);

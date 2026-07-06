@@ -1635,7 +1635,8 @@ const AppointmentReminders = {
           serviceLabel: svc.service_type,
           missedWhen: when,
           noShowReason: options.noShowReason || '',
-          feeCharged: options.feeCharged === true,
+          feeOutcome: options.feeOutcome
+            || (options.feeCharged === true ? 'charged' : 'none'),
         });
       } catch (e) {
         logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
