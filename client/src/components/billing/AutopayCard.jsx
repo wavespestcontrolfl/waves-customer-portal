@@ -240,6 +240,11 @@ export default function AutopayCard({ onStateChange }) {
   const state = ['active', 'paused', 'disabled'].includes(rawState) ? rawState : 'disabled';
   const { next_charge_date, next_charge_amount, monthly_rate, payment_methods = [], paused_until } = data;
   const nextChargeAmount = Number(next_charge_amount ?? monthly_rate ?? 0);
+  // Surcharge disclosure lives here now that the healthy-state banner above is
+  // hidden — this card is the only place an active autopay customer sees the
+  // base + credit-card-surcharge breakdown before the charge runs.
+  const nextChargeBase = Number(data.next_charge_base_amount ?? 0);
+  const nextChargeSurcharge = Number(data.next_charge_surcharge_amount ?? 0);
   const activeCard = payment_methods.find((p) => p.id === data.autopay_payment_method_id)
     || payment_methods.find((p) => p.is_default)
     || payment_methods[0];
@@ -408,6 +413,11 @@ export default function AutopayCard({ onStateChange }) {
                 ? `Paused until ${formatDate(paused_until)}`
                 : 'Auto Pay is off. Charges will not run automatically.'}
           </div>
+          {state === 'active' && nextChargeSurcharge > 0 && (
+            <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
+              ${nextChargeBase.toFixed(2)} + ${nextChargeSurcharge.toFixed(2)} credit card surcharge
+            </div>
+          )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
               Charging {activeCard.brand || 'card'} ending in {activeCard.last4}

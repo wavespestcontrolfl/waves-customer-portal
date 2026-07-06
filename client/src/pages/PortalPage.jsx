@@ -1665,7 +1665,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               </div>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 10, marginTop: 14, alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ display: 'flex', gap: 10, marginTop: 14, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
             <a href="https://apps.apple.com/us/app/waves-pest-control/id6782775654" target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store" style={{ minWidth: 0 }}>
               <img src="/app-email/apple-app-store-badge.png" alt="Download on the App Store" style={{ height: 44, maxWidth: '100%', display: 'block' }} />
             </a>
@@ -2956,8 +2956,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route text the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
                 { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
                 { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
-                // Seasonal Lawn Tips toggle removed (owner directive 2026-07-06) —
-                // the preference column stays server-side; no sends key on it today.
+                // Kept as the customer's only in-portal opt-out: the irrigation
+                // weekly email, seasonal SMS alerts, and the retention/marketing
+                // policy all key on notification_prefs.seasonal_tips.
+                { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
               ];
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
@@ -9559,7 +9561,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           <a href="sms:+19412975749" data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none' }}>
             Text
           </a>
-          <a href="mailto:contact@wavespestcontrolvenice.com?subject=Document%20request" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative' }}>
+          <a href="mailto:contact@wavespestcontrol.com?subject=Document%20request" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative' }}>
             Email
           </a>
         </div>
