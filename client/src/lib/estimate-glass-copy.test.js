@@ -91,8 +91,11 @@ describe('glassCtaMicroFor', () => {
   it('keeps the recurring terms for recurring plans and swaps them for one-time projects', () => {
     expect(glassCtaMicroFor('pest_control')).toBe(GLASS_COPY.ctaMicro);
     expect(glassCtaMicroFor('lawn_care')).toBe(GLASS_COPY.ctaMicro);
-    // One-time projects must not advertise contract/callback terms.
-    expect(glassCtaMicroFor('termite_trenching')).toMatch(/FDACS JB351547/);
+    // One-time projects must not advertise contract/callback terms, and the
+    // license NUMBER stays out of static copy (GuaranteeStrip renders the
+    // configured one — a hardcoded copy here would drift; codex P2).
+    expect(glassCtaMicroFor('termite_trenching')).toMatch(/Licensed & insured/);
+    expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/JB351547/);
     expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/long-term contract/);
     expect(glassCtaMicroFor('bora_care')).toMatch(/Satisfaction guaranteed/);
     // Row-slug spelling of rodent resolves to the rodent pack's line.
@@ -129,7 +132,7 @@ describe('glassRowInclusions', () => {
 });
 
 describe('glassServiceSlug', () => {
-  it('mirrors PriceCard serviceKey precedence', () => {
+  it('maps known service keys/labels and returns null for synthetic sections', () => {
     expect(glassServiceSlug('lawn_care')).toBe('lawn_care');
     expect(glassServiceSlug('Mosquito Control')).toBe('mosquito');
     expect(glassServiceSlug('Tree & Shrub')).toBe('tree_shrub');
@@ -138,7 +141,14 @@ describe('glassServiceSlug', () => {
     expect(glassServiceSlug('Palm Injection')).toBe('palm_injection');
     expect(glassServiceSlug('Rodent Bait Stations')).toBe('rodent_bait');
     expect(glassServiceSlug('pest_control')).toBe('pest_control');
-    expect(glassServiceSlug('')).toBe('pest_control');
+    // lawn_pest_* is pest (server recurringServiceKey semantics).
+    expect(glassServiceSlug('lawn_pest_control')).toBe('pest_control');
+    // Synthetic/unknown section keys must NOT inherit pest copy — the
+    // server's unsplittable multi-service section is keyed 'bundle'
+    // (codex P2: a lawn+mosquito bundle was getting pest day lines).
+    expect(glassServiceSlug('bundle')).toBe(null);
+    expect(glassServiceSlug('')).toBe(null);
+    expect(glassDayLinesFor(glassServiceSlug('bundle'))).toBe(null);
   });
 });
 

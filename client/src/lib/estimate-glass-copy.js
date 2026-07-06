@@ -94,9 +94,11 @@ const GLASS_PEST = {
 
 // One-time project quotes have different terms than recurring plans (no
 // cancel-anytime framing, no callback promise), so their micro line sticks
-// to claims GuaranteeStrip already makes on every estimate: license and
-// the satisfaction guarantee.
-const ONE_TIME_CTA_MICRO = 'Licensed & insured — FDACS JB351547 · Satisfaction guaranteed · Approve online in 60 seconds';
+// to claims GuaranteeStrip already makes on every estimate. The license
+// NUMBER itself is deliberately not repeated here — GuaranteeStrip renders
+// the configured one (estimate.licenseNumber) in the same viewport, and a
+// hardcoded copy would drift if the config changes.
+const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · Approve online in 60 seconds';
 
 const GLASS_PACKS = {
   pest_control: GLASS_PEST,
@@ -207,19 +209,23 @@ const GLASS_PACKS = {
     ],
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
+  // Scope-neutral on purpose: this category covers everything from
+  // bait-station-only monitoring plans to full trapping + exclusion
+  // remediation, so the hero must not promise removal or exclusion work —
+  // the priced line items state what's actually included.
   rodent: {
-    heroH1: '{first}, your rodent-free home plan is ready.',
-    heroSub: 'Remove what’s inside, block how they got in, and keep them out — a full remediation plan, not a box of traps.',
-    eyebrow: 'Your rodent remediation plan',
+    heroH1: '{first}, your rodent defense plan is ready.',
+    heroSub: 'Built for YOUR rodent situation — priced from your property’s actual conditions, with every visit documented, not a one-size-fits-all box of traps.',
+    eyebrow: 'Your rodent defense plan',
     aiTitle: 'Built from your home’s actual entry risks',
-    aiBody: 'We reviewed the conditions and entry risks driving rodent pressure at your property before pricing this plan — the fix matches the problem.',
+    aiBody: 'We reviewed the conditions and entry risks driving rodent pressure at your property before pricing this plan — the plan matches the problem.',
     askChips: [
       'Trapping vs exclusion?',
       'Do I need sanitation?',
       'Is the inspection fee credited?',
       'How long until they’re gone?',
     ],
-    ctaMicro: 'Licensed & insured — FDACS JB351547 · Satisfaction guaranteed · No pressure — approve when you’re ready',
+    ctaMicro: 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready',
   },
   bundle: {
     heroH1: '{first}, your complete home protection plan is ready.',
@@ -255,11 +261,16 @@ export function glassCtaMicroFor(serviceCategory) {
   return pack?.ctaMicro || GLASS_COPY.ctaMicro;
 }
 
-// Mirror of PriceCard's serviceKey() normalizer (same substring rules, same
-// precedence) so section-level glass copy resolves to the same slug the
-// row-level inclusions use. Keep the two in sync.
+// Section-key → glass slug. Same substring vocabulary as PriceCard's
+// serviceKey(), with two deliberate differences: 'pest' is checked FIRST
+// (matching the server's recurringServiceKey semantics, where lawn_pest_*
+// resolves to pest), and no match returns null instead of defaulting to
+// pest_control — the server can emit synthetic section keys (e.g. the
+// unsplittable multi-service 'bundle' section) that must NOT inherit
+// pest copy, so callers keep the server-provided wording on null.
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
+  if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
@@ -267,7 +278,7 @@ export function glassServiceSlug(keyOrLabel) {
   if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('palm')) return 'palm_injection';
   if (raw.includes('rodent') || raw.includes('bait station')) return 'rodent_bait';
-  return 'pest_control';
+  return null;
 }
 
 // ── Technical offer stack (pest) ────────────────────────────────────────────

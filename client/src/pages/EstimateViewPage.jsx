@@ -1208,6 +1208,13 @@ export function oneTimePriceCopy(breakdown = {}) {
 
 function SetupFeeCard({ fee }) {
   if (!fee) return null;
+  // Under glass, a prepay-waivable setup fee is already stated inside the
+  // pest offer stack ("$99 setup disappears with annual billing — waived
+  // instantly", glassPestInclusions setup bullet, same waivedWithPrepay
+  // eligibility) — rendering this card too said the same thing twice
+  // (owner directive 2026-07-05). Non-waivable fees keep the card; the
+  // bullet never covers those.
+  if (glassCopyActive() && fee.waivedWithPrepay) return null;
   return (
     <div style={{
       marginTop: 12,
