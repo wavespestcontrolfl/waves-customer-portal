@@ -698,14 +698,23 @@ async function detectContradictions() {
 
             if (!existing) {
               const [inserted] = await db('knowledge_contradictions').insert(contradiction).returning('id');
-              found.push(contradiction);
+              const insertedId = inserted?.id ?? inserted;
               // Trusted reads gate on the page's cached review_status — flip
               // the page and its KB mirror now, not at the next regeneration.
               // Passing the just-inserted id keeps the gate closed even if
               // the recompute's own contradiction lookup transiently fails.
-              await recomputeEntryReviewGate(contradiction.wiki_entry_id, {
-                assumeOpenIds: [inserted?.id ?? inserted],
-              });
+              try {
+                await recomputeEntryReviewGate(contradiction.wiki_entry_id, {
+                  assumeOpenIds: [insertedId],
+                });
+              } catch (gateErr) {
+                // Roll the insert back: the existing-row dedupe would
+                // otherwise skip this contradiction on every later run,
+                // leaving the page trusted with no retry path.
+                try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                throw gateErr;
+              }
+              found.push(contradiction);
             }
           }
         }

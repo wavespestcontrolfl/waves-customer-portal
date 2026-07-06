@@ -259,6 +259,20 @@ async function syncKbCopyTrust(entryId, trusted) {
   } catch (err) {
     // Only an absent knowledge_base table (42P01, fresh install) is benign.
     if (err?.code === '42P01') return;
+    // A GATING update gets one immediate retry — by this point the source
+    // page is already written untrusted, so every transient failure here
+    // means a stale active mirror until some later resync.
+    if (!trusted) {
+      try {
+        await db('knowledge_base')
+          .where({ wiki_entry_id: entryId, source: 'wiki-sync' })
+          .update({ status: 'flagged', active: false, updated_at: new Date() });
+        logger.warn(`[agronomic-wiki] KB mirror gating for entry ${entryId} succeeded on retry`);
+        return;
+      } catch (retryErr) {
+        err = retryErr;
+      }
+    }
     logger.error(`[agronomic-wiki] KB mirror trust sync failed for entry ${entryId} (trusted=${trusted}): ${err.message}`);
     // A failed GATING update leaves a stale active mirror agent-visible —
     // that must surface to the caller, not read as success. A failed
@@ -1269,6 +1283,19 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       err.statusCode = 409;
       throw err;
     }
+    // Pins override classifier judgment, never LIVE exceptions: a green or
+    // yellow pin while contradictions are open would trust the page AND
+    // freeze the same identities into the pinned flags, so later recomputes
+    // would see nothing new. (Lookup fails closed via stored identities.)
+    if (tier !== 'red') {
+      const openIds = await getOpenContradictionIdsFor(page.id, page);
+      if (openIds.length) {
+        const err = new Error('Cannot pin a green/yellow tier while this page has open contradictions — resolve or dismiss them first');
+        err.isOperational = true;
+        err.statusCode = 409;
+        throw err;
+      }
+    }
 
     const flags = [...new Set([...parseFlags(page.risk_flags), 'manual_override'])];
     const [updated] = await db('knowledge_entries')
@@ -1377,6 +1404,18 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
       }
 
       try {
+        // Wiki-sync MIRRORS of the variant still carry the variant's title
+        // and content — re-pointing them would let the post-merge trust
+        // alignment re-activate unreviewed duplicate text under the
+        // canonical page. Delete them instead; the canonical page's own
+        // mirror is (re)written by syncToClaudeopedia. (Contradiction rows
+        // referencing a deleted mirror are nulled by SET NULL and keep
+        // their wiki_entry_id link.)
+        await db('knowledge_base')
+          .where({ wiki_entry_id: dupe.id, source: 'wiki-sync' })
+          .del();
+        // Real KB entries merely LINKED to the variant keep their own
+        // content and just follow the page identity.
         await db('knowledge_base')
           .where({ wiki_entry_id: dupe.id })
           .update({ wiki_entry_id: canonicalEntry.id });

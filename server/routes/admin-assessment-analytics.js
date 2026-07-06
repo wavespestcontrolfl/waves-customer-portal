@@ -197,6 +197,9 @@ router.get('/contradictions', async (req, res, next) => {
 router.post('/contradictions/detect', async (req, res, next) => {
   try {
     const result = await analytics.detectContradictions();
+    // A run that died mid-scan (including a failed page re-gate after a
+    // contradiction insert) is not a success — surface it.
+    if (result.error) return res.status(500).json({ success: false, ...result });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
 });

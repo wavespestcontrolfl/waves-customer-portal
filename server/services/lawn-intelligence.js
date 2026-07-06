@@ -311,14 +311,23 @@ If no contradictions, return: { "contradictions": [] }`
                 contradiction_type: c.type || 'efficacy',
                 severity: c.severity || 'moderate',
               }).returning('id');
-              stats.found++;
+              const insertedId = inserted?.id ?? inserted;
               // Trusted reads gate on the page's cached review_status — flip
               // the page and its KB mirror now, not at the next regeneration.
               // Passing the just-inserted id keeps the gate closed even if
               // the recompute's own contradiction lookup transiently fails.
-              await agronomicWiki().recomputeEntryReviewGate(wiki.id, {
-                assumeOpenIds: [inserted?.id ?? inserted],
-              });
+              try {
+                await agronomicWiki().recomputeEntryReviewGate(wiki.id, {
+                  assumeOpenIds: [insertedId],
+                });
+              } catch (gateErr) {
+                // Roll the insert back: the existing-row dedupe would
+                // otherwise skip this contradiction on every later run,
+                // leaving the page trusted with no retry path.
+                try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                throw gateErr;
+              }
+              stats.found++;
             }
           }
         } catch (aiErr) {

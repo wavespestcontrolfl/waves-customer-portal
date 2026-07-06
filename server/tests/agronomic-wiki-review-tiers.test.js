@@ -388,6 +388,29 @@ describe('post-merge contradiction recheck', () => {
     ]));
   });
 
+  test('variant wiki-sync mirrors are DELETED on merge, not re-pointed with stale content', async () => {
+    const CANON_SLUG = 'product/lesco-high-manganese-combo';
+    const state = useDb({
+      products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
+      product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
+      treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] })),
+      knowledge_entries: (rec) => {
+        const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
+        return [];
+      },
+      knowledge_contradictions: [],
+      knowledge_bridge: [],
+      knowledge_base: [],
+    });
+
+    await wiki.updateProductPage('LESCO HMC Variant');
+
+    // the variant's mirror rows were deleted (stale variant content must not
+    // be re-activated under the canonical page's trust)
+    expect(state.deletes.knowledge_base).toBeGreaterThanOrEqual(1);
+  });
+
   test('inherited contradiction flags persist even when the page is already red for another reason', async () => {
     // 3 outcomes → low confidence → the canonical page is red/pending_review
     // BEFORE the merge recheck. The inherited contradiction changes neither
@@ -829,6 +852,27 @@ describe('review service methods', () => {
     expect(blocked.review_status).toBe('blocked');
   });
 
+  test('setTierOverride refuses green/yellow pins while contradictions are open', async () => {
+    const page = {
+      id: 'ke-1', slug: 'product/prodiamine', content: '# Real content',
+      review_tier: 'red', review_status: 'pending_review',
+      risk_flags: ['open_contradiction', 'contradiction:kc-1'],
+    };
+    const state = useDb({
+      knowledge_entries: [page],
+      knowledge_contradictions: [{ id: 'kc-1' }],
+      knowledge_base: [],
+    });
+
+    await expect(wiki.setTierOverride('product/prodiamine', 'green'))
+      .rejects.toMatchObject({ isOperational: true, statusCode: 409 });
+    expect(state.updates.knowledge_entries).toBeUndefined();
+
+    // red pin (keep gated) is still allowed with open contradictions
+    const pinned = await wiki.setTierOverride('product/prodiamine', 'red');
+    expect(pinned.review_status).toBe('pending_review');
+  });
+
   test('setTierOverride refuses green/yellow pins on a generation stub (red pin allowed)', async () => {
     const stub = {
       id: 'ke-1', slug: 'product/talstar-p',
@@ -889,13 +933,38 @@ describe('review service methods', () => {
       return b;
     };
 
-    // block = un-trusting the mirror; a failure must surface
+    // block = un-trusting the mirror; a persistent failure (initial +
+    // retry) must surface
     await expect(wiki.reviewPage('product/talstar-p', { action: 'block' }))
       .rejects.toThrow('update failed');
     // approve = re-trusting; a failure is conservative (mirror stays
     // flagged) and must NOT abort the approval
     const approved = await wiki.reviewPage('product/talstar-p', { action: 'approve' });
     expect(approved.review_status).toBe('approved');
+  });
+
+  test('a GATING mirror update that fails once succeeds via the immediate retry', async () => {
+    const page = { id: 'ke-1', slug: 'product/talstar-p', human_notes: null, content: '# Real content', risk_flags: [] };
+    const inner = makeDb({ knowledge_entries: [page], knowledge_base: [] });
+    let kbUpdateCalls = 0;
+    global.__tierDbMock = (table) => {
+      const b = inner(table);
+      if (table === 'knowledge_base') {
+        const origUpdate = b.update;
+        b.update = (patch) => {
+          kbUpdateCalls += 1;
+          if (kbUpdateCalls === 1) {
+            return { then: (res, rej) => Promise.reject(new Error('transient')).then(res, rej) };
+          }
+          return origUpdate(patch);
+        };
+      }
+      return b;
+    };
+
+    const blocked = await wiki.reviewPage('product/talstar-p', { action: 'block' });
+    expect(blocked.review_status).toBe('blocked');
+    expect(kbUpdateCalls).toBe(2); // initial failure + successful retry
   });
 
   test('reviewPage rejects unknown actions and missing pages', async () => {
