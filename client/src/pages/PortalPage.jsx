@@ -3,6 +3,7 @@ import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
 import { formatAddress } from '../utils/format-address';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
@@ -213,14 +214,14 @@ const VISUALLY_HIDDEN = {
   border: 0,
 };
 
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_BORDER_STRONG = '#D8D0C0';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
-const ESTIMATE_MUTED = '#475569';
-const ESTIMATE_SOFT = '#F8FCFE';
-const ESTIMATE_SOFT_BORDER = '#CFE7F5';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+const ESTIMATE_BORDER_STRONG = CUSTOMER_SURFACE.borderStrong;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_SOFT = CUSTOMER_SURFACE.soft;
+const ESTIMATE_SOFT_BORDER = CUSTOMER_SURFACE.softBorder;
 
 const PORTAL_SHELL = {
   page: ESTIMATE_BG,
@@ -232,9 +233,9 @@ const PORTAL_SHELL = {
   body: ESTIMATE_BODY,
   soft: ESTIMATE_SOFT,
   softBorder: ESTIMATE_SOFT_BORDER,
-  successBg: '#F0FDF4',
-  successBorder: '#BBF7D0',
-  successText: '#047857',
+  successBg: CUSTOMER_SURFACE.successBg,
+  successBorder: CUSTOMER_SURFACE.successBorder,
+  successText: CUSTOMER_SURFACE.successText,
   shadow: '0 18px 45px rgba(27,44,91,0.10)',
   shadowSoft: 'none',
 };
