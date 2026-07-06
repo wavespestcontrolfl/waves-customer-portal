@@ -78,7 +78,7 @@
 //   the operator to review before any further charges fire.
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -1213,9 +1213,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
 // ── Main /pay/:token V2 page ───────────────────────────────────────
 export default function PayPageV2() {
-  // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
+  // Liquid-glass 'pro' variant (visual only).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(glassParamRequested(), 'pro');
+  useGlassSurface(true, 'pro');
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();

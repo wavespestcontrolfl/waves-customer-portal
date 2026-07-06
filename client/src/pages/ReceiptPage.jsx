@@ -34,7 +34,7 @@
 //   a receipt) but should NOT expose card details.
 import { FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { useGlassSurface, glassParamRequested } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -198,9 +198,9 @@ function SuccessCheck({ size = 56 }) {
 }
 
 export default function ReceiptPage() {
-  // Liquid-glass 'pro' variant, dark-launched behind ?glass=1 (visual only).
+  // Liquid-glass 'pro' variant (visual only).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(glassParamRequested(), 'pro');
+  useGlassSurface(true, 'pro');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

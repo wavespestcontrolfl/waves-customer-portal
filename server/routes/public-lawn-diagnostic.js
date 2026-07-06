@@ -14,7 +14,6 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 
 const db = require('../models/db');
-const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { scrubCustomerText, safeConditionLabel, safeCustomerSummary, lowerConfidence } = require('../services/lawn-diagnostic-report');
 const { etParts } = require('../utils/datetime-et');
@@ -290,13 +289,12 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     setPrivacyHeaders(res);
     const row = await loadSentDiagnostic(req.params.token);
     if (!row) return res.status(404).json({ error: 'Report not found' });
-    // Glass release flag (GATE_REPORT_GLASS): mirrors reports-public.js — the
-    // key is absent (not false) while the gate is off so pre-release responses
-    // stay byte-identical. This route only serves the live customer view.
+    // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
+    // This route only serves the live customer view, which always renders glass.
     return res.json({
       success: true,
       report: buildPublicLawnReport(row),
-      ...(featureGates.isEnabled('reportGlassTheme') ? { glassDefault: true } : {}),
+      glassDefault: true,
     });
   } catch (err) {
     return next(err);

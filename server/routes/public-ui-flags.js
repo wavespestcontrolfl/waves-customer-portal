@@ -14,12 +14,15 @@
 
 const express = require('express');
 const router = express.Router();
-const featureGates = require('../config/feature-gates');
 
+// Glass is the unconditional portal theme now — the GATE_PORTAL_GLASS release
+// switch was retired. Current client bundles no longer fetch this endpoint;
+// it is kept (always affirming) so any still-cached Capacitor app bundle that
+// polls it stays on glass rather than reverting.
 router.get('/', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
-    portalGlass: featureGates.isEnabled('portalGlassTheme'),
+    portalGlass: true,
   });
 });
 

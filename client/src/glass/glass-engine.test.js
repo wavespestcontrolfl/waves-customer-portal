@@ -5,8 +5,6 @@ import {
   applyGlassScene,
   attachGlassPointerFx,
   fireGlassConfetti,
-  glassParamRequested,
-  glassReleaseActive,
   useGlassSurface,
 } from './glass-engine';
 
@@ -26,36 +24,6 @@ afterEach(() => {
   document.body.style.background = '';
   document.body.innerHTML = '';
   vi.restoreAllMocks();
-});
-
-describe('glassParamRequested', () => {
-  it('is true only with ?glass=1', () => {
-    setSearch('');
-    expect(glassParamRequested()).toBe(false);
-    setSearch('?glass=1');
-    expect(glassParamRequested()).toBe(true);
-    setSearch('?glass=0');
-    expect(glassParamRequested()).toBe(false);
-  });
-});
-
-describe('glassReleaseActive', () => {
-  it('without a param, only a literal server glassDefault:true releases', () => {
-    setSearch('');
-    expect(glassReleaseActive(true)).toBe(true);
-    expect(glassReleaseActive(false)).toBe(false);
-    expect(glassReleaseActive(undefined)).toBe(false);
-    expect(glassReleaseActive('true')).toBe(false);
-  });
-
-  it('?glass=1 forces on and ?glass=0 forces off regardless of the server flag', () => {
-    setSearch('?glass=1');
-    expect(glassReleaseActive(false)).toBe(true);
-    expect(glassReleaseActive(undefined)).toBe(true);
-    // ?glass=0 stays the per-link escape hatch back to the old page.
-    setSearch('?glass=0');
-    expect(glassReleaseActive(true)).toBe(false);
-  });
 });
 
 describe('applyGlassScene', () => {

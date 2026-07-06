@@ -1,13 +1,11 @@
 /**
- * GET /api/public/ui-flags — the portal/login release-switch payload
- * (GATE_PORTAL_GLASS). The shell has no per-page token payload, so this tiny
- * public endpoint is how the client learns glass is released; it must never
- * cache (gate flips propagate on next load) and must mirror the gate.
+ * GET /api/public/ui-flags — legacy portal release-switch payload. The
+ * GATE_PORTAL_GLASS gate was retired (glass is the unconditional portal theme
+ * now), so this endpoint always affirms `portalGlass: true`. It is kept only so
+ * any still-cached Capacitor app bundle that polls it stays on glass rather
+ * than reverting. Must never cache — a response must reach clients on next load.
  */
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
-
 const express = require('express');
-const { isEnabled } = require('../config/feature-gates');
 
 // No supertest in this repo — run the real router on an ephemeral port and
 // hit it with the built-in fetch.
@@ -27,23 +25,11 @@ afterAll((done) => {
   server.close(done);
 });
 
-beforeEach(() => {
-  isEnabled.mockReset();
-  isEnabled.mockReturnValue(false);
-});
-
 describe('GET /api/public/ui-flags', () => {
-  it('serves the flag payload with no-store caching', async () => {
+  it('always affirms portalGlass with no-store caching', async () => {
     const res = await fetch(`${base}/api/public/ui-flags`);
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
-    expect(await res.json()).toEqual({ portalGlass: false });
-    expect(isEnabled).toHaveBeenCalledWith('portalGlassTheme');
-  });
-
-  it('mirrors the portalGlassTheme gate when released', async () => {
-    isEnabled.mockImplementation((key) => key === 'portalGlassTheme');
-    const res = await fetch(`${base}/api/public/ui-flags`);
     expect(await res.json()).toEqual({ portalGlass: true });
   });
 });

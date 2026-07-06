@@ -42,7 +42,7 @@ import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/gl
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
-// appearance variables instead. Visual-only, follows the ?glass=1 gate.
+// appearance variables instead. Visual-only, applied whenever the glass theme is mounted.
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
@@ -424,20 +424,17 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
   return !!left && !!right && (left.includes(right) || right.includes(left));
 }
 
-// Liquid-glass theme gate (docs/design/estimate-glass-plan.md). Re-evaluated
-// per render — released estimates learn glassDefault from the /data payload
-// (setGlassDefault), which lands after the first loading render, so the
-// wrapper must pick the flip up rather than read once at mount. The URL
-// param still forces either way (?glass=1 / ?glass=0).
+// Liquid-glass theme — now unconditional on every estimate (the old page was
+// retired at 100% rollout). Only the marketing COPY stays category-scoped via
+// glassCopyActive(); the visual theme mounts for all estimates.
 function Page({ children }) {
-  const glassActive = glassCopyActive();
   return (
     <div style={{
       minHeight: '100vh', background: ESTIMATE_BG,
       fontFamily: FONT_BODY, color: COLORS.navy,
       display: 'flex', flexDirection: 'column',
     }}>
-      <EstimateGlassTheme active={glassActive} />
+      <EstimateGlassTheme active />
       <header style={{ background: COLORS.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
@@ -2409,7 +2406,7 @@ export default function EstimateViewPage() {
   // 9:00 AM") — SlotPicker reports it alongside the id; cleared with it.
   const [selectedSlotMeta, setSelectedSlotMeta] = useState(null);
   // Curated Google-review pool for the glass hero proof strip (PR C) —
-  // fetch only under the dark launch.
+  // fetched only when the glass copy is active.
   const featuredReviews = useFeaturedReviews(glassCopyActive(), 12);
   // serviceMode: 'recurring' | 'one_time'. Most estimates default to
   // recurring; structurally one-time estimates are forced to one_time after
@@ -2568,9 +2565,10 @@ export default function EstimateViewPage() {
     if (!r.ok) throw new Error(`estimate fetch failed: ${r.status}`);
     initialViewCountedRef.current = true;
     const body = await r.json();
-    // Glass release flag (GATE_ESTIMATE_GLASS): set the module state BEFORE
-    // setData so every glassCopyActive() consumer sees it on the render that
-    // paints the loaded page. URL ?glass=1/?glass=0 still override.
+    // Glass COPY default: set the module state BEFORE setData so every
+    // glassCopyActive() consumer sees it on the render that paints the loaded
+    // page. The marketing copy stays category-scoped; ?glass=1/?glass=0 still
+    // override the copy default. (The glass THEME itself is now unconditional.)
     setGlassDefault(body.glassDefault === true);
     setData(body);
     setLoading(false);

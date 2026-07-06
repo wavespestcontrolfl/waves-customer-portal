@@ -5,7 +5,7 @@ import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault } from '../glass/glass-engine';
+import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
@@ -80,12 +80,7 @@ function getServiceSelection(serviceType) {
 
 export default function RatePage() {
   const { token } = useParams();
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously, the ui-flags fetch keeps it fresh, ?glass=1/?glass=0
-  // keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);

@@ -4,7 +4,7 @@ import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
-import { useGlassSurface, portalGlassInitial } from './glass/glass-engine';
+import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
 
 class PageErrorBoundary extends Component {
@@ -228,11 +228,9 @@ function EstimatePublicGateway() {
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
   const location = useLocation();
-  // The auth-check screen mounts the same glass scene as the portal (cached
-  // gate value resolves synchronously), so loading renders like the real UI
-  // instead of a flat placeholder.
-  const glassActive = portalGlassInitial();
-  useGlassSurface(glassActive && loading, 'full');
+  // The auth-check screen mounts the same glass scene as the portal, so
+  // loading renders like the real UI instead of a flat placeholder.
+  useGlassSurface(loading, 'full');
 
   if (loading) {
     return (
@@ -241,7 +239,7 @@ function ProtectedRoute({ children }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: glassActive ? 'transparent' : '#FAF8F3',
+        background: 'transparent',
         fontFamily: FONTS.body,
         padding: 24,
         boxSizing: 'border-box',

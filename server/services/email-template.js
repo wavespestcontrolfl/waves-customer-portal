@@ -11,13 +11,13 @@
  * If you add a new transactional email, import wrapEmail + ctaButton
  * from here instead of hand-rolling another <div style>.
  *
- * Theming: every wrapper resolves a theme per call via the
- * emailGlassTheme feature gate (GATE_EMAIL_GLASS). Gate off = the
- * pre-glass warm-sand chrome, unchanged. Gate on = the liquid-glass
- * language translated for email clients (no backdrop-filter support):
- * cool gradient wash, #04395E ink, system font stack, gold gradient
- * CTA with navy text — mirroring client/src/glass/glass-theme.css
- * ([data-glass-accent] CTA, --brand ink, pro-scene wash).
+ * Theming: every wrapper renders the liquid-glass chrome — the email
+ * translation of the liquid-glass tokens for clients without
+ * backdrop-filter support: cool gradient wash, #04395E ink, system font
+ * stack, gold gradient CTA with navy text — mirroring
+ * client/src/glass/glass-theme.css ([data-glass-accent] CTA, --brand ink,
+ * pro-scene wash). The old warm-sand chrome and its GATE_EMAIL_GLASS gate
+ * were retired once glass shipped to 100%.
  */
 
 const {
@@ -30,63 +30,6 @@ const {
   WAVES_FL_LICENSE_LINE,
 } = require('../constants/business');
 const { formatDisplayDate } = require('../utils/date-only');
-const { isEnabled } = require('../config/feature-gates');
-
-// Pre-glass chrome — mirrors the original public estimate/project pages.
-const CLASSIC_THEME = {
-  ink: '#1B2C5B', // headings, CTA, phone links (NAVY)
-  link: '#009CDE', // footer "Questions?" link (WAVES_BLUE)
-  body: '#3F4A65',
-  muted: '#6B7280',
-  pageBg: '#FAF8F3', // SAND
-  pageBgImage: '', // no gradient
-  card: '#FFFFFF',
-  cardGlassBg: '', // no frosted overlay pre-glass
-  cardBorder: '#E7E2D7', // same value as rule — byte-identical gate-off
-  headerBand: '#FFFFFF', // same value as card
-  footerBand: '#FAF8F3', // same value as pageBg
-  rule: '#E7E2D7',
-  font: 'Inter,Arial,sans-serif',
-  headingFont: "'Source Serif 4',Georgia,serif",
-  headingWeight: '500',
-  headingTracking: '', // browser default
-  cardRadius: '16px',
-  cardShadow: 'none',
-  ctaBg: '#1B2C5B',
-  ctaBgImage: '',
-  ctaBorder: '#1B2C5B',
-  ctaText: '#FFFFFF',
-  ctaRadius: '10px',
-  ctaWeight: '800', // same values ctaButton hardcoded — byte-identical gate-off
-  ctaPad: '14px 24px',
-  ctaSize: '15px',
-  ctaShadow: '',
-  // DB-template block palette (email-template-library.js renderBlocks).
-  // Classic keeps the original slate set verbatim — byte-identical gate-off.
-  blocks: {
-    font: 'Inter,Arial,sans-serif',
-    heading: '#0F172A',
-    text: '#334155',
-    mutedText: '#64748B',
-    rule: '#E2E8F0',
-    calloutBorder: '#FFD700',
-    calloutBg: '#FDF6EC',
-    calloutText: '#334155',
-    footerLink: '#006B99',
-  },
-  // Newsletter body palette (newsletter-draft.js COLORS). Classic keeps
-  // the original Beehiiv-era set verbatim — byte-identical gate-off.
-  newsletter: {
-    font: 'Inter,Arial,sans-serif',
-    navy: '#1B2C5B',
-    blue: '#009CDE',
-    gold: '#FFD700',
-    muted: '#8B8680',
-    cardBg: '#FAFAF8',
-    homeownerBg: '#F0F7FA',
-    rule: '#E7E2D7',
-  },
-};
 
 // Glass chrome — email translation of the liquid-glass tokens. Solid
 // colors are the flattened-over-white equivalents of the glass rgba ink
@@ -167,8 +110,12 @@ const GLASS_THEME = {
   },
 };
 
+// Glass is the unconditional email theme now (GATE_EMAIL_GLASS retired). The
+// shared palette helpers (blockPalette, ctaButton, ctaChip, stripeFooterLine,
+// the getter palette) resolve through here, so it stays as the single glass
+// palette source.
 function activeTheme() {
-  return isEnabled('emailGlassTheme') ? GLASS_THEME : CLASSIC_THEME;
+  return GLASS_THEME;
 }
 
 /**
@@ -481,73 +428,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslett
  * }} opts
  */
 function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote }) {
-  if (isEnabled('emailGlassTheme')) {
-    return glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote });
-  }
-  const T = activeTheme();
-  const linesHtml = (lines || []).map(([label, value, emphasis]) => `
-    <tr>
-      <td style="padding:6px 0;font-family:${T.font};font-size:14px;color:${T.muted};">${label}</td>
-      <td align="right" style="padding:6px 0;font-family:${T.font};font-size:14px;color:${T.ink};font-weight:${emphasis ? '700' : '500'};">${value}</td>
-    </tr>
-  `).join('');
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Waves Pest Control</title>
-</head>
-<body style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
-  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}</div>` : ''}
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
-    <tr><td align="center" style="padding:32px 16px;">
-      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="${cardStyle(T, '560px')}">
-        <tr><td style="background:${T.headerBand};padding:18px 24px;border-bottom:1px solid ${T.rule};">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
-            <tr>
-              <td align="left">
-                <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;text-decoration:none;" />
-              </td>
-              <td align="right" style="font-family:${T.font};font-size:13px;font-weight:800;color:${T.ink};">
-                <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.ink};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-        <tr><td style="padding:36px 32px 8px 32px;">
-          <h1 style="margin:0 0 16px 0;font-family:${T.headingFont};font-style:normal;font-size:28px;line-height:1.15;color:${T.ink};font-weight:${T.headingWeight};${T.headingTracking ? `letter-spacing:${T.headingTracking};` : ''}">${heading}</h1>
-          <div style="font-family:${T.font};font-size:15px;line-height:1.55;color:${T.body};">
-            ${intro}
-          </div>
-        </td></tr>
-        ${linesHtml ? `
-        <tr><td style="padding:20px 32px 4px 32px;">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-top:1px solid ${T.rule};padding-top:8px;">
-            ${linesHtml}
-          </table>
-        </td></tr>` : ''}
-        ${ctaHref && ctaLabel ? `
-        <tr><td align="center" style="padding:28px 32px;">
-          ${ctaButton(ctaHref, ctaLabel)}
-        </td></tr>` : ''}
-        <tr><td align="center" style="padding:0 32px 28px 32px;">
-          <div style="font-family:${T.font};font-size:13px;line-height:1.55;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
-          </div>
-        </td></tr>
-        <tr><td align="center" style="background:${T.footerBand};padding:20px 32px;border-top:1px solid ${T.rule};">
-          ${appFooterHtml(T)}
-          <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:underline;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
-          </div>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+  return glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote });
 }
 
 function plainText(lines) {
@@ -568,47 +449,7 @@ function plainText(lines) {
  * }} opts
  */
 function wrapServiceEmail({ preheader, body, footerNote } = {}) {
-  if (isEnabled('emailGlassTheme')) {
-    return glassServiceEmail({ preheader, body, footerNote });
-  }
-  const T = activeTheme();
-  const safeBody = body || '';
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Waves Pest Control</title>
-</head>
-<body style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
-  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}</div>` : ''}
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
-    <tr><td align="center" style="padding:28px 12px;">
-      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="${cardStyle(T, '620px')}">
-        <tr><td style="background:${T.headerBand};padding:16px 24px;text-align:left;border-bottom:1px solid ${T.rule};">
-          <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-flex;align-items:center;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;vertical-align:middle;" />
-          </a>
-        </td></tr>
-        <tr><td style="padding:30px 30px 8px 30px;font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">
-          ${safeBody}
-        </td></tr>
-        <tr><td align="center" style="padding:10px 30px 28px 30px;">
-          <div style="font-family:${T.font};font-size:13px;line-height:1.55;color:${T.muted};text-align:center;">
-            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.link};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
-          </div>
-        </td></tr>
-        <tr><td align="center" style="background:${T.footerBand};padding:18px 24px;border-top:1px solid ${T.rule};">
-          ${appFooterHtml(T)}
-          <div style="font-family:${T.font};font-size:11px;color:${T.muted};line-height:1.55;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:underline;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
-          </div>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+  return glassServiceEmail({ preheader, body, footerNote });
 }
 
 /**
@@ -641,77 +482,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  * }} opts
  */
 function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
-  if (isEnabled('emailGlassTheme')) {
-    return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta });
-  }
-  const T = activeTheme();
-  const safeBody = body || '';
-  const unsubLine = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a> · `
-    : '';
-
-  // Google Preferred Sources is per-user search personalization: a signed-in
-  // reader who follows this link and checks the box sees Waves badged and
-  // surfaced more often in their own Top Stories / AI Overviews / AI Mode
-  // results. Domain-level only, so the hub domain is the one to promote.
-  const preferredSourcesLine = preferredSourcesCta
-    ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:12px;line-height:1.6;color:${T.body};text-align:center;">
-            Like what we send? <a href="https://www.google.com/preferences/source?q=${WAVES_WEBSITE_HOST}" style="color:${T.link};text-decoration:underline;font-weight:600;">Make Waves a preferred source on Google</a> — one tap, and you'll see more of us in your searches.
-          </div>`
-    : '';
-
-  const isLocalGuide = newsletterType === 'local-weekly-fresh-events';
-
-  const headerBlock = isLocalGuide
-    ? `<a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="88" height="88" style="display:inline-block;width:88px;height:88px;max-width:88px;border:0;outline:none;" />
-          </a>
-          <div style="margin-top:10px;font-family:${T.font};font-size:16px;letter-spacing:-0.01em;color:${T.ink};font-weight:800;">
-            Fresh This Week
-          </div>
-          <div style="margin-top:2px;font-family:${T.font};font-size:11px;letter-spacing:0.02em;text-transform:uppercase;color:${T.muted};font-weight:600;">
-            A local weekend guide from the Waves crew
-          </div>`
-    : `<a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo-2026.png" alt="Waves Pest Control &amp; Lawn Care" width="88" height="88" style="display:inline-block;width:88px;height:88px;max-width:88px;border:0;outline:none;" />
-          </a>
-          <div style="margin-top:8px;font-family:${T.font};font-size:12px;letter-spacing:0;text-transform:none;color:${T.ink};font-weight:800;">
-            The Waves Newsletter
-          </div>`;
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>${isLocalGuide ? 'Fresh This Week — Waves' : 'Waves Pest Control'}</title>
-</head>
-<body style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
-  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}</div>` : ''}
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
-    <tr><td align="center" style="padding:24px 12px;">
-      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="${cardStyle(T, '640px')}">
-        <tr><td style="background:${T.headerBand};padding:18px 24px;text-align:center;border-bottom:1px solid ${T.rule};">
-          ${headerBlock}
-        </td></tr>
-        <tr><td style="padding:28px 28px 8px 28px;font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
-          ${safeBody}
-        </td></tr>
-        <tr><td align="center" style="background:${T.footerBand};padding:18px 24px 22px 24px;border-top:1px solid ${T.rule};">
-          ${appFooterHtml(T)}
-          ${preferredSourcesLine}<div style="font-family:${T.font};font-size:12px;line-height:1.6;color:${T.muted};text-align:center;">
-            ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
-          </div>
-          <div style="margin-top:6px;font-family:${T.font};font-size:11px;color:${T.muted};text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}
-          </div>
-          ${footerNote ? `<div style="margin-top:8px;font-family:${T.font};font-size:11px;color:${T.muted};text-align:center;">${footerNote}</div>` : ''}
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta });
 }
 
 /**

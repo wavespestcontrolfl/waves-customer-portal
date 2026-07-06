@@ -4,7 +4,7 @@ import { useParams, useSearchParams } from "react-router-dom";
 import BrandFooter from "../components/BrandFooter";
 import { Button } from "../components/Button";
 import Icon from "../components/Icon";
-import { useGlassSurface, portalGlassInitial, watchPortalGlassDefault, fireGlassConfetti } from '../glass/glass-engine';
+import { useGlassSurface, fireGlassConfetti } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -53,12 +53,7 @@ function Ripple({ x, y }) {
 }
 
 export default function BookingPage() {
-  // Glass release (GATE_PORTAL_GLASS): cached server default resolves
-  // synchronously (no legacy flash on repeat visits), the ui-flags fetch
-  // keeps it fresh, ?glass=1 / ?glass=0 keep param precedence.
-  const [glassActive, setGlassActive] = useState(portalGlassInitial);
-  useEffect(() => watchPortalGlassDefault(setGlassActive), []);
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(true, 'full');
 
   const { estimateToken } = useParams();
   const [searchParams] = useSearchParams();
