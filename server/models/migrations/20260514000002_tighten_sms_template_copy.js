@@ -663,14 +663,8 @@ const TEMPLATES = [
     variables: ['first_name', 'service_type', 'portal_url'],
     sort_order: 8,
   },
-  {
-    template_key: 'service_complete_concise',
-    name: 'Service Complete - Concise',
-    category: 'service',
-    body: 'Hello {first_name}! Report: {portal_url}\nReply with questions.',
-    variables: ['first_name', 'portal_url'],
-    sort_order: 9,
-  },
+  // service_complete_concise removed by 20260706000010_sms_template_cleanup.js —
+  // the completion-text overflow swap is retired.
   // appointment_call_confirmed removed by 20260706000010_sms_template_cleanup.js —
   // call bookings confirm through the shared appointment_confirmation template.
   {

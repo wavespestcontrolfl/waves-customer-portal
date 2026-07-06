@@ -31,6 +31,9 @@ const REMOVED_TEMPLATE_KEYS = [
   'seasonal_alert',
   // Estimates still auto-extend their expiry; the customer text is retired.
   'estimate_auto_renewed',
+  // Completion-text overflow swap retired — long completion texts now send
+  // at full length (recap-only trimming keeps the report link intact).
+  'service_complete_concise',
 ];
 
 const REACTIVATED_TEMPLATE_KEYS = [

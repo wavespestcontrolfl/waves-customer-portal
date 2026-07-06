@@ -4896,11 +4896,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // or a resumed completion's persisted value) — the client no longer sends
         // customerRecap, so reading the request field would drop the recap here.
         const recapText = (recordStructuredNotes.customerRecap || customerRecap || '').trim();
-        const withRecap = (body, conciseBody) => {
-          const suffix = countSegments(`${conciseBody}${reviewSuffix}`).segmentCount <= 2 ? reviewSuffix : '';
-          const tail = countSegments(`${body}${suffix}`).segmentCount <= 2 ? body : conciseBody;
-          return composeCompletionSmsBody({ recapText, body: tail, suffix });
-        };
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
@@ -5013,15 +5008,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               sentSmsBody = `${body}${reviewSuffix}`.trim();
               completionSmsWasTruncated = false;
             } else {
-              const concise = await renderRequiredTemplate('service_complete_concise', {
-                first_name: svc.first_name || '',
-                portal_url: reportUrl,
-              }, {
-                workflow: 'dispatch_service_complete',
-                entity_type: 'service_record',
-                entity_id: record.id,
-              });
-              ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
+              // The service_complete_concise overflow swap was removed
+              // 2026-07-06 (owner call) — a long completion text now sends at
+              // full length; composeCompletionSmsBody still trims only the
+              // recap line to keep the report link intact.
+              ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = composeCompletionSmsBody({
+                recapText,
+                body,
+                suffix: reviewSuffix,
+              }));
             }
           }
         }

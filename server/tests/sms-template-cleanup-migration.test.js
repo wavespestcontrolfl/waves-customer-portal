@@ -12,6 +12,7 @@ const EXPECTED_REMOVED = [
   'waveguard_upsell',
   'seasonal_alert',
   'estimate_auto_renewed',
+  'service_complete_concise',
 ];
 
 const EXPECTED_REACTIVATED = [
