@@ -9,6 +9,14 @@
  * and selection wiring.
  *
  * onSearch(query) => Promise<{ summary: string }>  (may throw)
+ *
+ * Glass: the markup carries native data-glass / data-gt hooks (glass-theme.css)
+ * so any surface mounted under html[data-glass-theme] — glass estimate, glass
+ * reschedule — renders the bar in the glass language with no walker pass.
+ * The attributes are inert everywhere else; the inline `theme` styles remain
+ * the non-glass rendering. Buttons are tagged data-glass-accent (not "chip")
+ * because their inline navy fill is what the estimate walker normalizes to an
+ * accent anyway, and the accent rules force readable navy-on-gold text.
  */
 import { useState } from 'react';
 
@@ -54,13 +62,13 @@ export default function WavesAIScheduleSearch({
   };
 
   return (
-    <section style={{
+    <section data-glass="soft" style={{
       background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12,
       padding: 20, display: 'grid', gap: 12,
     }}>
       <div>
         {showEyebrow ? (
-          <div style={{
+          <div data-gt="eyebrow" style={{
             fontSize: 12, color: t.muted, letterSpacing: '0.12em',
             textTransform: 'uppercase', fontWeight: 700, marginBottom: 4,
           }}>
@@ -89,6 +97,7 @@ export default function WavesAIScheduleSearch({
         />
         <button
           type="submit"
+          data-glass-accent=""
           disabled={asking || !query.trim()}
           style={{
             minHeight: 46, border: 0, borderRadius: 10, padding: '0 20px',
@@ -107,6 +116,7 @@ export default function WavesAIScheduleSearch({
             <button
               key={chip}
               type="button"
+              data-glass-accent=""
               disabled={asking}
               onClick={() => { setQuery(chip); run(chip); }}
               style={{
@@ -122,7 +132,7 @@ export default function WavesAIScheduleSearch({
       ) : null}
 
       {summary ? (
-        <div aria-live="polite" style={{
+        <div aria-live="polite" data-glass="soft" style={{
           fontSize: 14, lineHeight: 1.5, color: t.text,
           background: t.inputBg, border: `1px solid ${t.border}`,
           borderRadius: 10, padding: '10px 12px',
