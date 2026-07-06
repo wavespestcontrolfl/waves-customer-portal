@@ -113,7 +113,7 @@ describe('classifyReviewTier', () => {
   });
 
   test('compliance signals force red at any confidence', () => {
-    for (const phrase of ['the June blackout window', 'per county ordinance', 'REI is 12 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
+    for (const phrase of ['the June blackout window', 'per county ordinance', 'local ordinances require', 'REI is 12 hours', 'do not apply to bahia', 'do-not-apply on bahia', 'phytotoxicity risk']) {
       const { tier, flags } = classifyReviewTier({ confidence: 'very_high', content: phrase });
       expect(tier).toBe('red');
       expect(flags).toContain('compliance_content');
@@ -286,6 +286,55 @@ describe('KB-copy trust propagation', () => {
   });
 });
 
+describe('resync trust preservation', () => {
+  test('syncToClaudeopedia writes mirrors gated by the source page trust', async () => {
+    const KnowledgeBridge = require('../services/knowledge-bridge');
+    const state = useDb({
+      knowledge_entries: [
+        { id: 'w1', slug: 'product/trusted', title: 'Product: Trusted', category: 'product', summary: 's', data_point_count: 9, confidence: 'moderate', content: '# Real', review_status: 'auto' },
+        { id: 'w2', slug: 'product/red', title: 'Product: Red', category: 'product', summary: 's', data_point_count: 2, confidence: 'low', content: '# Real too', review_status: 'pending_review' },
+      ],
+      knowledge_base: [],
+      knowledge_bridge: [],
+    });
+
+    await KnowledgeBridge.syncToClaudeopedia();
+
+    const rows = state.inserts.knowledge_base || [];
+    const trusted = rows.find((r) => r.slug === 'outcomes-product-trusted');
+    const red = rows.find((r) => r.slug === 'outcomes-product-red');
+    expect(trusted).toMatchObject({ status: 'active', active: true });
+    // a resync must never resurrect (or freshly create) an ungated mirror
+    // of an untrusted page — both the status field and the active boolean
+    expect(red).toMatchObject({ status: 'flagged', active: false });
+  });
+
+  test('a failed refresh classifies with the FRESH confidence, not the stored one', async () => {
+    const existing = {
+      id: 'ke-1', slug: 'track/st-augustine',
+      content: '# Track\n\nReal content.', data_point_count: 22, confidence: 'high',
+      source_treatment_ids: Array.from({ length: 22 }, (_, i) => `o${i}`), stale_flag: false,
+      review_tier: 'green', review_status: 'auto', risk_flags: [],
+    };
+    const state = useDb({
+      knowledge_entries: [existing],
+      knowledge_contradictions: [],
+      knowledge_base: [],
+    });
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });
+
+    // the source set shrank to 2 points → fresh confidence is 'low' → red
+    await wiki.generatePage('track/st-augustine', 'track', {
+      outcomes: [{ id: 'oA' }, { id: 'oB' }], totalOutcomeCount: 2, allOutcomeIds: ['oA', 'oB'],
+    }, 'Track st_augustine Performance');
+
+    const patch = (state.updates.knowledge_entries || []).find((u) => u.review_status);
+    expect(patch.review_tier).toBe('red');
+    expect(patch.review_status).toBe('pending_review');
+    expect(JSON.parse(patch.risk_flags)).toContain('low_confidence');
+  });
+});
+
 describe('post-merge contradiction recheck', () => {
   test('a contradiction inherited from a merged variant re-gates the canonical page', async () => {
     const CANON_SLUG = 'product/lesco-high-manganese-combo';
@@ -313,6 +362,10 @@ describe('post-merge contradiction recheck', () => {
     const regate = (state.updates.knowledge_entries || []).find((u) => u.review_status === 'pending_review');
     expect(regate).toBeTruthy();
     expect(JSON.parse(regate.risk_flags)).toContain('open_contradiction');
+    // and the unconditional post-merge mirror alignment flags moved mirrors
+    expect(state.updates.knowledge_base).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'flagged', active: false }),
+    ]));
   });
 });
 

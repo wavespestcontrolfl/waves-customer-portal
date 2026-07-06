@@ -506,7 +506,7 @@ Return a JSON object with:
     try {
       const wikiEntries = await db('knowledge_entries')
         .where('data_point_count', '>', 0)
-        .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content');
+        .select('id', 'slug', 'title', 'category', 'summary', 'data_point_count', 'confidence', 'content', 'review_status');
 
       for (const wiki of wikiEntries) {
         try {
@@ -514,13 +514,19 @@ Return a JSON object with:
 
           const existing = await db('knowledge_base').where({ slug: kbSlug }).first();
 
+          // Mirror trust follows the source page — a resync must never
+          // resurrect a flagged mirror of a red/blocked page, and a brand-new
+          // mirror of an untrusted page starts gated. Drives BOTH the status
+          // field and the active boolean (different KB readers filter on each).
+          const wikiTrusted = ['auto', 'approved'].includes(wiki.review_status);
           const kbData = {
             title: `Outcome Data: ${wiki.title}`,
             category: wiki.category === 'product' ? 'product' : wiki.category === 'track' ? 'protocol' : 'seasonal',
             content: `## Real-World Outcome Data\n\n${wiki.summary || ''}\n\n**Data Points:** ${wiki.data_point_count}\n**Confidence:** ${wiki.confidence}\n\n---\n\n${(wiki.content || '').substring(0, 3000)}`,
             source: 'wiki-sync',
             confidence: wiki.confidence,
-            status: 'active',
+            status: wikiTrusted ? 'active' : 'flagged',
+            active: wikiTrusted,
             metadata: JSON.stringify({ wiki_slug: wiki.slug, wiki_id: wiki.id, synced_at: new Date().toISOString() }),
             wiki_entry_id: wiki.id,
           };

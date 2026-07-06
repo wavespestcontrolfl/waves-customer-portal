@@ -74,7 +74,7 @@ router.get('/log', async (req, res, next) => {
 // GET /review/queue — exception queue: pending red pages, blocked pages,
 // recently-updated yellow pages. Must register before the /:slug(*) catch-all.
 // =========================================================================
-router.get('/review/queue', async (req, res, next) => {
+router.get('/review/queue', requireAdmin, async (req, res, next) => {
   try {
     const queue = await wiki.getReviewQueue();
     res.json(queue);

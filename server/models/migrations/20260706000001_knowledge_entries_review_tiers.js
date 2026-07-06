@@ -17,7 +17,7 @@
 // migrations must stay self-contained (never edited after they run).
 const COMPLIANCE_PATTERNS = [
   /\bblackout\b/i,
-  /\bordinance\b/i,
+  /\bordinances?\b/i,
   /\bREI\b/,
   /re-entry interval/i,
   /\bdo[- ]not[- ]apply\b/i,

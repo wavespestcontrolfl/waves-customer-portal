@@ -106,7 +106,7 @@ const TRUSTED_STATUSES = ['auto', 'approved'];
 // Mirrored in migration 20260706000001 (backfill).
 const COMPLIANCE_PATTERNS = [
   /\bblackout\b/i,
-  /\bordinance\b/i,
+  /\bordinances?\b/i,
   /\bREI\b/,
   /re-entry interval/i,
   /\bdo[- ]not[- ]apply\b/i,
@@ -502,10 +502,14 @@ const AgronomicWiki = {
                 risk_flags: JSON.stringify(review.flags),
                 updated_at: new Date(),
               });
-            await syncKbCopyTrust(entry.id, TRUSTED_STATUSES.includes(review.reviewStatus));
             Object.assign(entry, { review_tier: review.tier, review_status: review.reviewStatus, risk_flags: review.flags });
           }
         }
+
+        // Unconditional: the merge may have re-pointed variant mirrors (with
+        // the variant's old active/status) onto this entry — align every
+        // mirror with the canonical page's CURRENT trust, whatever gated it.
+        await syncKbCopyTrust(entry.id, TRUSTED_STATUSES.includes(entry.review_status));
       }
 
       return entry;
@@ -752,7 +756,9 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         // Content is preserved, but the review state must still advance — a
         // contradiction that appeared since the last write re-gates the page
         // even when the refresh itself failed.
-        const review = resolveReviewFields(existing, { confidence: existing.confidence, content: existing.content, hasOpenContradiction });
+        // Classify with the FRESH confidence — the new source set may have
+        // shrunk below the trust threshold even though this refresh failed.
+        const review = resolveReviewFields(existing, { confidence, content: existing.content, hasOpenContradiction });
         try {
           await db('knowledge_entries')
             .where({ id: existing.id })
