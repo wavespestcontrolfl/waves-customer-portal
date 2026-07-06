@@ -23,6 +23,62 @@ function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
 }
 
+// Escape LIKE/ILIKE metacharacters so product names containing literal
+// "%" or "_" (e.g. "LESCO High Manganese Combo AM 1% Mg 5.75% S ...")
+// match as text instead of acting as wildcards. Pair with ESCAPE '\'.
+function escapeLike(text) {
+  return String(text).replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
+// Assessment-pairing recency windows. An unbounded pre/post lookup can pair
+// a treatment with an assessment from a different program season, producing
+// meaningless deltas. Bounds are generous on purpose — the lawn program runs
+// ~monthly visits.
+const PRE_ASSESSMENT_MAX_AGE_DAYS = 180;
+const POST_ASSESSMENT_MAX_DAYS = 60;
+
+function daysFrom(date, days) {
+  return new Date(new Date(date).getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+// Resolve a free-text applied-product name to its canonical catalog product.
+// service_products rows carry whatever name the closeout stored, and the same
+// physical product appears under multiple vendor listing names — keying wiki
+// pages on the raw string splits one product's outcome data across pages.
+// Returns the canonical name plus every known name variant (catalog name +
+// aliases) so outcome aggregation covers all spellings.
+async function resolveCanonicalProduct(productName) {
+  const fallback = { canonicalName: productName, variants: [productName] };
+  if (!productName) return fallback;
+  try {
+    let catalogRow = await db('products_catalog')
+      .whereRaw('LOWER(name) = ?', [productName.toLowerCase()])
+      .first('id', 'name');
+    if (!catalogRow) {
+      const alias = await db('product_aliases')
+        .whereRaw('LOWER(alias_name) = ?', [productName.toLowerCase()])
+        .first('product_id');
+      if (alias?.product_id) {
+        catalogRow = await db('products_catalog')
+          .where({ id: alias.product_id })
+          .first('id', 'name');
+      }
+    }
+    if (!catalogRow) return fallback;
+
+    const aliasRows = await db('product_aliases')
+      .where({ product_id: catalogRow.id })
+      .select('alias_name');
+    const variants = [...new Set(
+      [catalogRow.name, ...aliasRows.map((a) => a.alias_name), productName].filter(Boolean)
+    )];
+    return { canonicalName: catalogRow.name, variants };
+  } catch (err) {
+    logger.warn(`[agronomic-wiki] Canonical product lookup failed for "${productName}": ${err.message}`);
+    return fallback;
+  }
+}
+
 function getSeason(month) {
   if (month >= 4 && month <= 9) return 'peak';
   if (month === 3 || month === 10) return 'shoulder';
@@ -125,11 +181,15 @@ const AgronomicWiki = {
           .first();
       }
       if (!postAssessment) {
+        const postWindowEnd = daysFrom(treatmentDate, POST_ASSESSMENT_MAX_DAYS);
         postAssessment = await db('lawn_assessments')
           .where({ customer_id: customerId, confirmed_by_tech: true })
           .where(function () {
             this.where({ service_record_id: serviceRecordId })
-              .orWhere('service_date', '>=', treatmentDate);
+              .orWhere(function () {
+                this.where('service_date', '>=', treatmentDate)
+                  .andWhere('service_date', '<=', postWindowEnd);
+              });
           })
           .orderByRaw('CASE WHEN service_record_id = ? THEN 0 ELSE 1 END', [serviceRecordId])
           .orderBy('service_date', 'asc')
@@ -141,10 +201,13 @@ const AgronomicWiki = {
         return null;
       }
 
-      // 3. Find the pre-assessment — last confirmed assessment BEFORE the treatment
+      // 3. Find the pre-assessment — last confirmed assessment BEFORE the
+      // treatment, bounded so an unrelated assessment from a prior program
+      // year can't produce a bogus delta.
       const preAssessment = await db('lawn_assessments')
         .where({ customer_id: customerId, confirmed_by_tech: true })
         .where('service_date', '<', treatmentDate)
+        .where('service_date', '>=', daysFrom(treatmentDate, -PRE_ASSESSMENT_MAX_AGE_DAYS))
         .orderBy('service_date', 'desc')
         .first();
 
@@ -269,11 +332,18 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   async updateProductPage(productName) {
     try {
-      const slug = `product/${slugify(productName)}`;
+      // One page per catalog product: resolve the applied-product string to
+      // its canonical catalog name and aggregate outcomes across every known
+      // name variant, so vendor-listing spellings don't split the data.
+      const { canonicalName, variants } = await resolveCanonicalProduct(productName);
+      const slug = `product/${slugify(canonicalName)}`;
 
-      // Query all treatment_outcomes involving this product
       const outcomes = await db('treatment_outcomes')
-        .whereRaw("products_applied::text ILIKE ?", [`%${productName}%`])
+        .where(function () {
+          for (const variant of variants) {
+            this.orWhereRaw("products_applied::text ILIKE ? ESCAPE '\\'", [`%${escapeLike(variant)}%`]);
+          }
+        })
         .orderBy('treatment_date', 'desc');
 
       if (!outcomes.length) {
@@ -283,9 +353,18 @@ const AgronomicWiki = {
 
       // Aggregate stats
       const stats = aggregateOutcomes(outcomes);
-      const data = { productName, stats, outcomes: outcomes.slice(0, 50) };
+      const data = { productName: canonicalName, stats, outcomes: outcomes.slice(0, 50) };
 
-      return AgronomicWiki.generatePage(slug, 'product', data, `Product: ${productName}`);
+      const entry = await AgronomicWiki.generatePage(slug, 'product', data, `Product: ${canonicalName}`);
+
+      // Fold variant-named duplicate pages into the canonical page. Only after
+      // a successful canonical write, so a generation failure never deletes
+      // the only copy of the content.
+      if (entry) {
+        await mergeVariantProductPages(entry, variants, slug);
+      }
+
+      return entry;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateProductPage failed for ${productName}: ${err.message}`);
       return null;
@@ -369,6 +448,14 @@ const AgronomicWiki = {
         .whereRaw("EXTRACT(MONTH FROM treatment_date) = ?", [month])
         .orderBy('treatment_date', 'desc');
 
+      // Match product/track behavior: no outcomes → no page. Generating from
+      // zero data burns an AI call to write a page that can only say
+      // "no data yet".
+      if (!outcomes.length) {
+        logger.info(`[agronomic-wiki] No outcomes found for month ${month} — skipping seasonal page`);
+        return null;
+      }
+
       const stats = aggregateOutcomes(outcomes);
       const data = { month, monthName, stats, outcomes: outcomes.slice(0, 50) };
 
@@ -389,6 +476,28 @@ const AgronomicWiki = {
 
       const dataPointCount = data.outcomes?.length || data.assessmentCount || 0;
       const confidence = confidenceLevel(dataPointCount);
+      const sourceIds = (data.outcomes || []).map((o) => o.id).slice(0, 200);
+
+      // Skip regeneration when the underlying data hasn't changed — the AI
+      // pass would just rewrite the same page. Placeholder stubs are always
+      // retried.
+      if (
+        existing &&
+        !existing.content.includes('*Pending AI generation') &&
+        existing.data_point_count === dataPointCount &&
+        sameSourceIds(existing.source_treatment_ids, sourceIds)
+      ) {
+        if (existing.stale_flag) {
+          await db('knowledge_entries')
+            .where({ id: existing.id })
+            .update({ stale_flag: false, updated_at: new Date() });
+        }
+        await logUpdate('skip', slug, `Skipped ${category} page: ${title} — no new data since last generation (${dataPointCount} data points)`, {
+          triggerType: 'wiki_generation',
+        });
+        logger.info(`[agronomic-wiki] Skipped page ${slug} — data unchanged (${dataPointCount} pts)`);
+        return existing;
+      }
 
       const systemPrompt = `You are maintaining an agronomic knowledge wiki for Waves Pest Control in Southwest Florida. You write technically accurate, data-driven content based on real treatment outcomes. Never fabricate data. Only make claims supported by the provided data points. When data is limited, say so explicitly. When data contradicts existing claims, flag it clearly. Write in markdown format.`;
 
@@ -423,19 +532,32 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
 
       const result = await callClaude(systemPrompt, userPrompt);
 
-      const content = result?.text || `# ${title}\n\n*Pending AI generation — ${dataPointCount} data points available.*`;
+      // A failed AI call must never clobber an existing page with the
+      // placeholder stub — keep the current content and surface the failure
+      // in the update log instead.
+      if (!result?.text?.trim() && existing) {
+        await logUpdate('error', slug, `Generation failed for ${category} page: ${title} — existing content preserved`, {
+          triggerType: 'wiki_generation',
+        });
+        logger.warn(`[agronomic-wiki] Generation failed for ${slug} — existing content preserved`);
+        return existing;
+      }
+
+      const content = result?.text?.trim()
+        ? result.text
+        : `# ${title}\n\n*Pending AI generation — ${dataPointCount} data points available.*`;
 
       const entryData = {
         slug,
         category,
         title: title || slug,
         content,
-        summary: content.split('\n').find((l) => l.trim() && !l.startsWith('#'))?.trim()?.substring(0, 500) || '',
+        summary: extractSummary(content),
         data_point_count: dataPointCount,
         confidence,
         last_data_update: new Date(),
         stale_flag: false,
-        source_treatment_ids: JSON.stringify((data.outcomes || []).map((o) => o.id).slice(0, 200)),
+        source_treatment_ids: JSON.stringify(sourceIds),
       };
 
       let entry;
@@ -583,9 +705,12 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         .where({ stale_flag: false })
         .update({ stale_flag: true });
 
-      // 2. Refresh stale pages (up to 10 per run to control API costs)
+      // 2. Refresh stale pages (up to 10 per run to control API costs).
+      // Only categories with a refresh path — anything else would sit in the
+      // stale list forever, permanently occupying refresh slots.
       const stalePages = await db('knowledge_entries')
         .where({ stale_flag: true })
+        .whereIn('category', ['product', 'track', 'seasonal', 'condition'])
         .orderBy('last_data_update', 'asc')
         .limit(10);
 
@@ -630,14 +755,106 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       return { refreshed, staleFound: stalePages.length };
     } catch (err) {
       logger.error(`[agronomic-wiki] weeklyRefresh failed: ${err.message}`);
+      // Log the failure so a refresh that dies is visible in the update log
+      // (a silent gap here previously read the same as "cron never fired").
+      // Distinct trigger_type so weeklyRefreshIfDue doesn't count a failed
+      // run as done — it retries the next day.
+      await logUpdate('error', null, `Weekly refresh failed: ${err.message}`, {
+        triggerType: 'weekly_cron_error',
+      });
       return { refreshed: 0, error: err.message };
     }
+  },
+
+  // ────────────────────────────────────────────────────────────
+  // weeklyRefreshIfDue — daily cron entry point with a weekly guard.
+  // The refresh previously ran on a single Sunday-6AM fire time; any miss
+  // (restart, deploy in flight, transient error) meant a whole week of
+  // silence. Running daily with a "already ran in the last 6 days" guard
+  // makes the schedule self-healing while keeping the weekly cadence.
+  // ────────────────────────────────────────────────────────────
+  async weeklyRefreshIfDue() {
+    try {
+      const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+      const recentRun = await db('knowledge_update_log')
+        .where({ trigger_type: 'weekly_cron' })
+        .where('created_at', '>', sixDaysAgo)
+        .first('id');
+      if (recentRun) {
+        return { skipped: true, refreshed: 0 };
+      }
+    } catch (err) {
+      // If the guard query itself fails, running the refresh is safer than
+      // never running it.
+      logger.error(`[agronomic-wiki] weeklyRefreshIfDue guard query failed: ${err.message}`);
+    }
+    return AgronomicWiki.weeklyRefresh();
   },
 };
 
 // ══════════════════════════════════════════════════════════════
 // INTERNAL HELPERS
 // ══════════════════════════════════════════════════════════════
+
+// source_treatment_ids is jsonb — pg usually returns it parsed, but tolerate
+// a raw string from older rows or mocks.
+function sameSourceIds(existingIds, newIds) {
+  let parsed = existingIds;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { return false; }
+  }
+  if (!Array.isArray(parsed)) return false;
+  if (parsed.length !== newIds.length) return false;
+  const a = [...parsed].sort();
+  const b = [...newIds].sort();
+  return a.every((id, i) => id === b[i]);
+}
+
+// First real prose line of the page. Generated pages open with a heading and
+// a run of "**Category:** ..." metadata lines — those make useless summaries
+// for search results and the estimate AI context.
+function extractSummary(content) {
+  const line = content.split('\n').find((l) => {
+    const t = l.trim();
+    if (!t || t.startsWith('#')) return false;
+    if (/^\*\*[^*]+:\*\*/.test(t)) return false; // "**Label:** value" metadata
+    if (/^[->|]/.test(t)) return false; // blockquote callouts, list bullets, tables
+    if (/^-{3,}$/.test(t)) return false; // horizontal rules
+    return true;
+  });
+  return line?.trim()?.substring(0, 500) || '';
+}
+
+// Delete leftover product pages that were keyed on a non-canonical name
+// variant, re-pointing any knowledge_base.wiki_entry_id references at the
+// canonical page first. knowledge_bridge rows cascade on delete and
+// knowledge_contradictions references SET NULL (migration 20260414000018/19).
+async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug) {
+  for (const variant of variants) {
+    const variantSlug = `product/${slugify(variant)}`;
+    if (variantSlug === canonicalSlug) continue;
+    try {
+      const dupe = await db('knowledge_entries')
+        .where({ slug: variantSlug, category: 'product' })
+        .first('id', 'slug');
+      if (!dupe) continue;
+
+      try {
+        await db('knowledge_base')
+          .where({ wiki_entry_id: dupe.id })
+          .update({ wiki_entry_id: canonicalEntry.id });
+      } catch { /* knowledge_base.wiki_entry_id column may not exist */ }
+
+      await db('knowledge_entries').where({ id: dupe.id }).del();
+      await logUpdate('merge', canonicalSlug, `Merged duplicate product page ${dupe.slug} into ${canonicalSlug}`, {
+        triggerType: 'wiki_generation',
+      });
+      logger.info(`[agronomic-wiki] Merged duplicate product page ${dupe.slug} into ${canonicalSlug}`);
+    } catch (err) {
+      logger.error(`[agronomic-wiki] Failed to merge duplicate page ${variantSlug}: ${err.message}`);
+    }
+  }
+}
 
 function aggregateOutcomes(outcomes) {
   if (!outcomes.length) return { count: 0 };
@@ -681,3 +898,13 @@ function aggregateOutcomes(outcomes) {
 }
 
 module.exports = AgronomicWiki;
+
+// Exposed for unit tests only.
+module.exports.__private = {
+  escapeLike,
+  extractSummary,
+  sameSourceIds,
+  resolveCanonicalProduct,
+  PRE_ASSESSMENT_MAX_AGE_DAYS,
+  POST_ASSESSMENT_MAX_DAYS,
+};
