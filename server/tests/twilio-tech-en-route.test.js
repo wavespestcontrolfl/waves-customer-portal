@@ -555,6 +555,33 @@ describe("TwilioService legacy customer SMS helpers", () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test("sendSeasonalAlert ignores a stale local channel when the account primary is authoritative", async () => {
+    // Secondary row carries a leftover 'email' but the primary profile (the
+    // only writable authority) has no prefs row at all → unset → SMS sends.
+    db.mockReturnValueOnce(
+      firstQuery({
+        id: "cust-2",
+        first_name: "Sam",
+        phone: "+15551112222",
+        account_id: "acct-1",
+        is_primary_profile: false,
+      }),
+    ).mockReturnValueOnce(
+      firstQuery({ seasonal_tips: true, sms_enabled: true, seasonal_channel: "email", updated_at: "2026-05-01T12:00:00.000Z" }),
+    ).mockReturnValueOnce(
+      firstQuery({ id: "primary-1" }),
+    ).mockReturnValueOnce(
+      firstQuery(undefined),
+    );
+    smsTemplates.getTemplate.mockResolvedValue("Seasonal alert body");
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendSeasonalAlert("cust-2", "Mosquitoes", "Check standing water.");
+
+    expect(result.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test("sendSeasonalAlert keeps the SMS leg for both/sms/unset delivery channels", async () => {
     for (const seasonal_channel of ["both", "sms", null]) {
       jest.clearAllMocks();

@@ -929,9 +929,12 @@ const TwilioService = {
     // always an explicit portal choice — migration 20260706001000 nulled the
     // inert 'email' column default that predated any UI for this preference.
     // The portal stores this account-level choice on the primary profile's
-    // row, so a secondary service property resolves the channel from the
-    // account primary (mirrors appointment-reminders getReminderPrefs).
-    let channelPrefs = prefs;
+    // row, so when a primary profile exists it is the ONLY authority — a
+    // stale value on a secondary property's own row must not override it in
+    // either direction, and a primary with no prefs row means unset (send).
+    // Only customers with no resolvable primary fall back to their local row
+    // (mirrors appointment-reminders getReminderPrefs).
+    let seasonalChannel = prefs?.seasonal_channel ?? null;
     if (customer.is_primary_profile !== true && customer.account_id) {
       const primary = await db("customers")
         .where({ account_id: customer.account_id, is_primary_profile: true })
@@ -942,10 +945,10 @@ const TwilioService = {
           .where({ customer_id: primary.id })
           .first()
           .catch(() => null);
-        if (ownerPrefs) channelPrefs = ownerPrefs;
+        seasonalChannel = ownerPrefs?.seasonal_channel ?? null;
       }
     }
-    if (channelPrefs?.seasonal_channel === 'email') return;
+    if (seasonalChannel === 'email') return;
 
     const body =
       typeof smsTemplatesRouter.getTemplate === "function"
