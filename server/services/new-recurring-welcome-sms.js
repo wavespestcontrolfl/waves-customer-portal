@@ -212,7 +212,18 @@ async function deliverQueuedWelcome(row) {
   });
 
   if (!sendResult.sent) {
-    // Consent blocks and landlines won't heal on retry — mark them done.
+    // A retryable provider failure (429/5xx) stays queued — push next_send_at
+    // out and let the next tick retry; the attempts counter still caps total
+    // tries. Consent blocks and landlines won't heal on retry — mark those
+    // done so hasWelcomeSequence's once-ever guard holds.
+    if (sendResult.retryable || sendResult.deferred) {
+      await db('sms_sequences').where({ id: row.id }).update({
+        next_send_at: new Date(Date.now() + 15 * 60 * 1000),
+        updated_at: new Date(),
+      });
+      logger.warn(`[new-recurring-welcome] retryable send failure for customer ${customer.id} (${sendResult.code || sendResult.reason || 'unknown'}) — requeued`);
+      return sendResult;
+    }
     await finish('cancelled', {
       skip_reason: `send_${sendResult.code || sendResult.reason || 'failed'}`,
     });

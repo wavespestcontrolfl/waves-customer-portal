@@ -348,6 +348,7 @@ class AvailabilityEngine {
 
     // Customer confirmation is handled by registerAppointment above.
     try {
+      const TwilioService = require('./twilio');
       const dateLabel = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
       // Adam notification
       if (process.env.ADAM_PHONE) {

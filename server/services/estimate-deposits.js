@@ -412,15 +412,20 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
   if (!body) return; // template missing or toggled off — deliberate silence
 
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
+  // Lead-only estimates (no customer row yet) can't satisfy the
+  // payment_receipt policy (requires customerId + phone_matches_customer) —
+  // mirror the estimate-accept lead send instead: estimate-scoped purpose,
+  // token-verified trust (they paid through the tokened estimate page), and
+  // an explicit transactional consent basis.
   const result = await sendCustomerMessage({
     to: phone,
     body,
     channel: 'sms',
     audience: estimate.customer_id ? 'customer' : 'lead',
-    purpose: 'payment_receipt',
+    purpose: estimate.customer_id ? 'payment_receipt' : 'estimate_followup',
     customerId: estimate.customer_id || undefined,
     estimateId,
-    identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+    identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'estimate_token_verified',
     consentBasis: estimate.customer_id ? undefined : {
       status: 'transactional_allowed',
       source: 'estimate_deposit_payment',

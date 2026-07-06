@@ -238,6 +238,28 @@ describe('new recurring welcome SMS', () => {
     ]));
   });
 
+  test('processDueWelcomes requeues a retryable provider failure instead of cancelling', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'PROVIDER_FAILURE' });
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    // Row stays active with a pushed-out next_send_at — never cancelled.
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates).toEqual([]);
+    const requeue = mockUpdates.find((u) => u.table === 'sms_sequences' && 'next_send_at' in u.data);
+    expect(requeue).toBeTruthy();
+  });
+
   test('processDueWelcomes drops the welcome when the appointment was cancelled', async () => {
     mockDueSequences = [{
       id: 'seq-1',

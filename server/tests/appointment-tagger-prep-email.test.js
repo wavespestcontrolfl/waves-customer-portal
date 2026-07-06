@@ -236,11 +236,14 @@ describe('appointment tagger prep email automation', () => {
   });
 
   test('skips when the customer has no valid email on any contact', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
     customerRow = { ...customerRow, email: '' };
 
     await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
 
     expect(executor.processTrigger).not.toHaveBeenCalled();
+    // The SMS asserts "we emailed your guide" — no queued email, no SMS.
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('prep.bed_bug'));
   });
 

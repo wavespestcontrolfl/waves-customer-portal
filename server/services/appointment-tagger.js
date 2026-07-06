@@ -207,7 +207,11 @@ class AppointmentTagger {
   async triggerPestPrep(service, pestType) {
     if (await this.hasPriorSameTypeBooking(service, pestType)) return;
 
-    await this.triggerPrepEmailGuide(service, pestType);
+    // The SMS copy asserts "we emailed your treatment guide" — only send it
+    // when the guide email actually queued (gate on, upcoming open visit,
+    // valid recipient email). Codex review 2026-07-06.
+    const emailQueued = await this.triggerPrepEmailGuide(service, pestType);
+    if (!emailQueued) return;
 
     const prepSMS = await this.getPrepSMS(pestType, service);
     if (!prepSMS) return;
@@ -257,10 +261,12 @@ class AppointmentTagger {
   // (appointment.cancelled, re-evaluated against the live row at send time)
   // still apply, and the once-per-appointment idempotency key makes re-runs
   // of onServiceScheduled (e.g. regenerate-brief) safe.
+  // Returns true only when the prep-guide email automation was queued — the
+  // SMS companion's copy depends on it.
   async triggerPrepEmailGuide(service, pestType) {
     const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
-    if (!automationKey) return;
-    if (!isEnabled('emailTemplateAutomations')) return;
+    if (!automationKey) return false;
+    if (!isEnabled('emailTemplateAutomations')) return false;
 
     // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
     // for past/closed appointments too, and "prepare for your treatment"
@@ -268,9 +274,9 @@ class AppointmentTagger {
     // (appointment.closed / appointment.past) re-check this against the live
     // row at send time for queued runs.
     const status = String(service.status || '').toLowerCase();
-    if (PREP_TERMINAL_STATUSES.has(status)) return;
+    if (PREP_TERMINAL_STATUSES.has(status)) return false;
     const serviceDateStr = dateOnlyString(service.scheduled_date);
-    if (!serviceDateStr || serviceDateStr < etDateString()) return;
+    if (!serviceDateStr || serviceDateStr < etDateString()) return false;
 
     try {
       // Route like the other prep/project emails: service contact first (the
@@ -284,7 +290,7 @@ class AppointmentTagger {
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
-        return;
+        return false;
       }
       const firstName = String(recipient.name || '').trim().split(/\s+/)[0]
         || String(service.first_name || '').trim()
@@ -314,8 +320,10 @@ class AppointmentTagger {
         },
         executeImmediately: false,
       });
+      return true;
     } catch (err) {
       logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
+      return false;
     }
   }
 
