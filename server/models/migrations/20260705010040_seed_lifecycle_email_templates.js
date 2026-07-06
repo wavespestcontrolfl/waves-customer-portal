@@ -96,9 +96,14 @@ const TEMPLATES = [
     name: 'Referral Invite',
     category: 'referral',
     sensitivity: 'normal',
-    // Referral asks are marketing — route through the dedicated
-    // marketing_referral suppression group (seeded in 20260518000001)
-    // so a referral unsubscribe is honored without killing service email.
+    // Referral asks are marketing end-to-end: marketing mode (newsletter
+    // wrapper with unsubscribe footer in previews AND sends),
+    // commercial_marketing legal class, and the dedicated
+    // marketing_referral suppression group (seeded in 20260518000001) so
+    // a referral unsubscribe never kills service email.
+    mode: 'marketing',
+    legal: 'commercial_marketing',
+    layout: 'newsletter_default_v1',
     stream: 'marketing_referral',
     description: 'Invites a happy customer to refer neighbors; the reward line comes from the sender so amounts are never baked into copy.',
     required: ['first_name', 'referral_url', 'referral_reward_line'],
@@ -187,15 +192,15 @@ function templateRow(t) {
     template_key: t.key,
     name: t.name,
     description: t.description || null,
-    mode: 'service',
+    mode: t.mode || 'service',
     purpose: t.category,
-    legal_classification: 'transactional_relationship',
+    legal_classification: t.legal || 'transactional_relationship',
     audience: 'customer',
     message_priority: 'normal',
     content_sensitivity: t.sensitivity || 'account',
     send_stream: t.stream || 'service_operational',
     suppression_group_key: t.stream || 'service_operational',
-    layout_wrapper_id: 'service_default_v1',
+    layout_wrapper_id: t.layout || 'service_default_v1',
     from_name: 'Waves Pest Control',
     from_email: SERVICE_FROM,
     reply_to: SERVICE_FROM,
