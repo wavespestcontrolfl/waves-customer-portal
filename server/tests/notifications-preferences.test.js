@@ -123,14 +123,6 @@ describe('notification preference updates', () => {
     });
   });
 
-  test('maps the seasonal tips delivery channel to seasonal_channel', () => {
-    expect(notificationPrefsDbUpdates({ seasonalTipsChannel: 'email' }, {}))
-      .toEqual({ seasonal_channel: 'email' });
-    // Seasonal defaults to 'both' (two real senders), not the sms fallback.
-    expect(notificationPrefsDbUpdates({ seasonalTipsChannel: 'pigeon' }, {}))
-      .toEqual({ seasonal_channel: 'both' });
-  });
-
   test('coerces an unrecognized channel value to sms', () => {
     const updates = notificationPrefsDbUpdates(
       { serviceReminder24hChannel: 'pigeon' },
@@ -155,39 +147,6 @@ describe('notification preference updates', () => {
       newValue: 'Email',
       scope: 'Account',
     }]);
-  });
-
-  test('compares seasonal channel changes against the both default, not sms', () => {
-    // Unset column → 'Text & Email' baseline: narrowing to Email logs the
-    // real prior state instead of pretending the customer was on Text.
-    expect(preferenceChangeItems(
-      { seasonalTipsChannel: 'email' },
-      { seasonal_channel: null },
-      { seasonalTipsChannel: 'email' },
-      { scope: 'Account' },
-    )).toEqual([{
-      key: 'seasonalTipsChannel',
-      label: 'Seasonal Lawn Tips — Delivery',
-      oldValue: 'Text & Email',
-      newValue: 'Email',
-      scope: 'Account',
-    }]);
-
-    // Unset → 'sms' IS a change (both → Text) and must produce an item.
-    expect(preferenceChangeItems(
-      { seasonalTipsChannel: 'sms' },
-      { seasonal_channel: null },
-      { seasonalTipsChannel: 'sms' },
-      { scope: 'Account' },
-    )).toHaveLength(1);
-
-    // Unset → 'both' is a no-op display-wise: no change-log item.
-    expect(preferenceChangeItems(
-      { seasonalTipsChannel: 'both' },
-      { seasonal_channel: null },
-      { seasonalTipsChannel: 'both' },
-      { scope: 'Account' },
-    )).toEqual([]);
   });
 
   test('labels a 72-hour reminder toggle for account.updated emails', () => {
@@ -226,12 +185,11 @@ describe('account-level channel routing', () => {
     expect(id).toBe('solo-1');
   });
 
-  test('CHANNEL_DB_COLUMNS lists every account-level channel column', () => {
+  test('CHANNEL_DB_COLUMNS lists the three appointment channel columns', () => {
     expect(CHANNEL_DB_COLUMNS).toEqual([
       'appointment_confirmation_channel',
       'service_reminder_72h_channel',
       'service_reminder_24h_channel',
-      'seasonal_channel',
     ]);
   });
 });

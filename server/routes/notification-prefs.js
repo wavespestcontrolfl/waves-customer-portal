@@ -34,11 +34,7 @@ router.get('/', async (req, res, next) => {
       enRouteChannel: prefs.en_route_channel || 'sms',
       serviceCompleteChannel: prefs.service_complete_channel || 'sms',
       billingChannel: prefs.billing_channel || 'sms',
-      // Unset means BOTH seasonal senders run (migration 20260706001000
-      // cleared the inert 'email' default) — surfacing 'email' here would
-      // let a GET→PUT round-trip through this legacy route silently write
-      // an SMS opt-out the customer never chose.
-      seasonalChannel: prefs.seasonal_channel || 'both',
+      seasonalChannel: prefs.seasonal_channel || 'email',
       reviewRequestChannel: prefs.review_request_channel || 'sms',
       referralChannel: prefs.referral_channel || 'sms',
       marketingChannel: prefs.marketing_channel || 'email',

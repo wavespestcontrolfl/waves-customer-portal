@@ -62,7 +62,7 @@ const CHANNEL_VALUES = ['sms', 'email', 'both'];
 
 // Delivery channel is an account-level "how to reach me" preference, stored on
 // the account's primary profile so it is consistent across every property.
-const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel', 'seasonal_channel'];
+const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
 
 const PREF_SELECT = [
   'appointment_confirmation',
@@ -86,8 +86,8 @@ const PREF_SELECT = [
   'service_reminder_24h_channel',
 ];
 
-function channelValue(value, fallback = 'sms') {
-  return CHANNEL_VALUES.includes(value) ? value : fallback;
+function channelValue(value) {
+  return CHANNEL_VALUES.includes(value) ? value : 'sms';
 }
 
 // Delivery channels are an account-level preference resolved from the primary
@@ -118,10 +118,6 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
       serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
       serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
-      // Seasonal tips have BOTH a real email sender (irrigation weekly) and a
-      // real SMS sender (seasonal alerts); an unset column means both send,
-      // so the portal shows 'both' until the customer narrows it.
-      seasonalTipsChannel: channelValue(prefs.seasonal_channel, 'both'),
     } : {}),
   };
 }
@@ -164,7 +160,6 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
   if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
-  if (updates.seasonalTipsChannel !== undefined) dbUpdates.seasonal_channel = channelValue(updates.seasonalTipsChannel, 'both');
   return dbUpdates;
 }
 
@@ -188,7 +183,6 @@ const ACCOUNT_PREF_LABELS = {
   appointmentConfirmationChannel: 'New Appointment Confirmation — Delivery',
   serviceReminder72hChannel: '72-Hour Appointment Reminder — Delivery',
   serviceReminder24hChannel: '24-Hour Service Reminder — Delivery',
-  seasonalTipsChannel: 'Seasonal Lawn Tips — Delivery',
 };
 
 // Preference keys whose value is a delivery channel (sms | email | both)
@@ -197,17 +191,9 @@ const CHANNEL_PREF_KEYS = new Set([
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
-  'seasonalTipsChannel',
 ]);
 
 const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email' };
-
-// An unset seasonal channel means 'both' (it has two real senders), while the
-// appointment channels default to 'sms' — the change log must compare against
-// the same default the payload displays or first-time changes mislabel.
-function channelFallbackFor(key) {
-  return key === 'seasonalTipsChannel' ? 'both' : 'sms';
-}
 
 const DB_FIELD_BY_PREF = {
   appointmentConfirmation: 'appointment_confirmation',
@@ -229,12 +215,11 @@ const DB_FIELD_BY_PREF = {
   appointmentConfirmationChannel: 'appointment_confirmation_channel',
   serviceReminder72hChannel: 'service_reminder_72h_channel',
   serviceReminder24hChannel: 'service_reminder_24h_channel',
-  seasonalTipsChannel: 'seasonal_channel',
 };
 
 function prefDisplayValue(key, value) {
   if (key === 'billingEmail' || key === 'billingContactName') return value || 'Not set';
-  if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value, channelFallbackFor(key))];
+  if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value)];
   return value === false ? 'Off' : 'On';
 }
 
@@ -248,7 +233,7 @@ function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, optio
     const oldRaw = dbField ? before?.[dbField] : undefined;
     let oldValue;
     if (key === 'billingEmail' || key === 'billingContactName') oldValue = oldRaw || '';
-    else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw, channelFallbackFor(key));
+    else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw);
     else oldValue = oldRaw !== false;
     const newValue = afterPrefs?.[key];
     if (prefDisplayValue(key, oldValue) === prefDisplayValue(key, newValue)) continue;
@@ -342,9 +327,12 @@ async function loadPreferencePayload(req) {
   const prefs = await ensurePrefs(req.customerId);
   const primaryId = await resolvePrimaryProfileId(req);
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
-  const channelOverlay = {};
-  for (const col of CHANNEL_DB_COLUMNS) channelOverlay[col] = channelPrefs[col];
-  return preferencePayload({ ...prefs, ...channelOverlay });
+  return preferencePayload({
+    ...prefs,
+    appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
+    service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
+    service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
+  });
 }
 
 // =========================================================================
@@ -430,7 +418,6 @@ router.put('/preferences', async (req, res, next) => {
       appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
-      seasonalTipsChannel: Joi.string().valid(...CHANNEL_VALUES),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);

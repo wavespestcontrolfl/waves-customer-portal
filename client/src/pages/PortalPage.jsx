@@ -2958,11 +2958,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
                 { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
                 // Kept as the customer's only in-portal opt-out: the irrigation
-                // weekly email, seasonal SMS alerts, and the retention/marketing
-                // policy all key on notification_prefs.seasonal_tips. Both a real
-                // email sender and a real SMS sender exist, so this row gets the
-                // delivery-channel select (seasonal_channel, default 'both').
-                { key: 'seasonalTips', channelKey: 'seasonalTipsChannel', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
+                // weekly email and the retention/marketing policy key on
+                // notification_prefs.seasonal_tips. Email-only since the
+                // seasonal_alert SMS blast was retired (2026-07-06), so no
+                // delivery-channel select — the on/off toggle is the honest control.
+                { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
               ];
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));

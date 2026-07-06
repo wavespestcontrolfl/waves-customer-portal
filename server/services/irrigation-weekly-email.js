@@ -306,28 +306,6 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     // dedicated opt-out is honored too (the SMS tip path gates on the same
     // pref in twilio.js).
     .whereRaw('np.seasonal_tips IS DISTINCT FROM false')
-    // Delivery-channel preference: 'sms' means the customer opted out of the
-    // email leg specifically (NULL/'both'/'email' all keep it — an unset
-    // column preserves the historical both-channels behavior). The portal
-    // stores this account-level choice on the primary profile's row, so when
-    // a primary profile exists it is the ONLY authority — a stale value on a
-    // secondary property's own row must not override it in either direction.
-    // Only accounts with no resolvable primary fall back to the local row
-    // (mirrors the resolution appointment reminders do in getReminderPrefs).
-    // Subqueries keep the candidate set duplicate-free.
-    .whereRaw(`(
-      CASE WHEN c.account_id IS NOT NULL AND EXISTS (
-             SELECT 1 FROM customers cp
-             WHERE cp.account_id = c.account_id AND cp.is_primary_profile = true)
-      THEN NOT EXISTS (
-             SELECT 1 FROM customers cp
-             JOIN notification_prefs npp ON npp.customer_id = cp.id
-             WHERE cp.account_id = c.account_id
-               AND cp.is_primary_profile = true
-               AND npp.seasonal_channel = 'sms')
-      ELSE (np.seasonal_channel IS NULL OR np.seasonal_channel <> 'sms')
-      END
-    )`)
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .whereNotNull('c.email')
