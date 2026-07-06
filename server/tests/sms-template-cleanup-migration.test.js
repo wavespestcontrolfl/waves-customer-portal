@@ -29,11 +29,12 @@ const EXPECTED_REACTIVATED = [
   'auto_cockroach',
 ];
 
-function buildKnex({ fleaExists = false, bodyRows = [] } = {}) {
+function buildKnex({ fleaExists = false, bodyRows = [], variantRows = [] } = {}) {
   const state = {
     deletedTemplateKeys: [],
     deletedVariantKeys: [],
     updates: [],
+    variantUpdates: [],
     inserted: [],
   };
 
@@ -45,6 +46,15 @@ function buildKnex({ fleaExists = false, bodyRows = [] } = {}) {
           state.deletedVariantKeys.push(...keys);
           return query;
         },
+        where(criteria) {
+          query.__where = criteria;
+          return query;
+        },
+        select: jest.fn(async () => variantRows.map((r) => ({ ...r }))),
+        update: jest.fn(async (data) => {
+          state.variantUpdates.push({ where: query.__where, data });
+          return 1;
+        }),
         del: jest.fn(async () => 0),
       };
       return query;
@@ -189,6 +199,20 @@ describe('sms template cleanup migration (20260706000010)', () => {
       expect(u.data.body).toMatch(/Reply STOP to opt out\./);
       expect(u.data.body).not.toMatch(/297-5749/);
     }
+  });
+
+  test('normalizes retained A/B variant bodies too', async () => {
+    const variantRows = [
+      { id: 'v1', body: 'Hello {first_name}! Short pitch. Reply here or call (941) 297-5749.' },
+      { id: 'v2', body: 'Hello {first_name}! Already compliant. Reply STOP to opt out.' },
+    ];
+    const { knex, state } = buildKnex({ variantRows });
+
+    await migration.up(knex);
+
+    const byId = Object.fromEntries(state.variantUpdates.map((u) => [u.where?.id, u.data.body]));
+    expect(byId.v1).toBe('Hello {first_name}! Short pitch. Reply here.\n\nReply STOP to opt out.');
+    expect(byId.v2).toBeUndefined();
   });
 
   test('keeps removed templates out of the runtime default seed list', () => {

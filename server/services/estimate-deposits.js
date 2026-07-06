@@ -448,9 +448,11 @@ async function sendDepositReceiptSms({ estimateId, amountDollars }) {
     // Deposits are commonly paid in the evening — a quiet-hours hold (or a
     // transient provider failure) must not eat the only payment receipt.
     // Re-queue onto the scheduled-SMS rail; the cron replays it at
-    // nextAllowedAt under purpose 'conversational' with the same consent
-    // basis, and original_message_type keeps the deposit_receipt row as the
-    // kill switch. Mirrors the twilio-webhook AI-reply requeue.
+    // nextAllowedAt under the same policy the immediate send enforced —
+    // payment_receipt for customer-linked rows, conversational + forwarded
+    // consent basis for lead rows (see purposeForScheduledMessageType).
+    // original_message_type keeps the deposit_receipt row as the kill
+    // switch. Mirrors the twilio-webhook AI-reply requeue.
     if (result.retryable && result.nextAllowedAt) {
       try {
         await db('sms_log').insert({

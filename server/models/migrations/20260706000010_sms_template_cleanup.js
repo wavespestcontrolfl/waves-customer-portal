@@ -245,6 +245,21 @@ exports.up = async function up(knex) {
         .update({ body: normalized, updated_at: new Date() });
     }
   }
+
+  // A/B variant bodies override the base template at render time
+  // (getTemplate prefers variant.body), so retained variants get the same
+  // normalization or customers would still receive the old copy.
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    const variantRows = await knex('sms_template_variants').select('id', 'body');
+    for (const row of variantRows) {
+      const normalized = normalizeTemplateBody(row.body);
+      if (normalized !== row.body) {
+        await knex('sms_template_variants')
+          .where({ id: row.id })
+          .update({ body: normalized, updated_at: new Date() });
+      }
+    }
+  }
 };
 
 exports.down = async function down() {

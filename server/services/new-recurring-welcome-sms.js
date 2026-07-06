@@ -217,11 +217,20 @@ async function deliverQueuedWelcome(row) {
     // tries. Consent blocks and landlines won't heal on retry — mark those
     // done so hasWelcomeSequence's once-ever guard holds.
     if (sendResult.retryable || sendResult.deferred) {
+      // Quiet-hours/holiday holds carry nextAllowedAt — schedule exactly
+      // there and refund the attempt (a legal-window hold isn't a failure;
+      // blind +15m retries would burn MAX_DELIVERY_ATTEMPTS overnight and
+      // cancel the welcome before the send window ever opens).
+      const isLegalHold = sendResult.code === 'QUIET_HOURS_HOLD';
+      const nextAt = sendResult.nextAllowedAt
+        ? new Date(sendResult.nextAllowedAt)
+        : new Date(Date.now() + 15 * 60 * 1000);
       await db('sms_sequences').where({ id: row.id }).update({
-        next_send_at: new Date(Date.now() + 15 * 60 * 1000),
+        next_send_at: nextAt,
+        ...(isLegalHold ? { step: parseInt(row.step, 10) || 0 } : {}),
         updated_at: new Date(),
       });
-      logger.warn(`[new-recurring-welcome] retryable send failure for customer ${customer.id} (${sendResult.code || sendResult.reason || 'unknown'}) — requeued`);
+      logger.warn(`[new-recurring-welcome] ${isLegalHold ? 'quiet-hours hold' : 'retryable send failure'} for customer ${customer.id} (${sendResult.code || sendResult.reason || 'unknown'}) — requeued for ${nextAt.toISOString()}`);
       return sendResult;
     }
     await finish('cancelled', {

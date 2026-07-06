@@ -260,6 +260,30 @@ describe('new recurring welcome SMS', () => {
     expect(requeue).toBeTruthy();
   });
 
+  test('processDueWelcomes schedules quiet-hours holds at nextAllowedAt without burning an attempt', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+
+    await service.processDueWelcomes();
+
+    const requeue = mockUpdates.find((u) => u.table === 'sms_sequences' && 'next_send_at' in u.data);
+    expect(requeue.data.next_send_at.toISOString()).toBe(nextAllowedAt);
+    // Legal-window hold refunds the attempt so overnight holds can't
+    // exhaust MAX_DELIVERY_ATTEMPTS before 8am.
+    expect(requeue.data.step).toBe(0);
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates).toEqual([]);
+  });
+
   test('processDueWelcomes drops the welcome when the appointment was cancelled', async () => {
     mockDueSequences = [{
       id: 'seq-1',

@@ -18,8 +18,14 @@ const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
 const CONTENT_REGISTRY_LIVE_LIMIT = 300;
 
-function purposeForScheduledMessageType(messageType) {
+function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}) {
   const type = String(messageType || '').toLowerCase();
+  // Deposit receipts requeued from a quiet-hours hold must replay under the
+  // same policy the immediate send enforced: payment_receipt (prefs-gated)
+  // for customer-linked rows; lead rows have no customerId so they replay
+  // under the transactional-grade conversational policy with the forwarded
+  // consent basis — payment_receipt would hard-require a customerId.
+  if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   if (type.includes('billing') || type.includes('payment') || type.includes('invoice')) return 'billing';
   if (type.includes('review')) return 'review_request';
   if (type.includes('referral')) return 'referral';
@@ -1528,7 +1534,7 @@ function initScheduledJobs() {
           return raw || {};
         };
         try {
-          const purpose = purposeForScheduledMessageType(msg.message_type);
+          const purpose = purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});

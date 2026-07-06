@@ -694,6 +694,35 @@ describe('webhook + invoice credit', () => {
     renderSmsTemplate.mockResolvedValue(null);
   });
 
+  it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '(941) 555-0100', customer_name: 'Sam Customer' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({
+      status: 'scheduled',
+      message_type: 'deposit_receipt',
+      to_phone: '(941) 555-0100',
+    });
+    expect(state.smsLogInserts[0].scheduled_for.toISOString()).toBe(nextAllowedAt);
+    // Lead-only estimate — the replay consent basis must ride the metadata.
+    expect(JSON.parse(state.smsLogInserts[0].metadata).consent_basis).toMatchObject({ status: 'transactional_allowed' });
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
   it('converts the originating lead to won when an eligible deposit is recorded', async () => {
     mockIsEstimateAcceptActive.mockReturnValue(true);
     mockConvertLeadFromEvent.mockClear();
