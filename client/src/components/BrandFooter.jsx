@@ -1,7 +1,8 @@
 import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { WAVES_ADDRESS_LINE } from '../constants/business';
+import { WAVES_ADDRESS_LINE, WAVES_FL_LICENSE_LINE } from '../constants/business';
 import { isNativeApp } from '../native/platform';
+import { useWavesShell } from './brand/WavesShellContext';
 import { glassCopyActive, GLASS_FOOTER_CITY_LINKS } from '../lib/estimate-glass-copy';
 
 const GBP_LOCATION_LINKS = [
@@ -104,6 +105,10 @@ function StoreBadges({ ctaColor }) {
 }
 
 export default function BrandFooter({ borderColor, variant }) {
+  // Standalone pages (no WavesShell → no TrustFooter strip) still need the
+  // copyright/license line; shell pages get it from TrustFooter and skip it
+  // here (the owner removed the duplicate).
+  const { inShell } = useWavesShell();
   // Quiet transactional footer for customer money pages (estimates):
   // socials + contact + legal, matching the server-rendered estimate's
   // .site-footer. No newsletter signup — the reader is here to review a
@@ -244,6 +249,11 @@ export default function BrandFooter({ borderColor, variant }) {
           </div>
         </div>
       </div>
+      {!inShell ? (
+        <div style={{ fontSize: 12, color: mutedColor, lineHeight: 1.6 }}>
+          © {new Date().getFullYear()} Waves Pest Control, LLC · Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}
+        </div>
+      ) : null}
     </div>
   );
 }

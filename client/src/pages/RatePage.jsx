@@ -670,8 +670,12 @@ function Page({ children }) {
         </div>
         <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>
           {children}
-          <BrandFooter />
         </div>
+      </div>
+      {/* Footer lives OUTSIDE the overflow:hidden card so tall states (AI
+          review writer, feedback form) scroll instead of clipping it. */}
+      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, paddingBottom: 24 }}>
+        <BrandFooter />
       </div>
       {/* Anton / Montserrat / Inter load globally via client/index.html */}
     </div>

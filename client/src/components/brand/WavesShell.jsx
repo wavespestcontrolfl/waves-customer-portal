@@ -36,7 +36,7 @@ export default function WavesShell({
   };
 
   return (
-    <WavesShellContext.Provider value={{ variant }}>
+    <WavesShellContext.Provider value={{ variant, inShell: true }}>
       <div
         style={{
           minHeight: '100vh',
