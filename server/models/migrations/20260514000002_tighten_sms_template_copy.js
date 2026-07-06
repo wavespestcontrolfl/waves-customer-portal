@@ -386,14 +386,8 @@ const TEMPLATES = [
     variables: ['first_name', 'referral_link'],
     sort_order: 31,
   },
-  {
-    template_key: 'referral_enrollment',
-    name: 'Referral Program Enrollment',
-    category: 'referrals',
-    body: "Hello {first_name}! You're enrolled in the Waves Referral Program. Share your link and earn a reward for every new customer: {referral_link}",
-    variables: ['first_name', 'referral_link'],
-    sort_order: 32,
-  },
+  // referral_enrollment removed by 20260706000010_sms_template_cleanup.js —
+  // enrollment is automatic; its only sender was an unmounted legacy route.
   {
     template_key: 'referral_invite',
     name: 'Referral Invite',

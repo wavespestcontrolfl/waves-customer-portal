@@ -18,6 +18,7 @@ const EXPECTED_REMOVED = [
   'reschedule_options_access',
   'reschedule_options_general',
   'billing_reminder',
+  'referral_enrollment',
   'self_booking_confirmation',
 ];
 
@@ -28,7 +29,7 @@ const EXPECTED_REACTIVATED = [
   'auto_cockroach',
 ];
 
-function buildKnex({ fleaExists = false } = {}) {
+function buildKnex({ fleaExists = false, bodyRows = [] } = {}) {
   const state = {
     deletedTemplateKeys: [],
     deletedVariantKeys: [],
@@ -68,10 +69,11 @@ function buildKnex({ fleaExists = false } = {}) {
         return query.__keys.length;
       }),
       update: jest.fn(async (data) => {
-        state.updates.push({ keys: [...(query.__keys || [])], data });
+        state.updates.push({ keys: [...(query.__keys || [])], where: query.__where, data });
         return (query.__keys || []).length;
       }),
       first: jest.fn(async () => (fleaExists ? { id: 'existing-flea' } : null)),
+      select: jest.fn(async () => bodyRows.map((r) => ({ ...r }))),
       insert: jest.fn(async (data) => {
         state.inserted.push(data);
         return [data];
@@ -165,6 +167,28 @@ describe('sms template cleanup migration (20260706000010)', () => {
     await migration.up(knex);
 
     expect(knex).not.toHaveBeenCalled();
+  });
+
+  test('normalizes copy: STOP notice on every body, no office phone, Hello greeting', async () => {
+    const bodyRows = [
+      { id: 'r1', template_key: 'autopay_charge_failed', body: 'Hello {first_name}! Update your card here: {update_card_url}\n\nQuestions or requests? Reply here or call (941) 297-5749.' },
+      { id: 'r2', template_key: 'referral_invite', body: "Hi {referee_name}! Get a free quote here: {referral_link}\n\nQuestions? Call (941) 297-5749." },
+      { id: 'r3', template_key: 'tech_arrived', body: 'Hello {first_name}! {tech_name} has arrived.\n\nReply here. Reply STOP to opt out.' },
+    ];
+    const { knex, state } = buildKnex({ bodyRows });
+
+    await migration.up(knex);
+
+    const bodyUpdates = state.updates.filter((u) => 'body' in u.data);
+    const byWhere = Object.fromEntries(state.updates.filter((u) => 'body' in u.data).map((u) => [u.where?.id, u.data.body]));
+    expect(byWhere.r1).toBe('Hello {first_name}! Update your card here: {update_card_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.');
+    expect(byWhere.r2).toBe('Hello {referee_name}! Get a free quote here: {referral_link}\n\nQuestions? Reply here.\n\nReply STOP to opt out.');
+    // Already compliant — untouched.
+    expect(byWhere.r3).toBeUndefined();
+    for (const u of bodyUpdates) {
+      expect(u.data.body).toMatch(/Reply STOP to opt out\./);
+      expect(u.data.body).not.toMatch(/297-5749/);
+    }
   });
 
   test('keeps removed templates out of the runtime default seed list', () => {

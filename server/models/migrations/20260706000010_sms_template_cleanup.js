@@ -47,6 +47,10 @@ const REMOVED_TEMPLATE_KEYS = [
   // WaveGuard monthly pre-charge text retired — autopay customers already
   // get the autopay pre-charge notice; the extra monthly text was noise.
   'billing_reminder',
+  // Its only sender (legacy admin-referrals.js) is not mounted — enrollment
+  // is automatic (portal referrals tab / nudge workflow auto-enroll), so
+  // there is no enrollment moment to text.
+  'referral_enrollment',
   // Self-bookings now confirm through the shared appointment_confirmation
   // flow (registerAppointment sendConfirmation) — prefs/channel-aware with
   // email fallback, replacing the bespoke code/address text.
@@ -68,7 +72,7 @@ const NEW_TEMPLATES = [
     template_key: 'auto_flea',
     name: 'Flea Treatment',
     category: 'onboarding',
-    body: "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.",
+    body: "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
     description: 'Treatment-prep text sent when a first-time flea treatment is booked.',
     variables: JSON.stringify(['first_name']),
     is_active: true,
@@ -79,7 +83,7 @@ const NEW_TEMPLATES = [
     template_key: 'deposit_receipt',
     name: 'Deposit Receipt',
     category: 'invoices',
-    body: 'Hello {first_name}! We received your ${amount} deposit — it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here.',
+    body: 'Hello {first_name}! We received your ${amount} deposit — it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here. Reply STOP to opt out.',
     description: 'Sent once when an estimate deposit payment succeeds (webhook or accept-time verification).',
     variables: JSON.stringify(['first_name', 'amount']),
     is_active: true,
@@ -153,7 +157,7 @@ const RECATEGORIZED_TEMPLATE_KEYS = {
     'upsell_tier_upgrade', 'upsell_add_service',
   ],
   referrals: [
-    'referral_enrollment', 'referral_invite', 'referral_milestone',
+    'referral_invite', 'referral_milestone',
     'referral_nudge', 'referral_reward',
   ],
   reviews: ['review_request', 'review_request_followup'],
@@ -162,6 +166,37 @@ const RECATEGORIZED_TEMPLATE_KEYS = {
   // replies + draft-approval sends).
   system: ['ai_assistant', 'ai_approved', 'ai_revised'],
 };
+
+// Copy normalization (owner-directed 2026-07-06), applied to every row after
+// the structural changes:
+//   1. Every template carries the opt-out notice ("Reply STOP to opt out.").
+//   2. No template embeds the office phone number — replies are the channel.
+//   3. Greetings open with "Hello {first_name}" (a few strays said "Hi").
+// Idempotent and edit-preserving: it transforms whatever body the admin last
+// saved rather than overwriting with stock copy.
+function normalizeTemplateBody(body) {
+  let next = String(body || '');
+
+  // Phone-number scrubs — most bodies embed the number as an "or call"
+  // clause; referral_invite uses a standalone sentence.
+  next = next.replace(/\s*or call \(941\) 297-5749/gi, '');
+  next = next.replace(/Questions\? Call \(941\) 297-5749\./gi, 'Questions? Reply here.');
+  next = next.replace(/\s*or call \{call_number\}/gi, '');
+  next = next.replace(/\s*call \(941\) 297-5749/gi, ' reply here');
+
+  // Greeting consistency.
+  next = next.replace(/^Hi (\{first_name\})/, 'Hello $1');
+  next = next.replace(/^Hi (\{referee_name\})/, 'Hello $1');
+
+  // Opt-out notice on every template (skip ones that already carry it).
+  if (!/reply stop/i.test(next)) {
+    next = `${next.trimEnd()}\n\nReply STOP to opt out.`;
+  }
+
+  return next;
+}
+
+exports._normalizeTemplateBody = normalizeTemplateBody;
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
@@ -198,6 +233,17 @@ exports.up = async function up(knex) {
       .whereIn('template_key', keys)
       .whereNot({ category })
       .update({ category, updated_at: new Date() });
+  }
+
+  // Copy normalization — see normalizeTemplateBody above.
+  const rows = await knex('sms_templates').select('id', 'template_key', 'body');
+  for (const row of rows) {
+    const normalized = normalizeTemplateBody(row.body);
+    if (normalized !== row.body) {
+      await knex('sms_templates')
+        .where({ id: row.id })
+        .update({ body: normalized, updated_at: new Date() });
+    }
   }
 };
 
