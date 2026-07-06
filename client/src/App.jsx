@@ -85,6 +85,16 @@ function FleetRedirect() {
   return <Navigate to={`/admin/equipment?${params.toString()}`} replace />;
 }
 
+// Legacy review funnel consolidated onto /rate. Old /review/:token links
+// (already texted to customers, plus the tech-trigger response URL) redirect
+// to the modern RatePage so there is a single review experience. Token +
+// any tracking query string are preserved.
+function ReviewLinkRedirect() {
+  const { token } = useParams();
+  const location = useLocation();
+  return <Navigate to={`/rate/${token}${location.search}`} replace />;
+}
+
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
@@ -183,7 +193,6 @@ const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const TrackPreviewPage = lazyWithRetry(() => import('./pages/TrackPreviewPage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
-const ReviewPage = lazyWithRetry(() => import('./pages/ReviewPage'));
 const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
 const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
@@ -301,7 +310,7 @@ export default function App() {
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportViewPage /></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ServiceOutlinePage /></Suspense>} />
-          <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
+          <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
           <Route path="/quote" element={<Navigate to="/estimate" replace />} />
