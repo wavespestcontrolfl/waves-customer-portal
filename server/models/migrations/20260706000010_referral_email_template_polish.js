@@ -55,6 +55,24 @@ exports.up = async function up(knex) {
       updated_at: new Date(),
     });
 
+  // Default preview fixture must satisfy the new required variable or the
+  // admin preview/test-send path fails with a missing-variable error.
+  if (await knex.schema.hasTable('email_template_fixtures')) {
+    const fixture = await knex('email_template_fixtures')
+      .where({ template_id: template.id, is_default: true })
+      .first('id', 'payload');
+    if (fixture) {
+      let payload = {};
+      try { payload = typeof fixture.payload === 'object' && fixture.payload !== null ? fixture.payload : JSON.parse(fixture.payload || '{}'); } catch { payload = {}; }
+      if (!payload.cta_label) {
+        payload.cta_label = 'View my referral balance';
+        await knex('email_template_fixtures')
+          .where({ id: fixture.id })
+          .update({ payload: JSON.stringify(payload), updated_at: new Date() });
+      }
+    }
+  }
+
   if (!template.active_version_id) return;
   const version = await knex('email_template_versions')
     .where({ id: template.active_version_id })

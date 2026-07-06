@@ -64,6 +64,9 @@ exports.up = async function up(knex) {
   const visits = await knex('scheduled_services')
     .where('status', 'completed')
     .where('service_type', 'ilike', BOND_MATCH)
+    // Anchor visits only — quarterly follow-up children copy the parent
+    // service_type and must not each start their own bond term.
+    .whereNull('recurring_parent_id')
     .select('id', 'customer_id', 'service_type', 'completed_at', 'actual_end_time', 'check_out_time', 'scheduled_date');
   for (const v of visits) {
     const existing = await knex('termite_bonds').where({ scheduled_service_id: v.id }).first('id');

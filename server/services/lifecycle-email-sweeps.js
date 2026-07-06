@@ -53,6 +53,10 @@ async function syncTermiteBonds() {
   const visits = await db('scheduled_services')
     .where('scheduled_services.status', 'completed')
     .where('scheduled_services.service_type', 'ilike', BOND_MATCH)
+    // Quarterly bond FOLLOW-UPS copy the parent service_type (recurring
+    // seeder) — only the establishing anchor visit starts a bond term, or a
+    // 1-year bond would get a renewal notice per quarterly child.
+    .whereNull('scheduled_services.recurring_parent_id')
     .leftJoin('termite_bonds', 'termite_bonds.scheduled_service_id', 'scheduled_services.id')
     .whereNull('termite_bonds.id')
     .select(

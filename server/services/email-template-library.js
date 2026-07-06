@@ -516,14 +516,23 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const serviceFooter = glassChrome
     ? (isInvoiceTemplate ? stripeFooterLine() : null)
     : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${blockPalette().footerLink};text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.${isInvoiceTemplate ? stripeFooterLine() : ''}`;
-  const footerNote = mode === 'marketing' ? null : serviceFooter;
+  // A marketing-stream template pinned to service chrome (referral.invite)
+  // is still a commercial email — the visible unsubscribe link must survive
+  // the wrapper swap. unsubscribeUrl is only resolved for marketing-stream
+  // sends, so plain service emails are unaffected.
+  const unsubFooterHtml = unsubscribeUrl
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from referral emails.`
+    : null;
+  const footerNote = mode === 'marketing'
+    ? null
+    : [serviceFooter, unsubFooterHtml].filter(Boolean).join(' ') || null;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
     : bodyText;
-  const text = mode === 'marketing'
+  const text = (mode === 'marketing' || unsubscribeUrl)
     ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
     : textBody;
 

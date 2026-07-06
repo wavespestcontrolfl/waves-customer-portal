@@ -433,6 +433,10 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
     const label = String(raw || '').trim();
     if (!label) continue;
     const lower = label.toLowerCase();
+    // 'service' is the smsServiceLabel fallback placeholder, not a real
+    // component — merging it produces "service & Quarterly Pest Control".
+    // It only survives via the final fallback when NO real label exists.
+    if (lower === 'service') continue;
     // Same containment semantics the pairwise merge had: skip a candidate an
     // existing part already covers; a candidate that covers existing parts
     // replaces them.
@@ -442,7 +446,7 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
     }
     parts.push(label);
   }
-  if (parts.length === 0) return String(nextLabel || '').trim();
+  if (parts.length === 0) return String(nextLabel || '').trim() || 'service';
   if (parts.length === 1) return parts[0];
   // List-style join (owner call 07-06): "A, B & C".
   return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
