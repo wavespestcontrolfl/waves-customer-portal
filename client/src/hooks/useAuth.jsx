@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
 import { flushNativePushToken } from '../native/nativePush';
 
@@ -9,6 +9,7 @@ export function AuthProvider({ children }) {
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const retryTimer = useRef(null);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -20,9 +21,19 @@ export function AuthProvider({ children }) {
     } else {
       setLoading(false);
     }
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    };
   }, []);
 
-  const loadCustomer = useCallback(async () => {
+  const loadCustomer = useCallback(async (attempt) => {
+    // `refreshCustomer` gets used as an event handler, so `attempt` may be
+    // anything — only our own retry chain passes a number.
+    const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
     try {
       const data = await api.getMe();
       setCustomer(data);
@@ -38,14 +49,24 @@ export function AuthProvider({ children }) {
       // or server 5xx on launch must not wipe a valid 30-day login.
       if (err?.status === 401 || err?.status === 403 || err?.sessionExpired) {
         api.clearTokens();
-      } else {
-        setError('Unable to reach the server. Your saved session will resume once you’re back online.');
+        setCustomer(null);
+        setProperties([]);
+        setLoading(false);
+        return;
       }
-      setCustomer(null);
-      setProperties([]);
-    } finally {
-      setLoading(false);
+      // Transient failure: keep the session check PENDING instead of letting
+      // a null customer bounce a valid saved session through ProtectedRoute
+      // to /login with nothing scheduled to bring it back. An already-loaded
+      // session keeps its data; startup stays on the checking screen (which
+      // surfaces `error`) and retries with capped backoff.
+      setError('Unable to reach the server. Your saved session will resume once you’re back online.');
+      retryTimer.current = setTimeout(
+        () => { loadCustomer(n + 1); },
+        Math.min(30000, 2000 * 2 ** Math.min(n, 4)),
+      );
+      return;
     }
+    setLoading(false);
   }, []);
 
   const sendCode = async (phone) => {
@@ -74,6 +95,10 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
     api.clearTokens();
     setCustomer(null);
     setProperties([]);

@@ -4640,7 +4640,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       return null; // share sheet canceled
     }
     try {
-      await navigator.clipboard?.writeText(reportUrl);
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Link copied" without an actual write.
+      if (typeof navigator.clipboard?.writeText !== 'function') return null;
+      await navigator.clipboard.writeText(reportUrl);
       trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
       return 'copied';
     } catch {

@@ -640,6 +640,37 @@ function NotFoundCard() {
   );
 }
 
+// A valid token that hit a server hiccup (500/502/429) is NOT an expired
+// link — telling the customer their link is invalid during an outage sends
+// them to the phone line for nothing. Offer a retry instead.
+function TransientErrorCard({ onRetry }) {
+  return (
+    <Card>
+      <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
+        We couldn&rsquo;t load your tracker
+      </div>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
+        Something went wrong on our end — your tracking link is still good.
+        Try again in a moment, or call us at{' '}
+        <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>.
+      </div>
+      <div style={{ textAlign: 'center', marginTop: 16 }}>
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            minHeight: 44, padding: '0 24px', borderRadius: 10, border: 'none',
+            background: TRACK_SURFACE.text, color: '#fff',
+            fontSize: 15, fontWeight: 700, cursor: 'pointer',
+          }}
+        >
+          Try again
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
   useGlassSurface(true, 'full');
@@ -731,7 +762,22 @@ export default function TrackPage() {
   }, [data?.meta?.pollIntervalSeconds, fetchTrack, notFound]);
 
   if (loading) return <Page><SkeletonCard /></Page>;
-  if (notFound || !data) return <Page><NotFoundCard /></Page>;
+  if (notFound) return <Page><NotFoundCard /></Page>;
+  if (!data) {
+    // No 404 and no data: either a transient failure (retryable) or an
+    // unrecognized payload — only a real 404 earns the "expired" card.
+    return (
+      <Page>
+        <TransientErrorCard
+          onRetry={async () => {
+            setLoading(true);
+            await fetchTrack();
+            setLoading(false);
+          }}
+        />
+      </Page>
+    );
+  }
 
   return (
     <Page>

@@ -275,7 +275,7 @@ function RoutesErrorBoundary({ children }) {
 }
 
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, loading, error } = useAuth();
   const location = useLocation();
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
@@ -315,7 +315,9 @@ function ProtectedRoute({ children }) {
             }}
           />
           <div style={{ fontSize: 17, fontWeight: 850, fontFamily: FONTS.heading }}>Loading your portal</div>
-          <p style={{ fontSize: 14, color: '#475569', margin: '6px 0 0', lineHeight: 1.45 }}>Checking your secure session.</p>
+          {/* While useAuth retries a transient failure, tell the customer
+              what's happening instead of an indefinite generic check. */}
+          <p style={{ fontSize: 14, color: '#475569', margin: '6px 0 0', lineHeight: 1.45 }}>{error || 'Checking your secure session.'}</p>
         </div>
         <style>{`
           @keyframes portalPulse {

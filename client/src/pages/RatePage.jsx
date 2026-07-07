@@ -186,6 +186,14 @@ export default function RatePage() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ score, feedback, highlights }),
       });
+      // 409 = the server already has this feedback (first POST committed but
+      // the response was lost, or a second tab submitted). Retrying forever
+      // would trap saved feedback behind an error — it's a success.
+      if (r.status === 409) {
+        setScreen('success');
+        setSubmitting(false);
+        return;
+      }
       if (!r.ok) throw new Error(`Submit failed (${r.status})`);
       const result = await r.json();
       if (result.redirect) {
