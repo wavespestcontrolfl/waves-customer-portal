@@ -76,6 +76,33 @@ async function checkConsentForPurpose(input, policy, contactState) {
 
   const prefs = contactState.prefs;
 
+  // Per-purpose delivery-channel column (sms | email | both). 'email' means
+  // the customer chose email-only delivery for this notification type, so the
+  // SMS leg is suppressed — the email version arrives via its own lane
+  // (receipt / billing emails to the billing address). Only gates SMS: an
+  // email send through the wrapper must not be blocked by an email-preferring
+  // customer. And only when a deliverable email actually exists — the portal
+  // UI can't save an email-only choice without one, but a direct API write
+  // (or an email removed later) could; suppressing the text then would leave
+  // the customer with NO channel, so SMS stays the fallback.
+  // Checked BEFORE the opt-out switches below: an email-only customer who has
+  // also texted STOP (or toggled a purpose off) must still read as
+  // CHANNEL_EMAIL_ONLY, not SMS_OPTED_OUT — callers like the receipt-delivery
+  // queue treat the channel preference as an expected skip but an opt-out on
+  // the SMS leg as an actionable failure, and would retry forever a receipt
+  // whose email leg already delivered. The SMS is suppressed either way.
+  if (policy.channelColumn && input.channel === 'sms' && prefs[policy.channelColumn] === 'email') {
+    const deliverableEmail = prefs.billing_email || contactState.customer?.email;
+    if (deliverableEmail) {
+      return {
+        ok: false,
+        code: 'CHANNEL_EMAIL_ONLY',
+        reason: `Recipient prefers email-only delivery for the "${policy.channelColumn}" notification type`,
+      };
+    }
+    logger.warn(`[messaging:consent] ${policy.channelColumn}='email' but no billing/account email on file — SMS stays the fallback, subject to the opt-out gates`);
+  }
+
   // Master kill-switch. Set to false on STOP keyword (existing twilio-webhook
   // logic) and on any opt-out detection by detectOptOut().
   if (prefs.sms_enabled === false) {
@@ -97,27 +124,6 @@ async function checkConsentForPurpose(input, policy, contactState) {
         reason: `Recipient has disabled the "${prefsColumn}" notification type`,
       };
     }
-  }
-
-  // Per-purpose delivery-channel column (sms | email | both). 'email' means
-  // the customer chose email-only delivery for this notification type, so the
-  // SMS leg is suppressed — the email version arrives via its own lane
-  // (receipt / billing emails to the billing address). Only gates SMS: an
-  // email send through the wrapper must not be blocked by an email-preferring
-  // customer. And only when a deliverable email actually exists — the portal
-  // UI can't save an email-only choice without one, but a direct API write
-  // (or an email removed later) could; suppressing the text then would leave
-  // the customer with NO channel, so SMS stays the fallback.
-  if (policy.channelColumn && input.channel === 'sms' && prefs[policy.channelColumn] === 'email') {
-    const deliverableEmail = prefs.billing_email || contactState.customer?.email;
-    if (deliverableEmail) {
-      return {
-        ok: false,
-        code: 'CHANNEL_EMAIL_ONLY',
-        reason: `Recipient prefers email-only delivery for the "${policy.channelColumn}" notification type`,
-      };
-    }
-    logger.warn(`[messaging:consent] ${policy.channelColumn}='email' but no billing/account email on file — sending SMS instead`);
   }
 
   // Marketing-grade consent. We require either:

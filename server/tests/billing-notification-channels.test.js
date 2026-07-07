@@ -87,6 +87,57 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.ok).toBe(true);
   });
 
+  test("channel 'email' outranks a STOP opt-out — the skip must read as the channel preference", async () => {
+    // An email-only customer who has also texted STOP gets CHANNEL_EMAIL_ONLY,
+    // not SMS_OPTED_OUT: the receipt-delivery queue treats the channel
+    // preference as an expected skip but an SMS opt-out as an actionable
+    // failure, and would retry forever a receipt whose email leg delivered
+    // (Codex P2 on 8bcfd5c). The SMS is suppressed either way.
+    const policy = resolvePolicy('customer', 'payment_receipt');
+    const res = await checkConsentForPurpose(
+      smsInput('payment_receipt'),
+      policy,
+      contactState(
+        { sms_enabled: false, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
+        { id: 'c1', email: 'adam@example.com' },
+      ),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
+  });
+
+  test("channel 'email' with NO deliverable email never texts a STOP customer", async () => {
+    // The no-email fallback re-enters the normal SMS gates — a STOP must
+    // still block the leg with SMS_OPTED_OUT.
+    const policy = resolvePolicy('customer', 'payment_receipt');
+    const res = await checkConsentForPurpose(
+      smsInput('payment_receipt'),
+      policy,
+      contactState(
+        { sms_enabled: false, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
+        { id: 'c1', email: null },
+      ),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('SMS_OPTED_OUT');
+  });
+
+  test("channel 'email' outranks the purpose toggles too — the delivered email IS the receipt", async () => {
+    // Same ordering rationale: 'channel_email_only' lets the queue stamp
+    // receipt_sent_at off the delivered email leg.
+    const policy = resolvePolicy('customer', 'payment_receipt');
+    const res = await checkConsentForPurpose(
+      smsInput('payment_receipt'),
+      policy,
+      contactState(
+        { sms_enabled: true, payment_confirmation_sms: false, payment_receipt_channel: 'email' },
+        { id: 'c1', email: 'adam@example.com' },
+      ),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
+  });
+
   test("channel gate only applies to the sms channel — an email send through the wrapper is not blocked", async () => {
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(

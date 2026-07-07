@@ -1,9 +1,34 @@
+jest.mock('../models/db', () => {
+  const dbMock = jest.fn();
+  dbMock.fn = { now: jest.fn(() => 'NOW') };
+  dbMock.raw = jest.fn((sql) => sql);
+  dbMock.transaction = jest.fn();
+  return dbMock;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn() }));
+jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn() }));
+
+const db = require('../models/db');
+const InvoiceService = require('../services/invoice');
+const { sendReceiptEmail } = require('../services/invoice-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 
 const {
   shouldRetryReceiptDelivery,
   receiptDeliveryFailureError,
 } = ReceiptDeliveryQueue._internals;
+
+// Chainable knex-table stub: every builder method returns the stub, first()
+// resolves `firstResult`, update() resolves 1 and is spyable.
+function tableStub(firstResult) {
+  const q = {};
+  q.where = jest.fn(() => q);
+  q.whereNull = jest.fn(() => q);
+  q.first = jest.fn(() => Promise.resolve(firstResult));
+  q.update = jest.fn(() => Promise.resolve(1));
+  return q;
+}
 
 describe('receipt delivery queue retry policy', () => {
   test('retries when email fails even if SMS succeeded', () => {
@@ -88,5 +113,88 @@ describe('receipt delivery queue retry policy', () => {
       smsResult: { sent: false, reason: 'receipt_texts_opted_out' },
       emailResult: { ok: false, error: 'No receipt recipient email' },
     })).toBe(false);
+  });
+
+  test('does not retry the payment_receipt kill switch — BOTH legs are intentional skips', () => {
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'receipt_texts_opted_out' },
+      emailResult: { ok: false, error: 'receipt_opted_out' },
+    })).toBe(false);
+  });
+});
+
+describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switch)', () => {
+  const job = { id: 'job1', invoice_id: 'inv1', attempts: 1, max_attempts: 5 };
+
+  let invoicesTable;
+  let prefsTable;
+  let jobsTable;
+
+  function primeDb({ invoice, prefs }) {
+    invoicesTable = tableStub(invoice);
+    prefsTable = tableStub(prefs);
+    jobsTable = tableStub(null);
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoicesTable;
+      if (table === 'notification_prefs') return prefsTable;
+      if (table === 'receipt_delivery_jobs') return jobsTable;
+      throw new Error(`unexpected table ${table}`);
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('payment_receipt=false skips the email leg entirely — no email, no receipt_sent_at stamp', async () => {
+    // The kill-switch customer opted out of payment receipts on EVERY
+    // channel. Before this gate the SMS leg skipped as expected while
+    // sendReceiptEmail still delivered (Codex P2 on 8bcfd5c).
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: false },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'receipt_texts_opted_out' });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    // Job completed, invoice NOT stamped (nothing was sent).
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
+    expect(invoicesTable.update).not.toHaveBeenCalled();
+  });
+
+  test('the text-only toggle still emails — payment_confirmation_sms=false is not the kill switch', async () => {
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: true, payment_confirmation_sms: false },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'receipt_texts_opted_out' });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    // The delivered email IS the receipt — stamped so the needs_receipt
+    // filter/batch resend can't double-send.
+    expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
+  });
+
+  test('payer-billed receipts are exempt — homeowner prefs never gate the payer AP email', async () => {
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: 'p1', invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: false },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'payer_billed' });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(sendReceiptEmail).toHaveBeenCalled();
+    // The homeowner's prefs are never even read on the payer path.
+    expect(prefsTable.first).not.toHaveBeenCalled();
   });
 });

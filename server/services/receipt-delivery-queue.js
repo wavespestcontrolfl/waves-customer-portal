@@ -90,7 +90,11 @@ async function claimDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {})
 }
 
 function expectedEmailSkip(result) {
-  return result?.error === 'No receipt recipient email';
+  // 'receipt_opted_out' is the payment_receipt=false kill switch (migration
+  // 104) — the customer opted out of payment receipts entirely, so the email
+  // leg is skipped on purpose, exactly like the no-recipient case.
+  return result?.error === 'No receipt recipient email'
+    || result?.error === 'receipt_opted_out';
 }
 
 function actionableSmsFailure(result) {
@@ -173,9 +177,28 @@ async function processReceiptDeliveryJob(job) {
       logger.warn(`[receipt-delivery-queue] Receipt SMS not sent for invoice ${invoice.invoice_number}: ${smsResult.reason}`);
     }
 
-    emailResult = await sendReceiptEmail(invoice.id, {
-      idempotencyKey: `receipt_email_auto:${invoice.id}`,
-    }).catch((err) => ({ ok: false, error: err.message }));
+    // payment_receipt=false is the full receipt kill switch (migration 104):
+    // the customer opted out of payment receipts on EVERY channel, not just
+    // texts — the estimate-deposit / no-show-fee email legs already honor it
+    // explicitly. Without this gate a kill-switch customer's SMS leg returns
+    // the expected 'receipt_texts_opted_out' skip while the email leg still
+    // delivers. Payer-billed invoices are exempt: their receipt goes to the
+    // third-party payer's AP inbox, which the homeowner's prefs don't govern.
+    // No receipt_sent_at stamp on this path (the stamp below requires a
+    // delivered email) — nothing was sent.
+    let receiptKillSwitch = false;
+    if (!invoice.payer_id) {
+      const prefs = await db('notification_prefs')
+        .where({ customer_id: invoice.customer_id })
+        .first()
+        .catch(() => null);
+      receiptKillSwitch = prefs?.payment_receipt === false;
+    }
+    emailResult = receiptKillSwitch
+      ? { ok: false, error: 'receipt_opted_out' }
+      : await sendReceiptEmail(invoice.id, {
+        idempotencyKey: `receipt_email_auto:${invoice.id}`,
+      }).catch((err) => ({ ok: false, error: err.message }));
     if (actionableEmailFailure(emailResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt email not sent for invoice ${invoice.invoice_number}: ${emailResult.error || 'unknown'}`);
     }
