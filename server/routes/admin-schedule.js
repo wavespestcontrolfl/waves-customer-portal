@@ -2593,6 +2593,90 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Void a visit's stale invoices for a re-service conversion, one at a time,
+// restoring any consumed deposit credit and auto-applied account credit in the
+// SAME transaction — mirroring InvoiceService.voidInvoice, which never voids
+// away credit (a blind bulk void left estimate_deposits rows 'credited'
+// against a void invoice: the deposit never rolled forward and never
+// refunded). Invoices with money in flight — a paid/processing payments row,
+// a recorded payment, or an attached PaymentIntent that is processing/
+// succeeded/unverifiable — are SKIPPED, not voided; a still-cancelable open
+// payment session is cancelled first so its client secret can't confirm
+// against a void invoice. Restore shortfalls THROW by contract so the whole
+// conversion rolls back rather than stranding money. Returns the ids
+// actually voided.
+const RESERVICE_PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
+
+async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) {
+  const { restoreDepositCreditForVoidedInvoice } = require('../services/estimate-deposits');
+  const { restoreAccountCreditForVoidedInvoice } = require('../services/customer-credit');
+  const voided = [];
+  for (const id of ids) {
+    // Lock the row through triage + void: /api/pay/:token/setup can mint a
+    // fresh PaymentIntent onto this invoice concurrently, and the lock
+    // guarantees the PI we triage is the PI the row carries when the void
+    // commits.
+    const invoice = await trx('invoices').where({ id }).forUpdate().first();
+    if (!invoice || ['paid', 'prepaid', 'void'].includes(invoice.status)) continue;
+    // Money guards (mirror InvoiceService.voidInvoice): recorded or in-flight
+    // money means refund/settle, never void.
+    if (invoice.payment_recorded_at) {
+      logger.warn('[admin-schedule] re-service void skipped — payment recorded on invoice', { invoiceId: id });
+      continue;
+    }
+    const inFlight = await trx('payments')
+      .whereIn('status', ['paid', 'processing'])
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(id)])
+      .first('id')
+      .catch(() => null);
+    if (inFlight) {
+      logger.warn('[admin-schedule] re-service void skipped — payment in flight on invoice', { invoiceId: id, paymentId: inFlight.id });
+      continue;
+    }
+    // PI triage: an open /pay session's client secret can still be confirmed
+    // AFTER a void — the webhook would then see a terminal invoice and orphan
+    // the collected money. Cancel a still-cancelable intent before voiding;
+    // SKIP the invoice entirely when the PI has money in flight or can't be
+    // verified/cancelled (leaving it live beats voiding away a charge).
+    const piId = invoice.stripe_payment_intent_id || null;
+    if (piId) {
+      const StripeService = require('../services/stripe');
+      let pi = null;
+      try {
+        pi = await StripeService.retrievePaymentIntent(piId);
+      } catch (err) {
+        logger.warn('[admin-schedule] re-service void skipped — open payment session unverifiable', { invoiceId: id, piId, error: err.message });
+        continue;
+      }
+      if (!pi) {
+        logger.warn('[admin-schedule] re-service void skipped — open payment session unverifiable', { invoiceId: id, piId });
+        continue;
+      }
+      if (RESERVICE_PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+        logger.warn('[admin-schedule] re-service void skipped — payment in flight on open session', { invoiceId: id, piId, piStatus: pi.status });
+        continue;
+      }
+      if (pi.status !== 'canceled') {
+        try {
+          await StripeService.cancelPaymentIntent(piId, { cancellation_reason: 'abandoned' });
+        } catch (err) {
+          logger.warn('[admin-schedule] re-service void skipped — open payment session not cancelable', { invoiceId: id, piId, error: err.message });
+          continue;
+        }
+      }
+    }
+    const updated = await trx('invoices')
+      .where({ id, status: invoice.status })
+      .whereNotIn('status', ['paid', 'prepaid', 'void'])
+      .update(voidUpdate);
+    if (!updated) continue;
+    await restoreDepositCreditForVoidedInvoice({ invoice, trx });
+    await restoreAccountCreditForVoidedInvoice({ invoice, createdBy: 'system:void' }, trx);
+    voided.push(id);
+  }
+  return voided;
+}
+
 // PUT /api/admin/schedule/:id/update-details — edit service fields
 router.put('/:id/update-details', async (req, res, next) => {
   try {
@@ -3109,13 +3193,15 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (hasInvoiceLink) {
           const voidUpdate = { status: 'void' };
           if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidUpdate.updated_at = trx.fn.now();
-          // Non-accrued invoices: bulk void as before.
-          await trx('invoices')
+          // Non-accrued invoices: void one-by-one, restoring consumed
+          // deposit/account credit and skipping in-flight payments.
+          const nonAccruedIds = await trx('invoices')
             .where({ scheduled_service_id: req.params.id })
             .whereNotIn('status', ['paid', 'prepaid', 'void'])
             .whereNull('payer_statement_id')
-            .update(voidUpdate)
-            .catch(() => {});
+            .pluck('id')
+            .catch(() => []);
+          await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });
           // Phase 2 accrued statement children: only void those on an OPEN
           // statement (a frozen statement's line is already billed — leave it),
           // and reroll the parent in the SAME transaction so its total drops the
@@ -3132,8 +3218,8 @@ router.put('/:id/update-details', async (req, res, next) => {
             for (const inv of accrued) {
               const stmt = await trx('payer_statements').where({ id: inv.payer_statement_id }).forUpdate().first('status');
               if (!stmt || stmt.status !== 'open') continue; // frozen → billed line, leave it
-              await trx('invoices').where({ id: inv.id }).whereNotIn('status', ['paid', 'prepaid', 'void']).update(voidUpdate);
-              rerollIds.add(inv.payer_statement_id);
+              const voidedIds = await voidConversionInvoicesRestoringCredits({ trx, ids: [inv.id], voidUpdate });
+              if (voidedIds.length > 0) rerollIds.add(inv.payer_statement_id);
             }
             for (const sid of rerollIds) {
               await require('../services/payer-statements').rollupStatement(sid, trx);
@@ -3193,13 +3279,15 @@ router.put('/:id/update-details', async (req, res, next) => {
                 if (hasInvLink) {
                   const voidSiblings = { status: 'void' };
                   if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidSiblings.updated_at = trx.fn.now();
-                  // Non-accrued siblings: bulk void as before.
-                  await trx('invoices')
+                  // Non-accrued siblings: void one-by-one, restoring consumed
+                  // deposit/account credit and skipping in-flight payments.
+                  const siblingInvoiceIds = await trx('invoices')
                     .whereIn('scheduled_service_id', siblingIds)
                     .whereNotIn('status', ['paid', 'prepaid', 'void'])
                     .whereNull('payer_statement_id')
-                    .update(voidSiblings)
-                    .catch(() => {});
+                    .pluck('id')
+                    .catch(() => []);
+                  await voidConversionInvoicesRestoringCredits({ trx, ids: siblingInvoiceIds, voidUpdate: voidSiblings });
                   // Phase 2 accrued siblings: void only those on an OPEN statement
                   // (frozen = billed line, left) and reroll the parent in the same
                   // txn. GATE off ⇒ no accrued children, so a no-op then.
@@ -3215,8 +3303,8 @@ router.put('/:id/update-details', async (req, res, next) => {
                     for (const inv of accruedSibs) {
                       const stmt = await trx('payer_statements').where({ id: inv.payer_statement_id }).forUpdate().first('status');
                       if (!stmt || stmt.status !== 'open') continue;
-                      await trx('invoices').where({ id: inv.id }).whereNotIn('status', ['paid', 'prepaid', 'void']).update(voidSiblings);
-                      rerollSibs.add(inv.payer_statement_id);
+                      const voidedSibIds = await voidConversionInvoicesRestoringCredits({ trx, ids: [inv.id], voidUpdate: voidSiblings });
+                      if (voidedSibIds.length > 0) rerollSibs.add(inv.payer_statement_id);
                     }
                     for (const sid of rerollSibs) {
                       await require('../services/payer-statements').rollupStatement(sid, trx);
@@ -6264,6 +6352,7 @@ router._test = {
   reportCopyRejection,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
+  voidConversionInvoicesRestoringCredits,
 };
 
 module.exports = router;
