@@ -3700,6 +3700,7 @@ export default function EstimateViewPage() {
               // "expired" card and destroy the preview's purpose.
               disabled={adminDraftPreview || ctaPhase === 'submitting'}
               serviceMode={serviceMode}
+              oneTimeExtrasTotal={serviceMode !== 'one_time' ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
