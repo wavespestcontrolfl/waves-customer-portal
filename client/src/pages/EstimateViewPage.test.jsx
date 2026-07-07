@@ -194,6 +194,51 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
     expect(screen.getByText('Exterior yard area exceeds automatic quote threshold.')).toBeInTheDocument();
   });
+
+  it('marks a prepay-waivable WaveGuard setup row with an asterisk and waiver note', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', detail: 'Membership setup fee', amount: 99, kind: 'charge' }],
+        }}
+        prepayWaivedServices={['waveguard_setup']}
+      />,
+    );
+
+    expect(screen.getByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).toBeInTheDocument();
+    expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
+  });
+
+  it('matches legacy label-only setup rows that carry no service key', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ label: 'WaveGuard Membership Setup', amount: 99, kind: 'charge' }],
+        }}
+        prepayWaivedServices={['waveguard_setup']}
+      />,
+    );
+
+    expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
+  });
+
+  it('shows no waiver note when the fee is not prepay-waivable', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', detail: 'Membership setup fee', amount: 99, kind: 'charge' }],
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
+    // Both the row amount and the one-time total render plain $99 — no asterisk.
+    expect(screen.getAllByText('$99').length).toBe(2);
+    expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
+  });
 });
 
 describe('oneTimePriceCopy', () => {

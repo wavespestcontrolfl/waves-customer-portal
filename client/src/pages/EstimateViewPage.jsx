@@ -1434,11 +1434,20 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service));
   if (items.length === 0) return null;
+  // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
+  // fed by pricing.firstVisitFees so the note only shows when the server says
+  // the fee is actually waivable. Legacy label-only setup rows carry no
+  // `service`, so fall back to the same label match the payment note uses.
+  const prepayWaived = new Set(prepayWaivedServices.filter(Boolean));
+  const isPrepayWaivedRow = (item) => prepayWaived.size > 0 && (
+    prepayWaived.has(item?.service)
+    || (prepayWaived.has('waveguard_setup') && isWaveGuardSetupBreakdownRow(item))
+  );
   const hasQuoteRequired = items.some((item) => item?.quoteRequired === true || item?.kind === 'quote_required');
   const total = excludeServices.length === 0 && Number.isFinite(Number(breakdown?.total))
     ? Number(breakdown.total)
@@ -1456,6 +1465,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           const amount = Number(item.amount) || 0;
           const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
           const isIncluded = !isQuoteRequired && item.kind === 'included';
+          const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
@@ -1477,6 +1487,11 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
                     {quoteNote}
                   </div>
                 ) : null}
+                {showPrepayWaiverNote ? (
+                  <div style={{ fontSize: 12, color: COLORS.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                    * {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
+                  </div>
+                ) : null}
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
@@ -1484,6 +1499,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
                 whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
               }}>
                 {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
+                {showPrepayWaiverNote ? '*' : ''}
               </div>
             </div>
           );
@@ -3250,8 +3266,8 @@ export default function EstimateViewPage() {
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
   // Live price for the glass sticky book bar — it must quote exactly what
-  // the cards quote. Bundles: combinedFrequency.monthly IS the monthly
-  // total CombinedRecurringPriceCard renders as /mo — no cadence multiply.
+  // the cards quote. Bundles: combinedFrequency.monthly IS the bundle's
+  // monthly total (accept charges this /mo number) — no cadence multiply.
   // Single service: the cadence price PriceCard renders.
   const stickyBarPrice = (() => {
     const HIDDEN = { label: null, period: null };
@@ -3287,6 +3303,14 @@ export default function EstimateViewPage() {
   const renderQuoteDetailCards = (readOnly = false, modeOverride = null) => {
     const cardsDisabled = readOnly || ctaPhase === 'submitting';
     const mode = modeOverride || serviceMode;
+    // Service keys whose one-time fee is waived with annual prepay (the
+    // WaveGuard setup fee) — the breakdown card marks these rows with an
+    // asterisk + waiver note when they render inside the one-time list.
+    const prepayWaivedServices = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+      ? pricing.firstVisitFees
+      : (pricing.setupFee ? [pricing.setupFee] : []))
+      .filter((fee) => fee?.waivedWithPrepay === true)
+      .map((fee) => fee.service);
     if (mode === 'recurring') {
       return (
         <>
@@ -3326,6 +3350,7 @@ export default function EstimateViewPage() {
                     excludeServices={setupFees
                       .filter((fee) => !(glassContent && fee.waivedWithPrepay && section.isPest === true))
                       .map((fee) => fee.service)}
+                    prepayWaivedServices={prepayWaivedServices}
                   />
                 ) : null}
               </>
@@ -3355,19 +3380,9 @@ export default function EstimateViewPage() {
           })}
           </div>
 
-          {/* The combined recurring total is the number the invoice/payment
-              copy uses — the customer has to see it before approving, so it
-              stays even though the per-service boxes each show a price. */}
-          {services.length > 1 && renderFlags.showRecurringSummary ? (
-            <CombinedRecurringPriceCard
-              combined={pricing.combinedRecurring}
-              selectedFrequency={combinedFrequency}
-              // Tier pill already renders ONCE above the service boxes
-              // (owner directive: single WaveGuard pill per bundle).
-              waveGuardTier={null}
-            />
-          ) : null}
-
+          {/* The combined "Recurring total" card was removed (owner directive
+              2026-07-07) — the per-service boxes and the sticky book bar carry
+              the bundle's monthly price. */}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
@@ -3393,6 +3408,7 @@ export default function EstimateViewPage() {
               excludeServices={(pricing.firstVisitFees || [])
                 .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
                 .map((fee) => fee.service)}
+              prepayWaivedServices={prepayWaivedServices}
             />
           ) : null}
 
