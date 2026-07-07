@@ -7415,6 +7415,12 @@ router.put('/:token/accept', async (req, res, next) => {
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
         .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        // A locked price means money already committed on a prior accept —
+        // even if some path later returns the row to a sendable status
+        // (e.g. a schedule/re-send after acceptance), a second accept must
+        // not run conversion and invoicing again. Nothing ever clears
+        // price_locked_at; its only writers are the two accept flows.
+        .whereNull('price_locked_at')
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update(acceptedUpdates);
       if (!acceptedCount) {
@@ -13307,6 +13313,7 @@ module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
+module.exports.isNonBillableOneTimeRow = isNonBillableOneTimeRow;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;

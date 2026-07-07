@@ -306,6 +306,10 @@ export default function ReceiptPage() {
   const serviceLabel = invoice.title || service.type || 'Service';
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
+  // Unpaid = the invoice reverted after a failed payment (e.g. an ACH debit
+  // bounced post-redirect) — the old neutral state still said "Receipt /
+  // Total charged / keep this for your records" for money never collected.
+  const unpaid = !paid && !processing && invoice.status !== 'refunded' && !refundState;
   const statusTone = refundState === 'fully_refunded'
     ? 'refunded'
     : refundState === 'partially_refunded'
@@ -323,15 +327,25 @@ export default function ReceiptPage() {
         ? 'Processing'
         : paid
           ? 'Paid'
-          : 'Receipt';
-  const heading = processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt';
+          : unpaid
+            ? 'Not paid'
+            : 'Receipt';
+  const heading = processing
+    ? 'Bank payment submitted'
+    : paid
+      ? 'Payment received'
+      : unpaid
+        ? 'Payment not completed'
+        : 'Receipt';
   const statusDetail = processing
     ? 'Bank payments usually take 3-5 business days to clear. We will send the final receipt after the payment settles.'
     : refundState === 'fully_refunded'
       ? 'This payment has been fully refunded.'
       : refundState === 'partially_refunded'
         ? `${fmtCurrency(payment.refundAmount)} has been refunded. Net paid: ${fmtCurrency(payment.remainingPaid)}.`
-        : 'Keep this receipt for your records.';
+        : unpaid
+          ? 'This payment didn’t go through, so the invoice is still open. Please use your payment link to try again, or call us at (941) 297-5749.'
+          : 'Keep this receipt for your records.';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -514,7 +528,7 @@ export default function ReceiptPage() {
             alignItems: 'center',
           }}>
             <div>
-              <div style={eyebrow}>{processing ? 'Submitted amount' : 'Receipt total'}</div>
+              <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
               <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
                 {fmtCurrency(chargedTotal)}
               </div>
@@ -661,7 +675,7 @@ export default function ReceiptPage() {
             {invoice.creditApplied > 0 && (
               <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
             )}
-            <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
+            <SummaryRow label={processing ? 'Total submitted' : unpaid ? 'Amount due' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
 
             {refundState && payment?.refundAmount > 0 && (
               <>

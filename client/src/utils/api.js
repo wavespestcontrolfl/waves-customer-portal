@@ -102,7 +102,21 @@ class ApiClient {
     return requestPromise;
   }
 
-  async attemptRefresh() {
+  attemptRefresh() {
+    // Single-flight: a tab mount fires 10-15 authed calls, and after in-
+    // session token expiry every one of them 401s and used to fire its own
+    // POST /auth/refresh — a parallel storm that ate the refresh rate limit
+    // (30/15min) and could turn a 429 into a spurious forced logout. All
+    // concurrent 401s now share one in-flight refresh.
+    if (!this.refreshPromise) {
+      this.refreshPromise = this._doRefresh().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  async _doRefresh() {
     try {
       const res = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',

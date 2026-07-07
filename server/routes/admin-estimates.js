@@ -501,15 +501,31 @@ router.post('/:id/send', async (req, res, next) => {
       if (scheduledTime <= new Date()) {
         return res.status(400).json({ error: 'scheduledAt must be in the future' });
       }
-      await db('estimates').where({ id: estimate.id }).update({
-        status: 'scheduled',
-        scheduled_at: scheduledTime,
-        send_method: sendMethod,
-        expires_at: estimateExpiresAt(() => scheduledTime),
-        scheduled_send_attempts: 0,
-        last_send_error: null,
-        updated_at: db.fn.now(),
-      });
+      // Atomic claim, mirroring the immediate-send path below. The
+      // assertEstimateSendable check above ran on a stale read: writing
+      // status='scheduled' unconditionally could clobber an in-flight
+      // 'sending' row (its guarded sent-write then misses and the cron
+      // re-sends — duplicate customer texts) or overwrite a concurrent
+      // accept (money-bearing state lost, and the row re-enters the send
+      // pipeline on a committed conversion).
+      const scheduledClaim = await db('estimates')
+        .where({ id: estimate.id })
+        .whereNull('price_locked_at')
+        .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        .update({
+          status: 'scheduled',
+          scheduled_at: scheduledTime,
+          send_method: sendMethod,
+          expires_at: estimateExpiresAt(() => scheduledTime),
+          scheduled_send_attempts: 0,
+          last_send_error: null,
+          updated_at: db.fn.now(),
+        });
+      if (!scheduledClaim) {
+        return res.status(409).json({
+          error: 'This estimate is mid-send, already accepted, or locked — refresh and retry.',
+        });
+      }
       return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
     }
 
@@ -1382,7 +1398,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
       .first(
         'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
         'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-        'bill_by_invoice', 'created_at', 'accepted_at', 'expires_at',
+        'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'expires_at',
         'customer_name', 'customer_phone', 'customer_email', 'address',
       );
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1442,6 +1458,16 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // annualized monthly, so summing both would double-count.
     const quotedTotal = (monthlyTotal || annualTotal || 0) + (onetimeTotal || 0);
 
+    // Whether the Schedule modal may offer one-step annual prepay for this
+    // quote + the exact amount the prepay invoice would bill (discount + floor
+    // applied). Server-derived so the modal never offers a billing term the
+    // accept would reject. Fail-soft: no prepay offer on error.
+    let prepay = { eligible: false, invoiceTotal: null };
+    try {
+      const e = await require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+      prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+    } catch { prepay = { eligible: false, invoiceTotal: null }; }
+
     const nameParts = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean);
 
     res.json({
@@ -1459,6 +1485,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,
+        prepay,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,

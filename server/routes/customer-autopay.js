@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
 const { isChargeableAutopayMethod } = require('../services/autopay-eligibility');
+const { etDateString } = require('../utils/datetime-et');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
@@ -306,9 +307,15 @@ router.post('/pause', autopayWriteLimiter, async (req, res, next) => {
     const { until, reason } = req.body || {};
     if (!until) return res.status(400).json({ error: 'until date required (YYYY-MM-DD)' });
 
-    const untilDate = new Date(until);
-    if (isNaN(untilDate.getTime())) return res.status(400).json({ error: 'invalid date' });
-    if (untilDate <= new Date()) return res.status(400).json({ error: 'date must be in the future' });
+    // Validate against the ET calendar, not Date-object comparison: for a
+    // 'YYYY-MM-DD' body, new Date() is UTC midnight, which is already past
+    // between 8 PM and midnight ET — rejecting the exact minimum date the
+    // pause UI offers. The eligibility cron compares etDateString the same way.
+    const untilStr = String(until);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(untilStr) || isNaN(new Date(`${untilStr}T12:00:00Z`).getTime())) {
+      return res.status(400).json({ error: 'invalid date' });
+    }
+    if (untilStr <= etDateString(new Date())) return res.status(400).json({ error: 'date must be in the future' });
 
     await db('customers').where({ id: req.customerId }).update({
       autopay_paused_until: until,

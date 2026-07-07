@@ -153,6 +153,12 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
+  // Before the month-based buckets: an every-6-weeks plan (9 visits/year) has
+  // no month-based cadence — without this it fell to the quarterly fallback,
+  // so a 6-week quote pre-filled the modal as quarterly and the prepay
+  // cadence-match preflight downgraded the booking (codex P2). The caller
+  // translates this to the scheduler's custom/42-day representation.
+  if (frequencyKey.includes('every6week')) return 'every_6_weeks';
   if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';
   if (frequencyKey.includes('triannual') || frequencyKey.includes('every4month')) return 'triannual';
   if (frequencyKey.includes('semiannual') || frequencyKey.includes('biannual') || frequencyKey.includes('every6month')) return 'semiannual';
@@ -160,6 +166,7 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   if (frequencyKey.includes('monthly') || frequencyKey === 'month') return 'monthly';
   if (frequencyKey.includes('annual') || frequencyKey.includes('year')) return 'annual';
   if (visits === 12) return 'monthly';
+  if (visits === 9) return 'every_6_weeks';
   if (visits === 6) return 'bimonthly';
   if (visits === 4) return 'quarterly';
   if (visits === 3) return 'triannual';
@@ -267,6 +274,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
 
   const matched = serviceCatalogMatch({ ...line, name }, serviceIndex);
   const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // The scheduler (and Schedule modal) have no native every_6_weeks cadence —
+  // they represent it as a custom 42-day interval. Translate here so the
+  // modal pre-fill books the series the quote actually sold; intervalDays is
+  // carried on the line because the modal's own inference can't recover it
+  // once the catalog match rewrites `frequency`.
+  const schedulerCadence = cadence === 'every_6_weeks' ? 'custom' : cadence;
   return {
     serviceId: matched?.id || null,
     serviceKey: matched?.service_key || line?.service || null,
@@ -278,7 +291,8 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     visitsPerYear: matched?.visits_per_year || line?.visitsPerYear || null,
     duration: matched?.default_duration_minutes || null,
     price,
-    cadence,
+    cadence: schedulerCadence,
+    intervalDays: cadence === 'every_6_weeks' ? 42 : null,
     source: kind,
     estimateId: estimate.id,
   };
@@ -1628,7 +1642,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
         .where({ is_active: true })
@@ -1693,6 +1707,15 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
         payment = await buildEstimatePaymentContext(estimate, {});
       } catch { payment = null; }
+      // Whether the Schedule modal may offer one-step annual prepay for this
+      // quote + the exact amount the prepay invoice would bill (discount +
+      // floor applied). Server-derived so the modal never offers a billing
+      // term the accept would reject. Fail-soft: no prepay offer on error.
+      let prepay = { eligible: false, invoiceTotal: null };
+      try {
+        const e = await require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+        prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+      } catch { prepay = { eligible: false, invoiceTotal: null }; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1708,6 +1731,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         lines,
         deposit,
         payment,
+        prepay,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,
@@ -3152,6 +3176,7 @@ router._private = {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  lockAndAssertNoAnnualPrepayOverlap,
   stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,

@@ -1,7 +1,34 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
-jest.mock('../services/estimate-converter', () => ({ convertEstimate: jest.fn() }));
+jest.mock('../services/estimate-converter', () => ({
+  convertEstimate: jest.fn(),
+  resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
+  // Real-enough commercial helpers for the taxed invoiceTotal path: key from
+  // the row's service field, flat base rate, and a blended rate equal to the
+  // base (single-line commercial quotes in these tests are fully taxable).
+  recurringServiceKey: jest.fn((svc) => svc?.service || null),
+  resolveCommercialPrepayBaseRate: jest.fn(async () => 0.07),
+  resolveCommercialPrepayTaxRate: jest.fn(() => 0.07),
+  // Mirror the real unit-count shape closely enough for the eligibility gate:
+  // count the recurring service lines — explicit or engine-backed (companion-
+  // absorption specifics are covered by the converter's own tests).
+  annualPrepayRecurringUnitCount: jest.fn((data) => (
+    (data?.recurring?.services || data?.engineResult?.lineItems || []).length
+  )),
+}));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
+// Deposit-credit netting in the prepay invoiceTotal preview: default = no
+// pending deposit; individual tests override per-call.
+jest.mock('../services/estimate-deposits', () => ({
+  ...jest.requireActual('../services/estimate-deposits'),
+  pendingDepositCredit: jest.fn(async () => null),
+}));
+// markEstimateManuallyAccepted lazy-requires the shared annual-prepay overlap
+// lock from the admin-customers route only on the prepay path; mock it so the
+// unit test doesn't pull in the route (and its DB) or need trx.raw.
+jest.mock('../routes/admin-customers', () => ({
+  _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue() },
+}));
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
 }));
@@ -17,6 +44,7 @@ const proposalWin = require('../services/proposal-win');
 const {
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
+  prepayBookingEligibility,
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
 
@@ -36,6 +64,10 @@ function makeDb(estimate, claimedOverrides = null) {
         this.statusList = { column, values };
         return this;
       },
+      whereNull(column) {
+        this.nullColumns = [...(this.nullColumns || []), column];
+        return this;
+      },
       whereRaw(clause) {
         this.rawClause = clause;
         return this;
@@ -49,14 +81,19 @@ function makeDb(estimate, claimedOverrides = null) {
           table,
           clause: this.clause,
           statusList: this.statusList,
+          nullColumns: this.nullColumns || null,
           rawClause: this.rawClause,
           patch,
         });
+        // Honor whereNull guards against the estimate row so the claim
+        // fails like the real SQL would (e.g. price_locked_at IS NULL).
+        const guardBlocked = table === 'estimates'
+          && (this.nullColumns || []).some((column) => estimate[column] != null);
         // claimedOverrides simulates the row mutating between the pre-claim SELECT
         // and this guarded UPDATE (e.g. a concurrent proposal-mode toggle).
         const updated = { ...estimate, ...patch, ...(claimedOverrides || {}) };
         return {
-          returning: async () => [updated],
+          returning: async () => (guardBlocked ? [] : [updated]),
         };
       },
       insert: async (row) => {
@@ -167,6 +204,10 @@ describe('estimate manual acceptance', () => {
         recurring: {
           services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }],
         },
+        // The $99 one-time is the WaveGuard setup fee (waived on prepay) — the
+        // accept-transaction one-time guard requires the rows to PROVE the
+        // total non-billable, matching prepayBookingEligibility.
+        oneTime: { total: 99, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
       },
     };
     const { database, updates, inserts } = makeDb(estimate);
@@ -668,11 +709,83 @@ describe('estimate manual acceptance', () => {
       price_locked_by: 'manual_accept',
       pricing_authority: 'LOCKED',
     });
-    // The status guard is what prevents a second accept from re-pricing.
+    // The status + lock guards are what prevent a second accept from
+    // re-pricing or re-converting.
     expect(updates[0].statusList).toEqual({ column: 'status', values: ['sent', 'viewed'] });
+    expect(updates[0].nullColumns).toEqual(['price_locked_at']);
   });
 
-  test('preserves an existing lock timestamp rather than re-stamping it', async () => {
+  test('a prepay_annual accept re-runs the one-time guard INSIDE the transaction (billable one-time work fails closed)', async () => {
+    // The booking preflight runs before the schedule POST and direct accepts
+    // never preflight — the claimed row itself is what must prove no billable
+    // one-time charge, or the converter mints only the recurring annual
+    // invoice and the one-time work is silently dropped.
+    const estimate = {
+      id: 'estimate-prepay-onetime',
+      status: 'viewed',
+      customer_id: 'customer-11',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '250.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+        oneTime: { items: [{ service: 'flea_treatment', name: 'Flea Treatment', price: 250 }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const converter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: converter,
+    })).rejects.toMatchObject({
+      statusCode: 422,
+      message: expect.stringContaining('one-time charge'),
+    });
+
+    expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a prepay_annual accept with only waived/discount one-time rows proceeds to conversion', async () => {
+    const estimate = {
+      id: 'estimate-prepay-ok',
+      status: 'viewed',
+      customer_id: 'customer-12',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '49.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+        oneTime: { total: 49, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const converter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-12', draftInvoiceId: 'inv-prepay' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: converter,
+    });
+
+    expect(converter.convertEstimate).toHaveBeenCalledWith(
+      'estimate-prepay-ok',
+      expect.objectContaining({ billingTerm: 'prepay_annual' }),
+    );
+  });
+
+  test('rejects a pre-locked estimate regressed to sent/viewed instead of rerunning conversion', async () => {
+    // A locked price means a prior accept already committed money
+    // (conversion + invoicing). Even when some path returned the row to a
+    // manually-acceptable status, a second accept must be refused — same
+    // price_locked_at IS NULL claim guard as the public accept path.
     const estimate = {
       id: 'estimate-prelocked',
       status: 'viewed',
@@ -684,14 +797,21 @@ describe('estimate manual acceptance', () => {
       price_locked_at: '2026-05-12T09:00:00.000Z',
     };
     const { database, updates } = makeDb(estimate);
-    await markEstimateManuallyAccepted({
+    const convertEstimate = jest.fn().mockResolvedValue({ customerId: 'customer-10' });
+    await expect(markEstimateManuallyAccepted({
       estimateId: estimate.id,
       adminUserId: 'admin-10',
       database,
       leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
-      estimateConverter: { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-10' }) },
+      estimateConverter: { convertEstimate },
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'This estimate was already accepted and its price locked — accepting it again would duplicate the conversion and invoicing. Review the linked customer/invoices instead.',
     });
-    expect(updates[0].patch.price_locked_at).toBe('2026-05-12T09:00:00.000Z');
+    expect(convertEstimate).not.toHaveBeenCalled();
+    // The claim carried the lock guard and nothing after it ran.
+    expect(updates[0].nullColumns).toEqual(['price_locked_at']);
+    expect(updates).toHaveLength(1);
   });
 });
 
@@ -910,5 +1030,412 @@ describe('commercial proposal win paths (#1917)', () => {
     await expect(markEstimateManuallyAccepted({
       estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
     })).rejects.toThrow(/no billable line items/i);
+  });
+});
+
+describe('prepay-on-book (one-step annual prepay while booking)', () => {
+  test('threads the booked term start + coverage config to the converter and takes the atomic overlap lock', async () => {
+    const estimate = {
+      id: 'estimate-prepay-onbook',
+      status: 'viewed',
+      customer_id: 'customer-onbook',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      declined_at: null,
+      decline_reason: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '99.00',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+        // Setup fee row proves the $99 one-time non-billable (waived on prepay).
+        oneTime: { total: 99, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-onbook', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-onbook' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-onbook',
+      source: 'verbal_annual_prepay_booking',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-07-30',
+      annualPrepayCoverage: {
+        coverageServiceType: 'Quarterly Pest Control Service',
+        coverageVisitCount: 4,
+        coverageCadence: 'quarterly',
+      },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    });
+
+    expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, expect.objectContaining({
+      billingTerm: 'prepay_annual',
+      skipAutoSchedule: true,
+      annualPrepayTermStart: '2026-07-30',
+      coverageServiceType: 'Quarterly Pest Control Service',
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
+    }));
+    // The atomic overlap lock fires (inside the accept txn, on the trx handle,
+    // anchored to the booked date) before conversion.
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
+      database, 'customer-onbook', '2026-07-30', false, expect.any(String),
+    );
+  });
+
+  test('rejects an annual-prepay coverage cadence the coverage scheduler does not support (422)', async () => {
+    // An unsupported cadence would silently normalize to null on the term and
+    // reseed coverage on a visit-count-derived schedule — wrong dates, paid
+    // covered visits could complete-bill again. Fail closed instead.
+    const estimate = {
+      id: 'estimate-prepay-badcadence',
+      status: 'viewed',
+      customer_id: 'customer-badcadence',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-07-30',
+      annualPrepayCoverage: { coverageServiceType: 'Pest Control', coverageVisitCount: 12, coverageCadence: 'custom' },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 422 });
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a plain (no-booking) prepay accept still takes the overlap lock, anchored to today', async () => {
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    lockAndAssertNoAnnualPrepayOverlap.mockClear();
+    const estimate = {
+      id: 'estimate-prepay-plain',
+      status: 'viewed',
+      customer_id: 'customer-plain',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-plain', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-plain' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    });
+
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledTimes(1);
+    const [, customerId, termStart] = lockAndAssertNoAnnualPrepayOverlap.mock.calls[0];
+    expect(customerId).toBe('customer-plain');
+    expect(termStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // No coverage/term-start overrides leak into the converter for a plain accept.
+    const opts = estimateConverter.convertEstimate.mock.calls[0][1];
+    expect(opts.annualPrepayTermStart).toBeUndefined();
+    expect(opts.coverageServiceType).toBeUndefined();
+  });
+
+  test('an overlap thrown by the lock surfaces as a tagged 409 and the estimate is not accepted downstream', async () => {
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    lockAndAssertNoAnnualPrepayOverlap.mockClear();
+    const overlapErr = new Error('Customer already has an annual prepay term through 2027-01-15. Use a start date after 2027-01-15.');
+    overlapErr.annualPrepayOverlap = { error: overlapErr.message, activeTermId: 'term-1', activeTermEnd: '2027-01-15' };
+    lockAndAssertNoAnnualPrepayOverlap.mockRejectedValueOnce(overlapErr);
+    const estimate = {
+      id: 'estimate-prepay-overlap',
+      status: 'viewed',
+      customer_id: 'customer-overlap',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-07-30',
+      annualPrepayCoverage: { coverageServiceType: 'Pest Control', coverageVisitCount: 4, coverageCadence: 'quarterly' },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      annualPrepayOverlap: expect.objectContaining({ activeTermEnd: '2027-01-15' }),
+    });
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+describe('prepayBookingEligibility (one-step prepay gate)', () => {
+  // onetime_total 0: a positive total with no parseable one-time rows is the
+  // fail-closed dropped-work shape and gets its own tests below.
+  const recurring = (services) => ({
+    status: 'sent',
+    monthly_total: '55.00',
+    annual_total: '660.00',
+    onetime_total: '0.00',
+    estimate_data: { recurring: { services } },
+  });
+
+  test('a single recurring service is eligible and returns the resolved invoice total', async () => {
+    const r = await prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(627); // from the mocked resolveAnnualPrepayInvoiceTotal
+  });
+
+  test('an engine-backed quote (recurring rows only under engineResult.lineItems) is eligible', async () => {
+    const r = await prepayBookingEligibility({
+      status: 'viewed',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', monthly: 55, annual: 660 }],
+        },
+      },
+    });
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(627);
+  });
+
+  test('a pending deposit credit nets against the previewed invoice total', async () => {
+    // convertEstimate applies the pending deposit to the minted invoice, so
+    // the modal preview must net it too: 627 - 49 = 578.
+    const { pendingDepositCredit } = require('../services/estimate-deposits');
+    pendingDepositCredit.mockResolvedValueOnce({ amount: 49, lineItem: {} });
+    const r = await prepayBookingEligibility({
+      id: 'estimate-with-deposit',
+      ...recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]),
+    });
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(578);
+    expect(pendingDepositCredit).toHaveBeenCalledWith('estimate-with-deposit');
+  });
+
+  test('a commercial recurring quote returns the TAX-INCLUSIVE invoice total', async () => {
+    // The converter invoices commercial prepay tax-inclusive (blended
+    // commercial rate passed to InvoiceService), so the modal preview must
+    // match: 627 + round(627 * 0.07) = 627 + 43.89.
+    const r = await prepayBookingEligibility(recurring([{ service: 'commercial_pest', name: 'Commercial Pest Control', frequency: 'monthly' }]));
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(670.89);
+  });
+
+  test('a bundled multi-recurring quote is NOT eligible (one covered service per term)', async () => {
+    const r = await prepayBookingEligibility(recurring([
+      { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' },
+      { service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' },
+    ]));
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('multi_service');
+  });
+
+  test('a commercial proposal is not eligible', async () => {
+    const r = await prepayBookingEligibility({
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: { proposal: { enabled: true }, recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('commercial_proposal');
+  });
+
+  test('invoice-mode and one-time-option quotes are not eligible', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    expect((await prepayBookingEligibility({ ...base, bill_by_invoice: true })).reason).toBe('invoice_mode');
+    expect((await prepayBookingEligibility({ ...base, show_one_time_option: true })).reason).toBe('one_time_option');
+  });
+
+  test('a quote with no recurring annual is not eligible', async () => {
+    const r = await prepayBookingEligibility({ monthly_total: '0.00', annual_total: '0.00', onetime_total: '250.00', estimate_data: {} });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('no_recurring_annual');
+  });
+
+  // The schedule POST books the visit BEFORE the accept runs, so eligibility
+  // must mirror the accept transaction's own blockers — anything the accept
+  // would reject has to fail closed pre-booking, not after the rows exist.
+  test('mirrors the accept status window: draft and accepted quotes are not eligible', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    expect((await prepayBookingEligibility({ ...base, status: 'draft' })).reason).toBe('status_not_acceptable');
+    expect((await prepayBookingEligibility({ ...base, status: 'accepted' })).reason).toBe('status_not_acceptable');
+    expect((await prepayBookingEligibility({ ...base, status: undefined })).reason).toBe('status_not_acceptable');
+  });
+
+  test('an expired quote is not eligible', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({ ...base, expires_at: '2020-01-01T00:00:00Z' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('expired');
+  });
+
+  test('unresolved manager approval blocks eligibility (accept would reject it)', async () => {
+    const r = await prepayBookingEligibility(recurring([
+      { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', requiresManagerApproval: true },
+    ]));
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('manager_approval_pending');
+  });
+
+  test('a pending commercial risk-type review blocks eligibility', async () => {
+    const base = recurring([{ service: 'commercial_pest', name: 'Commercial Pest Control', frequency: 'monthly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      estimate_data: { ...base.estimate_data, riskTypeNeedsReview: true },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('commercial_risk_review');
+  });
+
+  test('a billable quoted one-time line blocks one-step prepay (it would be neither scheduled nor invoiced)', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      estimate_data: {
+        ...base.estimate_data,
+        oneTime: { items: [{ service: 'flea_treatment', name: 'Flea Treatment', price: 250 }] },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a WaveGuard setup one-time row does NOT block (prepay waives it)', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      onetime_total: '49.00',
+      estimate_data: {
+        ...base.estimate_data,
+        oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 }] },
+      },
+    });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('a POSITIVE one_time_adjustment row blocks (residual charge, not a discount)', async () => {
+    // isBillableOneTimeInvoiceItem exempts one_time_adjustment by service key;
+    // the eligibility gate must use the isNonBillableOneTimeRow predicate so a
+    // positive adjustment (a real residual charge) still fails closed.
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      onetime_total: '150.00',
+      estimate_data: {
+        ...base.estimate_data,
+        oneTime: { items: [{ service: 'one_time_adjustment', name: 'Other one-time services', price: 150 }] },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a residual one-time charge masked by a nonbillable raw row still blocks (normalized breakdown)', async () => {
+    // acceptanceServiceLists returns the raw rows whenever ANY exist, so the
+    // synthetic positive one_time_adjustment (oneTime.total − rows) only
+    // surfaces through normalizeOneTimeBreakdown — the gate must check both.
+    const pest = { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' };
+    const r = await prepayBookingEligibility({
+      status: 'sent',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '150.00',
+      estimate_data: {
+        recurring: { services: [pest] },
+        result: {
+          recurring: { services: [pest] },
+          // Raw list = one nonbillable discount row; explicit total leaves a
+          // +170 residual that only the normalized breakdown synthesizes.
+          oneTime: { total: 150, items: [{ service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -20 }] },
+        },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a residual masked by a nonbillable raw row blocks for TOP-LEVEL legacy shapes too (no result wrapper)', async () => {
+    // normalizeOneTimeBreakdown reads only wrapped shapes (result /
+    // engineResult) — for top-level estData.oneTime it returns NO items, so
+    // the synthetic one_time_adjustment the wrapped-shape check relies on
+    // never exists, while the raw rows' nonzero length also skips the no-rows
+    // total guard. The gate recomputes the residual (explicit total − rows)
+    // for the unwrapped shape and fails closed on any positive remainder.
+    const pest = { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' };
+    const r = await prepayBookingEligibility({
+      status: 'sent',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '150.00',
+      estimate_data: {
+        recurring: { services: [pest] },
+        oneTime: { total: 150, items: [{ service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -20 }] },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a top-level legacy shape whose rows fully account for the explicit total stays eligible', async () => {
+    const pest = { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' };
+    const r = await prepayBookingEligibility({
+      status: 'sent',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '29.00',
+      estimate_data: {
+        recurring: { services: [pest] },
+        oneTime: {
+          total: 29,
+          items: [
+            { service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 },
+            { service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -20 },
+          ],
+        },
+      },
+    });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('a positive onetime_total with NO parseable one-time rows fails closed (legacy/malformed shape)', async () => {
+    // The rows are what prove a one-time total non-billable; absent rows +
+    // positive total could be sold work the accept would silently drop.
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({ ...base, onetime_total: '99.00' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
   });
 });

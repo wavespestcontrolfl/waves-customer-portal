@@ -65,6 +65,56 @@ function finiteNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+// Default covered visits/year for an annual-prepay term booked in one step,
+// from the booked recurring cadence. The operator can override in the modal.
+// Returns null for non-recurring / unknown cadences (the caller then requires
+// an explicit count or downgrades to a standard accept). Values mirror the
+// converter's CADENCE_VISITS map so a booked cadence and a converter-derived
+// cadence produce the same coverage count.
+function visitsPerYearForCadence(cadence) {
+  switch (String(cadence || '').trim().toLowerCase()) {
+    // monthly_nth_weekday is a 1-month interval (12/year) — kept here so the
+    // preflight reaches the SPECIFIC unsupported-cadence downgrade for it
+    // (prepayCoverageCadenceForPattern rejects it) instead of the generic
+    // unknown-cadence message.
+    case 'monthly': case 'monthly_nth_weekday': return 12;
+    case 'every_6_weeks': return 9;
+    case 'bimonthly': case 'bi_monthly': return 6;
+    case 'quarterly': return 4;
+    case 'triannual': case 'every_4_months': return 3;
+    case 'semiannual': case 'biannual': return 2;
+    case 'annual': case 'yearly': return 1;
+    default: return null;
+  }
+}
+
+// The COVERAGE cadence stored on an annual-prepay term for a booked recurring
+// pattern (also normalizes a QUOTE row's frequency label for the cadence-match
+// guard, hence the separator normalization). MUST be a value
+// annual-prepay-renewals' normalizeCoverageCadence accepts — an unsupported
+// value normalizes to null there and the term's renewal/stamping math silently
+// falls back to a visit-count-derived schedule, seeding wrong dates so paid
+// covered visits can complete-bill again. Patterns with no supported mapping
+// return null and the prepay-on-book preflight downgrades to a standard
+// accept — fail closed, even when the operator supplied an explicit visit
+// count. monthly_nth_weekday is deliberately UNSUPPORTED: an ongoing booking
+// pre-seeds only the first visits, and the coverage seeder fills the rest
+// from the stored cadence with same-day-of-month math and no nth/weekday
+// context — a "3rd Tuesday" route would get its remaining prepaid visits on
+// arbitrary dates.
+function prepayCoverageCadenceForPattern(cadence) {
+  switch (String(cadence || '').trim().toLowerCase().replace(/[\s-]+/g, '_')) {
+    case 'monthly': return 'monthly';
+    case 'every_6_weeks': return 'every_6_weeks';
+    case 'bimonthly': case 'bi_monthly': return 'bimonthly';
+    case 'quarterly': return 'quarterly';
+    case 'triannual': case 'every_4_months': return 'triannual';
+    case 'semiannual': case 'biannual': return 'semiannual';
+    case 'annual': case 'yearly': return 'annual';
+    default: return null;
+  }
+}
+
 // Does an unowned (customer_id NULL) quote's captured contact match the customer
 // we're about to book it against? Compares the last 10 phone digits (phones are
 // stored mixed E.164 / 10-digit) or a lowercased email. Used to gate attaching a
@@ -1693,13 +1743,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
+    // Optional: accept the linked open quote as annual prepay on book (creates
+    // the pending prepay invoice + renewal term in the same step as the
+    // booking). Only 'prepay_annual' is honored; anything else falls through
+    // to the standard verbal-yes accept. Ineligible combinations downgrade to
+    // a standard accept with a booking warning — never a half-applied prepay.
+    const bookingBillingTerm = req.body.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
     let linkedEstimate = null;
     let estimateAutoAccepted = false;
+    let annualPrepayResult = null;
     const bookingWarnings = [];
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
-        .first('id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at');
+        .first(
+          'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
+          'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option',
+        );
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
       // Reject only a genuine MISMATCH (estimate owned by a different customer).
       // A lead / standalone quote carries customer_id = NULL — that's bookable:
@@ -1745,6 +1805,202 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // unowned case, which acceptEstimateOnBook does not).
     const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
     const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
+
+    // Resolve the prepay-on-book decision now that the estimate is validated.
+    // Honor billingTerm='prepay_annual' ONLY for a server-eligible open quote on
+    // a recurring booking with a derivable coverage count, no add-ons, and no
+    // in-person prepay collection — otherwise downgrade to a standard accept +
+    // warn, so we never half-apply prepay (a booked visit with no invoice/term,
+    // or a term whose coverage can't reconcile with what was booked). Coverage
+    // uses the BOOKED service_type/cadence + the operator's visit count so the
+    // term stamps THIS booked series prepaid on payment (no completion
+    // double-bill) instead of seeding a duplicate one.
+    let bookingBillingTermEffective = bookingBillingTerm;
+    let annualPrepayCoverage = null;
+    if (bookingBillingTerm === 'prepay_annual') {
+      const { prepayBookingEligibility } = require('../services/estimate-manual-acceptance');
+      const { parseAnnualPrepayVisitCount } = require('./admin-customers')._private;
+      const downgrade = (warning) => {
+        bookingBillingTermEffective = 'standard';
+        bookingWarnings.push(warning);
+      };
+      const visitOverride = req.body.prepayVisitCount !== undefined && req.body.prepayVisitCount !== null && req.body.prepayVisitCount !== ''
+        ? parseAnnualPrepayVisitCount(req.body.prepayVisitCount)
+        : {};
+      // The modal books an every-6-weeks series as recurringPattern='custom'
+      // with recurringIntervalDays=42 (the scheduler's representation). For
+      // prepay cadence math that IS every_6_weeks — the coverage seeder
+      // supports it — so normalize before deriving coverage, else valid
+      // 6-week quotes downgrade as unsupported-cadence.
+      const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
+        ? 'every_6_weeks'
+        : recurringPattern;
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern);
+      const prepayCoverageCadence = prepayCoverageCadenceForPattern(prepayBookedPattern);
+      const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
+      const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
+      // The quote's (single) recurring service name + cadence — sourced
+      // through the same acceptanceServiceLists extractor the eligibility
+      // check and converter use, so engine-backed estimates (quote wizard /
+      // IB drafts, whose recurring rows live only under
+      // estimate_data.engineResult.lineItems) resolve too instead of silently
+      // skipping the mismatch guards. Both guard the same invariant: the
+      // prepay invoice prices the QUOTED plan, so coverage must stamp that
+      // plan — a different booked service would cover the wrong visits while
+      // the quoted service billed normally, and a different booked cadence
+      // (quoted quarterly, booked monthly) would stamp 12 visits as covered
+      // for a 4-visit annual price. Fuzzy (canonical-key) name match
+      // tolerates label drift like "Pest Control" vs "Quarterly Pest Control
+      // Service".
+      const { quoteRecurringName, quoteRecurringCadence } = (() => {
+        try {
+          const data = typeof linkedEstimate?.estimate_data === 'string'
+            ? JSON.parse(linkedEstimate.estimate_data)
+            : (linkedEstimate?.estimate_data || {});
+          const { acceptanceServiceLists } = require('./estimate-public');
+          const converter = require('../services/estimate-converter');
+          const list = acceptanceServiceLists(data).recurringSvcList || [];
+          const svc = list[0] || {};
+          // For PEST plans the accepted customerSelection.frequency IS the
+          // visit cadence the customer chose — the plan the quoted annual is
+          // priced for — and beats stale or missing quote-time line cadence
+          // (the converter's primaryUsesAcceptFrequency rule). Pest only:
+          // for lawn the selection stores the BILLING cadence, not the visit
+          // cadence, and must never be read as one.
+          const pestSelectionCadence = converter.recurringServiceKey(svc) === 'pest_control'
+            ? prepayCoverageCadenceForPattern(data.customerSelection?.frequency)
+            : null;
+          // The line's RAW frequency fields through the coverage mapper
+          // FIRST: every_6_weeks is a supported coverage cadence but the
+          // shared normalizeRecurringPattern inside explicitServiceCadence
+          // doesn't know it — the literal key normalizes to null and its 9
+          // visits/year alias to bimonthly — so a 6-week quote would never
+          // match its 6-week booking and always downgrade (pre-push P1).
+          // 9 visits/year with no frequency token is the same plan
+          // (cadenceFromEstimateLine maps it to custom/42 for the modal, so
+          // the booking arrives as every_6_weeks and must match here too).
+          // Only these exact shapes short-circuit; everything else still
+          // resolves through the converter's full precedence.
+          const rawLineVisits = Number(svc.visitsPerYear ?? svc.visits_per_year ?? svc.visits ?? svc.apps);
+          const rawLineCadence = [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
+            .map((value) => prepayCoverageCadenceForPattern(value))
+            .find(Boolean)
+            || (rawLineVisits === 9 ? 'every_6_weeks' : null);
+          return {
+            // Engine lineItems rows carry `service` (canonical key) / `label`
+            // rather than the manual rows' name fields — accept either shape.
+            quoteRecurringName: svc.name || svc.serviceName || svc.service_name || svc.service || svc.label || null,
+            // Pest selection first, then the SAME converter logic conversion
+            // uses (frequency-ish fields, then visitsPerYear/apps-style visit
+            // counts, then pattern text in the display name — see
+            // explicitServiceCadence), normalized through the same mapper as
+            // the booked pattern so the comparison is apples-to-apples. Null
+            // when unresolvable — the guard below fails CLOSED on that,
+            // never skips.
+            quoteRecurringCadence: pestSelectionCadence
+              || rawLineCadence
+              || prepayCoverageCadenceForPattern(converter.explicitServiceCadence(svc)),
+          };
+        } catch { return { quoteRecurringName: null, quoteRecurringCadence: null }; }
+      })();
+      const { serviceMatchesCoverage } = require('../services/annual-prepay-renewals');
+      const prepayEligibility = (linkedEstimate && acceptEstimateOnBook)
+        ? await prepayBookingEligibility(linkedEstimate)
+        : null;
+      if (!linkedEstimate || !acceptEstimateOnBook) {
+        downgrade('Appointment booked as standard — annual prepay on book needs an open (not yet accepted) linked quote. Use the estimate’s Annual Prepay action instead.');
+      } else if (!prepayEligibility.eligible) {
+        // Operator-facing WHY for the common blockers — eligibility now also
+        // mirrors the accept's own guards, so "not eligible" spans more than
+        // the service-mix rule and a bare generic message would send the
+        // operator hunting.
+        const reasonPhrase = {
+          one_time_items: 'the quote includes a one-time charge that a one-step prepay booking would neither schedule nor invoice',
+          manager_approval_pending: 'the quote still needs manager approval before it can be accepted',
+          commercial_risk_review: 'the quote needs its commercial business type set first',
+          status_not_acceptable: 'only sent or viewed quotes can be accepted while booking',
+          expired: 'the quote has expired',
+          multi_service: 'annual prepay covers a single recurring service and this quote has more than one',
+        }[prepayEligibility.reason]
+          || 'this quote is not prepay-eligible for one-step booking (it needs a single recurring service)';
+        downgrade(`Appointment booked, but annual prepay was not applied — ${reasonPhrase}. Use the estimate’s Annual Prepay action instead.`);
+      } else if (visitOverride.error) {
+        downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
+      } else if (!isRecurring || !coverageVisitCount) {
+        downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
+      } else if (!prepayCoverageCadence) {
+        downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
+      } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
+        && visitOverride.visitCount !== visitsPerYearForCadence(prepayBookedPattern)) {
+        // The covered-visit count is FIXED by the cadence for quote-derived
+        // prepay — the invoice prices exactly that plan. Any other count
+        // corrupts money: higher → splitCoverageAmount divides the prepaid
+        // total by more visits than the term can seed (excess prepaid value
+        // never stamps, later visits bill again); lower → the full quoted
+        // annual is invoiced but only that many visits stamp covered and the
+        // rest of the year bills again on top. The modal no longer sends a
+        // count; this rejects crafted/stale requests. Fail closed.
+        downgrade(`Appointment booked as standard — the covered-visit count for a ${prepayBookedPattern} annual prepay is fixed at ${visitsPerYearForCadence(prepayBookedPattern)} by the quoted plan (got ${visitOverride.visitCount}). Omit the count to use the cadence default.`);
+      } else if (!quoteRecurringCadence) {
+        // Can't prove the booked cadence matches the quoted plan — fail
+        // CLOSED (money correctness), never skip the comparison: the prepay
+        // invoice prices the quoted plan, so an unverifiable cadence could
+        // stamp the wrong number of covered visits for that price.
+        downgrade('Appointment booked as standard — the quoted plan’s cadence could not be determined, so annual prepay can’t verify the booked series matches what was sold. Use the estimate’s Annual Prepay action or set up prepay from Customer 360.');
+      } else if (quoteRecurringCadence !== prepayCoverageCadence) {
+        // The prepay invoice prices the QUOTED cadence's annual — booking a
+        // different cadence would stamp a different number of visits as
+        // covered for that price (quoted quarterly → booked monthly = 12
+        // covered visits for a 4-visit annual). Fail closed.
+        downgrade(`Appointment booked as standard — annual prepay must be booked on the quoted cadence (${quoteRecurringCadence}), not ${prepayCoverageCadence}: the prepay invoice prices the quoted plan. Re-quote or set up prepay from Customer 360.`);
+      } else if (hasAddons) {
+        downgrade('Appointment booked as standard — annual prepay can’t be combined with add-on lines (coverage would suppress their billing at completion). Book the add-ons as a separate appointment or bill standard.');
+      } else if (hasBoosters) {
+        downgrade('Appointment booked as standard — annual prepay can’t be combined with booster months (boosters would compete with the covered visits for the year’s coverage). Set up prepay from Customer 360, or book without boosters.');
+      } else if (req.body.prepaid) {
+        downgrade('Appointment booked as standard — collecting a prepayment in person and invoicing an annual prepay are mutually exclusive. Pick one.');
+      } else if (quoteRecurringName && !serviceMatchesCoverage({ service_type: serviceType }, quoteRecurringName)) {
+        downgrade(`Appointment booked as standard — annual prepay must be booked for the quoted recurring service (${quoteRecurringName}), not ${serviceType}.`);
+      } else {
+        // Don't mint a SECOND overlapping prepay term/invoice — mirror the
+        // Customer 360 overlap guard as a fast preflight. The atomic advisory
+        // lock inside the accept transaction is the race-safe backstop.
+        let overlapTerm = null;
+        try {
+          overlapTerm = await db('annual_prepay_terms')
+            .where({ customer_id: customerId })
+            .where(function overlapStatus() {
+              this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+                .orWhere(function lapsedRenewalStillInTerm() {
+                  this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+                });
+            })
+            .andWhere('term_end', '>=', dateOnly(scheduledDate) || scheduledDate)
+            .first('id', 'term_end');
+        } catch { overlapTerm = null; }
+        if (overlapTerm) {
+          downgrade('Appointment booked as standard — this customer already has an annual prepay term covering this date. Manage prepay from Customer 360 to avoid a duplicate invoice/term.');
+        } else {
+          annualPrepayCoverage = {
+            coverageServiceType: String(serviceType).slice(0, 100),
+            coverageVisitCount,
+            // The NORMALIZED coverage cadence, never the raw booking pattern —
+            // see prepayCoverageCadenceForPattern.
+            coverageCadence: prepayCoverageCadence,
+          };
+        }
+      }
+    }
+
+    // An annual-prepay booking MUST bill per application until the prepay
+    // invoice is paid — the per-visit coverage stamp is what suppresses
+    // billing after payment, and the seeder's own coverage rows are
+    // deliberately create_invoice_on_complete=true. The modal always sends
+    // createInvoice for these; forcing it here means a crafted/omitted flag
+    // can't book a prepay series whose pending-window completions bill
+    // nothing (codex P2).
+    const createInvoiceEffective = bookingBillingTermEffective === 'prepay_annual' ? true : !!createInvoice;
+
     const zone = getZone(customer?.city, customer?.zip);
     // Owner directive (2026-07-03): every service call defaults to 60 minutes;
     // the service-record default or an explicit tech-entered duration wins below.
@@ -1889,7 +2145,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
       if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
       if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = !!createInvoice;
+      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceEffective;
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
@@ -1963,7 +2219,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
         if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
+        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceEffective;
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
@@ -2026,7 +2282,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
           if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
           if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = !!createInvoice;
+          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceEffective;
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
           // Mirror only add-ons due on this booster date; one-time and
@@ -2103,31 +2359,94 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // warning, rather than failing the request. Skipped if the attach above lost
     // a race — accepting would convert the quote against the wrong customer.
     if (acceptEstimateOnBook && !estimateAttachRaceLost) {
+      // Link the just-created rows to the estimate once it's a recorded win —
+      // shared by the prepay path and the overlap-race standard fallback.
+      const linkCreatedRowsToEstimate = async () => {
+        if (!(cols.source_estimate_id && createdAppointments.length)) return;
+        try {
+          await db('scheduled_services')
+            .whereIn('id', createdAppointments.map((a) => a.id))
+            .update({ source_estimate_id: linkedEstimateId });
+        } catch (e) {
+          logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
+        }
+      };
       try {
         const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
         const acceptResult = await markEstimateManuallyAccepted({
           estimateId: linkedEstimateId,
           adminUserId: req.technicianId || null,
-          source: 'verbal_yes_booking',
+          source: bookingBillingTermEffective === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
+          billingTerm: bookingBillingTermEffective,
+          // Anchor the prepay renewal term to the visit we just booked — the
+          // converter can't see the row (it's linked after acceptance) and
+          // would otherwise start the term today, letting a future-dated
+          // booking renew before its first service.
+          annualPrepayTermStart: bookingBillingTermEffective === 'prepay_annual' ? dateOnly(scheduledDate) : null,
+          // Coverage from the BOOKED series (service_type / operator's visit
+          // count / booked cadence) so on payment the term attaches + stamps
+          // the rows this request just created instead of seeding duplicates.
+          annualPrepayCoverage: bookingBillingTermEffective === 'prepay_annual' ? annualPrepayCoverage : null,
         });
         estimateAutoAccepted = true;
+        if (bookingBillingTermEffective === 'prepay_annual') {
+          if (acceptResult?.alreadyAccepted) {
+            // Another session accepted this estimate between our preflight and
+            // the accept — the short-circuit records no conversion, so NO
+            // prepay invoice/term was created here. Never report prepay as
+            // applied when it wasn't.
+            bookingWarnings.push('Appointment booked, but annual prepay was not applied — the estimate was already accepted by another session. Manage prepay from Customer 360.');
+          } else {
+            annualPrepayResult = {
+              applied: true,
+              invoiceId: acceptResult?.conversion?.draftInvoiceId || null,
+            };
+          }
+        }
         // A recurring conversion sends its own new-recurring welcome SMS
         // post-commit; suppress this handler's duplicate so the customer isn't
         // double-texted.
         if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
         // Link the just-created rows now that the estimate is a recorded win.
-        if (cols.source_estimate_id && createdAppointments.length) {
-          try {
-            await db('scheduled_services')
-              .whereIn('id', createdAppointments.map((a) => a.id))
-              .update({ source_estimate_id: linkedEstimateId });
-          } catch (e) {
-            logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
-          }
-        }
+        await linkCreatedRowsToEstimate();
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
-        bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+        // An overlap that RACED in between the preflight check and the atomic
+        // lock must not strand the phone-accepted quote unaccepted/unlinked
+        // (the appointment rows are already committed) — mirror the preflight
+        // overlap branch: record the win as a STANDARD accept (no invoice/
+        // term) and link, then warn. The prepay attempt rolled back whole, so
+        // the estimate is still open for this retry.
+        let downgradedAfterOverlapRace = false;
+        if (bookingBillingTermEffective === 'prepay_annual' && err.annualPrepayOverlap) {
+          try {
+            const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+            const retryResult = await markEstimateManuallyAccepted({
+              estimateId: linkedEstimateId,
+              adminUserId: req.technicianId || null,
+              source: 'verbal_yes_booking',
+              billingTerm: 'standard',
+            });
+            estimateAutoAccepted = true;
+            downgradedAfterOverlapRace = true;
+            if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
+            await linkCreatedRowsToEstimate();
+            bookingWarnings.push('Appointment booked and the estimate was marked accepted as standard — an annual prepay term covering this date already exists (it landed during booking), so no new prepay invoice/term was created. Manage prepay from Customer 360.');
+          } catch (retryErr) {
+            logger.warn(`[schedule] standard-accept fallback after prepay overlap failed for estimate ${linkedEstimateId}: ${retryErr.message}`);
+          }
+        }
+        if (!downgradedAfterOverlapRace) {
+          if (bookingBillingTermEffective === 'prepay_annual') {
+            // The accept + prepay invoice/term are one transaction, so a failure
+            // (e.g. an overlap raced in between the preflight and the lock) leaves
+            // the estimate un-accepted and NO invoice/term behind — the booking
+            // stands, nothing is half-applied.
+            bookingWarnings.push(`Appointment booked, but the annual-prepay acceptance failed (${err.message}). The estimate was NOT marked accepted and no prepay invoice/term was created — use the estimate’s Annual Prepay action or Mark Won.`);
+          } else {
+            bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+          }
+        }
       }
     }
 
@@ -2187,6 +2506,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       appointments: createdAppointments,
       waveguardPlanSync,
       estimateAccepted: estimateAutoAccepted,
+      annualPrepay: annualPrepayResult,
       warnings: bookingWarnings,
     });
 
