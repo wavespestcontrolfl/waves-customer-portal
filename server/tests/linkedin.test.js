@@ -64,7 +64,9 @@ describe('createPost article thumbnail (Images API)', () => {
     jest.restoreAllMocks();
   });
 
-  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE', imageBytes = Buffer.from('jpeg-bytes') } = {}) {
+  // Default fixture leads with the JPEG magic bytes so the format sniff
+  // treats it as an accepted format and skips the sharp conversion.
+  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE', imageBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from('jpeg-bytes')]) } = {}) {
     const calls = [];
     global.fetch = jest.fn(async (url, opts = {}) => {
       const u = String(url);
@@ -189,6 +191,49 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(linkedin._isTrustedImageUrl('https://evil.example.com/x.jpg')).toBe(false);
     expect(linkedin._isTrustedImageUrl('https://notwavespestcontrol.com/x.jpg')).toBe(false);
     expect(linkedin._isTrustedImageUrl('not a url')).toBe(false);
+  });
+
+  test('_isLinkedinAcceptedImage sniffs magic bytes: JPEG/PNG/GIF pass, WebP does not', async () => {
+    const sharp = require('sharp');
+    const px = { create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } };
+    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).jpeg().toBuffer())).toBe(true);
+    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).png().toBuffer())).toBe(true);
+    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).gif().toBuffer())).toBe(true);
+    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).webp().toBuffer())).toBe(false);
+    expect(linkedin._isLinkedinAcceptedImage(Buffer.from('nope'))).toBe(false);
+    expect(linkedin._isLinkedinAcceptedImage(Buffer.alloc(0))).toBe(false);
+  });
+
+  test('a WebP thumbnail (published .webp blog hero) is converted to JPEG before the PUT — LinkedIn rejects WebP', async () => {
+    const sharp = require('sharp');
+    const webp = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } })
+      .webp().toBuffer();
+    const calls = mockRoutes({ imageBytes: webp });
+
+    const res = await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    const put = global.fetch.mock.calls.find(([u, o]) => String(u) === 'https://upload.example.com/u1' && o?.method === 'PUT');
+    expect(put).toBeTruthy();
+    const sent = put[1].body;
+    // JPEG magic bytes — the webp must not reach LinkedIn unconverted.
+    expect(sent[0]).toBe(0xff);
+    expect(sent[1]).toBe(0xd8);
+    expect(sent[2]).toBe(0xff);
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content.article.thumbnail).toBe('urn:li:image:abc');
+  });
+
+  test('a JPEG thumbnail uploads byte-for-byte unconverted', async () => {
+    const sharp = require('sharp');
+    const jpeg = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } })
+      .jpeg().toBuffer();
+    mockRoutes({ imageBytes: jpeg });
+
+    await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    const put = global.fetch.mock.calls.find(([u, o]) => String(u) === 'https://upload.example.com/u1' && o?.method === 'PUT');
+    expect(Buffer.compare(put[1].body, jpeg)).toBe(0);
   });
 
   test('a thumbnail failure never blocks the post — it publishes without an image (best-effort)', async () => {

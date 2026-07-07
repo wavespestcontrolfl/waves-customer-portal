@@ -827,10 +827,12 @@ async function uploadVideoToS3(buffer, filename) {
 // Hub posts only (the blog is hub-consolidated); returns null on any miss so
 // callers fall back to the brand card.
 // Every lane that shares a BLOG POST: the autonomous poller, the RSS
-// backstop, the scheduler — and 'blog', the admin BlogPage share button
-// (admin-content-v2 /blog/:id/share-social). Gates the og:image hero fetch,
-// the Facebook /feed link-post format, and the IG caption URL append.
-const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog']);
+// backstop, the scheduler, 'blog' (the admin BlogPage share button,
+// admin-content-v2 /blog/:id/share-social), and 'content_agent' (the content
+// agent's distribute_to_social tool — live blog_posts only, gated by
+// blogPostShareability). Gates the og:image hero fetch, the Facebook /feed
+// link-post format, and the IG caption URL append.
+const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'content_agent']);
 async function blogHeroSocialImageUrl(link) {
   try {
     const pageUrl = new URL(String(link || ''));

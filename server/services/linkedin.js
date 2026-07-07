@@ -355,6 +355,14 @@ class LinkedInService {
     }
   }
 
+  // The formats LinkedIn's Images API ingests, sniffed by magic bytes.
+  _isLinkedinAcceptedImage(bytes) {
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true; // JPEG
+    if (bytes.length >= 8 && bytes[0] === 0x89 && bytes.toString('ascii', 1, 4) === 'PNG') return true; // PNG
+    if (bytes.length >= 4 && bytes.toString('ascii', 0, 4) === 'GIF8') return true; // GIF
+    return false;
+  }
+
   // ── Images API: rehost a public image as a LinkedIn image URN ─────────────
   // initializeUpload → PUT the binary → poll until AVAILABLE → urn:li:image:….
   // LinkedIn does NOT scrape article URLs, so without this the article card
@@ -430,6 +438,19 @@ class LinkedInService {
     if (!bytes.length) throw new Error(`thumbnail image fetch returned empty body for ${imageUrl}`);
     if (bytes.length > MAX_THUMBNAIL_BYTES) {
       throw new Error(`thumbnail too large (${bytes.length} bytes) for ${imageUrl}`);
+    }
+
+    // LinkedIn's Images API accepts JPG/PNG/GIF only, but the admin BlogPage
+    // share passes the published hero URL straight through — and those heroes
+    // are .webp (publicBlogImageUrl) — so PUTting the fetched bytes unchanged
+    // gets rejected and the post silently ships without its thumbnail. Sniff
+    // the real format from the magic bytes (never the URL extension) and
+    // convert anything unaccepted to JPEG, matching the uploadImageToS3
+    // rehost the autonomous blog lane already goes through. A conversion
+    // failure throws — createPost then posts without the thumbnail.
+    if (!this._isLinkedinAcceptedImage(bytes)) {
+      const sharp = require('sharp');
+      bytes = await sharp(bytes).jpeg({ quality: 85 }).toBuffer();
     }
 
     const putRes = await fetch(value.uploadUrl, {
