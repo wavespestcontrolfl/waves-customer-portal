@@ -34,6 +34,9 @@ const TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
 const POSTS_URL = 'https://api.linkedin.com/rest/posts';
 const IMAGES_URL = 'https://api.linkedin.com/rest/images';
 const ORG_ACLS_URL = 'https://api.linkedin.com/rest/organizationAcls';
+// Article thumbnails are our own CDN-rehosted heroes (~100-300 KB); anything
+// bigger is a misconfiguration, not a legitimate thumbnail.
+const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024;
 
 // LinkedIn-API specifics — confirmed against Microsoft Learn Posts API docs
 // (defaultMoniker li-lms-2026-06) on 2026-06. LinkedIn sunsets monthly versions,
@@ -381,19 +384,31 @@ class LinkedInService {
       throw new Error('LinkedIn initializeUpload returned no uploadUrl/image URN');
     }
 
-    // Fetch the hosted image (our CDN-rehosted JPEG hero) with a bounded wait —
-    // a hung fetch here must not stall the whole publish loop.
+    // Fetch the hosted image (our CDN-rehosted JPEG hero) with a bounded wait
+    // that stays armed THROUGH the body read — a slow drip-fed body would
+    // otherwise buffer forever after the header timer cleared. redirect:
+    // 'error' closes the redirect hole in the host allowlist (a trusted host
+    // 302-ing to a private/metadata address would otherwise be followed);
+    // our CDN and hub serve images directly. Size-capped both by declared
+    // Content-Length and by the actual bytes read.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-    let imgRes;
+    let bytes;
     try {
-      imgRes = await fetch(imageUrl, { signal: controller.signal });
+      const imgRes = await fetch(imageUrl, { signal: controller.signal, redirect: 'error' });
+      if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status} for ${imageUrl}`);
+      const declared = Number(imgRes.headers?.get?.('content-length') || 0);
+      if (declared > MAX_THUMBNAIL_BYTES) {
+        throw new Error(`thumbnail too large (${declared} bytes declared) for ${imageUrl}`);
+      }
+      bytes = Buffer.from(await imgRes.arrayBuffer());
     } finally {
       clearTimeout(timeout);
     }
-    if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status} for ${imageUrl}`);
-    const bytes = Buffer.from(await imgRes.arrayBuffer());
     if (!bytes.length) throw new Error(`thumbnail image fetch returned empty body for ${imageUrl}`);
+    if (bytes.length > MAX_THUMBNAIL_BYTES) {
+      throw new Error(`thumbnail too large (${bytes.length} bytes) for ${imageUrl}`);
+    }
 
     const putRes = await fetch(value.uploadUrl, {
       method: 'PUT',

@@ -1433,12 +1433,15 @@ const SocialMediaService = {
       // hero must be uploaded as the article thumbnail or the share has no
       // picture at all.
       // The sync predicate can't see the OAuth grant; confirm an admin has
-      // actually connected the page before spending the hero fetch+rehost —
-      // the readiness probe below would skip LinkedIn anyway, orphaning the
-      // upload on every retry. getStatus never throws (a store failure reads
-      // as connected:false).
-      linkedinWantsHero = linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo })
-        && !!(await require('./linkedin').getStatus()).connected;
+      // actually connected the page — and that it isn't a known page-admin
+      // mismatch (orgVerified === false), which the publish loop below skips —
+      // before spending the hero fetch+rehost. Otherwise every retry orphans
+      // an upload no platform consumes. getStatus never throws (a store
+      // failure reads as connected:false).
+      if (linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo })) {
+        const linkedinStatus = await require('./linkedin').getStatus();
+        linkedinWantsHero = !!linkedinStatus.connected && linkedinStatus.orgVerified !== false;
+      }
       if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
@@ -1618,9 +1621,15 @@ const SocialMediaService = {
             if (link && BLOG_HERO_SOURCES.has(source)) {
               const igLimit = PLATFORM_LENGTH_LIMITS.instagram;
               const suffix = `\n\n${link}`;
-              igCaption = (content.length + suffix.length > igLimit)
-                ? `${content.slice(0, igLimit - suffix.length - 1).trimEnd()}…${suffix}`
-                : `${content}${suffix}`;
+              if (suffix.length >= igLimit) {
+                // A URL that can't fit the budget at all: keep the already-
+                // validated caption and skip the append (a negative slice
+                // here would keep the caption AND the URL — over-limit).
+              } else if (content.length + suffix.length > igLimit) {
+                igCaption = `${content.slice(0, igLimit - suffix.length - 1).trimEnd()}…${suffix}`;
+              } else {
+                igCaption = `${content}${suffix}`;
+              }
             }
             // NOT wrapped in withRetry: postToInstagram already polls Meta for
             // media ingestion (bounded ~45s). Retrying the whole call would

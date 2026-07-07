@@ -64,7 +64,7 @@ describe('createPost article thumbnail (Images API)', () => {
     jest.restoreAllMocks();
   });
 
-  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE' } = {}) {
+  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE', imageBytes = Buffer.from('jpeg-bytes') } = {}) {
     const calls = [];
     global.fetch = jest.fn(async (url, opts = {}) => {
       const u = String(url);
@@ -80,7 +80,14 @@ describe('createPost article thumbnail (Images API)', () => {
       if (u.startsWith('https://api.linkedin.com/rest/images/')) {
         return { ok: true, json: async () => ({ status: imageStatus }), text: async () => '' };
       }
-      if (u === IMG) return { ok: true, arrayBuffer: async () => Buffer.from('jpeg-bytes').buffer.slice(0), text: async () => '' };
+      if (u === IMG) {
+        return {
+          ok: true,
+          headers: { get: (h) => (h === 'content-length' ? String(imageBytes.length) : null) },
+          arrayBuffer: async () => imageBytes.buffer.slice(imageBytes.byteOffset, imageBytes.byteOffset + imageBytes.length),
+          text: async () => '',
+        };
+      }
       if (u === 'https://upload.example.com/u1') return { ok: true, text: async () => '' };
       if (u.startsWith('https://api.linkedin.com/rest/posts')) {
         return { ok: true, headers: { get: () => 'post-1' }, text: async () => '' };
@@ -124,6 +131,27 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(res).toMatchObject({ platform: 'linkedin', success: true });
     expect(calls.some((c) => c.url.includes('169.254.169.254'))).toBe(false);
     expect(calls.some((c) => c.url.includes('/rest/images'))).toBe(false);
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content.article.thumbnail).toBeUndefined();
+  });
+
+  test('thumbnail fetch refuses redirects (redirect: "error") — a trusted host 302-ing to a private address must not be followed', async () => {
+    const calls = mockRoutes();
+
+    await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    const imgFetch = global.fetch.mock.calls.find(([u]) => String(u) === IMG);
+    expect(imgFetch[1].redirect).toBe('error');
+    expect(calls.some((c) => c.url === IMG)).toBe(true);
+  });
+
+  test('oversized thumbnail (declared Content-Length) is refused — posts without a thumbnail', async () => {
+    const big = Buffer.alloc(11 * 1024 * 1024);
+    const calls = mockRoutes({ imageBytes: big });
+
+    const res = await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
     const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
     expect(postBody.content.article.thumbnail).toBeUndefined();
   });
