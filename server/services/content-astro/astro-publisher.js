@@ -216,7 +216,7 @@ async function buildFrontmatter(post) {
   const author = post.author_slug ? await authorService.getAuthor(post.author_slug) : null;
   const reviewer = post.reviewer_slug ? await authorService.getAuthor(post.reviewer_slug) : null;
 
-  const today = (post.publish_date ? new Date(post.publish_date) : new Date()).toISOString().slice(0, 10);
+  const today = calendarDateOnly(post.publish_date) || etDateString();
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const canonical = `${hub}/${slug}/`;
 
@@ -225,8 +225,15 @@ async function buildFrontmatter(post) {
         ? post.featured_image_url
         : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${post.hero_image_ext || imageExtFromSource(post.featured_image_url)}`)
     : null;
-  const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
-  const factCheckedDate = dateOnly(post.fact_checked_at);
+  // technically_reviewed / fact_checked are schema-REQUIRED: a present-but-
+  // corrupt stamp heals to today ET (matching publish_date's fallback) rather
+  // than dropping to undefined, which would fail assertValidBlogFrontmatter
+  // and strand the row before a PR ever opens. An absent stamp stays absent
+  // (unchanged behavior).
+  const technicallyReviewedDate = calendarDateOnly(post.technically_reviewed_at)
+    || (post.technically_reviewed_at ? etDateString() : null);
+  const factCheckedDate = calendarDateOnly(post.fact_checked_at)
+    || (post.fact_checked_at ? etDateString() : null);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
@@ -425,13 +432,16 @@ function clampTitle(title) {
 }
 
 function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body = '', { slug, canonical } = {}) {
-  const published = dateOnly(frontmatter.published)
-    || dateOnly(frontmatter.publish_date)
-    || dateOnly(brief.publish_window)
-    || etDateString();
-  const updated = dateOnly(frontmatter.updated) || published;
-  const reviewed = dateOnly(frontmatter.technically_reviewed) || updated;
-  const factChecked = dateOnly(frontmatter.fact_checked) || updated;
+  // Dates are stamped deterministically at PR-open, never taken from the
+  // writer agent's emitted frontmatter — models echo their (UTC) context date,
+  // which reads as "tomorrow" when the PR opens in the ET evening, and
+  // placeholder dates pass schema validation. This lane only ever publishes
+  // brand-new posts (single caller, fresh content/autonomous-* branch), so
+  // PR-open day in ET IS the publication date for all four fields.
+  const published = etDateString();
+  const updated = published;
+  const reviewed = published;
+  const factChecked = published;
   const heroAlt = String(frontmatter?.hero_image?.alt || frontmatter.hero_image_alt || frontmatter.title || '').trim();
   const defaultHeroSrc = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
   const emittedHeroSrc = String(frontmatter?.hero_image?.src || '').trim();
@@ -507,11 +517,33 @@ function estimateReadingTime(text) {
   return Math.max(1, Math.round(words / 220));
 }
 
-function dateOnly(value) {
+// Calendar-date normalization for STORED blog dates (publish_date /
+// technically_reviewed_at / fact_checked_at are DATE columns). pg/Knex
+// returns DATE columns as midnight Date objects, so the stored calendar day
+// is read directly (local date fields / date-string prefix) — round-tripping
+// it through a timezone conversion shifts every persisted date to the
+// previous ET day. Timezone (ET, via etDateString) only applies to "now"
+// stamps. Sanity rails: dates before the company existed (2024) are corrupt
+// rows → null, caller falls back (a live post shipped dated 1970-01-01 from
+// exactly this); no post may claim a future publish date (clamped to today
+// ET — the UTC version of this bug stamped "tomorrow" on ET-evening PRs).
+const EARLIEST_VALID_CONTENT_DATE = '2024-01-01';
+
+function calendarDateOnly(value) {
   if (!value) return null;
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  let s = null;
+  if (typeof value === 'string') {
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[T ]|$)/.exec(value.trim());
+    if (m) s = m[1];
+  }
+  if (!s) {
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    s = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  if (s < EARLIEST_VALID_CONTENT_DATE) return null;
+  const today = etDateString();
+  return s > today ? today : s;
 }
 
 function imageExtFromMime(mime) {
@@ -1460,7 +1492,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   // RENDERED field actually changed (checked above); mirrors publishRefresh
   // and avoids fake-freshness churn.
   {
-    const today = dateOnly(new Date());
+    const today = etDateString();
     if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
     else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
   }
@@ -1581,7 +1613,7 @@ async function publishRefresh(draft, brief = {}) {
 
   // Conditional freshness bump — only the field the live page already uses
   // (services: `modified`; blog v2: `updated`). Prevents fake-freshness churn.
-  const today = dateOnly(new Date());
+  const today = etDateString();
   if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
   else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
 
@@ -2478,12 +2510,26 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
 }
 
+// A body "matches" the head when it embeds the full SHA or any abbreviated
+// SHA (≥7 hex chars) that is a prefix of it. Codex's clean verdict arrives
+// as an ISSUE COMMENT embedding a 10-char "Reviewed commit:" SHA (no review
+// object), while this matcher previously demanded the first 12 chars — so
+// every comment-only clean verdict was ineligible and the poller sat at
+// codex_review_pending forever (astro PR #357 stalled >1h fully green).
+function bodyMatchesHead(body, headSha) {
+  const head = String(headSha || '').trim().toLowerCase();
+  if (!head) return false;
+  const text = String(body || '');
+  if (text.toLowerCase().includes(head)) return true;
+  const runs = text.match(/\b[0-9a-f]{7,40}\b/gi) || [];
+  return runs.some((run) => head.startsWith(run.toLowerCase()));
+}
+
 function latestReviewRequestAt(comments = [], headSha = null) {
   const head = String(headSha || '').trim();
-  const shortHead = head.slice(0, 12);
   const candidates = comments
     .filter((comment) => /@codex\s+review/i.test(String(comment?.body || '')))
-    .filter((comment) => !head || String(comment.body || '').includes(head) || (shortHead && String(comment.body || '').includes(shortHead)))
+    .filter((comment) => !head || bodyMatchesHead(comment.body, head))
     .map((comment) => Date.parse(comment.created_at || comment.createdAt || 0))
     .filter(Number.isFinite)
     .sort((a, b) => b - a);
@@ -2508,10 +2554,8 @@ function reviewEligibleForHead(review, { headSha = null, requestedAt = null } = 
 function commentEligibleForHead(comment, { headSha = null, requestedAt = null } = {}) {
   const head = String(headSha || '').trim();
   if (head) {
-    const body = String(comment?.body || '');
-    const shortHead = head.slice(0, 12);
     if (!requestedAt) return false;
-    if (!body.includes(head) && !(shortHead && body.includes(shortHead))) return false;
+    if (!bodyMatchesHead(comment?.body, head)) return false;
   }
   if (headSha && !requestedAt) return false;
   if (!requestedAt) return true;

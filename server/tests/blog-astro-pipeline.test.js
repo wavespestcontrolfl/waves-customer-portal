@@ -382,6 +382,36 @@ describe('blog Astro frontmatter validation', () => {
     })).toEqual({ clean: true });
   });
 
+  test('accepts a comment-only clean verdict embedding an abbreviated (10-char) reviewed SHA', () => {
+    // Real Codex shape (astro PR #357): the clean verdict is an ISSUE COMMENT
+    // with "Reviewed commit: `<10 hex chars>`" and no review object at all.
+    const { codexReviewStatus } = AstroPublisher._internals;
+    const head = 'f20181fa400ef698a6b34f6247c9a45dc288a1bc';
+    const request = {
+      user: { login: 'wavespestcontrolfl' },
+      body: `@codex review\n\nAddressed the review findings on head \`${head}\`. Please re-review.`,
+      created_at: '2026-07-07T02:57:36Z',
+    };
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [request, {
+        user: { login: 'chatgpt-codex-connector' },
+        body: "Codex Review: Didn't find any major issues. Chef's kiss.\n\n**Reviewed commit:** `f20181fa40`",
+        created_at: '2026-07-07T03:01:32Z',
+      }],
+    })).toEqual({ clean: true });
+
+    // A reviewed SHA that is NOT a prefix of the head stays ineligible.
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [request, {
+        user: { login: 'chatgpt-codex-connector' },
+        body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `294aaa24da`",
+        created_at: '2026-07-07T03:01:32Z',
+      }],
+    })).toMatchObject({ clean: false });
+  });
+
   test('only trusts the Codex connector bot as reviewer', () => {
     const { isCodexAuthor } = AstroPublisher._internals;
     expect(isCodexAuthor('chatgpt-codex-connector')).toBe(true);
@@ -2579,5 +2609,51 @@ describe('deploy-match window uses CREATION time, not completion (audit regressi
     };
     const post = { astro_merged_at: '2026-05-08T13:00:00.000Z' };
     expect(PagesPoll.deploymentMatchesMergedPost(deploy, post)).toBe(false);
+  });
+});
+
+describe('frontmatter date stamping (ET)', () => {
+  const { etDateString } = require('../utils/datetime-et');
+  const base = {
+    title: 'Date Stamp Test Post',
+    slug: 'date-stamp-test-post',
+    meta_description: 'A short guide used to exercise frontmatter date stamping.',
+    keyword: 'date stamping',
+    tag: 'Ants',
+    content: 'Body copy for the date stamping tests.',
+  };
+
+  test('a corrupt epoch-zero publish_date falls back to today ET (a live post shipped dated 1970-01-01)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: new Date(0) });
+    expect(data.published).toBe(etDateString());
+    expect(data.updated).toBe(etDateString());
+  });
+
+  test('a future publish_date clamps to today ET (posts may not claim a future publish date)', async () => {
+    const future = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: future });
+    expect(data.published).toBe(etDateString());
+  });
+
+  test('a stored DATE-column value keeps its calendar day (pg returns midnight Date objects)', async () => {
+    // pg parses DATE columns to local-midnight Dates — the stored calendar
+    // day is read directly, never shifted through a timezone conversion.
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: new Date(2026, 4, 8) });
+    expect(data.published).toBe('2026-05-08');
+  });
+
+  test('a date-only string publish_date passes through unshifted', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: '2026-05-08' });
+    expect(data.published).toBe('2026-05-08');
+  });
+
+  test('an epoch-zero review stamp heals to today ET (schema-required field — dropping it would block publish)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, fact_checked_at: new Date(0) });
+    expect(data.fact_checked).toBe(etDateString());
+  });
+
+  test('an absent review stamp stays absent (unchanged behavior)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base });
+    expect(data.fact_checked).toBeUndefined();
   });
 });
