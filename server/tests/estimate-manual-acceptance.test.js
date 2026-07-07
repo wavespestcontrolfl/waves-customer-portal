@@ -1,7 +1,20 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
-jest.mock('../services/estimate-converter', () => ({ convertEstimate: jest.fn() }));
+jest.mock('../services/estimate-converter', () => ({
+  convertEstimate: jest.fn(),
+  resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
+  // Mirror the real unit-count shape closely enough for the eligibility gate:
+  // count the recurring service lines (companion-absorption specifics are
+  // covered by the converter's own tests).
+  annualPrepayRecurringUnitCount: jest.fn((data) => (data?.recurring?.services || []).length),
+}));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
+// markEstimateManuallyAccepted lazy-requires the shared annual-prepay overlap
+// lock from the admin-customers route only on the prepay path; mock it so the
+// unit test doesn't pull in the route (and its DB) or need trx.raw.
+jest.mock('../routes/admin-customers', () => ({
+  _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue() },
+}));
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
 }));
@@ -17,6 +30,7 @@ const proposalWin = require('../services/proposal-win');
 const {
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
+  prepayBookingEligibility,
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
 
@@ -910,5 +924,183 @@ describe('commercial proposal win paths (#1917)', () => {
     await expect(markEstimateManuallyAccepted({
       estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
     })).rejects.toThrow(/no billable line items/i);
+  });
+});
+
+describe('prepay-on-book (one-step annual prepay while booking)', () => {
+  test('threads the booked term start + coverage config to the converter and takes the atomic overlap lock', async () => {
+    const estimate = {
+      id: 'estimate-prepay-onbook',
+      status: 'viewed',
+      customer_id: 'customer-onbook',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      declined_at: null,
+      decline_reason: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '99.00',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-onbook', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-onbook' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-onbook',
+      source: 'verbal_annual_prepay_booking',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-07-30',
+      annualPrepayCoverage: {
+        coverageServiceType: 'Quarterly Pest Control Service',
+        coverageVisitCount: 4,
+        coverageCadence: 'quarterly',
+      },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    });
+
+    expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, expect.objectContaining({
+      billingTerm: 'prepay_annual',
+      skipAutoSchedule: true,
+      annualPrepayTermStart: '2026-07-30',
+      coverageServiceType: 'Quarterly Pest Control Service',
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
+    }));
+    // The atomic overlap lock fires (inside the accept txn, on the trx handle,
+    // anchored to the booked date) before conversion.
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
+      database, 'customer-onbook', '2026-07-30', false, expect.any(String),
+    );
+  });
+
+  test('a plain (no-booking) prepay accept still takes the overlap lock, anchored to today', async () => {
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    lockAndAssertNoAnnualPrepayOverlap.mockClear();
+    const estimate = {
+      id: 'estimate-prepay-plain',
+      status: 'viewed',
+      customer_id: 'customer-plain',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-plain', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-plain' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    });
+
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledTimes(1);
+    const [, customerId, termStart] = lockAndAssertNoAnnualPrepayOverlap.mock.calls[0];
+    expect(customerId).toBe('customer-plain');
+    expect(termStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // No coverage/term-start overrides leak into the converter for a plain accept.
+    const opts = estimateConverter.convertEstimate.mock.calls[0][1];
+    expect(opts.annualPrepayTermStart).toBeUndefined();
+    expect(opts.coverageServiceType).toBeUndefined();
+  });
+
+  test('an overlap thrown by the lock surfaces as a tagged 409 and the estimate is not accepted downstream', async () => {
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    lockAndAssertNoAnnualPrepayOverlap.mockClear();
+    const overlapErr = new Error('Customer already has an annual prepay term through 2027-01-15. Use a start date after 2027-01-15.');
+    overlapErr.annualPrepayOverlap = { error: overlapErr.message, activeTermId: 'term-1', activeTermEnd: '2027-01-15' };
+    lockAndAssertNoAnnualPrepayOverlap.mockRejectedValueOnce(overlapErr);
+    const estimate = {
+      id: 'estimate-prepay-overlap',
+      status: 'viewed',
+      customer_id: 'customer-overlap',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-07-30',
+      annualPrepayCoverage: { coverageServiceType: 'Pest Control', coverageVisitCount: 4, coverageCadence: 'quarterly' },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      annualPrepayOverlap: expect.objectContaining({ activeTermEnd: '2027-01-15' }),
+    });
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+describe('prepayBookingEligibility (one-step prepay gate)', () => {
+  const recurring = (services) => ({
+    monthly_total: '55.00',
+    annual_total: '660.00',
+    onetime_total: '99.00',
+    estimate_data: { recurring: { services } },
+  });
+
+  test('a single recurring service is eligible and returns the resolved invoice total', () => {
+    const r = prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(627); // from the mocked resolveAnnualPrepayInvoiceTotal
+  });
+
+  test('a bundled multi-recurring quote is NOT eligible (one covered service per term)', () => {
+    const r = prepayBookingEligibility(recurring([
+      { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' },
+      { service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' },
+    ]));
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('multi_service');
+  });
+
+  test('a commercial proposal is not eligible', () => {
+    const r = prepayBookingEligibility({
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: { proposal: { enabled: true }, recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('commercial_proposal');
+  });
+
+  test('invoice-mode and one-time-option quotes are not eligible', () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    expect(prepayBookingEligibility({ ...base, bill_by_invoice: true }).reason).toBe('invoice_mode');
+    expect(prepayBookingEligibility({ ...base, show_one_time_option: true }).reason).toBe('one_time_option');
+  });
+
+  test('a quote with no recurring annual is not eligible', () => {
+    const r = prepayBookingEligibility({ monthly_total: '0.00', annual_total: '0.00', onetime_total: '250.00', estimate_data: {} });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('no_recurring_annual');
   });
 });

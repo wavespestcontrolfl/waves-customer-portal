@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 const EstimateConverter = require('./estimate-converter');
 const AccountMembershipEmail = require('./account-membership-email');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
@@ -68,6 +69,49 @@ function isCommercialProposalEstimate(estimate = {}) {
   return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
 }
 
+// The amount actually INVOICED when this estimate is accepted as annual prepay:
+// the undiscounted recurring annual run through the converter's shared resolver,
+// which applies the prepay discount (non-membership-fee mixes) and the
+// non-discountable floor. Same resolver the public render + accept use, so a
+// Schedule-modal preview matches the invoice the booking mints (no
+// pre-discount-vs-invoice drift). Null when there's no recurring annual.
+function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
+  const baseAnnual = resolveAnnualPrepayAmount(estimate);
+  if (!baseAnnual) return null;
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const { acceptanceServiceLists } = require('../routes/estimate-public');
+  const { recurringSvcList } = acceptanceServiceLists(data);
+  const resolved = EstimateConverter.resolveAnnualPrepayInvoiceTotal({
+    baseAnnual,
+    recurringServices: recurringSvcList,
+    estimateData: data,
+  });
+  return resolved?.amount != null ? Number(resolved.amount) : null;
+}
+
+// Can this estimate be accepted as annual prepay WHILE booking (the Schedule
+// modal's one-step prepay), and may the modal offer it? Mirrors every guard
+// markEstimateManuallyAccepted enforces for billingTerm='prepay_annual' — so
+// the modal never offers what the server would reject — PLUS the converter's
+// single-recurring-unit rule (one coverage_service_type per term; the shared
+// annualPrepayRecurringUnitCount also counts a supplemental companion a solo
+// primary absorbs, mirroring the converter's multi-service 422).
+// Returns { eligible, invoiceTotal, reason }.
+function prepayBookingEligibility(estimate = {}) {
+  const ineligible = (reason) => ({ eligible: false, invoiceTotal: null, reason });
+  const baseAnnual = resolveAnnualPrepayAmount(estimate);
+  if (!baseAnnual) return ineligible('no_recurring_annual');
+  if (isCommercialProposalEstimate(estimate)) return ineligible('commercial_proposal');
+  if (estimate.bill_by_invoice) return ineligible('invoice_mode');
+  if (estimate.show_one_time_option) return ineligible('one_time_option');
+  if (!hasManualAnnualPrepayRecurringRows(estimate)) return ineligible('no_recurring_rows');
+  if (!isManualAnnualPrepayEligibleServiceMix(estimate)) return ineligible('ineligible_mix');
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const units = EstimateConverter.annualPrepayRecurringUnitCount(data);
+  if (units !== 1) return ineligible(units > 1 ? 'multi_service' : 'no_recurring_rows');
+  return { eligible: true, invoiceTotal: annualPrepayInvoiceTotalForEstimate(estimate), reason: null };
+}
+
 function httpError(message, statusCode = 400) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -105,6 +149,17 @@ async function markEstimateManuallyAccepted({
   adminUserId,
   source = 'verbal_yes',
   billingTerm = 'standard',
+  // Booked first-visit date (YYYY-MM-DD) for an annual-prepay accept made WHILE
+  // scheduling — anchors the renewal term to the actual first service instead
+  // of today. Ignored for standard accepts and when not supplied.
+  annualPrepayTermStart = null,
+  // Coverage config for an annual-prepay accept made WHILE scheduling
+  // ({ coverageServiceType, coverageVisitCount, coverageCadence }), so the term
+  // stamps the operator's just-booked visit series prepaid on payment instead
+  // of seeding a duplicate one. coverageServiceType MUST be the booked
+  // service_type so the coverage match (serviceMatchesCoverage) finds the
+  // booked rows. Ignored for standard accepts and when not supplied.
+  annualPrepayCoverage = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -323,6 +378,27 @@ async function markEstimateManuallyAccepted({
           convertOptions.billingTerm = 'prepay_annual';
           convertOptions.prepayInvoiceAmount = annualPrepayAmount;
           convertOptions.autoSendInvoice = false;
+          if (annualPrepayTermStart) convertOptions.annualPrepayTermStart = annualPrepayTermStart;
+          if (annualPrepayCoverage && annualPrepayCoverage.coverageServiceType) {
+            convertOptions.coverageServiceType = annualPrepayCoverage.coverageServiceType;
+            convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
+            convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
+          }
+          // ATOMIC overlap guard: take the SAME per-customer advisory lock the
+          // Customer 360 prepay endpoints use and re-assert no overlapping term
+          // INSIDE this transaction — so a double-click, two admins, or an
+          // accept racing a Customer 360 prepay can't mint duplicate prepay
+          // invoices/terms. The lock releases at commit/rollback. Term start =
+          // the booked first visit for prepay-on-book, else today (the
+          // converter's own default for manual accepts).
+          const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx,
+            updatedEstimate.customer_id,
+            annualPrepayTermStart || etDateString(),
+            false,
+            'Customer already has an annual prepay term through',
+          );
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
         if (annualPrepaySelected && !conversion?.draftInvoiceId) {
@@ -337,6 +413,14 @@ async function markEstimateManuallyAccepted({
         // customer/visit/term/invoice is left behind.
         if (err && err.isOperational && err.statusCode === 422) {
           throw httpError(err.message, 422);
+        }
+        // Surface the atomic overlap guard as a 409 that keeps its tag, so the
+        // booking route can detect it and degrade to a standard booking with a
+        // warning instead of failing the whole request opaquely.
+        if (err && err.annualPrepayOverlap) {
+          const overlapErr = httpError(err.message, 409);
+          overlapErr.annualPrepayOverlap = err.annualPrepayOverlap;
+          throw overlapErr;
         }
         throw httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
       }
@@ -434,6 +518,8 @@ module.exports = {
   markEstimateManuallyAccepted,
   normalizeManualBillingTerm,
   resolveAnnualPrepayAmount,
+  annualPrepayInvoiceTotalForEstimate,
+  prepayBookingEligibility,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,

@@ -1628,7 +1628,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
         .where({ is_active: true })
@@ -1693,6 +1693,15 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
         payment = await buildEstimatePaymentContext(estimate, {});
       } catch { payment = null; }
+      // Whether the Schedule modal may offer one-step annual prepay for this
+      // quote + the exact amount the prepay invoice would bill (discount +
+      // floor applied). Server-derived so the modal never offers a billing
+      // term the accept would reject. Fail-soft: no prepay offer on error.
+      let prepay = { eligible: false, invoiceTotal: null };
+      try {
+        const e = require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+        prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+      } catch { prepay = { eligible: false, invoiceTotal: null }; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1708,6 +1717,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         lines,
         deposit,
         payment,
+        prepay,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,
@@ -3152,6 +3162,7 @@ router._private = {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  lockAndAssertNoAnnualPrepayOverlap,
   stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
