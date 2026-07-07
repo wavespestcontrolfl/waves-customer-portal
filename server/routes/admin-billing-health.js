@@ -7,7 +7,7 @@ const PaymentRouter = require('../services/payment-router');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { logAutopay } = require('../services/autopay-log');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -85,6 +85,44 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     // charged the month AGAIN and any armed retry rung fired on top:
     // double-collection on both legs.
     const isMonthlyCollection = amount == null;
+
+    // Already-collected guard: the daily cron stamps metadata.billed_month
+    // and dedupes on it — mirror that exact check here (including the
+    // legacy unstamped payment_date-window + marker match) so "Charge now"
+    // clicked AFTER this month's collection can't take the month twice.
+    // Explicit-amount charges skip the guard: entering an amount is the
+    // operator saying "charge this on top, on purpose".
+    if (isMonthlyCollection) {
+      const { year, month } = etParts(new Date());
+      const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+      const monthStart = `${monthKey}-01`;
+      const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      const monthEnd = `${monthKey}-${String(lastDay).padStart(2, '0')}`;
+      const existingCharge = await db('payments')
+        .where({ customer_id: customerId })
+        .whereIn('status', ['paid', 'processing'])
+        .where(function () {
+          this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+            .orWhere(function () {
+              this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                .andWhere('payment_date', '>=', monthStart)
+                .andWhere('payment_date', '<=', monthEnd)
+                .andWhere('description', 'like', '%WaveGuard Monthly%');
+            });
+        })
+        .first();
+      if (existingCharge) {
+        await logAutopay(customerId, 'skipped_already_paid', {
+          paymentId: existingCharge.id,
+          details: { source: 'manual_charge', billed_month: monthKey, admin_id: req.technicianId || null },
+        }).catch(() => {});
+        return res.status(409).json({
+          error: `${monthKey} is already collected for this customer (payment ${existingCharge.id}). To charge something additional on purpose, enter an explicit amount.`,
+          already_collected: true,
+          payment_id: existingCharge.id,
+        });
+      }
+    }
 
     let payment;
     try {
