@@ -412,6 +412,33 @@ describe('new recurring welcome SMS', () => {
     ]));
   });
 
+  test('email-only customer still queues the welcome (partial caller shape re-reads the row)', async () => {
+    // Caller shape has no phone AND no email field (the appointment tagger
+    // passes only id/name/phone) — the enqueue gate must consult the
+    // customer row instead of silently skipping.
+    mockCustomerRow = { id: 'customer-1', email: 'ada@example.com' };
+    const result = await service.sendNewRecurringWelcome({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '' },
+      scheduledServiceId: 'svc-1',
+    });
+
+    expect(result).toEqual({ sent: false, queued: true });
+    expect(mockInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'sms_sequences' }),
+    ]));
+  });
+
+  test('no phone and no email skips the enqueue entirely', async () => {
+    mockCustomerRow = { id: 'customer-1', email: '' };
+    const result = await service.sendNewRecurringWelcome({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '' },
+      scheduledServiceId: 'svc-1',
+    });
+
+    expect(result).toEqual({ sent: false, skipped: true, reason: 'no_contact' });
+    expect(mockInserts).toEqual([]);
+  });
+
   test('delivery fires the welcome email twin alongside the SMS', async () => {
     mockDueSequences = [{
       id: 'seq-1',
@@ -436,7 +463,15 @@ describe('new recurring welcome SMS', () => {
       to: 'ada@example.com',
       recipientId: 'customer-1',
       idempotencyKey: 'welcome.new_recurring:customer-1',
-      payload: expect.objectContaining({ first_name: 'Ada' }),
+      // Rejection bodies can echo the address — never let the provider log
+      // them raw.
+      suppressProviderErrorLog: true,
+      payload: expect.objectContaining({
+        first_name: 'Ada',
+        // The template's CTA renders customer_portal_url — a blank href
+        // makes renderBlocks DROP the portal button entirely.
+        customer_portal_url: expect.stringContaining('/login'),
+      }),
     }));
   });
 

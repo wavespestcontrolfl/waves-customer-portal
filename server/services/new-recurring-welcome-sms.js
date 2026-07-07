@@ -118,9 +118,22 @@ async function sendNewRecurringWelcome({
   adminUserId = null,
 } = {}) {
   if (!customer?.id) return { sent: false, skipped: true, reason: 'missing_customer' };
+  // The queued sequence is the scheduling vehicle for BOTH welcome legs
+  // (SMS + the email twin sent at delivery time) — an email-only customer
+  // must still enqueue or they get no welcome at all. Callers pass partial
+  // customer shapes (the appointment tagger sends only id/name/phone), so a
+  // missing phone re-reads the row rather than trusting the argument;
+  // deliverQueuedWelcome re-reads the full row at delivery time anyway.
   if (!customer.phone) {
-    logger.info(`[new-recurring-welcome] skipping customer ${customer.id}: no phone`);
-    return { sent: false, skipped: true, reason: 'no_phone' };
+    let email = String(customer.email || '').trim();
+    if (!email) {
+      const row = await db('customers').where({ id: customer.id }).first('email').catch(() => null);
+      email = String(row?.email || '').trim();
+    }
+    if (!email) {
+      logger.info(`[new-recurring-welcome] skipping customer ${customer.id}: no phone or email`);
+      return { sent: false, skipped: true, reason: 'no_contact' };
+    }
   }
   if (!(await db.schema.hasTable('sms_sequences'))) {
     logger.warn(`[new-recurring-welcome] sms_sequences table missing; welcome not queued for customer ${customer.id}`);
@@ -187,11 +200,16 @@ async function sendWelcomeEmail(customer) {
   }
   const EmailTemplateLibrary = require('./email-template-library');
   const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+  const { publicPortalUrl } = require('../utils/portal-url');
   const result = await EmailTemplateLibrary.sendTemplate({
     templateKey: TEMPLATE_EMAIL_KEY,
     to: email,
     payload: {
       first_name: String(customer.first_name || '').trim() || 'there',
+      // The template's CTA renders url_variable customer_portal_url
+      // (20260530000002) — renderBlocks DROPS a CTA with a blank href, so
+      // omitting this silently loses the portal button.
+      customer_portal_url: `${publicPortalUrl()}/login`,
       // The seed blocks don't reference it, but admin-edited versions may —
       // an empty value renders as a blank in customer copy.
       company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
