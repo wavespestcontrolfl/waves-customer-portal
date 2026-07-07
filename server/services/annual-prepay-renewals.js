@@ -790,6 +790,21 @@ async function reversePendingWindowCompletionCredits(term, conn = db, { visitId 
         const reverseAmount = Math.min(balance, creditAmount);
         if (!(reverseAmount > 0)) {
           logger.warn(`[annual-prepay] pending-completion credit ${marker} not reversible — balance exhausted (customer ${term.customer_id}); operator follow-up needed`);
+          // Still write the dedupe marker: refund syncs replay (Stripe/admin
+          // retries), and without a reversal row carrying this marker a later
+          // retry — after the customer receives unrelated account credit —
+          // would claw back the already-spent credit from that new balance.
+          // postCreditMovement rejects zero deltas, so record the 0-delta
+          // marker row directly (no balance movement).
+          await t('customer_credit_ledger').insert({
+            customer_id: term.customer_id,
+            delta: 0,
+            balance_after: balance,
+            source: 'adjustment',
+            invoice_id: credit.invoice_id || null,
+            note: `Annual prepay refunded — visit's pending-completion credit ${marker} already spent; nothing reversible (operator follow-up needed)`,
+            created_by: PENDING_COMPLETION_REVERSAL_BY,
+          });
           continue;
         }
         if (reverseAmount < creditAmount) {
@@ -1159,9 +1174,20 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           .first('id', 'annual_prepay_term_id');
         if (visitRow?.annual_prepay_term_id) {
           if (nextStatus === 'active') {
+            // Covered-status semantics, matching the coverage checks: a term
+            // that has already decided its renewal (renewed / switch_plan, or
+            // a lapse — cancelled WITH a renewal_decision) stays paid-covered
+            // through term_end, so a visit invoice that resolves paid this
+            // late must still get its slice credited. A true void/refund
+            // (cancelled, no decision) stays excluded.
             const coveringTerm = await conn('annual_prepay_terms')
               .where({ id: visitRow.annual_prepay_term_id })
-              .whereIn('status', ACTIVE_STATUSES)
+              .where(function covered() {
+                this.whereIn('status', COVERED_STATUSES)
+                  .orWhere(function lapsed() {
+                    this.where('status', 'cancelled').whereNotNull('renewal_decision');
+                  });
+              })
               .first('*');
             if (coveringTerm) await reconcilePendingWindowCompletions(coveringTerm, conn);
           } else {
@@ -1447,6 +1473,13 @@ async function createTermForAnnualPrepay({
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
       await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
+      // A term can be refreshed already-paid (Customer 360 "record annual
+      // prepay" marks the invoice paid BEFORE creating the term), so it never
+      // passes through syncTermForInvoicePayment's pending→active transition
+      // and its reconcile. Run the same pending-window reconcile here —
+      // covered visits that completed and billed per application before this
+      // point would otherwise be paid twice. Idempotent, safe on re-runs.
+      await reconcilePendingWindowCompletions(refreshed, conn);
     }
     return refreshed;
   }
@@ -1478,6 +1511,11 @@ async function createTermForAnnualPrepay({
   const refreshed = await refreshTermSnapshot(term.id, conn);
   if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
     await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
+    // Born-already-paid term (invoice marked paid before creation — the
+    // Customer 360 record-annual-prepay flow): the payment-sync reconcile
+    // never fires for it, so settle/credit covered visits that completed and
+    // billed before this point. Idempotent.
+    await reconcilePendingWindowCompletions(refreshed, conn);
   }
   return refreshed;
 }

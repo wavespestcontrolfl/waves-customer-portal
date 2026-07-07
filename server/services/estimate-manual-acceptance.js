@@ -198,6 +198,30 @@ async function prepayBookingEligibility(estimate = {}) {
     const normalizedRows = normalizeOneTimeBreakdown(data)?.items || [];
     if (normalizedRows.some((row) => !isNonBillableOneTimeRow(row))) return ineligible('one_time_items');
     if (!oneTimeRows.length && !normalizedRows.length && asMoneyOrNull(estimate.onetime_total)) return ineligible('one_time_items');
+    // Legacy TOP-LEVEL shapes (estData.oneTime with no result/engineResult
+    // wrapper): acceptanceServiceLists reads the raw rows but
+    // normalizeOneTimeBreakdown only reads wrapped shapes, so the synthetic
+    // positive one_time_adjustment (oneTime.total − rows) is never
+    // materialized and the onetime_total guard above is skipped because raw
+    // rows exist. Recompute that residual here and fail closed on a positive
+    // remainder — a billable one-time charge must never be silently dropped.
+    if (oneTimeRows.length && !normalizedRows.length) {
+      const topLevelOneTime = data?.oneTime && typeof data.oneTime === 'object' ? data.oneTime : null;
+      const declaredTotal = asMoneyOrNull(topLevelOneTime?.total) ?? asMoneyOrNull(estimate.onetime_total);
+      if (declaredTotal != null) {
+        const rowSum = oneTimeRows.reduce((sum, row) => {
+          // Same amount semantics as normalizeOneTimeBreakdown: discounted
+          // value wins when present, negatives keep their raw price.
+          const rawPrice = Number(row.price ?? row.amount ?? row.total);
+          const discounted = Number(row.priceAfterDiscount ?? row.totalAfterDiscount);
+          const amount = Number.isFinite(rawPrice) && rawPrice < 0
+            ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : rawPrice)
+            : (Number.isFinite(discounted) ? discounted : rawPrice);
+          return sum + (Number.isFinite(amount) ? amount : 0);
+        }, 0);
+        if (declaredTotal - rowSum > 0.005) return ineligible('one_time_items');
+      }
+    }
   } catch {
     return ineligible('one_time_items');
   }
