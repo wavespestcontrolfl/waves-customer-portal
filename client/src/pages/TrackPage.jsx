@@ -53,11 +53,14 @@ const TRACK_PRIMARY_CTA = {
   textDecoration: 'none',
 };
 
-function formatWindow(startIso, endIso) {
+// The arrival window quoted to customers is ALWAYS start + 2 hours (owner
+// directive — see server/utils/sms-time-format.js). The API's window.end is
+// the internal job-duration block and never renders on customer surfaces.
+function formatWindow(startIso) {
   if (!startIso) return '';
   try {
     const s = new Date(startIso);
-    const e = endIso ? new Date(endIso) : null;
+    const e = Number.isNaN(s.getTime()) ? null : new Date(s.getTime() + 120 * 60000);
     const dateFmt = { weekday: 'short', month: 'short', day: 'numeric' };
     const timeFmt = { hour: 'numeric', minute: '2-digit' };
     const datePart = s.toLocaleDateString(undefined, dateFmt);
@@ -384,7 +387,7 @@ function ClientMeta({ data }) {
 // ── State cards ──────────────────────────────────────────────────
 function ScheduledCard({ data }) {
   const techFirst = data.tech?.firstName || 'your tech';
-  const window = formatWindow(data.window?.start, data.window?.end);
+  const window = formatWindow(data.window?.start);
   return (
     <Card accent={COLORS.wavesBlue}>
       <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0 }}>

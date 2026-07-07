@@ -30,6 +30,24 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 
+// The arrival window quoted to customers is ALWAYS window_start + 2 hours
+// (owner directive — see server/utils/sms-time-format.js). window_end is the
+// internal job-duration block and must never render on customer surfaces.
+// Accepts an "HH:MM[:SS]" time string or an ISO datetime; returns the same
+// shape shifted +120 minutes, or null when the start is unparseable.
+const arrivalWindowEnd = (windowStart) => {
+  if (!windowStart) return null;
+  const raw = String(windowStart);
+  const m = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (m) {
+    const mins = ((Number(m[1]) * 60) + Number(m[2]) + 120) % 1440;
+    return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + 120 * 60000).toISOString();
+};
+
 // ---------------------------------------------------------------------------
 // Waves AI bar — the wavespestcontrol.com "Ask Waves" intake, embedded on
 // every portal tab. Pills are screen-aware; asking opens the authenticated
@@ -1465,7 +1483,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 </div>
                 {nextService?.windowStart && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {formatTime(nextService.windowStart)} - {formatTime(nextService.windowEnd)}
+                    {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
                   </div>
                 )}
               </div>
@@ -2729,7 +2747,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
           </div>
 
           {/* Service description */}
@@ -2810,7 +2828,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
         </div>
         <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -7083,7 +7101,7 @@ function MyPlanTab({ customer }) {
 
   const calendarTime = (event = {}) => {
     const windowStart = clockLabel(event.windowStart || event.window_start);
-    const windowEnd = clockLabel(event.windowEnd || event.window_end);
+    const windowEnd = clockLabel(arrivalWindowEnd(event.windowStart || event.window_start));
     if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
     if (windowStart) return windowStart;
 
@@ -7971,7 +7989,7 @@ function ServiceTracker() {
   const isTermite = svcType.toLowerCase().includes('termite');
 
   const fmtTime = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
-  const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(tracker.service.windowEnd)}` : 'today';
+  const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(arrivalWindowEnd(tracker.service.windowStart))}` : 'today';
   const stepTs = tracker.steps[step - 1]?.completedAt;
   const etaSource = tracker.etaSource || tracker.techPosition?.eta?.source;
   const etaDisplay = eta == null ? '—' : eta < 1 ? 'Now' : Math.round(eta);
