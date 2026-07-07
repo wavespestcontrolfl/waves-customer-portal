@@ -382,6 +382,36 @@ describe('blog Astro frontmatter validation', () => {
     })).toEqual({ clean: true });
   });
 
+  test('accepts a comment-only clean verdict embedding an abbreviated (10-char) reviewed SHA', () => {
+    // Real Codex shape (astro PR #357): the clean verdict is an ISSUE COMMENT
+    // with "Reviewed commit: `<10 hex chars>`" and no review object at all.
+    const { codexReviewStatus } = AstroPublisher._internals;
+    const head = 'f20181fa400ef698a6b34f6247c9a45dc288a1bc';
+    const request = {
+      user: { login: 'wavespestcontrolfl' },
+      body: `@codex review\n\nAddressed the review findings on head \`${head}\`. Please re-review.`,
+      created_at: '2026-07-07T02:57:36Z',
+    };
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [request, {
+        user: { login: 'chatgpt-codex-connector' },
+        body: "Codex Review: Didn't find any major issues. Chef's kiss.\n\n**Reviewed commit:** `f20181fa40`",
+        created_at: '2026-07-07T03:01:32Z',
+      }],
+    })).toEqual({ clean: true });
+
+    // A reviewed SHA that is NOT a prefix of the head stays ineligible.
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [request, {
+        user: { login: 'chatgpt-codex-connector' },
+        body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `294aaa24da`",
+        created_at: '2026-07-07T03:01:32Z',
+      }],
+    })).toMatchObject({ clean: false });
+  });
+
   test('only trusts the Codex connector bot as reviewer', () => {
     const { isCodexAuthor } = AstroPublisher._internals;
     expect(isCodexAuthor('chatgpt-codex-connector')).toBe(true);

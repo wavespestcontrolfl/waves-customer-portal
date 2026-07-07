@@ -2510,12 +2510,26 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
 }
 
+// A body "matches" the head when it embeds the full SHA or any abbreviated
+// SHA (≥7 hex chars) that is a prefix of it. Codex's clean verdict arrives
+// as an ISSUE COMMENT embedding a 10-char "Reviewed commit:" SHA (no review
+// object), while this matcher previously demanded the first 12 chars — so
+// every comment-only clean verdict was ineligible and the poller sat at
+// codex_review_pending forever (astro PR #357 stalled >1h fully green).
+function bodyMatchesHead(body, headSha) {
+  const head = String(headSha || '').trim().toLowerCase();
+  if (!head) return false;
+  const text = String(body || '');
+  if (text.toLowerCase().includes(head)) return true;
+  const runs = text.match(/\b[0-9a-f]{7,40}\b/gi) || [];
+  return runs.some((run) => head.startsWith(run.toLowerCase()));
+}
+
 function latestReviewRequestAt(comments = [], headSha = null) {
   const head = String(headSha || '').trim();
-  const shortHead = head.slice(0, 12);
   const candidates = comments
     .filter((comment) => /@codex\s+review/i.test(String(comment?.body || '')))
-    .filter((comment) => !head || String(comment.body || '').includes(head) || (shortHead && String(comment.body || '').includes(shortHead)))
+    .filter((comment) => !head || bodyMatchesHead(comment.body, head))
     .map((comment) => Date.parse(comment.created_at || comment.createdAt || 0))
     .filter(Number.isFinite)
     .sort((a, b) => b - a);
@@ -2540,10 +2554,8 @@ function reviewEligibleForHead(review, { headSha = null, requestedAt = null } = 
 function commentEligibleForHead(comment, { headSha = null, requestedAt = null } = {}) {
   const head = String(headSha || '').trim();
   if (head) {
-    const body = String(comment?.body || '');
-    const shortHead = head.slice(0, 12);
     if (!requestedAt) return false;
-    if (!body.includes(head) && !(shortHead && body.includes(shortHead))) return false;
+    if (!bodyMatchesHead(comment?.body, head)) return false;
   }
   if (headSha && !requestedAt) return false;
   if (!requestedAt) return true;
