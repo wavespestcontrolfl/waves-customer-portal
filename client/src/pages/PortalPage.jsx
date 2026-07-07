@@ -180,12 +180,19 @@ function utcDayFromDateKey(key) {
   return Date.UTC(y, m - 1, d);
 }
 
-function daysUntilEtDate(d) {
+// Signed ET-calendar-day difference from today (negative = past), null when
+// the input doesn't yield a valid date key.
+function etDayDiff(d) {
   const targetKey = typeof d === 'string' ? d.split('T')[0] : etDateString(new Date(d));
   const targetDay = utcDayFromDateKey(targetKey);
   const todayDay = utcDayFromDateKey(etDateString());
   if (!Number.isFinite(targetDay) || !Number.isFinite(todayDay)) return null;
-  return Math.max(0, Math.round((targetDay - todayDay) / 86400000));
+  return Math.round((targetDay - todayDay) / 86400000);
+}
+
+function daysUntilEtDate(d) {
+  const diff = etDayDiff(d);
+  return diff == null ? null : Math.max(0, diff);
 }
 
 function fmtDate(d, opts) {
@@ -2631,11 +2638,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const enriched = upcoming.map((s, idx) => {
     const svcDate = parseDate(s.date);
     const diffHrs = (svcDate - now) / (1000 * 60 * 60);
-    const isToday = svcDate.toDateString() === now.toDateString();
-    const isSoon = !isToday && diffHrs > 0 && diffHrs <= 48;
-    const isTomorrow = isSoon;
-    const isFuture = diffHrs > 48;
-    const daysUntil = Math.max(0, Math.ceil(diffHrs / 24));
+    // ET-calendar-day math, not rolling hours: a 46-hours-out visit is
+    // "2 days", not "Tomorrow", and the counter can't drift before noon.
+    const dayDiff = etDayDiff(s.date);
+    const isToday = dayDiff === 0;
+    const isTomorrow = dayDiff === 1;
+    const isSoon = isTomorrow;
+    const isFuture = dayDiff != null && dayDiff > 1;
+    const daysUntil = dayDiff == null ? 0 : Math.max(0, dayDiff);
     const visitNum = s.visitNumber || (idx + 1);
     const description = getScheduleVisitDescription(s.serviceType, visitNum);
     return { ...s, svcDate, diffHrs, isToday, isTomorrow, isSoon, isFuture, daysUntil, visitNum, description };

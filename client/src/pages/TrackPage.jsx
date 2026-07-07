@@ -76,8 +76,10 @@ function formatWindow(startIso) {
 function formatCompleteDate(iso) {
   if (!iso) return '';
   try {
+    // completed_at is a real UTC instant; render its ET calendar day so the
+    // date matches the visit regardless of the viewer's device timezone.
     return new Date(iso).toLocaleDateString(undefined, {
-      weekday: 'long', month: 'long', day: 'numeric',
+      weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
     });
   } catch {
     return '';

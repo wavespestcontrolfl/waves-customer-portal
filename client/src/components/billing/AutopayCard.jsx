@@ -251,9 +251,14 @@ export default function AutopayCard({ onStateChange }) {
   };
   const theme = themeMap[state];
 
+  // next_charge_date / paused_until are DATE columns ('YYYY-MM-DD' or
+  // UTC-midnight ISO) — parse at noon so the label doesn't render a day
+  // early for viewers behind UTC (same trap PortalPage.parseDate guards).
   const formatDate = (s) => {
     if (!s) return 'Not scheduled';
-    const d = new Date(s);
+    const dateKey = typeof s === 'string' ? s.split('T')[0] : etDateString(new Date(s));
+    const d = new Date(`${dateKey}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return 'Not scheduled';
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
