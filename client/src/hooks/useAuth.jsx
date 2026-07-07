@@ -10,6 +10,10 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
+  // Mirrors `customer` for reads inside the stable loadCustomer callback
+  // (empty deps ⇒ stale closure) — the transient branch needs to know
+  // whether a session is already on screen.
+  const customerRef = useRef(null);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -36,6 +40,7 @@ export function AuthProvider({ children }) {
     }
     try {
       const data = await api.getMe();
+      customerRef.current = data;
       setCustomer(data);
       const propertyData = await api.getAuthProperties().catch(() => ({ properties: [] }));
       setProperties(propertyData.properties || []);
@@ -49,6 +54,7 @@ export function AuthProvider({ children }) {
       // or server 5xx on launch must not wipe a valid 30-day login.
       if (err?.status === 401 || err?.status === 403 || err?.sessionExpired) {
         api.clearTokens();
+        customerRef.current = null;
         setCustomer(null);
         setProperties([]);
         setLoading(false);
@@ -60,6 +66,11 @@ export function AuthProvider({ children }) {
       // session keeps its data; startup stays on the checking screen (which
       // surfaces `error`) and retries with capped backoff.
       setError('Unable to reach the server. Your saved session will resume once you’re back online.');
+      // Post-login calls (verifyCode/switchProperty) arrive with loading
+      // already false — flip it back so ProtectedRoute holds the checking
+      // card during the retry instead of bouncing the valid session to
+      // /login. A session already on screen keeps rendering untouched.
+      if (!customerRef.current) setLoading(true);
       retryTimer.current = setTimeout(
         () => { loadCustomer(n + 1); },
         Math.min(30000, 2000 * 2 ** Math.min(n, 4)),
@@ -100,6 +111,7 @@ export function AuthProvider({ children }) {
       retryTimer.current = null;
     }
     api.clearTokens();
+    customerRef.current = null;
     setCustomer(null);
     setProperties([]);
   };
