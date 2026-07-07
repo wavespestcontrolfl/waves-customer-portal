@@ -158,9 +158,35 @@ async function prepayBookingEligibility(estimate = {}) {
   if (isCommercialProposalEstimate(estimate)) return ineligible('commercial_proposal');
   if (estimate.bill_by_invoice) return ineligible('invoice_mode');
   if (estimate.show_one_time_option) return ineligible('one_time_option');
+  // Mirror the accept transaction's own blockers (status window, expiry,
+  // manager approval, commercial risk-type review): the schedule POST books
+  // the visit BEFORE calling markEstimateManuallyAccepted, so anything the
+  // accept would reject must make the one-step option ineligible up front —
+  // fail closed pre-booking, not a booked visit whose promised prepay accept
+  // then errors. The customer-link guard is deliberately NOT mirrored: the
+  // route attaches lead quotes to the customer on book, before accepting.
+  if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) return ineligible('status_not_acceptable');
+  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return ineligible('expired');
+  if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) return ineligible('manager_approval_pending');
+  if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) return ineligible('commercial_risk_review');
   if (!hasManualAnnualPrepayRecurringRows(estimate)) return ineligible('no_recurring_rows');
   if (!isManualAnnualPrepayEligibleServiceMix(estimate)) return ineligible('ineligible_mix');
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  // One-step prepay books ONLY the recurring series and the accept runs with
+  // skipAutoSchedule — a billable quoted one-time line would end up neither
+  // scheduled nor invoiced (the converter mints just the recurring annual
+  // prepay invoice) while the whole estimate is marked accepted: sold work
+  // silently dropped. Non-charges don't block (isBillableOneTimeInvoiceItem
+  // exempts adjustments/discounts and the WaveGuard setup prepay waives).
+  // Unparseable mix = fail closed (money).
+  try {
+    const { acceptanceServiceLists, isBillableOneTimeInvoiceItem } = require('../routes/estimate-public');
+    if ((acceptanceServiceLists(data).oneTimeList || []).some(isBillableOneTimeInvoiceItem)) {
+      return ineligible('one_time_items');
+    }
+  } catch {
+    return ineligible('one_time_items');
+  }
   const units = EstimateConverter.annualPrepayRecurringUnitCount(data);
   if (units !== 1) return ineligible(units > 1 ? 'multi_service' : 'no_recurring_rows');
   return { eligible: true, invoiceTotal: await annualPrepayInvoiceTotalForEstimate(estimate), reason: null };

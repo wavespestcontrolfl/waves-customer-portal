@@ -1825,30 +1825,55 @@ router.post('/', requireAdmin, async (req, res, next) => {
             ? JSON.parse(linkedEstimate.estimate_data)
             : (linkedEstimate?.estimate_data || {});
           const { acceptanceServiceLists } = require('./estimate-public');
+          const converter = require('../services/estimate-converter');
           const list = acceptanceServiceLists(data).recurringSvcList || [];
           const svc = list[0] || {};
+          // For PEST plans the accepted customerSelection.frequency IS the
+          // visit cadence the customer chose — the plan the quoted annual is
+          // priced for — and beats stale or missing quote-time line cadence
+          // (the converter's primaryUsesAcceptFrequency rule). Pest only:
+          // for lawn the selection stores the BILLING cadence, not the visit
+          // cadence, and must never be read as one.
+          const pestSelectionCadence = converter.recurringServiceKey(svc) === 'pest_control'
+            ? prepayCoverageCadenceForPattern(data.customerSelection?.frequency)
+            : null;
           return {
             // Engine lineItems rows carry `service` (canonical key) / `label`
             // rather than the manual rows' name fields — accept either shape.
             quoteRecurringName: svc.name || svc.serviceName || svc.service_name || svc.service || svc.label || null,
-            // Resolved with the SAME converter logic conversion uses
-            // (frequency-ish fields, then visitsPerYear/apps-style visit
+            // Pest selection first, then the SAME converter logic conversion
+            // uses (frequency-ish fields, then visitsPerYear/apps-style visit
             // counts, then pattern text in the display name — see
-            // explicitServiceCadence), then normalized through the same
-            // mapper as the booked pattern so the comparison is
-            // apples-to-apples. Null when unresolvable — the guard below
-            // fails CLOSED on that, never skips.
-            quoteRecurringCadence: prepayCoverageCadenceForPattern(
-              require('../services/estimate-converter').explicitServiceCadence(svc)
-            ),
+            // explicitServiceCadence), normalized through the same mapper as
+            // the booked pattern so the comparison is apples-to-apples. Null
+            // when unresolvable — the guard below fails CLOSED on that,
+            // never skips.
+            quoteRecurringCadence: pestSelectionCadence
+              || prepayCoverageCadenceForPattern(converter.explicitServiceCadence(svc)),
           };
         } catch { return { quoteRecurringName: null, quoteRecurringCadence: null }; }
       })();
       const { serviceMatchesCoverage } = require('../services/annual-prepay-renewals');
+      const prepayEligibility = (linkedEstimate && acceptEstimateOnBook)
+        ? await prepayBookingEligibility(linkedEstimate)
+        : null;
       if (!linkedEstimate || !acceptEstimateOnBook) {
         downgrade('Appointment booked as standard — annual prepay on book needs an open (not yet accepted) linked quote. Use the estimate’s Annual Prepay action instead.');
-      } else if (!(await prepayBookingEligibility(linkedEstimate)).eligible) {
-        downgrade('Appointment booked, but annual prepay was not applied — this quote is not prepay-eligible for one-step booking (it needs a single recurring service). Use the estimate’s Annual Prepay action instead.');
+      } else if (!prepayEligibility.eligible) {
+        // Operator-facing WHY for the common blockers — eligibility now also
+        // mirrors the accept's own guards, so "not eligible" spans more than
+        // the service-mix rule and a bare generic message would send the
+        // operator hunting.
+        const reasonPhrase = {
+          one_time_items: 'the quote includes a one-time charge that a one-step prepay booking would neither schedule nor invoice',
+          manager_approval_pending: 'the quote still needs manager approval before it can be accepted',
+          commercial_risk_review: 'the quote needs its commercial business type set first',
+          status_not_acceptable: 'only sent or viewed quotes can be accepted while booking',
+          expired: 'the quote has expired',
+          multi_service: 'annual prepay covers a single recurring service and this quote has more than one',
+        }[prepayEligibility.reason]
+          || 'this quote is not prepay-eligible for one-step booking (it needs a single recurring service)';
+        downgrade(`Appointment booked, but annual prepay was not applied — ${reasonPhrase}. Use the estimate’s Annual Prepay action instead.`);
       } else if (visitOverride.error) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {

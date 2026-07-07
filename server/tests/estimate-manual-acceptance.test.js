@@ -1107,6 +1107,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
 
 describe('prepayBookingEligibility (one-step prepay gate)', () => {
   const recurring = (services) => ({
+    status: 'sent',
     monthly_total: '55.00',
     annual_total: '660.00',
     onetime_total: '99.00',
@@ -1121,6 +1122,7 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
 
   test('an engine-backed quote (recurring rows only under engineResult.lineItems) is eligible', async () => {
     const r = await prepayBookingEligibility({
+      status: 'viewed',
       monthly_total: '55.00',
       annual_total: '660.00',
       estimate_data: {
@@ -1185,5 +1187,65 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     const r = await prepayBookingEligibility({ monthly_total: '0.00', annual_total: '0.00', onetime_total: '250.00', estimate_data: {} });
     expect(r.eligible).toBe(false);
     expect(r.reason).toBe('no_recurring_annual');
+  });
+
+  // The schedule POST books the visit BEFORE the accept runs, so eligibility
+  // must mirror the accept transaction's own blockers — anything the accept
+  // would reject has to fail closed pre-booking, not after the rows exist.
+  test('mirrors the accept status window: draft and accepted quotes are not eligible', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    expect((await prepayBookingEligibility({ ...base, status: 'draft' })).reason).toBe('status_not_acceptable');
+    expect((await prepayBookingEligibility({ ...base, status: 'accepted' })).reason).toBe('status_not_acceptable');
+    expect((await prepayBookingEligibility({ ...base, status: undefined })).reason).toBe('status_not_acceptable');
+  });
+
+  test('an expired quote is not eligible', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({ ...base, expires_at: '2020-01-01T00:00:00Z' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('expired');
+  });
+
+  test('unresolved manager approval blocks eligibility (accept would reject it)', async () => {
+    const r = await prepayBookingEligibility(recurring([
+      { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', requiresManagerApproval: true },
+    ]));
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('manager_approval_pending');
+  });
+
+  test('a pending commercial risk-type review blocks eligibility', async () => {
+    const base = recurring([{ service: 'commercial_pest', name: 'Commercial Pest Control', frequency: 'monthly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      estimate_data: { ...base.estimate_data, riskTypeNeedsReview: true },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('commercial_risk_review');
+  });
+
+  test('a billable quoted one-time line blocks one-step prepay (it would be neither scheduled nor invoiced)', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      estimate_data: {
+        ...base.estimate_data,
+        oneTime: { items: [{ service: 'flea_treatment', name: 'Flea Treatment', price: 250 }] },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a WaveGuard setup one-time row does NOT block (prepay waives it)', async () => {
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      estimate_data: {
+        ...base.estimate_data,
+        oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 }] },
+      },
+    });
+    expect(r.eligible).toBe(true);
   });
 });
