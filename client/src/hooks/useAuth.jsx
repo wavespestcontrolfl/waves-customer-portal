@@ -121,6 +121,12 @@ export function AuthProvider({ children }) {
     try {
       const data = await api.selectAuthProperty(customerId);
       api.setTokens(data.token, data.refreshToken);
+      // The token now points at the TARGET property — the old customer must
+      // not keep rendering (and firing actions) against it if the reload
+      // hits a transient failure. Go pending until the target customer
+      // loads; loadCustomer's retry branch keeps it pending on failure.
+      customerRef.current = null;
+      setLoading(true);
       setProperties(data.properties || []);
       await loadCustomer();
       return true;
