@@ -35,6 +35,7 @@
 import { FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useGlassSurface } from '../glass/glass-engine';
+import { isNativeApp, saveUrlNative } from '../native/nativeFile';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -702,6 +703,15 @@ export default function ReceiptPage() {
             {hasReceiptPdf ? (
               <a
                 href={`${API_BASE}/receipt/${token}/pdf`}
+                onClick={(e) => {
+                  // Capacitor webview: a bare PDF navigation replaces the SPA
+                  // with no back control — share sheet instead (F-046).
+                  if (isNativeApp()) {
+                    e.preventDefault();
+                    saveUrlNative(`${API_BASE}/receipt/${token}/pdf`, 'Waves_Receipt.pdf')
+                      .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                  }
+                }}
                 data-glass="chip" data-glass-pill=""
                 style={{
                   minHeight: 40,
@@ -726,6 +736,9 @@ export default function ReceiptPage() {
                 Receipt PDF available after bank payment clears
               </span>
             ) : null}
+            {/* window.print() is a no-op in the Capacitor webview — hide the
+                button there; the Receipt PDF share sheet carries Print on iOS. */}
+            {isNativeApp() ? null : (
             <button
               type="button"
               onClick={() => window.print()}
@@ -749,6 +762,7 @@ export default function ReceiptPage() {
               <Icon name="print" size={16} strokeWidth={2} />
               Print
             </button>
+            )}
           </div>
         </BrandCard>
 

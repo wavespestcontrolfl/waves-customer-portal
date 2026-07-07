@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
@@ -1765,10 +1766,27 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
       <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
         {pdfUrl
-          ? <a data-glass-accent="" href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
+          ? <a
+              data-glass-accent=""
+              href={pdfUrl}
+              download
+              onClick={(e) => {
+                trackReportEvent(token, 'pdf_downloaded');
+                // In the Capacitor shell an <a download> dead-ends the
+                // webview — route through the native share sheet (F-046).
+                if (isNativeApp()) {
+                  e.preventDefault();
+                  saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
+                    .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                }
+              }}
+              style={actionButtonStyle('primary')}
+            ><Download size={16} /> Download PDF</a>
           : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
         <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? 'Link copied' : 'Share'}</button>
-        <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        {/* window.print() is a no-op in the Capacitor webview — hide the
+            button there; the Download PDF share sheet carries Print on iOS. */}
+        {isNativeApp() ? null : <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>}
         <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
     </section>
@@ -4542,7 +4560,20 @@ function LegacyReport({ data, token, glass = false }) {
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
           {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
-          <a href={pdfUrl} download data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}><Download size={16} /> Download PDF</a>
+          <a
+            href={pdfUrl}
+            download
+            data-glass-accent={glass ? '' : undefined}
+            onClick={(e) => {
+              // Capacitor webview: <a download> dead-ends — share sheet instead.
+              if (isNativeApp()) {
+                e.preventDefault();
+                saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
+                  .catch(() => window.alert('Could not save the PDF. Please try again.'));
+              }
+            }}
+            style={{ ...actionButtonStyle('primary'), marginTop: 18 }}
+          ><Download size={16} /> Download PDF</a>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
