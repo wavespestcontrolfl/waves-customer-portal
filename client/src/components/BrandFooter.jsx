@@ -168,12 +168,19 @@ export default function BrandFooter({ borderColor, variant }) {
         ) : (
           <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>{WAVES_ADDRESS_LINE}</div>
         )}
-        <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 8 }}>
-          <a href={PRIVACY_URL} target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>Privacy Policy</a>
-          {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
-          <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>Terms of Service</a>
-        </div>
-        <div style={{ fontSize: 12, color: B.grayDark }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
+        {/* One legal stack per page (owner 2026-07-06): shell pages get
+            Privacy/Terms + copyright from TrustFooter, so the contact
+            variant only carries them standalone (codex P2, PR #2439). */}
+        {!inShell ? (
+          <>
+            <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 8 }}>
+              <a href={PRIVACY_URL} target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>Privacy Policy</a>
+              {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
+              <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>Terms of Service</a>
+            </div>
+            <div style={{ fontSize: 12, color: B.grayDark }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
+          </>
+        ) : null}
       </div>
     );
   }
@@ -190,7 +197,11 @@ export default function BrandFooter({ borderColor, variant }) {
         <div style={{ fontSize: 12, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>
           <ServiceAreaLinks color={B.grayDark} />
         </div>
-        <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
+        {/* Shell pages get the copyright from TrustFooter — the document
+            sign-off keeps only the identity block there (codex P2, PR #2439). */}
+        {!inShell ? (
+          <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
+        ) : null}
       </div>
     );
   }

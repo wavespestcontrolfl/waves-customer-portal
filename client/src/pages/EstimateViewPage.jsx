@@ -66,6 +66,7 @@ import {
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
+import { formatETDate } from '../lib/timezone';
 import { PRICE_FONT } from '../components/estimate/tokens';
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
@@ -530,13 +531,16 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
     address,
   ].map((line) => String(line || '').trim()).filter(Boolean);
   // Estimate issue + expiration dates (owner ask 2026-07-06). Invalid or
-  // absent timestamps render nothing rather than "Invalid Date".
+  // absent timestamps render nothing rather than "Invalid Date". ET-pinned:
+  // SMS/email/PDF and the server-rendered page all stamp these dates in
+  // Eastern time, so a browser in another timezone must not show a
+  // different calendar day (codex P1, PR #2439).
   const fmtDate = (value) => {
     if (!value) return null;
     const d = new Date(value);
     return Number.isNaN(d.getTime())
       ? null
-      : d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
+      : formatETDate(d, { month: 'long', day: 'numeric', year: 'numeric' });
   };
   const issuedDisplay = fmtDate(createdAt);
   const expiresDisplay = fmtDate(expiresAt);
@@ -3114,10 +3118,19 @@ export default function EstimateViewPage() {
   })();
   const soonestSlotLabel = firstSlotDate
     ? new Date(`${firstSlotDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })
-    : 'tomorrow';
-  const fillGlassTokens = (str) => (str
-    ? String(str).replace(/\{city\}/g, estimateCity).replace(/\{date\}/g, soonestSlotLabel)
-    : str);
+    : null;
+  // Until a REAL first slot is known (still loading, request failed, or no
+  // openings), the "as soon as {date}" clause is dropped rather than guessed
+  // — a "tomorrow" placeholder can contradict the slot picker below (codex
+  // P2, PR #2439). The residual-token replace guards any future pack string
+  // that uses {date} outside that phrase.
+  const fillGlassTokens = (str) => {
+    if (!str) return str;
+    const withCity = String(str).replace(/\{city\}/g, estimateCity);
+    return soonestSlotLabel
+      ? withCity.replace(/\{date\}/g, soonestSlotLabel)
+      : withCity.replace(/\s*as soon as \{date\}/gi, '').replace(/\{date\}/g, 'soon');
+  };
   const headline = fillGlassTokens(glassPack?.heroH1) || UNIVERSAL_HEADLINE;
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the

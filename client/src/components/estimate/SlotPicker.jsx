@@ -137,10 +137,12 @@ export default function SlotPicker({
   }, [glass]);
 
   // Report the first open slot's date up to the page (hero {date} token).
+  // A loaded response with NO slots reports null so the page drops a stale
+  // date instead of keeping an earlier claim (codex P2, PR #2439); before
+  // load it stays silent so the page's neutral copy holds.
   useEffect(() => {
-    if (!onFirstSlotDate) return;
-    const first = data?.primary?.[0]?.date || data?.expander?.[0]?.date || null;
-    if (first) onFirstSlotDate(first);
+    if (!onFirstSlotDate || !data) return;
+    onFirstSlotDate(data?.primary?.[0]?.date || data?.expander?.[0]?.date || null);
   }, [data, onFirstSlotDate]);
 
   const selectSlot = (slot) => {
