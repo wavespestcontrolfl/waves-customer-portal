@@ -96,6 +96,42 @@ export function formatETDateTime(date, options = {}) {
   return d.toLocaleString('en-US', { timeZone: TIMEZONE, ...options });
 }
 
+// ── <datetime-local> inputs, ET-anchored ───────────────────────────
+//
+// A `type="datetime-local"` input holds a naive 'YYYY-MM-DDTHH:mm'
+// wall-clock string with no zone. These two helpers pin that wall clock
+// to ET so an editor anywhere sees and enters ET, and the stored instant
+// round-trips exactly. Never populate such an input from toISOString()
+// (that shows UTC wall-clock, hours off the ET the rest of the UI shows).
+
+// Instant → 'YYYY-MM-DDTHH:mm' ET wall-clock, for an input's `value`.
+export function etDatetimeLocalValue(date) {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  const { year, month, day, hour, minute } = etParts(d);
+  const p = (v) => String(v).padStart(2, '0');
+  return `${year}-${p(month)}-${p(day)}T${p(hour)}:${p(minute)}`;
+}
+
+// 'YYYY-MM-DDTHH:mm' ET wall-clock → ISO instant string. Interprets the
+// value as ET: guess the instant as if the wall clock were UTC, then
+// correct by the actual ET offset at that guess (Intl handles DST). One
+// correction is exact except inside the ~1h DST transition seam.
+export function etDatetimeLocalToISO(value) {
+  if (!value) return null;
+  const [datePart, timePart] = String(value).split('T');
+  if (!datePart || !timePart) return null;
+  const [y, mo, d] = datePart.split('-').map(Number);
+  const [h, mi] = timePart.split(':').map(Number);
+  if ([y, mo, d, h, mi].some(Number.isNaN)) return null;
+  const targetWall = Date.UTC(y, mo - 1, d, h, mi);
+  const p = etParts(new Date(targetWall));
+  const guessWall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
+  const offset = guessWall - targetWall; // ET behind UTC → negative
+  return new Date(targetWall - offset).toISOString();
+}
+
 // ── Day arithmetic anchored to ET ──────────────────────────────────
 //
 // Returns a Date N ET-calendar-days away from `date`. Anchors at

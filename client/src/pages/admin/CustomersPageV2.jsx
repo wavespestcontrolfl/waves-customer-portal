@@ -1012,7 +1012,12 @@ export default function CustomersPageV2() {
       email: c.email || "",
       phone: c.phone || "",
       city: c.city || "",
-      tier: c.tier || "Bronze",
+      // Preserve the customer's real tier (null for leads / one-time / No
+      // Plan). Defaulting to "Bronze" made an unrelated edit (e.g. fixing a
+      // name) PUT waveguard_tier='Bronze', which the server read as a new
+      // membership — writing a phantom plan AND emailing the customer a
+      // "membership started" notice. The select's "No Plan" option is value "".
+      tier: c.tier || null,
       monthlyRate: c.monthlyRate || "",
       pipelineStage: c.pipelineStage || "new_lead",
       serviceContactName: c.serviceContactName || "",
