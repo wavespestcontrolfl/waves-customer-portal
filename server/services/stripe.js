@@ -1428,18 +1428,11 @@ const StripeService = {
       throw new Error('Payment is not a Stripe payment — cannot refund via Stripe');
     }
 
-    // Cents math against what's already been refunded: partials must
-    // ACCUMULATE (two 50% refunds = fully refunded), and a request beyond
-    // the remaining balance is rejected here with a clear message instead
-    // of surfacing as an opaque Stripe error.
     const paidCents = Math.round(parseFloat(payment.amount) * 100);
     const priorCents = Math.round(parseFloat(payment.refund_amount || 0) * 100);
     const remainingCents = paidCents - priorCents;
-    if (remainingCents <= 0) throw new Error('Payment is already fully refunded');
     const requestCents = amount ? Math.round(amount * 100) : null;
-    if (requestCents !== null && (requestCents <= 0 || requestCents > remainingCents)) {
-      throw new Error(`Refund amount must be between $0.01 and the remaining $${(remainingCents / 100).toFixed(2)}`);
-    }
+    const requestTag = requestCents === null ? 'rest' : String(requestCents);
 
     // Persist the attempt key BEFORE calling Stripe. The retry contract
     // ("re-running the same refund is safe") must hold even when the
@@ -1453,13 +1446,28 @@ const StripeService = {
     try {
       meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
     } catch { meta = {}; }
-    const requestTag = requestCents === null ? 'rest' : String(requestCents);
-    let idempotencyKey;
-    if (meta.pending_refund_key && meta.pending_refund_request === requestTag) {
-      idempotencyKey = meta.pending_refund_key;
-    } else if (meta.pending_refund_key) {
+    const isReplay = !!(meta.pending_refund_key && meta.pending_refund_request === requestTag);
+    if (meta.pending_refund_key && !isReplay) {
       throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
+    }
+
+    let idempotencyKey;
+    if (isReplay) {
+      // Replays skip the remaining-balance validation below: the webhook
+      // may already have recorded the very refund being replayed (a $60
+      // refund on $100 repaired to remaining $40 would otherwise be
+      // rejected here and wedge the payment), and Stripe replays the key
+      // idempotently — no new money moves either way.
+      idempotencyKey = meta.pending_refund_key;
     } else {
+      // Cents math against what's already been refunded: partials must
+      // ACCUMULATE (two 50% refunds = fully refunded), and a NEW request
+      // beyond the remaining balance is rejected with a clear message
+      // instead of surfacing as an opaque Stripe error.
+      if (remainingCents <= 0) throw new Error('Payment is already fully refunded');
+      if (requestCents !== null && (requestCents <= 0 || requestCents > remainingCents)) {
+        throw new Error(`Refund amount must be between $0.01 and the remaining $${(remainingCents / 100).toFixed(2)}`);
+      }
       idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
       await db('payments').where({ id: paymentId }).update({
         metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag }),

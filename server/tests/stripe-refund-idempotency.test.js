@@ -134,6 +134,32 @@ describe('StripeService.refund', () => {
     expect(updatePayments).toHaveBeenCalledTimes(1);
   });
 
+  test('replay bypasses the remaining-balance check (repaired $60-of-$100 retry is not wedged)', async () => {
+    // $60 refund succeeded at Stripe, local update failed, webhook
+    // repaired refund_amount=60 → remaining is $40. Retrying the same $60
+    // must replay the persisted key (Stripe dedupes; no new money), not be
+    // rejected by the new-attempt balance validation.
+    paymentRow.refund_amount = '60.00';
+    paymentRow.stripe_refund_id = 're_1';
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_6000_0',
+      pending_refund_request: '6000',
+    });
+    stripeClient.refunds.create.mockResolvedValueOnce({
+      id: 're_1', status: 'succeeded', amount: 6000, created: 1780000000,
+    });
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 60 });
+
+    const [, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_6000_0');
+    // Ledger stays at the repaired $60 — the replay is not re-added.
+    expect(updatePayments).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'paid',
+      refund_amount: 60,
+    }));
+  });
+
   test('webhook-repaired replay does NOT double-count the same refund in the ledger', async () => {
     // Same scenario, focused on the amount: webhook wrote refund_amount=40
     // and stripe_refund_id=re_1 from THIS refund. The replay returns the
