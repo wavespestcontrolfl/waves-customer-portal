@@ -137,6 +137,12 @@ const TRUST_RANK = {
  *                               'none'          — purpose bypasses consent
  *   - prefsColumn             Optional notification_prefs column that must be
  *                             true (in addition to sms_enabled) for a send to fire.
+ *   - channelColumn           Optional notification_prefs column holding the
+ *                             customer's delivery-channel choice for this
+ *                             purpose (sms | email | both). 'email' suppresses
+ *                             the SMS leg — the email version of these notices
+ *                             is delivered by its own lane (receipt / billing
+ *                             emails to the billing address).
  *   - minIdentityTrust        Minimum identityTrustLevel required to send.
  *   - requireIds              Field names on the input that must be present.
  *
@@ -232,6 +238,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'billing_reminder',
+    channelColumn: 'billing_reminder_channel',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
@@ -240,7 +247,13 @@ const PURPOSE_POLICY = {
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
-    prefsColumn: 'payment_receipt',
+    // Was 'payment_receipt' — a column that has never existed on
+    // notification_prefs, so the portal's "Payment confirmation texts"
+    // toggle was stored but never enforced. The real column is
+    // payment_confirmation_sms (defaults true, so default-on customers
+    // are unaffected).
+    prefsColumn: 'payment_confirmation_sms',
+    channelColumn: 'payment_confirmation_channel',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },

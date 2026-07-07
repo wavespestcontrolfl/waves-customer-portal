@@ -98,6 +98,19 @@ async function checkConsentForPurpose(input, policy, contactState) {
     }
   }
 
+  // Per-purpose delivery-channel column (sms | email | both). 'email' means
+  // the customer chose email-only delivery for this notification type, so the
+  // SMS leg is suppressed — the email version arrives via its own lane
+  // (receipt / billing emails). Only gates SMS: an email send through the
+  // wrapper must not be blocked by an email-preferring customer.
+  if (policy.channelColumn && input.channel === 'sms' && prefs[policy.channelColumn] === 'email') {
+    return {
+      ok: false,
+      code: 'CHANNEL_EMAIL_ONLY',
+      reason: `Recipient prefers email-only delivery for the "${policy.channelColumn}" notification type`,
+    };
+  }
+
   // Marketing-grade consent. We require either:
   //   - the consentBasis on the input is { status: 'opted_in', ... }
   //   - or the customer has a stored marketing-consent flag (when wired)

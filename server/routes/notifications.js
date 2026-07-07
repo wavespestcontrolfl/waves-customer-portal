@@ -60,8 +60,12 @@ function normalizeContactInput(contact = {}) {
 // Delivery-channel options for per-notification channel selection.
 const CHANNEL_VALUES = ['sms', 'email', 'both'];
 
-// Delivery channel is an account-level "how to reach me" preference, stored on
-// the account's primary profile so it is consistent across every property.
+// Appointment delivery channels are an account-level "how to reach me"
+// preference, stored on the account's primary profile so they are consistent
+// across every property. The billing channels are NOT listed here — billing
+// sends target the charged customer row, so billing_reminder_channel /
+// payment_confirmation_channel live per-row next to the billing_reminder /
+// payment_confirmation_sms toggles and billing_email they modify.
 const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
 
 const PREF_SELECT = [
@@ -84,6 +88,8 @@ const PREF_SELECT = [
   'appointment_confirmation_channel',
   'service_reminder_72h_channel',
   'service_reminder_24h_channel',
+  'billing_reminder_channel',
+  'payment_confirmation_channel',
 ];
 
 function channelValue(value) {
@@ -118,6 +124,8 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
       serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
       serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+      billingReminderChannel: channelValue(prefs.billing_reminder_channel),
+      paymentConfirmationChannel: channelValue(prefs.payment_confirmation_channel),
     } : {}),
   };
 }
@@ -160,6 +168,8 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
   if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
+  if (updates.billingReminderChannel !== undefined) dbUpdates.billing_reminder_channel = channelValue(updates.billingReminderChannel);
+  if (updates.paymentConfirmationChannel !== undefined) dbUpdates.payment_confirmation_channel = channelValue(updates.paymentConfirmationChannel);
   return dbUpdates;
 }
 
@@ -183,6 +193,8 @@ const ACCOUNT_PREF_LABELS = {
   appointmentConfirmationChannel: 'New Appointment Confirmation — Delivery',
   serviceReminder72hChannel: '72-Hour Appointment Reminder — Delivery',
   serviceReminder24hChannel: '24-Hour Service Reminder — Delivery',
+  billingReminderChannel: 'Billing Reminder — Delivery',
+  paymentConfirmationChannel: 'Payment Confirmation — Delivery',
 };
 
 // Preference keys whose value is a delivery channel (sms | email | both)
@@ -191,6 +203,8 @@ const CHANNEL_PREF_KEYS = new Set([
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
+  'billingReminderChannel',
+  'paymentConfirmationChannel',
 ]);
 
 const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email' };
@@ -215,6 +229,8 @@ const DB_FIELD_BY_PREF = {
   appointmentConfirmationChannel: 'appointment_confirmation_channel',
   serviceReminder72hChannel: 'service_reminder_72h_channel',
   serviceReminder24hChannel: 'service_reminder_24h_channel',
+  billingReminderChannel: 'billing_reminder_channel',
+  paymentConfirmationChannel: 'payment_confirmation_channel',
 };
 
 function prefDisplayValue(key, value) {
@@ -418,6 +434,8 @@ router.put('/preferences', async (req, res, next) => {
       appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
+      billingReminderChannel: Joi.string().valid(...CHANNEL_VALUES),
+      paymentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);
