@@ -91,12 +91,13 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // queue treat the channel preference as an expected skip but an opt-out on
   // the SMS leg as an actionable failure, and would retry forever a receipt
   // whose email leg already delivered. The SMS is suppressed either way.
-  // channelGate 'opt_in' policies only apply the gate when the CALLER declares
-  // an email leg exists (input.hasEmailLeg) — several payment_receipt sends
-  // are SMS-only confirmations with no email equivalent (billing-cron autopay
-  // successes, invoice thank-yous, balance payment-received), and suppressing
-  // those for an email-only customer would leave them with no confirmation at
-  // all. Flows with a real email sidecar (the invoice receipt path) opt in.
+  // channelGate 'opt_in' policies (billing, payment_receipt) only apply the
+  // gate when the CALLER declares an email leg exists (input.hasEmailLeg) —
+  // several sends are SMS-only with no email equivalent (billing-cron autopay
+  // successes, invoice thank-yous, balance payment-received, the operator
+  // Comms billing reminder), and suppressing those for an email-only customer
+  // would leave them with no message at all. Flows with a real email sidecar
+  // (the invoice receipt path) opt in.
   const channelGateApplies = policy.channelColumn
     && input.channel === 'sms'
     && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);

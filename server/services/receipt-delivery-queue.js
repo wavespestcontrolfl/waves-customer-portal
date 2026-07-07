@@ -93,8 +93,11 @@ function expectedEmailSkip(result) {
   // 'receipt_opted_out' is the payment_receipt=false kill switch (migration
   // 104) — the customer opted out of payment receipts entirely, so the email
   // leg is skipped on purpose, exactly like the no-recipient case.
+  // 'channel_sms_only' is the customer's payment_receipt_channel='sms'
+  // (Text-only) preference: the SMS leg carries the receipt.
   return result?.error === 'No receipt recipient email'
-    || result?.error === 'receipt_opted_out';
+    || result?.error === 'receipt_opted_out'
+    || result?.error === 'channel_sms_only';
 }
 
 function actionableSmsFailure(result) {
@@ -190,6 +193,7 @@ async function processReceiptDeliveryJob(job) {
     // No receipt_sent_at stamp on this path (the stamp below requires a
     // delivered email) — nothing was sent.
     let receiptKillSwitch = false;
+    let textOnlyChannel = false;
     let prefsLookupFailed = false;
     if (!invoice.payer_id) {
       const prefs = await db('notification_prefs')
@@ -204,14 +208,27 @@ async function processReceiptDeliveryJob(job) {
           return null;
         });
       receiptKillSwitch = prefs?.payment_receipt === false;
+      textOnlyChannel = prefs?.payment_receipt_channel === 'sms';
     }
+    // payment_receipt_channel='sms' (the portal's Text choice): the SMS leg IS
+    // the receipt, so the email leg is skipped — EXCEPT as a fallback when the
+    // text can never deliver (no phone, STOP suppression, or the receipt-texts
+    // toggle off): a record of the payment still has to reach the customer
+    // somewhere, mirroring the consent gate's no-usable-email SMS fallback in
+    // the other direction. A transient SMS failure does NOT fall back — the
+    // retry ladder re-attempts the text. Payer-billed invoices never read the
+    // homeowner prefs above, so the payer AP email routing is untouched.
+    const smsPermanentlyUndeliverable = ['no-phone', 'sms_suppressed', 'receipt_texts_opted_out'].includes(smsResult?.reason);
+    const textOnlyEmailSkip = textOnlyChannel && !smsPermanentlyUndeliverable;
     emailResult = prefsLookupFailed
       ? { ok: false, error: 'receipt prefs lookup failed' }
       : receiptKillSwitch
         ? { ok: false, error: 'receipt_opted_out' }
-        : await sendReceiptEmail(invoice.id, {
-          idempotencyKey: `receipt_email_auto:${invoice.id}`,
-        }).catch((err) => ({ ok: false, error: err.message }));
+        : textOnlyEmailSkip
+          ? { ok: false, error: 'channel_sms_only' }
+          : await sendReceiptEmail(invoice.id, {
+            idempotencyKey: `receipt_email_auto:${invoice.id}`,
+          }).catch((err) => ({ ok: false, error: err.message }));
     if (actionableEmailFailure(emailResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt email not sent for invoice ${invoice.invoice_number}: ${emailResult.error || 'unknown'}`);
     }

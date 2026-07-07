@@ -36,10 +36,10 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(resolvePolicy('customer', 'payment_receipt').channelColumn).toBe('payment_receipt_channel');
   });
 
-  test("purpose 'billing': channel 'email' suppresses the SMS leg (billing email on file)", async () => {
+  test("purpose 'billing': channel 'email' suppresses the SMS leg for callers with an email sidecar", async () => {
     const policy = resolvePolicy('customer', 'billing');
     const res = await checkConsentForPurpose(
-      smsInput('billing'),
+      { ...smsInput('billing'), hasEmailLeg: true },
       policy,
       contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
     );
@@ -106,16 +106,20 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.ok).toBe(true);
   });
 
-  test("the 'billing' gate stays unconditional — every billing notice has an email lane", async () => {
+  test("the 'billing' gate is OPT-IN too — the SMS-only Comms billing reminder is never suppressed", async () => {
+    // The only live purpose-'billing' SMS sender is the operator Comms
+    // billing reminder (comms-tools), which has no email branch — an
+    // unconditional gate would turn an email-preferring customer's only
+    // billing reminder into silence (Codex P2 on 15fc2cf0). The dispatcher's
+    // billing lane pre-filters on billing_channel itself before this gate.
     const policy = resolvePolicy('customer', 'billing');
-    expect(policy.channelGate).toBeUndefined();
+    expect(policy.channelGate).toBe('opt_in');
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
       contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
     );
-    expect(res.ok).toBe(false);
-    expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
+    expect(res.ok).toBe(true);
   });
 
   test("channel 'email' outranks a STOP opt-out — the skip must read as the channel preference", async () => {

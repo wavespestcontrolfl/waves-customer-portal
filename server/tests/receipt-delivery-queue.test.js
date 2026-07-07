@@ -232,6 +232,59 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
   });
 
+  test("payment_receipt_channel='sms' skips the email leg — the delivered text IS the receipt", async () => {
+    // The portal's Text choice must suppress the email side too, not just
+    // Email suppress the SMS side (Codex P2 on 15fc2cf0). sendReceipt stamps
+    // receipt_sent_at itself on SMS success, so no stamp is needed here.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: true, payment_receipt_channel: 'sms' },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
+  });
+
+  test('a Text-only customer whose SMS can never deliver still gets the email fallback', async () => {
+    // STOP suppression (like no-phone or the receipt-texts toggle) is
+    // permanent — with the text undeliverable, skipping the email too would
+    // leave no record of the payment at all. Mirrors the consent gate's
+    // no-usable-email SMS fallback in the other direction.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: true, payment_receipt_channel: 'sms' },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'sms_suppressed' });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
+  });
+
+  test('a Text-only transient SMS failure retries the text — it does NOT fall back to email', async () => {
+    // A Twilio blip is not a reason to email a customer who chose Text: the
+    // retry ladder re-attempts the SMS. The email skip is expected, the SMS
+    // failure is actionable, so the job reschedules.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: true, payment_receipt_channel: 'sms' },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'Twilio unavailable' });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(false);
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'retry_scheduled' }));
+  });
+
   test('payer-billed receipts are exempt — homeowner prefs never gate the payer AP email', async () => {
     primeDb({
       invoice: { id: 'inv1', customer_id: 'c1', payer_id: 'p1', invoice_number: 'WPC-1', receipt_sent_at: null },
