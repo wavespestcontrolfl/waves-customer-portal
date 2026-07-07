@@ -1733,13 +1733,25 @@ function EditEntryModal({ entry, onClose, onSave }) {
             </button>{" "}
             <button
               disabled={!form.edit_reason}
-              onClick={() =>
+              onClick={() => {
+                // If a clock field wasn't touched, send back the exact stored
+                // instant rather than re-deriving it from the ET wall clock.
+                // A wall-clock string can't distinguish the two 1 AM instants
+                // on a DST fall-back day, so re-deriving an untouched value
+                // would silently shift a repeated-hour entry by an hour on any
+                // unrelated edit. Only convert when the operator changed it.
+                const resolve = (field, original) =>
+                  form[field] === etDatetimeLocalValue(original)
+                    ? original
+                      ? new Date(original).toISOString()
+                      : null
+                    : etDatetimeLocalToISO(form[field]);
                 onSave({
                   ...form,
-                  clock_in: etDatetimeLocalToISO(form.clock_in),
-                  clock_out: etDatetimeLocalToISO(form.clock_out),
-                })
-              }
+                  clock_in: resolve("clock_in", entry.clock_in),
+                  clock_out: resolve("clock_out", entry.clock_out),
+                });
+              }}
               style={{
                 ...sBtn(D.teal, D.white),
                 opacity: form.edit_reason ? 1 : 0.5,
