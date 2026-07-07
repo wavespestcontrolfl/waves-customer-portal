@@ -88,6 +88,22 @@ describe('glassScarcityInfo', () => {
     )).toBe(null);
   });
 
+  it('recounts from still-bookable slots when a counted opening stales out', () => {
+    // Server counted 2 openings today, but 12:30 drifted inside the 2-hour
+    // lead while the page sat open. The server pins every scarce-first-day
+    // slot into the payload, so the shortfall means that opening is truly
+    // gone — the badge must say 1, not keep the fetch-time 2 (Codex P2,
+    // PR #2469).
+    expect(glassScarcityInfo(
+      [
+        { date: '2026-07-05', windowStart: '12:30' }, // inside the 2h lead → stale
+        { date: '2026-07-05', windowStart: '14:00' },
+      ],
+      { date: '2026-07-05', openCount: 2 },
+      NOW,
+    )).toEqual({ count: 1, label: 'Only 1 opening today — 2:00 PM' });
+  });
+
   it('handles the weekday form for later-week scarcity', () => {
     expect(glassScarcityInfo(
       [{ date: '2026-07-07', windowStart: '09:00' }],

@@ -7546,30 +7546,37 @@ function MyPlanTab({ customer }) {
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
-            <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
+            <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {includedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
-                  <div key={svc.id}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 850, marginBottom: 8 }}>
-                      <Icon name={iconName(svc.icon)} size={14} strokeWidth={1.8} />
+                  <div key={svc.id} style={{
+                    background: subtle,
+                    border: '1px solid rgba(255,255,255,0.65)',
+                    borderRadius: 14,
+                    padding: '12px 12px 10px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 700, marginBottom: 10 }}>
+                      <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
-                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#D8D0C0' : 'transparent';
-                        const border = isScheduled ? fill : '#E7E2D7';
+                        const isFilled = isCompleted || isOverdue || (isCurrentMonth && isScheduled);
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
+                        const border = isFilled ? 'rgba(255,255,255,0.55)' : isScheduled ? 'rgba(27,44,91,0.35)' : 'rgba(27,44,91,0.14)';
                         const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
+                        const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 0 }}>
+                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -7579,17 +7586,34 @@ function MyPlanTab({ customer }) {
                               onBlur={() => setHoveredCalendarItem(null)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 999,
-                              background: fill,
-                              border: `1px solid ${border}`,
-                              opacity: isScheduled ? 1 : 0.45,
-                              boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
-                              padding: 0,
-                              cursor: isScheduled ? 'pointer' : 'default',
-                            }}
-                            />
+                                width: '100%',
+                                height: 26,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                background: 'transparent',
+                                border: 'none',
+                                padding: 0,
+                                cursor: isScheduled ? 'pointer' : 'default',
+                              }}
+                            >
+                              <span aria-hidden="true" style={{
+                                display: 'block',
+                                boxSizing: 'border-box',
+                                width: 15,
+                                height: 15,
+                                borderRadius: 999,
+                                background: fill,
+                                border: `1.5px solid ${border}`,
+                                boxShadow: isFilled
+                                  ? `inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 6px rgba(4,57,94,0.22)${isCurrentMonth ? `, 0 0 0 3px ${B.wavesBlue}2E` : ''}`
+                                  : isScheduled
+                                    ? 'inset 0 1px 0 rgba(255,255,255,0.8), 0 1px 3px rgba(4,57,94,0.12)'
+                                    : 'none',
+                                transform: isHovered ? 'scale(1.35)' : 'scale(1)',
+                                transition: 'transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 200ms ease',
+                              }} />
+                            </button>
                             {isScheduled && hoveredCalendarItem === tooltipKey && (
                               <div role="tooltip" style={{
                                 position: 'absolute',
@@ -7615,7 +7639,12 @@ function MyPlanTab({ customer }) {
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
+                            <div style={{
+                              fontSize: 10,
+                              fontWeight: isCurrentMonth ? 800 : 600,
+                              letterSpacing: '0.02em',
+                              color: isCurrentMonth ? B.wavesBlue : 'rgba(27,44,91,0.5)',
+                            }}>{month[0]}</div>
                           </div>
                         );
                       })}
@@ -10814,6 +10843,14 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Lock the page scroll while the sheet is open — on iOS a touch scroll on
+  // the sheet otherwise chains to the page behind it.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
   const muted = PORTAL_SHELL.muted;
   const card = {
     background: PORTAL_SHELL.surface,
@@ -10872,6 +10909,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         maxHeight: 'calc(100vh - 16px)',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
       }}>
         <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
         <div style={{
@@ -11057,6 +11095,27 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Lock the page scroll while the chat is open — on iOS a touch scroll on
+  // the overlay otherwise chains to the page behind it.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
+  // The iOS keyboard doesn't resize the layout viewport — it pans it, which
+  // shoved the sheet (header and close button included) off the top of the
+  // screen while typing. Cap the sheet to the visual viewport instead.
+  const [viewportH, setViewportH] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const update = () => setViewportH(Math.round(vv.height));
+    update();
+    vv.addEventListener('resize', update);
+    return () => vv.removeEventListener('resize', update);
+  }, []);
+
   // A question handed in from the Waves AI bar sends itself on open.
   useEffect(() => {
     if (initialQuestion && !initialSentRef.current) {
@@ -11105,12 +11164,15 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         role="dialog"
         aria-modal="true"
         aria-label="Waves assistant"
-        data-glass=""
+        data-glass="modal"
         style={{
-          background: PORTAL_SHELL.surface,
+          background: PORTAL_SHELL.page,
           position: 'relative',
+          boxSizing: 'border-box',
           borderRadius: compact ? '8px 8px 0 0' : 8,
-          maxHeight: compact ? '85vh' : 'min(760px, calc(100vh - 48px))',
+          maxHeight: compact
+            ? (viewportH ? `min(85dvh, ${viewportH}px)` : '85dvh')
+            : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
           margin: '0 auto',
@@ -11126,6 +11188,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }`}</style>
 
         <div style={{
+          flexShrink: 0,
           padding: '16px 18px',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -11133,7 +11196,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <ShellIconTile icon="waves" size={40} />
+            <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
             <div>
               <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Waves Assistant</div>
               <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
@@ -11146,9 +11209,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
+          overscrollBehavior: 'contain',
           padding: '16px 18px',
-          maxHeight: compact ? '60vh' : 'none',
-          background: PORTAL_SHELL.page,
+          background: 'transparent',
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
@@ -11188,6 +11251,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         </div>
 
         <div style={{
+          flexShrink: 0,
           padding: '12px 16px',
           borderTop: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
@@ -11206,13 +11270,15 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               padding: '0 14px',
               borderRadius: 8,
               border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-              fontSize: 14,
+              // 16px floor: anything smaller makes iOS auto-zoom the page on
+              // focus, which is what pushed the open chat off the screen.
+              fontSize: 16,
               fontFamily: FONTS.body,
               outline: 'none',
               background: '#fff',
               color: PORTAL_SHELL.text,
             }}
-            autoFocus
+            autoFocus={!compact}
           />
           <button onClick={send} disabled={sending || !input.trim()} style={{
             width: 44,
@@ -11324,6 +11390,16 @@ export default function PortalPage() {
       document.removeEventListener('mousedown', onPointer);
       document.removeEventListener('keydown', onKey);
     };
+  }, [showMenu]);
+
+  // Lock the page scroll while the account menu is open — on iOS a touch
+  // scroll on the dropdown otherwise chains to the page behind it, so the
+  // background moved while the menu stayed put.
+  useEffect(() => {
+    if (!showMenu) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
   }, [showMenu]);
 
   if (!customer) return null;
@@ -11494,8 +11570,13 @@ export default function PortalPage() {
                 background: PORTAL_SHELL.page,
                 borderRadius: 16,
                 overflow: 'hidden',
-                maxHeight: 'calc(100vh - 72px)',
+                // dvh + safe-area: the menu sits ~60px below the notch, so a
+                // plain 100vh budget pushed the last rows off-screen on iOS.
+                maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 84px)',
                 overflowY: 'auto',
+                WebkitOverflowScrolling: 'touch',
+                // Keep the menu's scroll from chaining to the page behind it.
+                overscrollBehavior: 'contain',
                 boxShadow: PORTAL_SHELL.shadow,
                 border: `1px solid ${PORTAL_SHELL.border}`,
                 zIndex: 200,

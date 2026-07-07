@@ -181,7 +181,7 @@ function classify(revealIO, statIO, pro) {
   if (satCard) {
     satCard.querySelectorAll('[data-glass="soft"]').forEach((tile) => {
       const t = tile.textContent.trim();
-      if (/^(HOME|LOT|POOL\/LANAI|COMPLEXITY)/i.test(t) && t.length < 40 && !tile.hasAttribute('data-g-stattile')) tile.setAttribute('data-g-stattile', '');
+      if (/^(HOME|LOT|POOL\/LANAI|COMPLEXITY|TREATABLE LAWN)/i.test(t) && t.length < 40 && !tile.hasAttribute('data-g-stattile')) tile.setAttribute('data-g-stattile', '');
     });
   }
 

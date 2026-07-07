@@ -80,6 +80,23 @@ export default function CashSection({
                 }
                 chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
               />
+              {/* Deposits live in their own ledger (estimate_deposits) and
+                  never appear as invoices/payments rows, so without this tile
+                  collected-at-accept money is invisible on every cash view.
+                  On hand = received, not yet credited to a first invoice. */}
+              <KpiTile
+                label="Deposits on Hand"
+                value={
+                  kpis.deposits
+                    ? fmtMoneyCompact(kpis.deposits.onHand)
+                    : "—"
+                }
+                sub={
+                  kpis.deposits
+                    ? `${kpis.deposits.onHandCount} awaiting first invoice · ${fmtMoneyCompact(kpis.deposits.collectedPeriod)} collected this period`
+                    : "unavailable"
+                }
+              />
             </>
           )}
         </KpiStrip>

@@ -850,6 +850,31 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         : null;
     } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
 
+    // Estimate-deposit money — deposits live in their own ledger
+    // (estimate_deposits), never as payments/invoices rows, so none of the
+    // AR/billing queries above can see them. onHand = received rows' unapplied
+    // remainder (amount − credited − refunded, the pendingDepositCredit
+    // formula); collectedPeriod = gross deposit money that arrived in the
+    // window (received_at is only stamped on real Stripe success, so a bare
+    // window filter excludes pending/failed rows). null (not zeros) on a read
+    // failure so the tile can show unavailable rather than a real-looking $0.
+    let deposits = null;
+    try {
+      const [ledger] = await db('estimate_deposits').select(
+        db.raw("COALESCE(SUM(GREATEST(amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0), 0)) FILTER (WHERE status = 'received'), 0) as on_hand"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count"),
+      );
+      const [window] = await db('estimate_deposits')
+        .modify((qb) => applyETTimestampWindow(qb, 'received_at', start, todayStr))
+        .select(db.raw('COALESCE(SUM(amount), 0) as collected'), db.raw('COUNT(*) as n'));
+      deposits = {
+        onHand: parseFloat(ledger.on_hand),
+        onHandCount: parseInt(ledger.on_hand_count, 10),
+        collectedPeriod: parseFloat(window.collected),
+        collectedPeriodCount: parseInt(window.n, 10),
+      };
+    } catch (err) { logger.error(`[admin-dashboard] deposit kpis failed: ${err.message}`); }
+
     return {
       period: range ? 'custom' : period,
       periodLabel: range ? `Since ${start}` : periodLabel(period),
@@ -895,6 +920,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         customerBase,
       },
       retention: { pct: retentionPct, lost },
+      deposits,
       momentum,
       leaderboard,
     };

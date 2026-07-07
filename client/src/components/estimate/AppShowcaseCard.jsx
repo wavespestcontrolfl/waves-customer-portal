@@ -125,15 +125,29 @@ export default function AppShowcaseCard({ onBookToday = null }) {
         <div className="gc-app-visual">
           <div className="gc-av-left">
             <div className="gc-av-glow" aria-hidden="true" />
-            <img
-              className="gc-av-phone"
-              src="/images/app/app-tracking.webp"
-              width="760"
-              height="1647"
-              loading="lazy"
-              alt="Waves app live technician tracking"
-              style={{ height: 'auto' }}
-            />
+            {/* Two Android-style phones, two different in-app screens
+                (owner 2026-07-07): the home dashboard up front, the
+                Billing & Auto Pay screen behind. */}
+            <figure className="gc-phone gc-phone--android">
+              <span className="gc-phone-cam" aria-hidden="true" />
+              <img
+                src="/images/app/app-dashboard-glass.webp"
+                width="780"
+                height="1688"
+                loading="lazy"
+                alt="Waves app home screen with your plan, balance, and next visit"
+              />
+            </figure>
+            <figure className="gc-phone gc-phone--android gc-phone--b">
+              <span className="gc-phone-cam" aria-hidden="true" />
+              <img
+                src="/images/app/app-billing-glass.webp"
+                width="780"
+                height="1688"
+                loading="lazy"
+                alt="Waves app Billing screen with Auto Pay, saved card, and payment history"
+              />
+            </figure>
           </div>
           <div className="gc-av-right">
             <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: W.navyDeep }}>
@@ -143,8 +157,22 @@ export default function AppShowcaseCard({ onBookToday = null }) {
               {GLASS_COPY.appHouseholdLine}
             </p>
             <div className="gc-av-chips">
+              {/* data-glass-accent renders these as the same gold pills as the
+                  report-card / AI slot-search chips (owner 2026-07-07); the
+                  inline styles remain the non-glass fallback. */}
               {APP_FEATURES.map(([, label]) => (
-                <span key={label} className="gc-av-chip">{label}</span>
+                <span
+                  key={label}
+                  data-glass-accent=""
+                  style={{
+                    padding: '8px 14px', borderRadius: 999,
+                    fontSize: 14, fontWeight: 700, color: W.navyDeep,
+                    background: W.white, border: '1px solid #DCEAF3',
+                    boxShadow: '0 2px 8px rgba(4,57,94,.08)',
+                  }}
+                >
+                  {label}
+                </span>
               ))}
             </div>
             {native ? null : (

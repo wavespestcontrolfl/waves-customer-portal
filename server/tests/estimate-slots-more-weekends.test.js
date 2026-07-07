@@ -42,17 +42,44 @@ describe('estimate slot weekend and expander behavior', () => {
       .toEqual(['soon-open', 'next-open']);
   });
 
-  test('estimate slot selection spreads across distinct days instead of stacking one day', () => {
+  test('estimate slot selection pins a scarce first day (≤2 windows) ahead of the spread', () => {
     const slots = [
       { slotId: 'day-one-9', date: '2026-05-24', windowStart: '09:00', routeOptimal: false },
       { slotId: 'day-one-10', date: '2026-05-24', windowStart: '10:00', routeOptimal: false },
       { slotId: 'day-two-9', date: '2026-05-25', windowStart: '09:00', routeOptimal: false },
     ];
 
-    // Soonest day's earliest window leads (the ASAP option), then the next
-    // distinct day — not a second same-day window.
+    // The scarcity badge counts the full first-day pool, so with only two
+    // windows on the soonest day BOTH must survive selection — the cross-day
+    // spread resumes after them (owner bug report 2026-07-07: banner said
+    // "2 openings today" over a single bookable card).
     expect(slotAvailabilityInternals.selectCustomerFacingSlots(slots, 2).map((slot) => slot.slotId))
-      .toEqual(['day-one-9', 'day-two-9']);
+      .toEqual(['day-one-9', 'day-one-10']);
+    expect(slotAvailabilityInternals.selectCustomerFacingSlots(slots, 3).map((slot) => slot.slotId))
+      .toEqual(['day-one-9', 'day-one-10', 'day-two-9']);
+  });
+
+  test('scarce first-day windows survive the display slice across a wide day spread', () => {
+    // The regression shape: 12 days each with 2 windows, display limit 9.
+    // Under the plain spread, day one's second window ranks 13th and is
+    // sliced off while firstDayAvailability still reports openCount 2.
+    const slots = Array.from({ length: 12 }, (_, dayIdx) => {
+      const date = `2026-07-${String(7 + dayIdx).padStart(2, '0')}`;
+      return ['14:00', '16:00'].map((windowStart) => ({
+        slotId: `${date}_${windowStart}`,
+        date,
+        windowStart,
+        routeOptimal: false,
+      }));
+    }).flat();
+
+    const picks = slotAvailabilityInternals.selectCustomerFacingSlots(slots, 9);
+    expect(picks.map((slot) => slot.slotId)).toContain('2026-07-07_14:00');
+    expect(picks.map((slot) => slot.slotId)).toContain('2026-07-07_16:00');
+    // Both first-day windows lead the list, then distinct later days.
+    expect(picks[0].slotId).toBe('2026-07-07_14:00');
+    expect(picks[1].slotId).toBe('2026-07-07_16:00');
+    expect(new Set(picks.slice(2).map((slot) => slot.date)).size).toBe(picks.length - 2);
   });
 
   test('diversifyByDay surfaces one slot per day before doubling up, soonest first', () => {
