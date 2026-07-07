@@ -909,6 +909,7 @@ describe('admin email template routes', () => {
     setDbQueues({
       'email_suppressions as s': [chain({ result: suppressionRows })],
       customers: [customersQuery],
+      'notification_prefs as np': [chain({ result: [] })],
       email_messages: [chain({ result: blockedRows })],
       email_suppressions: [chain({ result: [{ group_key: null, suppression_type: 'bounce', count: '2' }] })],
     });
@@ -937,6 +938,57 @@ describe('admin email template routes', () => {
       expect(orphan.last_blocked_at).toBeNull();
       expect(body.stats).toEqual([{ group_key: null, suppression_type: 'bounce', count: 2 }]);
       expect(customersQuery.whereNull).toHaveBeenCalledWith('deleted_at');
+    });
+  });
+
+  test('falls back to notification_prefs.billing_email when no customers column matches', async () => {
+    const suppressionRows = [
+      {
+        id: 'sup-1',
+        email: 'Billing@Example.com',
+        group_key: null,
+        suppression_type: 'bounce',
+        status: 'active',
+        suppressed_at: '2026-07-01T00:00:00.000Z',
+      },
+    ];
+    const billingRows = [
+      {
+        id: 'cust-2',
+        first_name: 'Robin',
+        last_name: 'Vale',
+        phone: '+19415550111',
+        pipeline_stage: 'active_customer',
+        billing_email_lc: 'billing@example.com',
+      },
+    ];
+    const billingQuery = chain({ result: billingRows });
+    setDbQueues({
+      'email_suppressions as s': [chain({ result: suppressionRows })],
+      customers: [chain({ result: [] })],
+      'notification_prefs as np': [billingQuery],
+      email_messages: [chain({ result: [] })],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/suppressions`, {
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.suppressions).toHaveLength(1);
+      expect(body.suppressions[0].customer).toEqual({
+        id: 'cust-2',
+        first_name: 'Robin',
+        last_name: 'Vale',
+        phone: '+19415550111',
+        pipeline_stage: 'active_customer',
+        matched_field: 'billing_email',
+      });
+      expect(billingQuery.join).toHaveBeenCalledWith('customers as c', 'c.id', 'np.customer_id');
+      expect(billingQuery.whereNull).toHaveBeenCalledWith('c.deleted_at');
     });
   });
 });

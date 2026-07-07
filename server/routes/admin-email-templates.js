@@ -577,6 +577,33 @@ router.get('/suppressions', async (req, res, next) => {
           });
         }
       }
+      // Invoice/payment sends can also target notification_prefs.billing_email
+      // (getBillingContact), and bounce recovery treats it as sendable — so a
+      // billing-address bounce has a real customer behind it even when no
+      // customers column matches. Lowest precedence: only fills emails the
+      // customers pass left unmatched.
+      const unmatchedEmails = emails.filter((e) => !customersByEmail.has(e));
+      if (unmatchedEmails.length) {
+        const billingRows = await db('notification_prefs as np')
+          .join('customers as c', 'c.id', 'np.customer_id')
+          .select(
+            'c.id', 'c.first_name', 'c.last_name', 'c.phone', 'c.pipeline_stage',
+            db.raw('LOWER(np.billing_email) as billing_email_lc'),
+          )
+          .whereNull('c.deleted_at')
+          .whereIn(db.raw('LOWER(np.billing_email)'), unmatchedEmails);
+        for (const row of billingRows) {
+          if (customersByEmail.has(row.billing_email_lc)) continue;
+          customersByEmail.set(row.billing_email_lc, {
+            id: row.id,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            phone: row.phone,
+            pipeline_stage: row.pipeline_stage,
+            matched_field: 'billing_email',
+          });
+        }
+      }
       const blockedRows = await db('email_messages')
         .select(db.raw('LOWER(recipient_email_snapshot) as email_lc'))
         .where({ status: 'blocked' })
