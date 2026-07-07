@@ -3464,6 +3464,37 @@ const InvoiceService = {
         ),
       )
       .whereNull("archived_at");
+
+    // Estimate-deposit visibility: deposits live in their own ledger
+    // (estimate_deposits), never as payments/invoices rows, so without this
+    // block collected deposit money is invisible on the invoices surface.
+    // "On hand" = received rows' unapplied remainder (same formula as
+    // pendingDepositCredit); "collected" = all money that ever arrived
+    // (received/credited/refunding/refunded — received_at is only stamped on
+    // real Stripe success). Fail-soft: a ledger read miss must not take down
+    // the invoice stats header.
+    let deposits = { onHand: 0, onHandCount: 0, collected: 0 };
+    try {
+      const [d] = await db("estimate_deposits").select(
+        db.raw(
+          "COALESCE(SUM(GREATEST(amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0), 0)) FILTER (WHERE status = 'received'), 0) as on_hand",
+        ),
+        db.raw(
+          "COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count",
+        ),
+        db.raw(
+          "COALESCE(SUM(amount - COALESCE(refunded_amount, 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
+        ),
+      );
+      deposits = {
+        onHand: parseFloat(d.on_hand),
+        onHandCount: parseInt(d.on_hand_count),
+        collected: parseFloat(d.collected),
+      };
+    } catch (err) {
+      logger.warn(`[invoice] deposit stats read failed: ${err.message}`);
+    }
+
     return {
       total: parseInt(totals.total),
       paid: parseInt(totals.paid),
@@ -3471,6 +3502,7 @@ const InvoiceService = {
       overdue: parseInt(totals.overdue),
       totalCollected: parseFloat(totals.total_collected),
       totalOutstanding: parseFloat(totals.total_outstanding),
+      deposits,
     };
   },
 };
