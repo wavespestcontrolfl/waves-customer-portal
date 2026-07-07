@@ -15,6 +15,12 @@ jest.mock('../services/estimate-converter', () => ({
   annualPrepayRecurringUnitCount: jest.fn((data) => (data?.recurring?.services || []).length),
 }));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
+// Deposit-credit netting in the prepay invoiceTotal preview: default = no
+// pending deposit; individual tests override per-call.
+jest.mock('../services/estimate-deposits', () => ({
+  ...jest.requireActual('../services/estimate-deposits'),
+  pendingDepositCredit: jest.fn(async () => null),
+}));
 // markEstimateManuallyAccepted lazy-requires the shared annual-prepay overlap
 // lock from the admin-customers route only on the prepay path; mock it so the
 // unit test doesn't pull in the route (and its DB) or need trx.raw.
@@ -988,6 +994,38 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     );
   });
 
+  test('rejects an annual-prepay coverage cadence the coverage scheduler does not support (422)', async () => {
+    // An unsupported cadence would silently normalize to null on the term and
+    // reseed coverage on a visit-count-derived schedule — wrong dates, paid
+    // covered visits could complete-bill again. Fail closed instead.
+    const estimate = {
+      id: 'estimate-prepay-badcadence',
+      status: 'viewed',
+      customer_id: 'customer-badcadence',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      billingTerm: 'prepay_annual',
+      annualPrepayTermStart: '2026-07-30',
+      annualPrepayCoverage: { coverageServiceType: 'Pest Control', coverageVisitCount: 12, coverageCadence: 'custom' },
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 422 });
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
   test('a plain (no-booking) prepay accept still takes the overlap lock, anchored to today', async () => {
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
     lockAndAssertNoAnnualPrepayOverlap.mockClear();
@@ -1077,6 +1115,20 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     const r = await prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
     expect(r.eligible).toBe(true);
     expect(r.invoiceTotal).toBe(627); // from the mocked resolveAnnualPrepayInvoiceTotal
+  });
+
+  test('a pending deposit credit nets against the previewed invoice total', async () => {
+    // convertEstimate applies the pending deposit to the minted invoice, so
+    // the modal preview must net it too: 627 - 49 = 578.
+    const { pendingDepositCredit } = require('../services/estimate-deposits');
+    pendingDepositCredit.mockResolvedValueOnce({ amount: 49, lineItem: {} });
+    const r = await prepayBookingEligibility({
+      id: 'estimate-with-deposit',
+      ...recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]),
+    });
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(578);
+    expect(pendingDepositCredit).toHaveBeenCalledWith('estimate-with-deposit');
   });
 
   test('a commercial recurring quote returns the TAX-INCLUSIVE invoice total', async () => {

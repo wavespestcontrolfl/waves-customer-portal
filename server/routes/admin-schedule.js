@@ -86,6 +86,28 @@ function visitsPerYearForCadence(cadence) {
   }
 }
 
+// The COVERAGE cadence stored on an annual-prepay term for a booked recurring
+// pattern. MUST be a value annual-prepay-renewals' normalizeCoverageCadence
+// accepts — an unsupported value normalizes to null there and the term's
+// renewal/stamping math silently falls back to a visit-count-derived schedule,
+// seeding wrong dates so paid covered visits can complete-bill again.
+// monthly_nth_weekday books on a 1-month interval, so its coverage IS monthly.
+// Patterns with no supported mapping (custom, weekly, biweekly, daily) return
+// null and the prepay-on-book preflight downgrades to a standard accept —
+// fail closed, even when the operator supplied an explicit visit count.
+function prepayCoverageCadenceForPattern(cadence) {
+  switch (String(cadence || '').trim().toLowerCase()) {
+    case 'monthly': case 'monthly_nth_weekday': return 'monthly';
+    case 'every_6_weeks': return 'every_6_weeks';
+    case 'bimonthly': case 'bi_monthly': return 'bimonthly';
+    case 'quarterly': return 'quarterly';
+    case 'triannual': case 'every_4_months': return 'triannual';
+    case 'semiannual': case 'biannual': return 'semiannual';
+    case 'annual': case 'yearly': return 'annual';
+    default: return null;
+  }
+}
+
 // Does an unowned (customer_id NULL) quote's captured contact match the customer
 // we're about to book it against? Compares the last 10 phone digits (phones are
 // stored mixed E.164 / 10-digit) or a lowercased email. Used to gate attaching a
@@ -1774,6 +1796,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         ? parseAnnualPrepayVisitCount(req.body.prepayVisitCount)
         : {};
       const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(recurringPattern);
+      const prepayCoverageCadence = prepayCoverageCadenceForPattern(recurringPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
       // The quote's (single) recurring service name — sourced through the same
@@ -1808,6 +1831,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
+      } else if (!prepayCoverageCadence) {
+        downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (hasAddons) {
         downgrade('Appointment booked as standard — annual prepay can’t be combined with add-on lines (coverage would suppress their billing at completion). Book the add-ons as a separate appointment or bill standard.');
       } else if (hasBoosters) {
@@ -1839,7 +1864,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           annualPrepayCoverage = {
             coverageServiceType: String(serviceType).slice(0, 100),
             coverageVisitCount,
-            coverageCadence: recurringPattern || null,
+            // The NORMALIZED coverage cadence, never the raw booking pattern —
+            // see prepayCoverageCadenceForPattern.
+            coverageCadence: prepayCoverageCadence,
           };
         }
       }

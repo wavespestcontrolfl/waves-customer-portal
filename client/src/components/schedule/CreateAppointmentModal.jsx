@@ -1079,6 +1079,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const groupHasBoosters = group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0);
         const attachAnnualPrepay = billAsAnnualPrepay && isRecurring && !prepayAttachedThisSubmit
           && extras.length === 0 && !groupHasBoosters
+          && visitsPerYearForCadence(group.cadence) != null
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
         const body = {
           customerId: selectedCustomer.id,
@@ -1601,11 +1602,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         const submitGroup = groupServicesForAppointmentSubmit(services)[0] || null;
                         const prepayBlockReason = !submitGroup || submitGroup.cadence === 'one_time'
                           ? 'needs a recurring visit'
-                          : submitGroup.lines.length > 1
-                            ? 'can’t be combined with add-on service lines — book them as a separate appointment'
-                            : submitGroup.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)
-                              ? 'can’t be combined with booster months'
-                              : null;
+                          : visitsPerYearForCadence(submitGroup.cadence) == null
+                            ? 'isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)'
+                            : submitGroup.lines.length > 1
+                              ? 'can’t be combined with add-on service lines — book them as a separate appointment'
+                              : submitGroup.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)
+                                ? 'can’t be combined with booster months'
+                                : null;
                         const segStyle = (active) => ({
                           flex: 1,
                           padding: '6px 10px',

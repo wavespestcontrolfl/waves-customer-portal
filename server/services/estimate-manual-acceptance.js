@@ -97,21 +97,37 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   const hasCommercialRecurring = (recurringSvcList || []).some(
     (svc) => String(EstimateConverter.recurringServiceKey(svc) || '').startsWith('commercial_')
   );
-  if (!hasCommercialRecurring) return amount;
-  // Effective (exemption/county-aware) base rate for this customer, blended by
-  // the taxable pest share of the plan — mirrors the converter's
-  // prepayTaxRate. Fails soft to the FL default inside the resolver, like the
-  // accept path. Tax dollars round to cents exactly as InvoiceService does
-  // (rate * after-discount subtotal), so preview == minted total.
-  const baseRate = await EstimateConverter.resolveCommercialPrepayBaseRate(
-    estimate.customer_id || estimate.customerId || null, {}
-  );
-  const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
-    prepayDiscountApplied: Number(resolved.discount) > 0,
-    baseRate,
-  });
-  const taxDollars = Math.round(amount * taxRate * 100) / 100;
-  return Math.round((amount + taxDollars) * 100) / 100;
+  let total = amount;
+  if (hasCommercialRecurring) {
+    // Effective (exemption/county-aware) base rate for this customer, blended
+    // by the taxable pest share of the plan — mirrors the converter's
+    // prepayTaxRate. Fails soft to the FL default inside the resolver, like
+    // the accept path. Tax dollars round to cents exactly as InvoiceService
+    // does (rate * after-discount subtotal), so preview == minted total.
+    const baseRate = await EstimateConverter.resolveCommercialPrepayBaseRate(
+      estimate.customer_id || estimate.customerId || null, {}
+    );
+    const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
+      prepayDiscountApplied: Number(resolved.discount) > 0,
+      baseRate,
+    });
+    const taxDollars = Math.round(amount * taxRate * 100) / 100;
+    total = Math.round((amount + taxDollars) * 100) / 100;
+  }
+  // Deposit credit: convertEstimate applies any pending estimate deposit to
+  // the minted invoice (InvoiceService caps it against the after-tax total),
+  // so the operator-facing preview nets it out the same way. Fail-SOFT to the
+  // gross total on a read error — this is display copy; the accept path
+  // re-reads the ledger fail-CLOSED inside its transaction.
+  let depositCredit = 0;
+  if (estimate.id) {
+    try {
+      const { pendingDepositCredit } = require('./estimate-deposits');
+      const credit = await pendingDepositCredit(estimate.id);
+      depositCredit = credit ? Math.max(0, Number(credit.amount) || 0) : 0;
+    } catch { depositCredit = 0; }
+  }
+  return Math.round(Math.max(0, total - depositCredit) * 100) / 100;
 }
 
 // Can this estimate be accepted as annual prepay WHILE booking (the Schedule
@@ -406,6 +422,22 @@ async function markEstimateManuallyAccepted({
           convertOptions.autoSendInvoice = false;
           if (annualPrepayTermStart) convertOptions.annualPrepayTermStart = annualPrepayTermStart;
           if (annualPrepayCoverage && annualPrepayCoverage.coverageServiceType) {
+            // Fail CLOSED on a coverage cadence the renewal/stamping math
+            // doesn't support: letting it silently normalize to null
+            // downstream would seed a visit-count-derived schedule on wrong
+            // dates, and paid covered visits could complete-bill again.
+            // Callers pass a pre-normalized value (see admin-schedule's
+            // prepayCoverageCadenceForPattern); this guards future callers.
+            if (annualPrepayCoverage.coverageCadence != null) {
+              const { normalizeCoverageCadence } = require('./annual-prepay-renewals')._private;
+              if (!normalizeCoverageCadence(annualPrepayCoverage.coverageCadence)) {
+                // isOperational: the conversion catch below passes operational
+                // 422s through verbatim instead of wrapping them as a 500.
+                const cadenceErr = httpError(`Unsupported annual-prepay coverage cadence: ${annualPrepayCoverage.coverageCadence}`, 422);
+                cadenceErr.isOperational = true;
+                throw cadenceErr;
+              }
+            }
             convertOptions.coverageServiceType = annualPrepayCoverage.coverageServiceType;
             convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
             convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
