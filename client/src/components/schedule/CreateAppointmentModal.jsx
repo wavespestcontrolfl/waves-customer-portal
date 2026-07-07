@@ -252,6 +252,16 @@ function visitsPerYearForCadence(cadence) {
   }
 }
 
+// The scheduler represents an every-6-weeks series as cadence 'custom' with a
+// 42-day interval (see serviceCadenceConfig); for prepay purposes that IS
+// every_6_weeks — the server normalizes the booked pattern the same way — so
+// the prepay guards must not treat it as an unsupported custom cadence.
+function prepayCadenceKey(cadence, intervalDays) {
+  return (String(cadence || '') === 'custom' && Number(intervalDays) === 42)
+    ? 'every_6_weeks'
+    : cadence;
+}
+
 export function formatScheduleEstimateAmount(estimate) {
   const onetime = Number(estimate?.onetimeTotal);
   if (Number.isFinite(onetime) && onetime > 0) return `${formatMoney(onetime)} one-time`;
@@ -1077,7 +1087,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const groupHasBoosters = group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0);
         const attachAnnualPrepay = billAsAnnualPrepay && isRecurring && !prepayAttachedThisSubmit
           && extras.length === 0 && !groupHasBoosters
-          && visitsPerYearForCadence(group.cadence) != null
+          && visitsPerYearForCadence(prepayCadenceKey(group.cadence, group.intervalDays)) != null
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
         const body = {
           customerId: selectedCustomer.id,
@@ -1590,7 +1600,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           ? Number(linkedEstimate.prepay.invoiceTotal)
                           : annual;
                         const recurringSvc = services.find((s) => s.cadence && s.cadence !== 'one_time');
-                        const defaultVisits = visitsPerYearForCadence(recurringSvc?.cadence);
+                        const defaultVisits = visitsPerYearForCadence(prepayCadenceKey(recurringSvc?.cadence, recurringSvc?.intervalDays));
                         // Why the CURRENT booking group can't carry annual
                         // prepay (null = it can). The server downgrades a
                         // prepay request that rides with add-on lines or
@@ -1600,7 +1610,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         const submitGroup = groupServicesForAppointmentSubmit(services)[0] || null;
                         const prepayBlockReason = !submitGroup || submitGroup.cadence === 'one_time'
                           ? 'needs a recurring visit'
-                          : visitsPerYearForCadence(submitGroup.cadence) == null
+                          : visitsPerYearForCadence(prepayCadenceKey(submitGroup.cadence, submitGroup.intervalDays)) == null
                             ? 'isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)'
                             : submitGroup.lines.length > 1
                               ? 'can’t be combined with add-on service lines — book them as a separate appointment'

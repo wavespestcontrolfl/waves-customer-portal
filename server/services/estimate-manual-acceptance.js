@@ -177,13 +177,14 @@ async function prepayBookingEligibility(estimate = {}) {
   // scheduled nor invoiced (the converter mints just the recurring annual
   // prepay invoice) while the whole estimate is marked accepted: sold work
   // silently dropped. Non-charges don't block (isBillableOneTimeInvoiceItem
-  // exempts adjustments/discounts and the WaveGuard setup prepay waives).
-  // Unparseable mix = fail closed (money).
+  // exempts adjustments/discounts and the WaveGuard setup prepay waives),
+  // but a positive onetime_total whose rows can't be parsed at all is NOT
+  // proven non-billable — legacy/malformed shapes fail closed too (money).
   try {
     const { acceptanceServiceLists, isBillableOneTimeInvoiceItem } = require('../routes/estimate-public');
-    if ((acceptanceServiceLists(data).oneTimeList || []).some(isBillableOneTimeInvoiceItem)) {
-      return ineligible('one_time_items');
-    }
+    const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
+    if (oneTimeRows.some(isBillableOneTimeInvoiceItem)) return ineligible('one_time_items');
+    if (!oneTimeRows.length && asMoneyOrNull(estimate.onetime_total)) return ineligible('one_time_items');
   } catch {
     return ineligible('one_time_items');
   }

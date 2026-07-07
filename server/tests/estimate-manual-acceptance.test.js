@@ -1106,11 +1106,13 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
 });
 
 describe('prepayBookingEligibility (one-step prepay gate)', () => {
+  // onetime_total 0: a positive total with no parseable one-time rows is the
+  // fail-closed dropped-work shape and gets its own tests below.
   const recurring = (services) => ({
     status: 'sent',
     monthly_total: '55.00',
     annual_total: '660.00',
-    onetime_total: '99.00',
+    onetime_total: '0.00',
     estimate_data: { recurring: { services } },
   });
 
@@ -1241,11 +1243,21 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
     const r = await prepayBookingEligibility({
       ...base,
+      onetime_total: '49.00',
       estimate_data: {
         ...base.estimate_data,
         oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 }] },
       },
     });
     expect(r.eligible).toBe(true);
+  });
+
+  test('a positive onetime_total with NO parseable one-time rows fails closed (legacy/malformed shape)', async () => {
+    // The rows are what prove a one-time total non-billable; absent rows +
+    // positive total could be sold work the accept would silently drop.
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({ ...base, onetime_total: '99.00' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
   });
 });

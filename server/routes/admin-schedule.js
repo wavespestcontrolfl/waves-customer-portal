@@ -1733,7 +1733,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         .where({ id: linkedEstimateId })
         .first(
           'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
-          'monthly_total', 'annual_total', 'bill_by_invoice', 'show_one_time_option',
+          'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option',
         );
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
       // Reject only a genuine MISMATCH (estimate owned by a different customer).
@@ -1802,8 +1802,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const visitOverride = req.body.prepayVisitCount !== undefined && req.body.prepayVisitCount !== null && req.body.prepayVisitCount !== ''
         ? parseAnnualPrepayVisitCount(req.body.prepayVisitCount)
         : {};
-      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(recurringPattern);
-      const prepayCoverageCadence = prepayCoverageCadenceForPattern(recurringPattern);
+      // The modal books an every-6-weeks series as recurringPattern='custom'
+      // with recurringIntervalDays=42 (the scheduler's representation). For
+      // prepay cadence math that IS every_6_weeks — the coverage seeder
+      // supports it — so normalize before deriving coverage, else valid
+      // 6-week quotes downgrade as unsupported-cadence.
+      const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
+        ? 'every_6_weeks'
+        : recurringPattern;
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern);
+      const prepayCoverageCadence = prepayCoverageCadenceForPattern(prepayBookedPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
       // The quote's (single) recurring service name + cadence — sourced
@@ -1880,8 +1888,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
-      } else if (visitOverride.visitCount && visitsPerYearForCadence(recurringPattern)
-        && visitOverride.visitCount !== visitsPerYearForCadence(recurringPattern)) {
+      } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
+        && visitOverride.visitCount !== visitsPerYearForCadence(prepayBookedPattern)) {
         // The covered-visit count is FIXED by the cadence for quote-derived
         // prepay — the invoice prices exactly that plan. Any other count
         // corrupts money: higher → splitCoverageAmount divides the prepaid
@@ -1890,7 +1898,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // annual is invoiced but only that many visits stamp covered and the
         // rest of the year bills again on top. The modal no longer sends a
         // count; this rejects crafted/stale requests. Fail closed.
-        downgrade(`Appointment booked as standard — the covered-visit count for a ${recurringPattern} annual prepay is fixed at ${visitsPerYearForCadence(recurringPattern)} by the quoted plan (got ${visitOverride.visitCount}). Omit the count to use the cadence default.`);
+        downgrade(`Appointment booked as standard — the covered-visit count for a ${prepayBookedPattern} annual prepay is fixed at ${visitsPerYearForCadence(prepayBookedPattern)} by the quoted plan (got ${visitOverride.visitCount}). Omit the count to use the cadence default.`);
       } else if (!quoteRecurringCadence) {
         // Can't prove the booked cadence matches the quoted plan — fail
         // CLOSED (money correctness), never skip the comparison: the prepay
