@@ -10843,6 +10843,14 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Lock the page scroll while the sheet is open — on iOS a touch scroll on
+  // the sheet otherwise chains to the page behind it.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
   const muted = PORTAL_SHELL.muted;
   const card = {
     background: PORTAL_SHELL.surface,
@@ -10901,6 +10909,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         maxHeight: 'calc(100vh - 16px)',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
       }}>
         <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
         <div style={{
@@ -11086,6 +11095,14 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Lock the page scroll while the chat is open — on iOS a touch scroll on
+  // the overlay otherwise chains to the page behind it.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
   // A question handed in from the Waves AI bar sends itself on open.
   useEffect(() => {
     if (initialQuestion && !initialSentRef.current) {
@@ -11175,6 +11192,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
+          overscrollBehavior: 'contain',
           padding: '16px 18px',
           maxHeight: compact ? '60vh' : 'none',
           background: PORTAL_SHELL.page,
@@ -11355,6 +11373,16 @@ export default function PortalPage() {
     };
   }, [showMenu]);
 
+  // Lock the page scroll while the account menu is open — on iOS a touch
+  // scroll on the dropdown otherwise chains to the page behind it, so the
+  // background moved while the menu stayed put.
+  useEffect(() => {
+    if (!showMenu) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [showMenu]);
+
   if (!customer) return null;
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
@@ -11523,8 +11551,13 @@ export default function PortalPage() {
                 background: PORTAL_SHELL.page,
                 borderRadius: 16,
                 overflow: 'hidden',
-                maxHeight: 'calc(100vh - 72px)',
+                // dvh + safe-area: the menu sits ~60px below the notch, so a
+                // plain 100vh budget pushed the last rows off-screen on iOS.
+                maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 84px)',
                 overflowY: 'auto',
+                WebkitOverflowScrolling: 'touch',
+                // Keep the menu's scroll from chaining to the page behind it.
+                overscrollBehavior: 'contain',
                 boxShadow: PORTAL_SHELL.shadow,
                 border: `1px solid ${PORTAL_SHELL.border}`,
                 zIndex: 200,
