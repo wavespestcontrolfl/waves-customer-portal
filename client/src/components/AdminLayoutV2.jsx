@@ -19,6 +19,7 @@ import { cn } from "./ui/cn";
 import { Building2 } from "lucide-react";
 import {
   LayoutDashboard,
+  Camera,
   Users,
   ClipboardList,
   Calendar,
@@ -112,6 +113,7 @@ const NAV_SECTIONS = [
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
+      { path: "/admin/lawn-assessments", icon: Camera, label: "Assessments" },
     ],
   },
   {

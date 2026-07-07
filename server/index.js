@@ -524,6 +524,8 @@ app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
+// Photo-assessment lead magnets (lawn + pest) — admin list/detail/send surface.
+app.use('/api/admin/photo-assessments', require('./routes/admin-photo-assessments'));
 app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
 app.use('/api/admin/assessment-analytics', require('./routes/admin-assessment-analytics'));
 app.use('/api/admin/treatment-plans', require('./routes/admin-treatment-plans'));

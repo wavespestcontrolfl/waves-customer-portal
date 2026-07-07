@@ -2,6 +2,7 @@ const {
   applySensitiveSpaHeaders,
   isServiceOutlinePath,
   isLawnReportPath,
+  isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
 } = require('../utils/sensitive-spa-headers');
@@ -55,6 +56,18 @@ describe('sensitive SPA document headers', () => {
     expect(isLawnReportPath(`/lawn-report/${LAWN_TOKEN}/`)).toBe(true);
     expect(isLawnReportPath('/lawn-report/not-a-real-token')).toBe(false);
     expect(isLawnReportPath('/api/public/lawn-diagnostic/0123456789abcdef0123456789abcdef')).toBe(false);
+  });
+
+  test('marks pest-report token pages noindex, no-referrer, and no-store', () => {
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/pest-report/${LAWN_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(isPestReportPath(`/pest-report/${LAWN_TOKEN}`)).toBe(true);
+    expect(isPestReportPath('/pest-report/not-a-real-token')).toBe(false);
   });
 
   test('marks customer + project post-service report shells noindex, no-referrer, no-store', () => {

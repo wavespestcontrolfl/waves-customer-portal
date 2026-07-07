@@ -280,6 +280,39 @@ export default function LawnReportViewPage() {
         </SectionCard>
       ) : null}
 
+      {/* Pricing — present only on assessment-funnel reports (server-computed
+          at unlock from the pricing engine; tech-sent reports carry none). */}
+      {Array.isArray(report.pricing?.tiers) && report.pricing.tiers.length ? (
+        <SectionCard>
+          <SectionTitle>{report.pricing.service_label || 'Your lawn program'}</SectionTitle>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {report.pricing.tiers.map((tier, i) => (
+              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+                <div>
+                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+                    {tier.label}{tier.recommended ? ' · Most popular' : ''}
+                  </div>
+                  {/* Engine labels usually already read "N Applications" — only add
+                      the cadence line when the label doesn't state it. */}
+                  {tier.visits && !/application/i.test(tier.label || '') ? <div style={{ fontSize: 14, color: MUTED }}>{tier.visits} applications per year</div> : null}
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  {tier.monthly != null ? (
+                    <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                      ${tier.monthly}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span>
+                    </div>
+                  ) : null}
+                  {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+          {report.pricing.basis_note ? (
+            <p style={{ margin: '12px 0 0', color: MUTED, fontSize: 14, lineHeight: 1.5 }}>{report.pricing.basis_note}</p>
+          ) : null}
+        </SectionCard>
+      ) : null}
+
       {/* CTA */}
       <SectionCard style={{ background: TAN }}>
         <SectionTitle>Want us to take care of it?</SectionTitle>
