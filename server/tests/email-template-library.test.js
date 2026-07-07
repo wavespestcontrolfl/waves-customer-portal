@@ -4,9 +4,13 @@ jest.mock('../services/sendgrid-mail', () => ({
   serviceGroupId: jest.fn(() => 202),
   sendOne: jest.fn(),
 }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({})),
+}));
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
+const NotificationService = require('../services/notification-service');
 const EmailTemplates = require('../services/email-template-library');
 
 function chain({ result = [], first, returning } = {}) {
@@ -1066,5 +1070,125 @@ describe('email template library rendering', () => {
       sent: true,
       message: sentMessage,
     }));
+  });
+
+  test('defaults a blank first_name to "there" in greeting, subject, and text', () => {
+    const template = serviceTemplate({ required_variables: ['estimate_url', 'expires_at'] });
+    for (const payload of [
+      { expires_at: 'June 12', estimate_url: 'https://example.com/e/1' },
+      { first_name: '   ', expires_at: 'June 12', estimate_url: 'https://example.com/e/1' },
+      { first_name: null, expires_at: 'June 12', estimate_url: 'https://example.com/e/1' },
+    ]) {
+      const rendered = EmailTemplates.renderTemplate({ template, version: version(), payload });
+      expect(rendered.html).toContain('Hi there,');
+      expect(rendered.text).toContain('Hi there,');
+      expect(rendered.html).not.toContain('Hi ,');
+    }
+  });
+
+  test('name fallback does not mask a declared-required first_name', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate(),
+      version: version(),
+      payload: { expires_at: 'June 12', estimate_url: 'https://example.com/e/1' },
+    });
+    expect(rendered.missingPayload).toContain('first_name');
+    // The render itself still degrades to "there" (sendTemplate is the layer
+    // that fails closed on missing required variables).
+    expect(rendered.html).toContain('Hi there,');
+  });
+
+  test('alerts admin when an operational send is blocked by suppression', async () => {
+    const bounceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'bounce',
+      group_key: null,
+      status: 'active',
+    };
+    const blockedRow = { id: 'msg-blocked', status: 'blocked' };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [bounceSuppression] })],
+      email_messages: [chain({ returning: [blockedRow] })],
+      notifications: [chain({ first: undefined })],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'Sam@Example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Email blocked by suppression',
+      expect.stringContaining('estimate.expiring_notice to sam@example.com'),
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          dedupeKey: 'email-send-blocked:sam@example.com',
+          suppression_type: 'bounce',
+        }),
+      }),
+    );
+  });
+
+  test('does not re-alert a blocked send inside the dedupe window', async () => {
+    const bounceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'bounce',
+      group_key: null,
+      status: 'active',
+    };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [bounceSuppression] })],
+      email_messages: [chain({ returning: [{ id: 'msg-blocked', status: 'blocked' }] })],
+      notifications: [chain({ first: { id: 'existing-alert' } })],
+    });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e/1', expires_at: 'June 12' },
+    });
+
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('does not alert when a marketing-stream send is blocked', async () => {
+    const unsubSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'unsubscribe',
+      group_key: 'marketing_newsletter',
+      status: 'active',
+    };
+    setDbQueues({
+      email_templates: [chain({ first: marketingTemplate({ active_version_id: 'ver-marketing' }) })],
+      email_template_versions: [chain({
+        first: version({
+          id: 'ver-marketing',
+          subject: 'Monthly update',
+          blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}.' }],
+        }),
+      })],
+      email_suppressions: [chain({ result: [unsubSuppression] })],
+      email_messages: [chain({ returning: [{ id: 'msg-blocked', status: 'blocked' }] })],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'newsletter.monthly',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ sent: false, blocked: true }));
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 });
