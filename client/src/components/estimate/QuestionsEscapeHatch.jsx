@@ -37,17 +37,16 @@ export default function QuestionsEscapeHatch({ estimateSlug, context = 'estimate
   // and the estimate copy composed "question about quote #<report token>" —
   // a report token isn't a quote number.
   const isReport = context === 'lawn_report';
-  const slugStr = estimateSlug ? `%23${estimateSlug}` : 'my%20estimate';
-  const smsBody = isReport
+  // Plain text here; encode only at URL construction — a raw "#" in a
+  // mailto/sms URL starts the fragment and truncates the body before the
+  // quote number.
+  const bodyText = isReport
     ? 'Hi, I have a question about my Waves lawn report'
-    : `Hi, I have a question about quote ${slugStr}`;
+    : `Hi, I have a question about quote ${estimateSlug ? `#${estimateSlug}` : 'my estimate'}`;
   const mailSubject = isReport ? 'Question about my Waves lawn report' : 'Question about my Waves estimate';
-  const mailBody = isReport
-    ? 'Hi, I have a question about my Waves lawn report'
-    : `Hi, I have a question about quote ${decodeURIComponent(slugStr)}`;
   const textHref = isLikelyMobile()
-    ? `sms:${BUSINESS_LINE}?&body=${smsBody}`
-    : `mailto:${BUSINESS_EMAIL}?subject=${mailSubject}&body=${mailBody}`;
+    ? `sms:${BUSINESS_LINE}?&body=${encodeURIComponent(bodyText)}`
+    : `mailto:${BUSINESS_EMAIL}?subject=${encodeURIComponent(mailSubject)}&body=${encodeURIComponent(bodyText)}`;
 
   return (
     <div style={{

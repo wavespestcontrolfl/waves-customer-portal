@@ -32,6 +32,7 @@ import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
+import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
@@ -3827,6 +3828,10 @@ export default function EstimateViewPage() {
           <GoogleProfilesCard />
         </>
       )}
+      {/* Text-only escape hatch (the call button is gone from customer
+          surfaces, owner 2026-07-07) — customers who aren't ready to accept
+          still get the SMS/email path on estimate links. */}
+      <QuestionsEscapeHatch estimateSlug={estimate.slug} />
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
           slot-aware approve. Configure phase only — during slot review it
           would cover the confirm/cancel buttons. */}
