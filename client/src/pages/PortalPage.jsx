@@ -30,6 +30,26 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 
+// Authenticated fetch → blob download for Bearer-only report endpoints. A
+// bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
+// auth) — same path DocumentsTab's handleDownload uses.
+async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
+  const token = localStorage.getItem('waves_token');
+  let abs = url;
+  try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // The arrival window quoted to customers is ALWAYS window_start + 2 hours
 // (owner directive — see server/utils/sms-time-format.js). window_end is the
 // internal job-duration block and must never render on customer surfaces.
@@ -2228,18 +2248,39 @@ function ServicesTab() {
                             {/* reportAvailable === false → no button at all: the
                                 fallback generator 404s for internal-only records. */}
                             {(s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false) && (
-                              <a
-                                href={s.reportUrl || api.getServiceReportUrl(s.id)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                data-glass-accent="" style={{
-                                  ...primaryButton, padding: '7px 12px', fontSize: 12,
-                                  textDecoration: 'none',
-                                  borderRadius: 8,
-                                }}
-                              >
-                                <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : s.reportUrl ? 'View report' : 'Download PDF'}
-                              </a>
+                              s.reportUrl ? (
+                                <a
+                                  href={s.reportUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  data-glass-accent="" style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    textDecoration: 'none',
+                                    borderRadius: 8,
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                </a>
+                              ) : (
+                                // No public reportUrl — the fallback endpoint is
+                                // Bearer-only, so a bare anchor opened a raw 401
+                                // JSON page. Download through authed fetch instead.
+                                <button
+                                  type="button"
+                                  data-glass-accent=""
+                                  onClick={() => {
+                                    downloadAuthedPdf(api.getServiceReportUrl(s.id)).catch(() => {
+                                      alert('Could not download this report. Please try again.');
+                                    });
+                                  }}
+                                  style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    borderRadius: 8, cursor: 'pointer',
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
+                                </button>
+                              )
                             )}
                             <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>

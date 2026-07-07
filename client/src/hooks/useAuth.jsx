@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
-import { flushNativePushToken } from '../native/nativePush';
+import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 
 const AuthContext = createContext(null);
 
@@ -105,11 +105,22 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
     }
+    // Deactivate this device's push registration BEFORE dropping the JWT —
+    // otherwise the device keeps receiving the previous account's pushes.
+    // Awaited (with a cap) because the unsubscribe may need the api client's
+    // 401→refresh retry, which dies the moment clearTokens runs; the timeout
+    // keeps a dead network from wedging logout. No-op (instant) on web.
+    try {
+      await Promise.race([
+        deactivateNativePushToken(),
+        new Promise((resolve) => { setTimeout(resolve, 4000); }),
+      ]);
+    } catch { /* best-effort */ }
     api.clearTokens();
     customerRef.current = null;
     setCustomer(null);
@@ -121,6 +132,9 @@ export function AuthProvider({ children }) {
     try {
       const data = await api.selectAuthProperty(customerId);
       api.setTokens(data.token, data.refreshToken);
+      // Re-point this device's push subscription at the newly selected
+      // customer — otherwise pushes keep flowing to the previous property.
+      repostNativePushToken();
       // The token now points at the TARGET property — the old customer must
       // not keep rendering (and firing actions) against it if the reload
       // hits a transient failure. Go pending until the target customer

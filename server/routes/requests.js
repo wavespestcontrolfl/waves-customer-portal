@@ -35,7 +35,10 @@ const createSchema = Joi.object({
   subject: Joi.string().trim().min(1).max(200).required(),
   description: Joi.string().trim().allow('').max(500).optional(),
   urgency: Joi.string().valid(...VALID_URGENCIES).optional(),
-  locationOnProperty: Joi.string().valid(...VALID_LOCATIONS).optional(),
+  // The portal sends null when no location chip is tapped (it's optional in
+  // the UI) — without .allow(null, '') that payload 400s and the request is
+  // never created.
+  locationOnProperty: Joi.string().valid(...VALID_LOCATIONS).allow(null, '').optional(),
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
   photos: Joi.array().items(Joi.string().max(8 * 1024 * 1024)).max(MAX_PHOTOS).optional(),
