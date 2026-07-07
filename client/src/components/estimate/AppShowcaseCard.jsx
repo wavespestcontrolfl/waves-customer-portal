@@ -95,7 +95,9 @@ function StoreBadge({ url, label, children }) {
 export default function AppShowcaseCard({ onBookToday = null }) {
   // Inside the native app the store badges are dead weight (and an App
   // Store review flag) — every other surface hides them via isNativeApp().
-  if (isNativeApp()) return null;
+  // Only the badge rows go, though: the rest of the card (and especially
+  // the "Book today!" CTA on self-bookable estimates) must stay.
+  const native = isNativeApp();
   const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
   // Glass copy pack (PR B).
   const glass = glassCopyActive();
@@ -145,6 +147,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
                 <span key={label} className="gc-av-chip">{label}</span>
               ))}
             </div>
+            {native ? null : (
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
               {(APP_STORE_URL || !PLAY_STORE_URL) ? (
                 <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
@@ -158,6 +161,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
                 </span>
               ) : null}
             </div>
+            )}
           </div>
         </div>
       ) : (
@@ -213,6 +217,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             </div>
           ))}
         </div>
+        {native ? null : (
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 2, opacity: anyStoreLive ? 1 : 0.92 }}>
           {(APP_STORE_URL || !PLAY_STORE_URL) ? (
             <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
@@ -226,6 +231,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             </span>
           ) : null}
         </div>
+        )}
       </div>
       )}
 

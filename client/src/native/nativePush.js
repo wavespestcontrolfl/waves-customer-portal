@@ -31,6 +31,10 @@ let pendingToken = null;
 let lastToken = null;
 const LAST_TOKEN_KEY = 'waves_native_push_token';
 let listenersBound = false;
+// Logout's unsubscribe request while it's on the wire. postToken() awaits it
+// so a quick logout→login re-subscribe can't reach the server first and then
+// be deactivated when the older unsubscribe lands.
+let inflightDeactivation = null;
 
 function rememberToken(token) {
   lastToken = token;
@@ -66,6 +70,7 @@ async function postToken(token) {
   // native platform — initNativePush gates on isNativeApp).
   const platform = nativePlatform() === 'android' ? 'android' : 'ios';
   try {
+    if (inflightDeactivation) await inflightDeactivation;
     const res = await fetch('/api/push/native-subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
@@ -147,16 +152,28 @@ export async function deactivateNativePushToken() {
   // would kill the household's other devices. No token remembered means this
   // device never registered — nothing to deactivate for it.
   if (!token) return;
-  try {
-    await fetch('/api/push/native-unsubscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({ token }),
-    });
-  } catch (err) {
-    console.warn('[nativePush] token deactivation failed:', err?.message || err);
-  }
+  // Re-arm BEFORE the network round-trip: a quick logout→login flushes
+  // pendingToken during loadCustomer, and a post-await assignment can run
+  // after that flush already no-opped — leaving the device unsubscribed
+  // until the next Capacitor registration event (app restart).
   pendingToken = token;
+  const request = (async () => {
+    try {
+      await fetch('/api/push/native-unsubscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ token }),
+      });
+    } catch (err) {
+      console.warn('[nativePush] token deactivation failed:', err?.message || err);
+    }
+  })();
+  inflightDeactivation = request;
+  try {
+    await request;
+  } finally {
+    if (inflightDeactivation === request) inflightDeactivation = null;
+  }
 }
 
 /**
