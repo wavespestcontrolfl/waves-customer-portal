@@ -717,6 +717,35 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         logger.warn(`[annual-prepay] pending-completion slice unresolved for visit ${row.id} (invoice ${invoice.id} status=${invoiceStatus}) — will reconcile when the invoice resolves`);
         continue;
       }
+      // Stripe PARTIAL refunds leave the invoice 'paid' — the refund state
+      // lives on the payment rows (refund_status/refund_amount; the webhook
+      // only flips invoices.status on FULL refunds, which the reversal hook
+      // owns). Any refund signal on the visit's payments means the amount
+      // actually collected is less than the invoice says: crediting the full
+      // slice would over-credit, and the right partial amount is an operator
+      // judgment — leave it for follow-up. Fail-closed: if the check itself
+      // errors, don't credit on uncertain money.
+      try {
+        const refundActivity = await conn('payments')
+          .where(function linkedToInvoice() {
+            this.whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [invoice.id]);
+            if (invoice.stripe_payment_intent_id) this.orWhere('stripe_payment_intent_id', invoice.stripe_payment_intent_id);
+            if (invoice.stripe_charge_id) this.orWhere('stripe_charge_id', invoice.stripe_charge_id);
+          })
+          .where(function refundSignal() {
+            this.where('status', 'refunded')
+              .orWhereNotNull('refund_status')
+              .orWhere('refund_amount', '>', 0);
+          })
+          .first('id');
+        if (refundActivity) {
+          logger.warn(`[annual-prepay] pending-completion slice for visit ${row.id} skipped — invoice ${invoice.id} has refund activity on its payments; operator follow-up needed`);
+          continue;
+        }
+      } catch (err) {
+        logger.warn(`[annual-prepay] pending-completion refund check failed for invoice ${invoice.id}: ${err.message} — slice left unresolved`);
+        continue;
+      }
       const visitSlice = slices[index] ?? slices[0] ?? 0;
       if (!(visitSlice > 0)) continue;
       const marker = `term ${term.id}, visit ${row.id}`;

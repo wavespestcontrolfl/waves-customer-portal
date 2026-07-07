@@ -43,6 +43,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'forUpdate',
     'leftJoin',
     'whereRaw',
+    'orWhereNotNull',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -916,6 +917,7 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     setDbQueues({
       scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
       invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      payments: [query({ first: undefined })],
       customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: undefined })],
     });
@@ -940,6 +942,7 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     setDbQueues({
       scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
       invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      payments: [query({ first: undefined })],
       customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: { id: 'ledger-1' } })],
     });
@@ -981,6 +984,22 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 
+  test('a PARTIALLY REFUNDED paid invoice gets no slice credit (refund state lives on payments)', async () => {
+    // Stripe partial refunds leave invoices.status='paid' — refund_status /
+    // refund_amount live on the payment rows. Crediting the full slice would
+    // over-credit a visit the customer already got money back on.
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      payments: [query({ first: { id: 'pay-partial-refund' } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
   test('a settle-refused OPEN invoice is left alone (no credit for money never collected)', async () => {
     setDbQueues({
       scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
@@ -1001,6 +1020,7 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     setDbQueues({
       scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
       invoices: [query({ first: { id: 'inv-visit', status: 'prepaid', payment_recorded_at: null, annual_prepay_covered_term_id: null } })],
+      payments: [query({ first: undefined })],
       customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: undefined })],
     });
@@ -1203,6 +1223,7 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
       invoices: [
         query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } }),
       ],
+      payments: [query({ first: undefined })],
       customers: [
         query({ columnInfo: {} }), // syncCustomerRenewalDate column probe (no renewal column)
         query({ first: { id: 'customer-1' } }), // credit-path row lock
@@ -1256,6 +1277,7 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
       invoices: [
         query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } }),
       ],
+      payments: [query({ first: undefined })],
       customers: [
         query({ columnInfo: {} }),
         query({ first: { id: 'customer-1' } }),
@@ -1337,6 +1359,7 @@ describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics
       invoices: [
         query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-07-01', annual_prepay_covered_term_id: null } }),
       ],
+      payments: [query({ first: undefined })],
       customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: undefined })],
     });
@@ -1374,6 +1397,7 @@ describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics
       invoices: [
         query({ first: { id: 'inv-visit', status: 'prepaid', payment_recorded_at: null, annual_prepay_covered_term_id: null } }),
       ],
+      payments: [query({ first: undefined })],
       customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: undefined })],
     });
