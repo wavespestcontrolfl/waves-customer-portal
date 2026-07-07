@@ -342,6 +342,11 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
     // landing here is an infrastructure failure (DB hiccup, etc). Answering
     // 401 made clients treat a still-valid 30-day session as rejected and
     // wipe it; a 5xx tells them to keep the token and retry.
+    // The error middleware logs req.body — redact the live 30-day bearer
+    // credential before it reaches the logs.
+    if (req.body && req.body.refreshToken) {
+      req.body = { ...req.body, refreshToken: '[redacted]' };
+    }
     return next(err);
   }
 });

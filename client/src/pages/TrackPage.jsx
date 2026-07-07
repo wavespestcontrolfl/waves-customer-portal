@@ -684,6 +684,9 @@ export default function TrackPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // React reuses this page instance across /track/:token navigations —
+  // responses for a previous token must never land in the new token's state.
+  const tokenRef = useRef(token);
 
   // Refetch the public track endpoint. Used both for the initial mount
   // and as the wake-up handler when a customer:job_update broadcast
@@ -696,6 +699,7 @@ export default function TrackPage() {
   const fetchTrack = useCallback(async () => {
     try {
       const r = await fetch(`${API_BASE}/public/track/${token}`);
+      if (tokenRef.current !== token) return; // stale response for a prior token
       if (r.status === 404) {
         setNotFound(true);
         return;
@@ -705,6 +709,7 @@ export default function TrackPage() {
       // en-route render. Only accept payloads with a recognized state.
       if (!r.ok) return;
       const body = await r.json();
+      if (tokenRef.current !== token) return;
       if (body?.state) setData(body);
     } catch {
       // Don't clobber an existing render on a transient network blip;
@@ -712,15 +717,21 @@ export default function TrackPage() {
     }
   }, [token]);
 
-  // Initial fetch on mount.
+  // Initial fetch on mount and on every token change — the previous
+  // token's data/notFound must not render (or suppress the retry card)
+  // under the new URL.
   useEffect(() => {
     let cancelled = false;
+    tokenRef.current = token;
+    setData(null);
+    setNotFound(false);
+    setLoading(true);
     (async () => {
       await fetchTrack();
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [fetchTrack]);
+  }, [token, fetchTrack]);
 
   // Live socket subscription. Authenticates with the public track
   // token (PR adding socket auth's trackToken path); server resolves
