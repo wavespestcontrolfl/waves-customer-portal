@@ -13,7 +13,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn().mockResolvedValue('body') }));
+// Default: no template row (renderSmsTemplate resolves undefined) so the
+// built-in fallback copy is what the assertions below see; the template-path
+// tests override per-call.
+jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));
@@ -35,6 +38,7 @@ const SmartRebooker = require('../services/rebooker');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const RescheduleSMS = require('../services/reschedule-sms');
 
 db.fn = { now: jest.fn(() => 'NOW()') };
@@ -137,6 +141,55 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     await RescheduleSMS.handleRescheduleReply('cust-1', '2');
 
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain("We'll remind you the day before.");
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'reschedule_confirmed_future',
+      { date: expect.any(String), time: '8:00 AM - 10:00 AM' },
+      expect.objectContaining({ workflow: 'reschedule_reply', entity_id: 'svc-1' }),
+    );
+  });
+
+  test('an active admin-edited template overrides the built-in confirmation copy', async () => {
+    renderSmsTemplate.mockResolvedValueOnce('EDITED TEMPLATE BODY');
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    // Same-day slot selects the same-day template key.
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'reschedule_confirmed_today',
+      { date: expect.any(String), time: '1:00 PM - 3:00 PM' },
+      expect.objectContaining({ workflow: 'reschedule_reply', entity_id: 'svc-1' }),
+    );
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe('EDITED TEMPLATE BODY');
+  });
+
+  test('a disabled/missing template falls back to built-in copy — the confirmation always sends', async () => {
+    // Default mock already resolves undefined (missing/disabled template).
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].body)
+      .toBe('Confirmed. Your service is rescheduled for Saturday, Jul 4, 1:00 PM - 3:00 PM.\n\nSee you today.');
+  });
+
+  test('call-requested reply renders the reschedule_call_requested template with built-in fallback', async () => {
+    wireDb({
+      reschedule_log: [
+        chain({ first: jest.fn().mockResolvedValue(pendingRow()) }),
+        chain(),
+      ],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
+    });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', 'please call me');
+
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'reschedule_call_requested', {}, expect.objectContaining({ workflow: 'reschedule_reply', entity_id: 'svc-1' }),
+    );
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe("No problem. We'll give you a call shortly.");
+    expect(result).toMatchObject({ handled: true, action: 'call_requested', smsSent: true });
   });
 
   test('scheduled_date as a JS Date still matches (no "Sat Jul 04" stringify bug)', async () => {
