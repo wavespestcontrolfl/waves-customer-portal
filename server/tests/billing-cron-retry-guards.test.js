@@ -226,6 +226,24 @@ describe('processPaymentRetries — suppression guards', () => {
       }));
   });
 
+  test('already-collected resolution runs BEFORE the disabled state guard — row superseded, not stranded', async () => {
+    // Obligation collected elsewhere, THEN customer disables autopay. The
+    // disabled guard exits without superseding; if it ran first the row
+    // would stay unsuperseded and billing-v2 /balance would keep summing
+    // already-collected money as owed (codex P1 on PR #2437 round 1).
+    mockCustomer.autopay_enabled = false;
+    mockCollectedRow = { id: 'pay-collector', status: 'paid' };
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(1);
+    expect(mockPaymentUpdates[0].superseded_by_payment_id).toBe('pay-collector');
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_already_paid', expect.anything());
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'skipped_disabled', expect.anything());
+  });
+
   test('clean retry carries the failed row\'s billed_month stamp forward', async () => {
     mockFailedPayments = [monthlyFailedPayment()];
     const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
