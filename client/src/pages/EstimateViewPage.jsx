@@ -582,11 +582,15 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
       {(slug || dateLine) ? (
         /* Estimate # + dates at body size (design audit 2026-07-06): the
            expiry is action-relevant — it should not carry the page's lowest
-           emphasis, and the quote number was not shown anywhere. */
-        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-          {slug ? <strong style={{ color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong> : null}
-          {slug && dateLine ? <span aria-hidden="true"> · </span> : null}
-          {dateLine}
+           emphasis, and the quote number was not shown anywhere. Dates sit on
+           their own line under the number, same weight (owner ask 07-07). */
+        <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.5 }}>
+          {slug ? (
+            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong>
+          ) : null}
+          {dateLine ? (
+            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>{dateLine}</strong>
+          ) : null}
         </div>
       ) : null}
     </div>
