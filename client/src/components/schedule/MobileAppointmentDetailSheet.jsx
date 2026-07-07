@@ -219,11 +219,13 @@ export default function MobileAppointmentDetailSheet({
 
   const cancelAppointment = async () => {
     if (!window.confirm(`Cancel appointment for ${service.customerName || 'customer'}? This cannot be undone.`)) return;
+    // Busy BEFORE the async card-hold preview — a slow preview must not
+    // leave the Cancel control active for a double-tap re-entry.
+    setActionBusy('cancel');
     // Card-hold visits inside the late-cancel window: ask whether this is a
     // business-initiated cancel (waive the fee) before committing.
     const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
-    if (!proceed) return;
-    setActionBusy('cancel');
+    if (!proceed) { setActionBusy(''); return; }
     try {
       await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: 'PUT',

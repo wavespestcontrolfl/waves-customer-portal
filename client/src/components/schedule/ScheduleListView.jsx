@@ -139,6 +139,9 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       });
       setSelected(new Set());
       setBulkAction('');
+      // One decision per bulk cancel: never let a checked waive leak into
+      // the next batch and silently forfeit disclosed fees.
+      setBulkWaiveCardHoldFee(false);
       fetchList();
       onRefresh?.();
     } catch (e) {

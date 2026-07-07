@@ -192,11 +192,13 @@ export default function ScheduleCustomerSidebar({
     if (!service?.id || cancelling) return;
     if (!canCancelAppointment) return;
     if (cancelScope !== 'this_only' && !canCancelSeries) return;
+    // Busy BEFORE the async card-hold preview — a slow preview must not
+    // leave the cancel button active for a re-entrant click.
+    setCancelling(true);
     // Card-hold visits inside the late-cancel window: ask whether this is a
     // business-initiated cancel (waive the fee) before committing.
     const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
-    if (!proceed) return;
-    setCancelling(true);
+    if (!proceed) { setCancelling(false); return; }
     try {
       const reasonParts = [];
       if (notificationType !== 'none') reasonParts.push(`Notification requested: ${notificationType.replace('_', ' ')}`);
