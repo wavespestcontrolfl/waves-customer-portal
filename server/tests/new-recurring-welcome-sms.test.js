@@ -111,6 +111,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: (...args) => mockSendTemplate(...args),
+  redactEmailAddresses: (s) => String(s || ''),
 }));
 
 describe('new recurring welcome SMS', () => {

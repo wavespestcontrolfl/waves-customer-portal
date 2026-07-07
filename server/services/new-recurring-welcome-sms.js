@@ -175,18 +175,35 @@ async function sendWelcomeEmail(customer) {
     logger.warn(`[new-recurring-welcome] welcome email skipped for customer ${customer.id} — SendGrid not configured`);
     return;
   }
+  // Portal-wide email opt-out — service_operational suppression groups
+  // don't cover it, so the sender checks it explicitly.
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: customer.id })
+    .first('email_enabled')
+    .catch(() => null);
+  if (prefs?.email_enabled === false) {
+    logger.info(`[new-recurring-welcome] welcome email skipped for customer ${customer.id} — email disabled in prefs`);
+    return;
+  }
   const EmailTemplateLibrary = require('./email-template-library');
+  const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
   const result = await EmailTemplateLibrary.sendTemplate({
     templateKey: TEMPLATE_EMAIL_KEY,
     to: email,
     payload: {
       first_name: String(customer.first_name || '').trim() || 'there',
+      // The seed blocks don't reference it, but admin-edited versions may —
+      // an empty value renders as a blank in customer copy.
+      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     },
     recipientType: 'customer',
     recipientId: customer.id,
     triggerEventId: `${TEMPLATE_EMAIL_KEY}:${customer.id}`,
     idempotencyKey: `${TEMPLATE_EMAIL_KEY}:${customer.id}`,
     categories: ['welcome_new_recurring'],
+    // SendGrid rejection bodies can echo the recipient address — keep them
+    // out of the provider log; the caller's catch redacts too.
+    suppressProviderErrorLog: true,
   });
   if (result?.blocked) {
     logger.warn(`[new-recurring-welcome] welcome email suppressed for customer ${customer.id}: ${result.reason || 'suppressed'}`);
@@ -235,7 +252,8 @@ async function deliverQueuedWelcome(row) {
   // delivery moment as the SMS. Kill switch = the welcome.new_recurring
   // email template row.
   await sendWelcomeEmail(customer).catch((err) => {
-    logger.warn(`[new-recurring-welcome] welcome email failed for customer ${customer.id}: ${err.message}`);
+    const { redactEmailAddresses } = require('./email-template-library');
+    logger.warn(`[new-recurring-welcome] welcome email failed for customer ${customer.id}: ${redactEmailAddresses(err.message)}`);
   });
 
   if (!customer.phone) {

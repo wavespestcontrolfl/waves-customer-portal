@@ -22,6 +22,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  redactEmailAddresses: (s) => String(s || ''),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),

@@ -22,6 +22,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
@@ -157,6 +158,9 @@ function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
     service_summary: serviceSummary || "",
     property_address: est.address || "",
     price_summary: moneySummary(est),
+    // Templates render "call {{company_phone}}" lines — a missing payload
+    // value renders as an empty string in customer copy.
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     ...extra,
   };
 }
@@ -253,6 +257,9 @@ async function sendDualChannel(est, { sms, email }) {
         triggerEventId: `estimate_followup_${email.stage}:${est.id}`,
         idempotencyKey: `estimate_followup_${email.stage}:${est.id}`,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
+        // SendGrid rejection bodies can echo the recipient address — keep
+        // them out of the provider log; the catch below redacts too.
+        suppressProviderErrorLog: true,
       });
       if (result?.blocked) {
         logger.warn(
@@ -268,7 +275,7 @@ async function sendDualChannel(est, { sms, email }) {
       }
     } catch (e) {
       logger.error(
-        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${e.message}`,
+        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${EmailTemplateLibrary.redactEmailAddresses(e.message)}`,
       );
     }
   }
@@ -277,13 +284,13 @@ async function sendDualChannel(est, { sms, email }) {
 
 // 5. Deposit started but never completed (2-72h after the last pending
 // PaymentIntent). Highest-intent drop-off: the customer clicked accept and
-// reached the Stripe card form. Gated separately because it's a new
+// reached the Stripe card form. Gated separately because it's a
 // customer-facing auto-send — until GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS is
 // on, candidates are only counted in the log (shadow, no claims) so the
-// volume can be judged before any text goes out. SMS-only stage: there is no
-// email template for it, so a missing/disabled SMS template skips WITHOUT
-// claiming (nothing could send on either channel — claiming would burn the
-// stage for nothing).
+// volume can be judged before anything goes out; the gate arms BOTH
+// channels. Dual-channel like the other stages (estimate.deposit_abandoned
+// email + estimate_followup_deposit SMS); a claim requires at least one
+// deliverable leg, so nothing can silently burn the stage.
 async function checkDepositAbandoned(now = new Date()) {
   let sent = 0;
   const nowMs = now.getTime();
