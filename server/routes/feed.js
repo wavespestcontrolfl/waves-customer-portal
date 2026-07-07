@@ -356,9 +356,11 @@ router.get('/local', async (req, res, next) => {
       await localNewsStore.insertItems(arrivals);
       // Banked rows were validated at ingest, but the allowlist can change
       // after rows are stored — re-validate on the way out so a delisted
-      // publisher's rows stop rendering immediately. Read a small buffer,
-      // drop rows whose link no longer passes, then cut to card size.
-      const rows = await localNewsStore.latestItems(10);
+      // publisher's rows stop rendering immediately. Read the whole bank
+      // (≤ KEEP_ROWS small rows): a delisted publisher may own all of the
+      // newest rows, and a short buffer would drain the card in exactly
+      // the event this filter exists for.
+      const rows = await localNewsStore.latestItems(localNewsStore.KEEP_ROWS);
       posts = rows
         .map(row => {
           const link = safeLink(row.link);

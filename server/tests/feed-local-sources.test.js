@@ -150,10 +150,13 @@ const EXTERNAL_ROUTES = {
 // after ingest) — the read path must null it rather than render it.
 const BANKED_PAGE = 'https://www.venicegondolier.com/news/article_banked123.html';
 const BANKED_EVIL_IMG = 'https://evil.example.com/irrigation.jpg';
-// A row whose LINK host is no longer on the allowlist (planted directly in
-// the table, or its publisher was delisted) — dropped entirely on read,
-// even though it's the newest row in the bank.
-const PLANTED_PAGE = 'https://evil.example.com/planted-article.html';
+// Rows whose LINK host is no longer on the allowlist (planted directly in
+// the table, or their publisher was delisted) — dropped entirely on read.
+// Six of them, all newer than every valid row: the read path must dig past
+// the whole delisted block to fill the card (Codex P2 on 594b1e1 — a short
+// read buffer would drain the card in exactly this event).
+const PLANTED_PAGE = 'https://evil.example.com/planted-article-0.html';
+const plantedPage = (i) => `https://evil.example.com/planted-article-${i}.html`;
 
 const realFetch = global.fetch;
 let server;
@@ -162,26 +165,27 @@ let externalCalls;
 
 beforeAll(async () => {
   const store = require('../services/local-news-store');
-  store._rows.push(
-    {
-      id: 998,
-      link: PLANTED_PAGE,
-      title: 'Planted row with untrusted link',
+  for (let i = 0; i < 6; i++) {
+    store._rows.push({
+      id: 990 + i,
+      link: plantedPage(i),
+      title: `Planted row with untrusted link ${i}`,
       description: 'Must never render.',
       image: null,
       source_name: 'MySuncoast',
-      pub_date: new Date('2026-07-08T12:00:00Z'), // newest row in the bank
-    },
-    {
-      id: 999,
-      link: BANKED_PAGE,
-      title: 'Venice tightens irrigation restrictions for summer',
-      description: 'Watering days change citywide.',
-      image: BANKED_EVIL_IMG,
-      source_name: 'Venice Gondolier',
-      pub_date: new Date('2026-06-20T12:00:00Z'),
-    },
-  );
+      // All six sit newest in the bank (newer than every valid story).
+      pub_date: new Date(`2026-07-08T12:0${i}:00Z`),
+    });
+  }
+  store._rows.push({
+    id: 999,
+    link: BANKED_PAGE,
+    title: 'Venice tightens irrigation restrictions for summer',
+    description: 'Watering days change citywide.',
+    image: BANKED_EVIL_IMG,
+    source_name: 'Venice Gondolier',
+    pub_date: new Date('2026-06-20T12:00:00Z'),
+  });
 
   const a = express();
   a.use('/api/feed', require('../routes/feed'));
@@ -218,9 +222,10 @@ test('merges all corridor sources newest-first, tags each item with its outlet, 
   // 6 fixture items pass fetch; the restaurant item fails RELEVANT, the
   // theft and baseball items trip EXCLUDE, the Gondolier source is down →
   // 4 survive, interleaved newest-first, and the pre-banked story (in no
-  // upstream feed anymore) still renders at the bottom. The planted row
-  // with the off-allowlist link is dropped on read despite being the
-  // newest row in the bank.
+  // upstream feed anymore) still renders at the bottom. All six planted
+  // rows with off-allowlist links are dropped on read despite being the
+  // six newest rows in the bank — the card fills from the valid rows
+  // beneath them.
   expect(posts.map((p) => [p.sourceName, p.title])).toEqual([
     ['Tampa Bay Times', 'Red tide bloom drifts toward St. Pete beaches'],
     ['Herald-Tribune', 'Hurricane season lawn prep tips for Sarasota homeowners'],
