@@ -11103,6 +11103,19 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     return () => { document.body.style.overflow = prevOverflow; };
   }, []);
 
+  // The iOS keyboard doesn't resize the layout viewport — it pans it, which
+  // shoved the sheet (header and close button included) off the top of the
+  // screen while typing. Cap the sheet to the visual viewport instead.
+  const [viewportH, setViewportH] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const update = () => setViewportH(Math.round(vv.height));
+    update();
+    vv.addEventListener('resize', update);
+    return () => vv.removeEventListener('resize', update);
+  }, []);
+
   // A question handed in from the Waves AI bar sends itself on open.
   useEffect(() => {
     if (initialQuestion && !initialSentRef.current) {
@@ -11151,12 +11164,15 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         role="dialog"
         aria-modal="true"
         aria-label="Waves assistant"
-        data-glass=""
+        data-glass="modal"
         style={{
-          background: PORTAL_SHELL.surface,
+          background: PORTAL_SHELL.page,
           position: 'relative',
+          boxSizing: 'border-box',
           borderRadius: compact ? '8px 8px 0 0' : 8,
-          maxHeight: compact ? '85vh' : 'min(760px, calc(100vh - 48px))',
+          maxHeight: compact
+            ? (viewportH ? `min(85dvh, ${viewportH}px)` : '85dvh')
+            : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
           margin: '0 auto',
@@ -11172,6 +11188,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }`}</style>
 
         <div style={{
+          flexShrink: 0,
           padding: '16px 18px',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -11194,8 +11211,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           overflowY: 'auto',
           overscrollBehavior: 'contain',
           padding: '16px 18px',
-          maxHeight: compact ? '60vh' : 'none',
-          background: PORTAL_SHELL.page,
+          background: 'transparent',
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
@@ -11235,6 +11251,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         </div>
 
         <div style={{
+          flexShrink: 0,
           padding: '12px 16px',
           borderTop: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
@@ -11253,13 +11270,15 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               padding: '0 14px',
               borderRadius: 8,
               border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-              fontSize: 14,
+              // 16px floor: anything smaller makes iOS auto-zoom the page on
+              // focus, which is what pushed the open chat off the screen.
+              fontSize: 16,
               fontFamily: FONTS.body,
               outline: 'none',
               background: '#fff',
               color: PORTAL_SHELL.text,
             }}
-            autoFocus
+            autoFocus={!compact}
           />
           <button onClick={send} disabled={sending || !input.trim()} style={{
             width: 44,
