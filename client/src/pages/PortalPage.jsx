@@ -3247,6 +3247,7 @@ function BillingTab({ customer }) {
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
+  const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
   const [stripeReady, setStripeReady] = useState(false);
@@ -3377,6 +3378,9 @@ function BillingTab({ customer }) {
     try {
       await api.removeCard(cardId);
       await refreshCards();
+      // Card changes can move or disable Auto Pay server-side — remount the
+      // AutopayCard so it never shows "Active" against a removed card.
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       alert(err.message || 'Failed to remove card');
     }
@@ -3386,6 +3390,7 @@ function BillingTab({ customer }) {
     try {
       await api.setDefaultCard(cardId);
       await refreshCards();
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       alert(err.message || 'Failed to set default card');
     }
@@ -3793,7 +3798,7 @@ function BillingTab({ customer }) {
       </div>
       )}
 
-      <AutopayCard onStateChange={setAutopay} />
+      <AutopayCard key={autopayRefreshKey} onStateChange={setAutopay} />
 
       <div data-glass="card" style={{
         ...card,
@@ -3848,7 +3853,7 @@ function BillingTab({ customer }) {
         )}
       </div>
 
-      <div data-glass="card" style={{ ...card, padding: 20 }}>
+      <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div>
             <div style={sectionTitle}>Payment Methods</div>
@@ -4075,7 +4080,10 @@ function BillingTab({ customer }) {
                 {p.lastFour && ` - ${p.cardBrand || 'Card'} ending in ${p.lastFour}`}
               </div>
               {p.status === 'failed' && (
-                <button type="button" style={{
+                <button type="button" onClick={() => {
+                  document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  handleAddCard();
+                }} style={{
                   marginTop: 8, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
                   background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                 }}>Update Payment Method</button>

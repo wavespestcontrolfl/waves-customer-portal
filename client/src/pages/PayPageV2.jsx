@@ -409,6 +409,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [displayedBase, setDisplayedBase] = useState(amount);
   const [displayedSurcharge, setDisplayedSurcharge] = useState(0);
   const [displayedTotal, setDisplayedTotal] = useState(amount);
+  // Mirror of displayedBase readable inside the Payment Element's change
+  // closure, so invalidating a quote can reset the totals to the base.
+  const displayedBaseRef = useRef(amount);
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
   const selectedMethodRef = useRef('card');
@@ -481,6 +484,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         return { ok: true, replaced: false, superseded: true };
       }
       setDisplayedBase(data.base);
+      displayedBaseRef.current = data.base;
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
       return { ok: true, replaced: false, superseded: false };
@@ -665,9 +669,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         paymentElement.on('change', (event) => {
           if (cancelled) return;
           // Clear pending surcharge quote on any element change — the customer
-          // may have edited card details, making the old PM stale.
+          // may have edited card details, making the old PM stale — and reset
+          // the displayed totals derived from it, so the previous card's
+          // surcharge and "Total charged" don't linger on screen.
           setAwaitingConfirm(false);
           setQuoteData(null);
+          setDisplayedSurcharge(0);
+          setDisplayedTotal(displayedBaseRef.current);
           setElementError(event.error?.message || null);
           const nextMethod = event.value?.type || null;
           if (nextMethod && nextMethod !== selectedMethodRef.current) {
@@ -859,6 +867,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
       // Show the surcharge confirmation UI
       setDisplayedBase(quote.base);
+      displayedBaseRef.current = quote.base;
       setDisplayedSurcharge(quote.surcharge);
       setDisplayedTotal(quote.total);
       setQuoteData({ ...quote, paymentMethodId: paymentMethod.id });

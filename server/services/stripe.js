@@ -575,14 +575,37 @@ const StripeService = {
         logger.warn(`[stripe] Detach warning (proceeding with DB removal): ${err.message}`);
       }
       await db('payment_methods').where({ id: cardId }).del();
+      await this._disableAutopayIfMethodRemoved(customerId, card);
       logger.info(`[stripe] Payment method removed for ${customerId}: ${cardId}`);
       return { success: true };
     }
 
     // Fallback — just remove from DB
     await db('payment_methods').where({ id: cardId }).del();
+    await this._disableAutopayIfMethodRemoved(customerId, card);
     logger.info(`[stripe] Payment method removed (DB only) for ${customerId}: ${cardId}`);
     return { success: true };
+  },
+
+  /**
+   * Removing the card that carried Auto Pay used to leave the customer's
+   * autopay flags pointing at a deleted row — the cron silently stopped
+   * charging while the AutopayCard still showed Active. Disable autopay
+   * honestly so the UI shows Off with a set-up CTA.
+   */
+  async _disableAutopayIfMethodRemoved(customerId, removedCard) {
+    if (!removedCard?.autopay_enabled) return;
+    try {
+      await db('customers')
+        .where({ id: customerId })
+        .update({ autopay_enabled: false, autopay_payment_method_id: null });
+      const { logAutopay } = require('./autopay-log');
+      await logAutopay(customerId, 'autopay_disabled', {
+        details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+      });
+    } catch (err) {
+      logger.warn(`[stripe] autopay cleanup after card removal failed for ${customerId}: ${err.message}`);
+    }
   },
 
   // =========================================================================
