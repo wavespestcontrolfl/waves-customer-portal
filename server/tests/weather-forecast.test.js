@@ -1,7 +1,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
-const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip, _test } = require('../services/weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip, forecastLinkForPlace, _test } = require('../services/weather-forecast');
 
 describe('weather-forecast (NWS)', () => {
   beforeEach(() => {
@@ -20,6 +20,21 @@ describe('weather-forecast (NWS)', () => {
     expect(forecastLinkForZip('34202-1234')).toBe('https://forecast.weather.gov/zipcity.php?inputstring=34202');
     expect(forecastLinkForZip(null)).toBeNull();
     expect(forecastLinkForZip('not a zip')).toBeNull();
+  });
+
+  test('forecastLinkForPlace prefers "City, ST" and falls back to zip', () => {
+    expect(forecastLinkForPlace({ city: 'Bradenton', state: 'FL', zip: '34211' }))
+      .toBe('https://forecast.weather.gov/zipcity.php?inputstring=Bradenton%2C+FL');
+    // Multi-word city, lowercase state, stray whitespace all normalize.
+    expect(forecastLinkForPlace({ city: '  Port  Charlotte ', state: 'fl', zip: '33948' }))
+      .toBe('https://forecast.weather.gov/zipcity.php?inputstring=Port+Charlotte%2C+FL');
+    // Missing/unusable city or state → zip fallback → null when zip is junk too.
+    expect(forecastLinkForPlace({ city: null, state: 'FL', zip: '34202' }))
+      .toBe('https://forecast.weather.gov/zipcity.php?inputstring=34202');
+    expect(forecastLinkForPlace({ city: 'Bradenton', state: 'Florida', zip: '34202' }))
+      .toBe('https://forecast.weather.gov/zipcity.php?inputstring=34202');
+    expect(forecastLinkForPlace({ city: '123', state: 'FL', zip: null })).toBeNull();
+    expect(forecastLinkForPlace()).toBeNull();
   });
 
   test('outlook maps daytime periods by date and caches', async () => {

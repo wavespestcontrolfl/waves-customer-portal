@@ -23,7 +23,7 @@ const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { getDailyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
+const { getDailyRainOutlook, forecastLinkForPlace } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
@@ -134,6 +134,8 @@ async function loadServiceWithCustomer(serviceId) {
       'customers.first_name',
       'customers.phone',
       'customers.zip',
+      'customers.city',
+      'customers.state',
       'customers.latitude as customer_latitude',
       'customers.longitude as customer_longitude',
       'customers.id as cust_id',
@@ -270,7 +272,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
   const altClause = alt
     ? ` Reply 1 to confirm, or 2 to switch to ${customerArrivalOption(alt.date, alt.window)}.`
     : ' Reply to this message if you need a different time.';
-  const forecastLink = forecastLinkForZip(customer.zip);
+  const forecastLink = forecastLinkForPlace({ city: customer.city, state: customer.state, zip: customer.zip });
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
   const body = await renderSmsTemplate('rain_out_moved', {
@@ -440,8 +442,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
     if (notifyCustomer) {
       try {
         const customer = job.id === serviceId
-          ? { id: service.cust_id || service.customer_id, phone: service.phone, first_name: service.first_name, zip: service.zip }
-          : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip');
+          ? { id: service.cust_id || service.customer_id, phone: service.phone, first_name: service.first_name, zip: service.zip, city: service.city, state: service.state }
+          : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'city', 'state');
         sms = await sendMovedSms({ job, customer, reasonCode, chosen, alt: job.id === serviceId ? alt : null, serviceId: job.id });
         if (sms.sent && job.id === serviceId && alt) {
           await attachReplyOptions(job.id, chosen, alt);

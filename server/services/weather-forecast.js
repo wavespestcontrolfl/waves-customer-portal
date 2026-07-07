@@ -157,9 +157,28 @@ function forecastLinkForZip(zip) {
   return clean ? `https://forecast.weather.gov/zipcity.php?inputstring=${clean[0]}` : null;
 }
 
+/**
+ * City-first variant: "City, ST" makes the link (and the NWS page it
+ * lands on) name the customer's own city instead of a bare zip — the
+ * same "City, St" format the weather.gov search box takes. Falls back
+ * to the zip link when city/state are missing or unusable.
+ */
+function forecastLinkForPlace({ city, state, zip } = {}) {
+  const cityClean = String(city || '').trim().replace(/\s+/g, ' ');
+  const stateClean = String(state || '').trim().toUpperCase();
+  if (/[A-Za-z]/.test(cityClean) && /^[A-Z]{2}$/.test(stateClean)) {
+    // encodeURIComponent, then '+' for spaces — zipcity is a GET form,
+    // and '+' keeps the URL shorter/cleaner in an SMS than %20.
+    const inputstring = encodeURIComponent(`${cityClean}, ${stateClean}`).replace(/%20/g, '+');
+    return `https://forecast.weather.gov/zipcity.php?inputstring=${inputstring}`;
+  }
+  return forecastLinkForZip(zip);
+}
+
 module.exports = {
   getDailyRainOutlook,
   getHourlyRainOutlook,
   forecastLinkForZip,
+  forecastLinkForPlace,
   _test: { cacheKey, _cache, _hourlyCache },
 };

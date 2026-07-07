@@ -12,7 +12,10 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlook: jest.fn().mockResolvedValue(null),
-  forecastLinkForZip: jest.fn((zip) => (zip ? `https://forecast.weather.gov/zipcity.php?inputstring=${zip}` : null)),
+  forecastLinkForPlace: jest.fn(({ city, state, zip } = {}) => {
+    if (city && state) return `https://forecast.weather.gov/zipcity.php?inputstring=${encodeURIComponent(`${city}, ${state}`).replace(/%20/g, '+')}`;
+    return zip ? `https://forecast.weather.gov/zipcity.php?inputstring=${zip}` : null;
+  }),
 }));
 
 const db = require('../models/db');
@@ -35,6 +38,8 @@ const SERVICE = {
   first_name: 'Pat',
   phone: '+19415551234',
   zip: '34202',
+  city: 'Bradenton',
+  state: 'FL',
   customer_latitude: 27.4,
   customer_longitude: -82.4,
 };
@@ -134,7 +139,8 @@ describe('rain-out service', () => {
       expect(vars.new_option).toContain('1:00 PM - 3:00 PM');
       expect(vars.alt_clause).toContain('Reply 1 to confirm, or 2 to switch');
       expect(vars.alt_clause).toContain('8:00 AM - 10:00 AM');
-      expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
+      // City-first link: the customer sees their own city, not a bare zip.
+      expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=Bradenton%2C+FL');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 
       // Reply options carry the tight 1-hour internal slot in start/end (a reply
