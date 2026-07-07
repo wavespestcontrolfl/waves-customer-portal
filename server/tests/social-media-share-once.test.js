@@ -51,6 +51,9 @@ describe('shareUrlOnce', () => {
     // Dedup must NOT block on prior 'failed' rows (kept retryable).
     expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['dry_run', 'failed']);
     expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({ source: 'autonomous_blog', noAiImage: true }));
+    // The autonomous blog lane opts into EVERY platform explicitly — the
+    // omitted-channels default excludes twitter (admin preview flow).
+    expect(publishSpy.mock.calls[0][0].channels).toEqual(expect.arrayContaining(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']));
     expect(res).toMatchObject({ shared: true });
   });
 

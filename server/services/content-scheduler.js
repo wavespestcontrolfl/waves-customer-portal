@@ -66,6 +66,9 @@ async function sharePublishedBlog(blog) {
       link,
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
+      // Blog shares opt into every platform incl. Twitter — the omitted-
+      // channels default deliberately excludes it (admin preview flow).
+      channels: SocialMediaService.PUBLISH_PLATFORMS,
       // No imageUrl: publishToAll's blog-hero branch resolves the live page's
       // og:image and re-hosts it as JPEG (Instagram rejects the raw .webp hero
       // the old publicBlogImageUrl handed it), falling back to the brand card
@@ -639,12 +642,26 @@ const ContentScheduler = {
           ? JSON.parse(social.custom_content)
           : social.custom_content;
 
+        // Pre-publish, platforms_posted holds the REQUESTED platform list the
+        // admin picked at scheduling time (publishToAll rewrites it with the
+        // results afterwards). Pass it through so a post scheduled for a
+        // narrower set (e.g. Facebook-only) never fans out to platforms the
+        // admin didn't select. Empty/missing → publishToAll's default set.
+        let storedPlatforms = social.platforms_posted;
+        if (typeof storedPlatforms === 'string') {
+          try { storedPlatforms = JSON.parse(storedPlatforms); } catch { storedPlatforms = null; }
+        }
+        const requestedChannels = Array.isArray(storedPlatforms)
+          ? storedPlatforms.map((p) => (typeof p === 'string' ? p : p?.platform)).filter(Boolean)
+          : [];
+
         const result = await SocialMediaService.publishToAll({
           title: social.title,
           description: social.description,
           link: social.source_url,
           guid: social.source_guid || `social_${social.id}`,
           source: 'scheduled',
+          channels: requestedChannels.length ? requestedChannels : undefined,
           customContent,
         });
 

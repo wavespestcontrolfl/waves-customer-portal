@@ -59,6 +59,12 @@ const SOCIAL_FLAGS = {
 };
 
 const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp', 'twitter'];
+// Omitted-channels default. Twitter is deliberately NOT in it: the admin
+// Publish All flow posts with channels omitted and only previews/edits the
+// four legacy platforms, so a default-set tweet would publish server-side
+// copy the admin never saw. The autonomous blog-share lanes (shareUrlOnce,
+// RSS, scheduled blog shares) opt into Twitter EXPLICITLY via channels.
+const DEFAULT_PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 
 function normalizePublishChannels(channels) {
   // ONLY an omitted value (undefined/null) defaults to all platforms. Any
@@ -66,7 +72,7 @@ function normalizePublishChannels(channels) {
   // "facebook" instead of ["facebook"]) and an all-invalid/empty list both
   // resolve to NO platforms — never "all" — so a malformed filter can't blast
   // everywhere.
-  if (channels == null) return new Set(PUBLISH_PLATFORMS);
+  if (channels == null) return new Set(DEFAULT_PUBLISH_PLATFORMS);
   if (!Array.isArray(channels)) return new Set();
   const selected = channels
     .map((channel) => String(channel || '').trim().toLowerCase())
@@ -1274,6 +1280,9 @@ const SocialMediaService = {
             link: normalizedUrl,
             guid: normalizedGuid,
             source: 'rss',
+            // Blog shares opt into every platform incl. Twitter (the omitted-
+            // channels default excludes it — see DEFAULT_PUBLISH_PLATFORMS).
+            channels: PUBLISH_PLATFORMS,
             imageUrl,
             gbpImageUrl,
             // Autonomous (cron) shares use the brand card or go text-only — never
@@ -1327,6 +1336,9 @@ const SocialMediaService = {
       if (existing) return { skipped: 'already_posted' };
       const result = await this.publishToAll({
         title, description, link: normalized, guid: normalized, source, noAiImage,
+        // Autonomous blog-share lane: opt into every platform incl. Twitter
+        // (the omitted-channels default excludes it).
+        channels: PUBLISH_PLATFORMS,
       });
       return { shared: true, ...result };
     });
@@ -1589,7 +1601,12 @@ const SocialMediaService = {
           // Text + article URL; X renders the link card from the page's
           // og:image, so blog shares need no media upload (mirrors the FB
           // /feed link-post approach).
-          const r = await withRetry(() => postToTwitter(content, link), { label: 'twitter' });
+          // NOT wrapped in withRetry: tweet creation is non-idempotent — if X
+          // accepts the create but the response is lost/times out, a retry
+          // publishes a DUPLICATE tweet (same rule as the FB video and IG
+          // container flows). A transient failure surfaces as an X partial
+          // failure and stays retryable through the normal channels.
+          const r = await postToTwitter(content, link);
           platformResults.push({ ...r, content });
         }
       } catch (err) {
@@ -1838,4 +1855,6 @@ module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
 module.exports.isImageHostingConfigured = isImageHostingConfigured;
 module.exports.blogHeroSocialImageUrl = blogHeroSocialImageUrl;
 module.exports.BLOG_HERO_SOURCES = BLOG_HERO_SOURCES;
+module.exports.PUBLISH_PLATFORMS = PUBLISH_PLATFORMS;
+module.exports.DEFAULT_PUBLISH_PLATFORMS = DEFAULT_PUBLISH_PLATFORMS;
 module.exports.facebookWantsBlogHero = facebookWantsBlogHero;

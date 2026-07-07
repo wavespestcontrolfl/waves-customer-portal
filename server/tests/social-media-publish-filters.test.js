@@ -10,14 +10,20 @@ const social = require('../services/social-media');
 const { normalizePublishChannels, normalizeGbpLocationIds } = social;
 
 describe('normalizePublishChannels', () => {
-  test('omitted (null/undefined) defaults to all platforms', () => {
-    expect(normalizePublishChannels(undefined)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']));
-    expect(normalizePublishChannels(null)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']));
+  test('omitted (null/undefined) defaults to the LEGACY four platforms — Twitter is explicit-opt-in (the admin Publish All flow previews only these four)', () => {
+    expect(normalizePublishChannels(undefined)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp']));
+    expect(normalizePublishChannels(null)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp']));
   });
 
-  test('a valid array selects only those platforms', () => {
+  test('a valid array selects only those platforms (twitter selectable explicitly)', () => {
     expect(normalizePublishChannels(['facebook', 'gbp'])).toEqual(new Set(['facebook', 'gbp']));
     expect(normalizePublishChannels(['Facebook ', 'INSTAGRAM'])).toEqual(new Set(['facebook', 'instagram']));
+    expect(normalizePublishChannels(['twitter'])).toEqual(new Set(['twitter']));
+  });
+
+  test('the autonomous blog-share channel list covers every platform incl. twitter', () => {
+    expect(social.PUBLISH_PLATFORMS).toEqual(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']);
+    expect(social.DEFAULT_PUBLISH_PLATFORMS).toEqual(['facebook', 'instagram', 'linkedin', 'gbp']);
   });
 
   test('malformed EXPLICIT value fails closed to no platforms (never all)', () => {
