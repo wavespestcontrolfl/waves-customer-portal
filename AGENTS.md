@@ -317,6 +317,44 @@ finding and warns on P1. Reviewers must return JSON matching
   lead per diagnostic via an atomic `whereNull('lead_id')` guard returning 409
   on repeat, no raw PII logging, never mutates diagnostic scoring or any
   customer/assessment table).
+  `/api/public/lawn-assessment/analyze` (write; prospect lawn-photo upload for
+  the wavespestcontrol.com lead-magnet funnel — no auth, no token. Paid
+  dual-model vision per accepted request, so it carries the full abuse triad:
+  entire surface 404s unless GATE_LAWN_ASSESSMENT is on, honeypot drop,
+  Turnstile verified and enforced with GATE_LEAD_TURNSTILE, 5 req/hour per-IP
+  in-route limit plus the shared 40/day photoAssessmentDailyLimiter at mount,
+  ≤5 photos with per-photo size cap. Persists a `lawn_diagnostics` row
+  (mode=prospect, source=public_funnel) via the SAME shared analysis ladder as
+  the tech flow; the response is a TEASER ONLY — a strict subset of the public
+  report egress allowlist (status label, one gated finding, counts) plus a
+  32-hex claim token. The full report payload never leaves the server before
+  claim. Prospect free-text note is stored for admin view only — never fed to
+  models or customer copy. Privacy headers on all responses.)
+  `/api/public/lawn-assessment/:id/claim` (write; contact capture that unlocks
+  the full report — same gate-404 + honeypot + privacy headers, 10 req/min
+  limit, UUID + 32-hex claim-token format gates with generic 404 so tokens
+  can't be probed, strict body validation before coercion — name plus a valid
+  email or phone. Creates ONE lead per assessment inside a transaction with an
+  atomic status+`whereNull('lead_id')` guard (409 on replay), mints the
+  30-day report token served by `/api/public/lawn-diagnostic/:token`, and
+  stores a server-computed pricing snapshot from the pricing engine (size-band
+  basis, engine-authoritative — pricing failure never blocks the claim).)
+  `/api/public/pest-identifier/analyze` (write; prospect pest-photo upload —
+  exact mirror of `/api/public/lawn-assessment/analyze` behind
+  GATE_PEST_IDENTIFIER, writing `pest_identifications`. Customer-visible copy
+  comes ONLY from the fixed PEST_LIBRARY allowlist in
+  services/pest-identification.js — model output never reaches a prospect, and
+  low-confidence/conflicting IDs degrade to generic category labels.)
+  `/api/public/pest-identifier/:id/claim` (write; mirror of the lawn claim —
+  same one-shot lead+token transaction, 409 on replay, typical-home pricing
+  snapshot only for engine-priceable service lines; termite/rodent/bed-bug
+  style IDs stay inspection-first with fixed suggestive-only copy that must
+  never read like a WDO/confirmed finding.)
+  `/api/public/pest-identifier/:token` (read-only tokenized pest report;
+  same contract as `/api/public/lawn-diagnostic/:token` — 32-hex format gate,
+  60 req/min, privacy headers, only sent/unexpired rows, strictly allowlisted
+  payload via buildPublicPestReport, generic 404, plus a set-once
+  `report_first_viewed_at` funnel stamp.)
   `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
   no auth, no DB writes, no PII — returns a deterministic Florida
   pest-pressure model keyed only on a curated city slug / FL ZIP plus
