@@ -16,6 +16,9 @@
  *  - matched stories bank in local_news_items, so older posts keep the
  *    card full after they rotate out of the upstream feeds; og:image page
  *    fetches are spent only on genuinely new links
+ *  - banked rows are re-validated against the allowlist on read: a row
+ *    whose link host was delisted after ingest is dropped, a delisted
+ *    image host degrades to null
  */
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, res, next) => { req.customerId = 'cust-1'; next(); },
@@ -143,8 +146,14 @@ const EXTERNAL_ROUTES = {
 
 // A story banked on an earlier refresh that has since rotated out of every
 // upstream feed — the whole point of the bank is that it still renders.
+// Its stored image now points off-allowlist (as if the CDN were delisted
+// after ingest) — the read path must null it rather than render it.
 const BANKED_PAGE = 'https://www.venicegondolier.com/news/article_banked123.html';
-const BANKED_IMG = 'https://bloximages.newyork1.vip.townnews.com/venicegondolier.com/irrigation.jpg';
+const BANKED_EVIL_IMG = 'https://evil.example.com/irrigation.jpg';
+// A row whose LINK host is no longer on the allowlist (planted directly in
+// the table, or its publisher was delisted) — dropped entirely on read,
+// even though it's the newest row in the bank.
+const PLANTED_PAGE = 'https://evil.example.com/planted-article.html';
 
 const realFetch = global.fetch;
 let server;
@@ -153,15 +162,26 @@ let externalCalls;
 
 beforeAll(async () => {
   const store = require('../services/local-news-store');
-  store._rows.push({
-    id: 999,
-    link: BANKED_PAGE,
-    title: 'Venice tightens irrigation restrictions for summer',
-    description: 'Watering days change citywide.',
-    image: BANKED_IMG,
-    source_name: 'Venice Gondolier',
-    pub_date: new Date('2026-06-20T12:00:00Z'),
-  });
+  store._rows.push(
+    {
+      id: 998,
+      link: PLANTED_PAGE,
+      title: 'Planted row with untrusted link',
+      description: 'Must never render.',
+      image: null,
+      source_name: 'MySuncoast',
+      pub_date: new Date('2026-07-08T12:00:00Z'), // newest row in the bank
+    },
+    {
+      id: 999,
+      link: BANKED_PAGE,
+      title: 'Venice tightens irrigation restrictions for summer',
+      description: 'Watering days change citywide.',
+      image: BANKED_EVIL_IMG,
+      source_name: 'Venice Gondolier',
+      pub_date: new Date('2026-06-20T12:00:00Z'),
+    },
+  );
 
   const a = express();
   a.use('/api/feed', require('../routes/feed'));
@@ -198,7 +218,9 @@ test('merges all corridor sources newest-first, tags each item with its outlet, 
   // 6 fixture items pass fetch; the restaurant item fails RELEVANT, the
   // theft and baseball items trip EXCLUDE, the Gondolier source is down →
   // 4 survive, interleaved newest-first, and the pre-banked story (in no
-  // upstream feed anymore) still renders at the bottom.
+  // upstream feed anymore) still renders at the bottom. The planted row
+  // with the off-allowlist link is dropped on read despite being the
+  // newest row in the bank.
   expect(posts.map((p) => [p.sourceName, p.title])).toEqual([
     ['Tampa Bay Times', 'Red tide bloom drifts toward St. Pete beaches'],
     ['Herald-Tribune', 'Hurricane season lawn prep tips for Sarasota homeowners'],
@@ -212,15 +234,17 @@ test('merges all corridor sources newest-first, tags each item with its outlet, 
 
   // Images: feed-native wins without a page fetch; image-less items resolve
   // og:image from the (allowlisted) article page at ingest; misses degrade
-  // to null; the banked story keeps its stored image without any fetch.
+  // to null. The banked story renders without any fetch, but its stored
+  // off-allowlist image is re-validated to null on the way out.
   expect(posts[0].image).toBe(TAMPABAY_IMG);
   expect(posts[1].image).toBe(HERALD_IMG);
   expect(externalCalls).not.toContain(HERALD_PAGE);
   expect(externalCalls).not.toContain(TAMPABAY_PAGE);
   expect(posts[2].image).toBe(BRADENTON_IMG);
   expect(posts[3].image).toBeNull();
-  expect(posts[4].image).toBe(BANKED_IMG);
+  expect(posts[4].image).toBeNull();
   expect(externalCalls).not.toContain(BANKED_PAGE);
+  expect(externalCalls).not.toContain(PLANTED_PAGE);
 
   // All posts keep the shared /local contract.
   for (const p of posts) expect(p.source).toBe('local');

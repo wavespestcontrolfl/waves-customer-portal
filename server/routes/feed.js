@@ -354,16 +354,27 @@ router.get('/local', async (req, res, next) => {
         item.image = item.image || await resolveOgImage(item.link);
       }));
       await localNewsStore.insertItems(arrivals);
-      const rows = await localNewsStore.latestItems(5);
-      posts = rows.map(row => ({
-        title: row.title,
-        link: row.link,
-        pubDate: new Date(row.pub_date).toUTCString(),
-        description: row.description || '',
-        image: row.image || null,
-        source: 'local',
-        sourceName: row.source_name,
-      }));
+      // Banked rows were validated at ingest, but the allowlist can change
+      // after rows are stored — re-validate on the way out so a delisted
+      // publisher's rows stop rendering immediately. Read a small buffer,
+      // drop rows whose link no longer passes, then cut to card size.
+      const rows = await localNewsStore.latestItems(10);
+      posts = rows
+        .map(row => {
+          const link = safeLink(row.link);
+          if (!link) return null;
+          return {
+            title: row.title,
+            link,
+            pubDate: new Date(row.pub_date).toUTCString(),
+            description: row.description || '',
+            image: safeImage(row.image),
+            source: 'local',
+            sourceName: row.source_name,
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 5);
     } catch (err) {
       // Table missing / DB unreachable: degrade to serving this fetch's
       // items directly (the pre-bank behavior) — never a 500.
