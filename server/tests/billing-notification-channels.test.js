@@ -24,15 +24,15 @@ const smsInput = (purpose) => ({
   customerId: 'c1',
 });
 
-const contactState = (prefs) => ({ prefs, customer: { id: 'c1' }, lookupFailed: false });
+const contactState = (prefs, customer = { id: 'c1' }) => ({ prefs, customer, lookupFailed: false });
 
 describe('billing / payment-confirmation delivery channel (SMS leg gating)', () => {
-  test("purpose 'billing': channel 'email' suppresses the SMS leg", async () => {
+  test("purpose 'billing': channel 'email' suppresses the SMS leg (billing email on file)", async () => {
     const policy = resolvePolicy('customer', 'billing');
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_reminder_channel: 'email' }),
+      contactState({ sms_enabled: true, billing_reminder: true, billing_reminder_channel: 'email', billing_email: 'ap@example.com' }),
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
@@ -48,15 +48,34 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.ok).toBe(true);
   });
 
-  test("purpose 'payment_receipt': channel 'email' suppresses the SMS leg", async () => {
+  test("purpose 'payment_receipt': channel 'email' suppresses the SMS leg (account email on file)", async () => {
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
       smsInput('payment_receipt'),
       policy,
-      contactState({ sms_enabled: true, payment_confirmation_sms: true, payment_confirmation_channel: 'email' }),
+      contactState(
+        { sms_enabled: true, payment_confirmation_sms: true, payment_confirmation_channel: 'email' },
+        { id: 'c1', email: 'adam@example.com' },
+      ),
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
+  });
+
+  test("channel 'email' with NO deliverable email falls back to SMS instead of leaving no channel", async () => {
+    // The portal UI can't save an email-only choice without an email on file,
+    // but a direct API write (or an email removed later) can — the customer
+    // must still be reachable.
+    const policy = resolvePolicy('customer', 'payment_receipt');
+    const res = await checkConsentForPurpose(
+      smsInput('payment_receipt'),
+      policy,
+      contactState(
+        { sms_enabled: true, payment_confirmation_sms: true, payment_confirmation_channel: 'email' },
+        { id: 'c1', email: null },
+      ),
+    );
+    expect(res.ok).toBe(true);
   });
 
   test("channel gate only applies to the sms channel — an email send through the wrapper is not blocked", async () => {

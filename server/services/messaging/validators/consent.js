@@ -101,14 +101,22 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // Per-purpose delivery-channel column (sms | email | both). 'email' means
   // the customer chose email-only delivery for this notification type, so the
   // SMS leg is suppressed — the email version arrives via its own lane
-  // (receipt / billing emails). Only gates SMS: an email send through the
-  // wrapper must not be blocked by an email-preferring customer.
+  // (receipt / billing emails to the billing address). Only gates SMS: an
+  // email send through the wrapper must not be blocked by an email-preferring
+  // customer. And only when a deliverable email actually exists — the portal
+  // UI can't save an email-only choice without one, but a direct API write
+  // (or an email removed later) could; suppressing the text then would leave
+  // the customer with NO channel, so SMS stays the fallback.
   if (policy.channelColumn && input.channel === 'sms' && prefs[policy.channelColumn] === 'email') {
-    return {
-      ok: false,
-      code: 'CHANNEL_EMAIL_ONLY',
-      reason: `Recipient prefers email-only delivery for the "${policy.channelColumn}" notification type`,
-    };
+    const deliverableEmail = prefs.billing_email || contactState.customer?.email;
+    if (deliverableEmail) {
+      return {
+        ok: false,
+        code: 'CHANNEL_EMAIL_ONLY',
+        reason: `Recipient prefers email-only delivery for the "${policy.channelColumn}" notification type`,
+      };
+    }
+    logger.warn(`[messaging:consent] ${policy.channelColumn}='email' but no billing/account email on file — sending SMS instead`);
   }
 
   // Marketing-grade consent. We require either:
@@ -148,7 +156,7 @@ async function loadContactState(input) {
   if (input.customerId) {
     try {
       state.prefs = await db('notification_prefs').where({ customer_id: input.customerId }).first();
-      state.customer = await db('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'city');
+      state.customer = await db('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
     } catch (err) {
       logger.warn(`[messaging:consent] customer lookup failed: ${err.message}`);
       state.lookupFailed = true;
@@ -159,7 +167,7 @@ async function loadContactState(input) {
   // flows where the wrapper is invoked with only `to` set.
   if (!state.customer && input.to) {
     try {
-      const cust = await db('customers').where({ phone: input.to }).first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'city');
+      const cust = await db('customers').where({ phone: input.to }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
       if (cust) {
         state.customer = cust;
         state.prefs = await db('notification_prefs').where({ customer_id: cust.id }).first();
