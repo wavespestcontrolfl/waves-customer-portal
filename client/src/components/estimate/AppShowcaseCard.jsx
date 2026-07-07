@@ -157,8 +157,22 @@ export default function AppShowcaseCard({ onBookToday = null }) {
               {GLASS_COPY.appHouseholdLine}
             </p>
             <div className="gc-av-chips">
+              {/* data-glass-accent renders these as the same gold pills as the
+                  report-card / AI slot-search chips (owner 2026-07-07); the
+                  inline styles remain the non-glass fallback. */}
               {APP_FEATURES.map(([, label]) => (
-                <span key={label} className="gc-av-chip">{label}</span>
+                <span
+                  key={label}
+                  data-glass-accent=""
+                  style={{
+                    padding: '8px 14px', borderRadius: 999,
+                    fontSize: 14, fontWeight: 700, color: W.navyDeep,
+                    background: W.white, border: '1px solid #DCEAF3',
+                    boxShadow: '0 2px 8px rgba(4,57,94,.08)',
+                  }}
+                >
+                  {label}
+                </span>
               ))}
             </div>
             {native ? null : (
