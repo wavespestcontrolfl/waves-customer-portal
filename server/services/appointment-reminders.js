@@ -608,18 +608,21 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
   return { customer, techName };
 }
 
-async function getReminderPrefs(customerId) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
-
-  // Delivery channel is an account-level "how to reach me" preference, saved on
-  // the account owner's (primary profile's) row in the portal. Reminders load
-  // prefs by each appointment's service-property customer id, so a secondary
-  // property would otherwise miss the channel choice and default to SMS.
-  // Resolve it from the account's primary customer profile. (customers.account_id
-  // references customer_accounts.id, NOT a customers.id — so look up the primary
-  // profile rather than reading prefs by account_id directly.)
+// Delivery channel is an account-level "how to reach me" preference, saved on
+// the account owner's (primary profile's) row in the portal. Send paths load
+// prefs by each appointment's service-property customer id, so a secondary
+// property would otherwise miss the channel choice and default to SMS.
+// Resolve it from the account's primary customer profile. (customers.account_id
+// references customer_accounts.id, NOT a customers.id — so look up the primary
+// profile rather than reading prefs by account_id directly.)
+// `customerRow` is an optional pre-fetched customers row (must include
+// account_id / is_primary_profile) so callers that already loaded the customer
+// skip the extra query. Falls back to the passed `prefs` row on any miss.
+async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null) {
   let channelPrefs = prefs;
-  const customer = await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
+  const customer = (customerRow && customerRow.account_id !== undefined)
+    ? customerRow
+    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
   if (customer && customer.is_primary_profile !== true && customer.account_id) {
     const primary = await db('customers')
       .where({ account_id: customer.account_id, is_primary_profile: true })
@@ -630,6 +633,12 @@ async function getReminderPrefs(customerId) {
       if (ownerPrefs) channelPrefs = ownerPrefs;
     }
   }
+  return channelPrefs;
+}
+
+async function getReminderPrefs(customerId) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
     raw: prefs || {},
@@ -1760,6 +1769,13 @@ AppointmentReminders.alertNoReachableChannel = alertNoReachableChannel;
 // call-created) can route their own confirmation SMS through the customer's
 // account-level confirmation channel preference.
 AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel;
+
+// Exposed so the tech-tracking send paths in services/twilio.js can honor the
+// customer's account-level delivery channel (en_route_channel /
+// tech_arrived_channel) with the same normalization and primary-profile
+// resolution the appointment reminders use.
+AppointmentReminders.apptChannel = apptChannel;
+AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
 
 AppointmentReminders._test = {
   maskPhone,

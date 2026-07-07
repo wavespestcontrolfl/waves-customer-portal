@@ -635,7 +635,25 @@ const TwilioService = {
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
       .first();
-    if (!customer || !prefs?.tech_en_route || !prefs?.sms_enabled) return;
+    if (!customer || !prefs?.tech_en_route) return;
+
+    // Honor the customer's delivery-channel choice (portal Settings dropdown,
+    // notification_prefs.en_route_channel). Account-level — resolved from the
+    // primary profile like the appointment-reminder channels; anything
+    // unrecognized (or a lookup failure) normalizes to 'sms' so legacy
+    // customers see no behavior change.
+    const AppointmentReminders = require("./appointment-reminders");
+    let channel = "sms";
+    try {
+      const channelRow = await AppointmentReminders.resolveChannelPrefsRow(customerId, prefs, customer);
+      channel = AppointmentReminders.apptChannel(channelRow?.en_route_channel);
+    } catch (e) {
+      logger.warn(`[twilio] en-route channel lookup failed for customer ${customerId}: ${e.message} — defaulting to SMS`);
+    }
+    const smsAllowed = !!prefs?.sms_enabled;
+    // Legacy gate, unchanged for text-first customers: SMS disabled with no
+    // email preference means there is nothing to send.
+    if (channel === "sms" && !smsAllowed) return;
 
     const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
@@ -671,73 +689,108 @@ const TwilioService = {
     const cachedPrimaryLandline = customer.line_type === "landline" && !!primaryDigits;
     let attemptedSms = false;
     let landlineSkipped = false;
-    for (const contact of contacts) {
-      if (cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
-        landlineSkipped = true;
-        continue;
-      }
-      // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
-      // {first_name} template slot wants only the first token, so strip the rest.
-      const firstName = firstNameFrom(contact.name) || customer.first_name || "";
-      let body = null;
-      if (typeof smsTemplatesRouter.getTemplate === "function") {
-        body = await smsTemplatesRouter.getTemplate("tech_en_route", {
-          first_name: firstName,
-          tech_name: customerTechName,
-          eta_line: etaLine,
-          track_clause: trackClause,
-          track_url: trackUrl || "",
-        }, { workflow: "tech_en_route", entity_type: "customer", entity_id: customerId });
-      }
-      if (!body) {
-        logger.warn(
-          `[twilio] tech_en_route template missing/disabled — skipping en-route SMS for customer ${customerId}`,
+    const attemptSms = async () => {
+      for (const contact of contacts) {
+        if (cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
+          landlineSkipped = true;
+          continue;
+        }
+        // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
+        // {first_name} template slot wants only the first token, so strip the rest.
+        const firstName = firstNameFrom(contact.name) || customer.first_name || "";
+        let body = null;
+        if (typeof smsTemplatesRouter.getTemplate === "function") {
+          body = await smsTemplatesRouter.getTemplate("tech_en_route", {
+            first_name: firstName,
+            tech_name: customerTechName,
+            eta_line: etaLine,
+            track_clause: trackClause,
+            track_url: trackUrl || "",
+          }, { workflow: "tech_en_route", entity_type: "customer", entity_id: customerId });
+        }
+        if (!body) {
+          logger.warn(
+            `[twilio] tech_en_route template missing/disabled — skipping en-route SMS for customer ${customerId}`,
+          );
+          continue;
+        }
+        attemptedSms = true;
+        results.push(
+          await sendCustomerMessage({
+            to: contact.phone,
+            body,
+            channel: "sms",
+            audience: "customer",
+            purpose: "tech_en_route",
+            customerId,
+            identityTrustLevel:
+              isServiceContactRole(contact.role)
+                ? "service_contact_authorized"
+                : "phone_matches_customer",
+            metadata: { original_message_type: "tech_en_route" },
+          }),
         );
-        continue;
       }
-      attemptedSms = true;
-      results.push(
-        await sendCustomerMessage({
-          to: contact.phone,
-          body,
-          channel: "sms",
-          audience: "customer",
-          purpose: "tech_en_route",
-          customerId,
-          identityTrustLevel:
-            isServiceContactRole(contact.role)
-              ? "service_contact_authorized"
-              : "phone_matches_customer",
-          metadata: { original_message_type: "tech_en_route" },
-        }),
-      );
-    }
-
-    const delivered = results.some((r) => r?.sent);
-
-    // None of the contacts could receive the en-route text (landline / no mobile /
-    // blocked), or there were no phone contacts at all — send the en-route notice
-    // by email instead so the customer still knows the tech is on the way.
-    if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0)) {
+      return results.some((r) => r?.sent);
+    };
+    const sendEnRouteEmail = async () => {
       try {
         const AppointmentEmail = require("./appointment-email");
-        const emailRes = await AppointmentEmail.sendTechEnRouteEmail({
+        return await AppointmentEmail.sendTechEnRouteEmail({
           customerId,
           techName: customerTechName,
           etaMinutes,
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
-        // Unlike confirmation/reminders, a locally-skipped en-route SMS (cached
-        // landline / no phone contacts) produces no Twilio delivery callback, so
-        // this is the only path that can flag an unreachable customer. If the email
-        // also can't land (no address / suppressed), alert a human to call them.
-        if (!emailRes?.ok && ((emailRes?.skipped && emailRes.reason === "missing_email") || emailRes?.blocked)) {
-          const AppointmentReminders = require("./appointment-reminders");
-          await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route" });
-        }
       } catch (e) {
-        logger.warn(`[twilio] en-route email fallback failed for customer ${customerId}: ${e.message}`);
+        logger.warn(`[twilio] en-route email send failed for customer ${customerId}: ${e.message}`);
+        return { ok: false, error: e.message };
+      }
+    };
+    const alertUnreachable = async () => {
+      try {
+        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route" });
+      } catch (e) {
+        logger.warn(`[twilio] en-route no-channel alert failed for customer ${customerId}: ${e.message}`);
+      }
+    };
+
+    // email — email only; when no usable email exists (none on file /
+    // suppressed / provider error) fall back to SMS so the customer still
+    // learns the tech is coming (mirrors deliverAppointmentNotice).
+    if (channel === "email") {
+      const emailRes = await sendEnRouteEmail();
+      if (emailRes?.ok) return { success: true, results, emailSent: true };
+      const delivered = smsAllowed ? await attemptSms() : false;
+      if (!delivered) await alertUnreachable();
+      return { success: delivered, results };
+    }
+
+    // both — SMS and email; alert a human only when neither lands.
+    if (channel === "both") {
+      const delivered = smsAllowed ? await attemptSms() : false;
+      const emailRes = await sendEnRouteEmail();
+      const emailOk = !!emailRes?.ok;
+      if (!delivered && !emailOk) await alertUnreachable();
+      return { success: delivered || emailOk, results, emailSent: emailOk };
+    }
+
+    // sms (default) — unchanged legacy behavior: SMS first, email only as the
+    // undeliverable fallback.
+    const delivered = await attemptSms();
+
+    // None of the contacts could receive the en-route text (landline / no mobile /
+    // blocked), or there were no phone contacts at all — send the en-route notice
+    // by email instead so the customer still knows the tech is on the way.
+    if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0)) {
+      const emailRes = await sendEnRouteEmail();
+      // Unlike confirmation/reminders, a locally-skipped en-route SMS (cached
+      // landline / no phone contacts) produces no Twilio delivery callback, so
+      // this is the only path that can flag an unreachable customer. If the email
+      // also can't land (no address / suppressed), alert a human to call them.
+      if (!emailRes?.ok && ((emailRes?.skipped && emailRes.reason === "missing_email") || emailRes?.blocked)) {
+        await alertUnreachable();
       }
     }
 
@@ -752,7 +805,7 @@ const TwilioService = {
    * text. Copy must not say "on the way" (that's en-route). Fired from
    * track-transitions markOnProperty when the live tracker flips to on-site.
    */
-  async sendTechArrived(customerId, techName) {
+  async sendTechArrived(customerId, techName, { scheduledServiceId = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -762,56 +815,120 @@ const TwilioService = {
     // keeps its idempotency guard stamped on this signal so no later same-job
     // signal re-fires a stale arrival text if the pref flips while on-site.
     if (!customer) return { success: false, suppressed: true, reason: "no_customer" };
-    if (!prefs?.sms_enabled) return { success: false, suppressed: true, reason: "sms_disabled" };
     if (!prefs?.tech_arrived) return { success: false, suppressed: true, reason: "opt_out" };
+
+    // Honor the customer's delivery-channel choice (portal Settings dropdown,
+    // notification_prefs.tech_arrived_channel). Account-level like the
+    // appointment-reminder channels; unrecognized values (or a lookup failure)
+    // normalize to 'sms' so legacy customers see no behavior change.
+    const AppointmentReminders = require("./appointment-reminders");
+    let channel = "sms";
+    try {
+      const channelRow = await AppointmentReminders.resolveChannelPrefsRow(customerId, prefs, customer);
+      channel = AppointmentReminders.apptChannel(channelRow?.tech_arrived_channel);
+    } catch (e) {
+      logger.warn(`[twilio] tech-arrived channel lookup failed for customer ${customerId}: ${e.message} — defaulting to SMS`);
+    }
+    const smsAllowed = !!prefs?.sms_enabled;
+    if (channel === "sms" && !smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
 
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
-    if (!contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
+    if (channel === "sms" && !contacts.length) return { success: false, suppressed: true, reason: "no_contacts" };
 
     const results = [];
     const {
       sendCustomerMessage,
     } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
-    for (const contact of contacts) {
-      // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
-      // {first_name} template slot wants only the first token, so strip the rest.
-      const firstName = firstNameFrom(contact.name) || customer.first_name || "";
-      let body = null;
-      if (typeof smsTemplatesRouter.getTemplate === "function") {
-        body = await smsTemplatesRouter.getTemplate("tech_arrived", {
-          first_name: firstName,
-          tech_name: customerTechName,
-        }, { workflow: "tech_arrived", entity_type: "customer", entity_id: customerId });
-      }
-      if (!body) {
-        logger.warn(
-          `[twilio] tech_arrived template missing/disabled — skipping arrival SMS for customer ${customerId}`,
+    // The SMS leg exists when texting is enabled and there is someone to text.
+    // For email/both this decides whether an SMS miss is retryable ("the leg
+    // existed and transiently failed") or deterministic ("there was no leg").
+    const smsLegAvailable = smsAllowed && contacts.length > 0;
+    const attemptSmsLegs = async () => {
+      for (const contact of contacts) {
+        // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
+        // {first_name} template slot wants only the first token, so strip the rest.
+        const firstName = firstNameFrom(contact.name) || customer.first_name || "";
+        let body = null;
+        if (typeof smsTemplatesRouter.getTemplate === "function") {
+          body = await smsTemplatesRouter.getTemplate("tech_arrived", {
+            first_name: firstName,
+            tech_name: customerTechName,
+          }, { workflow: "tech_arrived", entity_type: "customer", entity_id: customerId });
+        }
+        if (!body) {
+          logger.warn(
+            `[twilio] tech_arrived template missing/disabled — skipping arrival SMS for customer ${customerId}`,
+          );
+          continue;
+        }
+        results.push(
+          await sendCustomerMessage({
+            to: contact.phone,
+            body,
+            channel: "sms",
+            audience: "customer",
+            purpose: "tech_arrived",
+            customerId,
+            identityTrustLevel:
+              isServiceContactRole(contact.role)
+                ? "service_contact_authorized"
+                : "phone_matches_customer",
+            metadata: {
+              original_message_type: "tech_arrived",
+              appointment_progress_event: "tech_arrived",
+            },
+          }),
         );
-        continue;
       }
-      results.push(
-        await sendCustomerMessage({
-          to: contact.phone,
-          body,
-          channel: "sms",
-          audience: "customer",
-          purpose: "tech_arrived",
+      return results.some((r) => r?.sent);
+    };
+    const sendArrivedEmail = async () => {
+      try {
+        const AppointmentEmail = require("./appointment-email");
+        return await AppointmentEmail.sendTechArrivedEmail({
           customerId,
-          identityTrustLevel:
-            isServiceContactRole(contact.role)
-              ? "service_contact_authorized"
-              : "phone_matches_customer",
-          metadata: {
-            original_message_type: "tech_arrived",
-            appointment_progress_event: "tech_arrived",
-          },
-        }),
-      );
+          scheduledServiceId,
+          techName: customerTechName,
+          idempotencyKey: `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+        });
+      } catch (e) {
+        logger.warn(`[twilio] tech-arrived email send failed for customer ${customerId}: ${e.message}`);
+        return { ok: false, error: e.message };
+      }
+    };
+    // Same suppressed-vs-retryable contract as the SMS-only path, extended to
+    // the email leg: a deterministic email miss (no address on file /
+    // suppressed) can't be fixed by retrying, so with no SMS leg left the
+    // arrival is HANDLED; a transient email error releases the guard so a
+    // later signal can retry.
+    const classifyMiss = (emailRes) => {
+      const emailTransient = emailRes ? !(emailRes.ok || emailRes.skipped || emailRes.blocked) : false;
+      const smsRetryable = smsLegAvailable && (results.length === 0 || results.some((r) => r?.retryable));
+      if (emailTransient || smsRetryable) return { success: false, results };
+      return { success: false, suppressed: true, reason: "blocked", results };
+    };
+
+    // email — email first; when no usable email exists fall back to SMS so
+    // the arrival notice still lands.
+    if (channel === "email") {
+      const emailRes = await sendArrivedEmail();
+      if (emailRes?.ok) return { success: true, results, emailSent: true };
+      if (smsLegAvailable && (await attemptSmsLegs())) return { success: true, results };
+      return classifyMiss(emailRes);
     }
 
-    if (results.some((r) => r?.sent)) return { success: true, results };
+    // both — SMS and email; success when either lands.
+    if (channel === "both") {
+      const smsDelivered = smsLegAvailable ? await attemptSmsLegs() : false;
+      const emailRes = await sendArrivedEmail();
+      if (smsDelivered || emailRes?.ok) return { success: true, results, emailSent: !!emailRes?.ok };
+      return classifyMiss(emailRes);
+    }
+
+    // sms (default) — unchanged legacy behavior.
+    if (await attemptSmsLegs()) return { success: true, results };
 
     // Nothing delivered. Distinguish a RETRYABLE miss from deterministic
     // suppression so the caller knows whether to release its arrival guard:

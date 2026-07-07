@@ -28,9 +28,14 @@ jest.mock("../services/messaging/send-customer-message", () => ({
 }));
 jest.mock("../services/appointment-email", () => ({
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
+  sendTechArrivedEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock("../services/appointment-reminders", () => ({
   alertNoReachableChannel: jest.fn(async () => ({})),
+  // Channel resolution defaults to the prefs row the sender loaded — tests set
+  // en_route_channel / tech_arrived_channel directly on that row.
+  resolveChannelPrefsRow: jest.fn(async (customerId, prefs) => prefs),
+  apptChannel: (value) => (value === "email" || value === "both" ? value : "sms"),
 }));
 
 const db = require("../models/db");
@@ -190,6 +195,109 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(result.success).toBe(false);
   });
 
+  test("email channel sends the en-route email and skips SMS", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: true, en_route_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    shortenOrPassthrough.mockResolvedValue("https://portal.wavespestcontrol.com/l/abc23");
+    AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: true });
+
+    const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", 20, "track-token");
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendTechEnRouteEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customerId: "cust-1",
+        trackUrl: "https://portal.wavespestcontrol.com/l/abc23",
+        idempotencyKey: "appointment.en_route:track-token",
+      }),
+    );
+    expect(AppointmentReminders.alertNoReachableChannel).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+  });
+
+  test("email channel falls back to SMS when no usable email exists", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: true, en_route_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    shortenOrPassthrough.mockResolvedValue("https://portal.wavespestcontrol.com/l/abc23");
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan is on the way.");
+    AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: "missing_email" });
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", null, "track-token");
+
+    expect(AppointmentEmail.sendTechEnRouteEmail).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "+15551112222", purpose: "tech_en_route" }),
+    );
+    expect(AppointmentReminders.alertNoReachableChannel).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+  });
+
+  test("both channel sends SMS and email", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: true, en_route_channel: "both" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    shortenOrPassthrough.mockResolvedValue("https://portal.wavespestcontrol.com/l/abc23");
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan is on the way.");
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: true });
+
+    const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", null, "track-token");
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendTechEnRouteEmail).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+
+  test("email channel still delivers when texting is disabled (legacy sms_enabled gate lifted)", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: false, en_route_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    shortenOrPassthrough.mockResolvedValue("https://portal.wavespestcontrol.com/l/abc23");
+    AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: true });
+
+    const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", null, "track-token");
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+  });
+
+  test("sms channel with texting disabled still sends nothing (legacy gate preserved)", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: false }),
+    );
+
+    const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", null, "track-token");
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendTechEnRouteEmail).not.toHaveBeenCalled();
+    expect(result).toBeUndefined();
+  });
+
   test("sendTechArrived gates on the tech_arrived pref and uses arrival copy", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
@@ -296,6 +404,103 @@ describe("TwilioService.sendTechEnRoute", () => {
     // guard so a later signal can try again once the failure clears.
     expect(result.success).toBe(false);
     expect(result.suppressed).toBeFalsy();
+  });
+
+  test("sendTechArrived email channel sends the arrival email and skips SMS", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: true });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendTechArrivedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customerId: "cust-1",
+        scheduledServiceId: "job-9",
+        idempotencyKey: "appointment.tech_arrived:job-9",
+      }),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  test("sendTechArrived email channel falls back to SMS when no usable email exists", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: "missing_email" });
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "+15551112222", purpose: "tech_arrived" }),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  test("sendTechArrived email channel with a deterministic email miss and no SMS leg is suppressed", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: "missing_email" });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    // No email on file and no SMS leg — retrying can't change either, so the
+    // arrival is handled and the caller keeps its guard stamped.
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+  });
+
+  test("sendTechArrived email channel stays retryable on a transient email error", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, error: "provider timeout" });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    // Transient provider failure — release the guard so a later signal retries.
+    expect(result.success).toBe(false);
+    expect(result.suppressed).toBeFalsy();
+  });
+
+  test("sendTechArrived both channel succeeds when either leg lands", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: true, tech_arrived_channel: "both" }),
+    );
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    smsTemplates.getTemplate.mockResolvedValue("Hello Sam! Bryan has arrived.");
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: false });
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: true });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendTechArrivedEmail).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
   });
 });
 
