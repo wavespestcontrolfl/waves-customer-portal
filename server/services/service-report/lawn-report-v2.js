@@ -265,7 +265,7 @@ function seriesFrom(trend, field, mapVal = (v) => num(v)) {
     .filter((p) => p.value !== null));
 }
 
-function buildTrends(lawnAssessment, mowingHeight) {
+function buildTrends(lawnAssessment, mowingHeight, waterGapHistory = [], mowingTrendFallback = null) {
   const trend = Array.isArray(lawnAssessment?.trend) ? lawnAssessment.trend : [];
   const out = {};
   const add = (key, series) => { if (series.length >= 2) out[key] = series; };
@@ -274,13 +274,27 @@ function buildTrends(lawnAssessment, mowingHeight) {
   add('weed', seriesFrom(trend, 'weedSuppression'));
   add('color', seriesFrom(trend, 'colorHealth'));
   add('stress', seriesFrom(trend, 'stressDamage'));
-  const mowTrend = Array.isArray(mowingHeight?.trend) ? mowingHeight.trend : [];
-  const mow = dedupeTrend(mowTrend
+  // Water gap vs the weekly target — from the per-visit water-intake snapshots
+  // persisted at report build. Rows arrive capped at THIS visit's date (a
+  // permanent report token must never expose later visits).
+  const gap = dedupeTrend((Array.isArray(waterGapHistory) ? waterGapHistory : [])
+    .map((r) => ({ label: monthLabel(r.serviceDate), value: num(r.waterGapInches) }))
+    .filter((p) => p.value !== null));
+  if (gap.length >= 2) out.waterGap = gap;
+  // Mowing height-of-cut vs the ideal band. Prefer the current reading's own
+  // trend; a visit with no gauge reading still shows the history via the
+  // fallback context (same {trend, band} shape, also capped at this visit).
+  const mowCtx = (mowingHeight && Array.isArray(mowingHeight.trend) && mowingHeight.trend.length)
+    ? mowingHeight
+    : mowingTrendFallback;
+  const mowTrend = Array.isArray(mowCtx?.trend) ? mowCtx.trend : [];
+  const mow = dedupeTrend([...mowTrend]
+    .sort((a, b) => new Date(a.measuredAt) - new Date(b.measuredAt))
     .map((r) => ({ label: monthLabel(r.measuredAt), value: num(r.heightIn) }))
     .filter((p) => p.value !== null));
   if (mow.length >= 2) {
     out.mowing = mow;
-    out.mowingBand = [num(mowingHeight.band?.min), num(mowingHeight.band?.max)];
+    out.mowingBand = [num(mowCtx.band?.min), num(mowCtx.band?.max)];
   }
   return out;
 }
@@ -409,9 +423,13 @@ const ISSUE_TOPIC = {
  * @param {object} input.lawnAssessment  buildLawnAssessmentReportData(...) return
  * @param {object} [input.mowingHeight]  buildMowingHeightContext(...) return
  * @param {string} [input.customerConcern]
+ * @param {Array}  [input.waterGapHistory]  [{ serviceDate, waterGapInches }] per-visit
+ *   snapshot history, capped at this visit's date
+ * @param {object} [input.mowingTrendFallback]  { trend, band } history when THIS visit
+ *   has no gauge reading (same shape subset as mowingHeight)
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -583,7 +601,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     : null;
   const aftercare = buildAftercare(applications);
 
-  const trends = buildTrends(lawnAssessment, mowingHeight);
+  const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
   if (trendSeasonNote) trends.seasonalNote = trendSeasonNote;
 
   // The "Water / Coverage" diagnosis card is intentionally NOT displayed: its
