@@ -3345,7 +3345,12 @@ export default function EstimateViewPage() {
     // than a wrong recap. (New accepts always persist it.) Declined/expired
     // keep just the terminal card too.
     const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
-    const stateHero = TERMINAL_HERO[cta.terminalState] || null;
+    // A commercial proposal is quote_required by design but its terminal card
+    // says "Your formal proposal is ready." — the generic "in the works" hero
+    // would contradict it, so proposals get their own status statement.
+    const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
+      ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
+      : TERMINAL_HERO[cta.terminalState] || null;
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}

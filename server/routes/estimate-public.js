@@ -4249,13 +4249,19 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // mirrors TERMINAL_HERO in EstimateViewPage.jsx: a terminal page must not
   // promise "your estimate is ready!" above a booked / call-us / declined
   // banner. Status statements only, so they're category-safe. A null eyebrow
-  // keeps the standard "Your estimate · {service}" kicker.
+  // keeps the standard "Your estimate · {service}" kicker. Order matters:
+  // terminal statuses (accepted/declined) outrank the generic quoteRequired
+  // flag, and a commercial proposal outranks the generic quote copy — its
+  // banner says the formal proposal is ready, so "in the works" would
+  // contradict it.
   const stateHero = est.status === 'accepted'
     ? { h1: `Hello ${firstName}, your plan is booked!`, eyebrow: 'Your Waves plan' }
-    : quoteRequired
-    ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
     : est.status === 'declined'
     ? { h1: `Hello ${firstName}, here’s your Waves estimate.`, eyebrow: null }
+    : quoteRequired && commercialProposal
+    ? { h1: `Hello ${firstName}, your formal proposal is ready.`, eyebrow: 'Your commercial proposal' }
+    : quoteRequired
+    ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
     : null;
   const heroH1 = stateHero?.h1 || `Hello ${firstName}, your estimate is ready!`;
   const heroEyebrow = stateHero?.eyebrow || `Your estimate · ${escapeHtml(quotedServicesLabel)}`;

@@ -2521,11 +2521,25 @@ describe('public estimate one-time breakdown', () => {
     expect(quote).toContain('Your custom quote');
     expect(quote).not.toContain('your estimate is ready!');
 
-    // Declined keeps the neutral headline + the standard service kicker.
-    const declined = renderPage('hero-declined-token', { ...base, status: 'declined' }, estData);
+    // Declined keeps the neutral headline + the standard service kicker —
+    // and outranks a lingering quoteRequired flag.
+    const declined = renderPage('hero-declined-token', {
+      ...base, status: 'declined', quoteRequired: true,
+    }, estData);
     expect(declined).toContain('Hello Pat, here’s your Waves estimate.');
     expect(declined).toContain('Your estimate ·');
     expect(declined).not.toContain('your estimate is ready!');
+    expect(declined).not.toContain('custom quote is in the works');
+
+    // A commercial proposal is quote-required by design but its banner says
+    // the formal proposal is ready — the hero must agree, not say "in the
+    // works".
+    const proposal = renderPage('hero-proposal-token', {
+      ...base, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0,
+    }, { ...estData, proposal: { enabled: true } });
+    expect(proposal).toContain('Hello Pat, your formal proposal is ready.');
+    expect(proposal).toContain('Your commercial proposal');
+    expect(proposal).not.toContain('custom quote is in the works');
   });
 
   test('server-rendered termite trenching quote-required page avoids zero-price acceptance copy', () => {
