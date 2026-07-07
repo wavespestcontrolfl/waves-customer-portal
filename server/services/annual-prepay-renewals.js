@@ -638,6 +638,88 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   };
 }
 
+// A covered-window visit that COMPLETED before the prepay invoice was paid
+// billed per application (owner ruling: the pending window bills normally) —
+// but the paid annual still prices that visit's slice, and
+// applyPrepaidCoverageForTerm deliberately skips completed rows, so without
+// reconciliation the customer pays that visit twice: once per-visit, once
+// inside the annual. Runs on payment sync for every live term (idempotent —
+// the settle no-ops on already-covered invoices and the credit is
+// ledger-deduped per term+visit):
+//   - completion invoice still OPEN → settle it as coverage (the paid annual
+//     IS that visit's payment; settleInvoiceAsAnnualPrepayCovered runs the
+//     full PI triage and refuses money-in-flight / paid shapes).
+//   - completion invoice PAID / money in flight / settle refused → the annual
+//     over-collected exactly that visit's slice: return the slice as account
+//     credit.
+//   - never invoiced, or invoice voided/refunded → nothing was collected for
+//     the visit, so the annual slice IS its payment — no action.
+// Best-effort: a failure here must never block the payment sync itself.
+const PENDING_COMPLETION_CREDIT_BY = 'system:annual_prepay_pending_completion';
+
+async function reconcilePendingWindowCompletions(term, conn = db) {
+  const summary = { settled: 0, credited: 0 };
+  try {
+    const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+    const totalAmount = Number(term?.prepay_amount);
+    if (!term?.id || !term.customer_id || !coverageVisitCount || !(totalAmount > 0)) return summary;
+    const rows = await coverageRowsForTerm(term, conn);
+    const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      if (String(row.status || '').toLowerCase() !== 'completed') continue;
+      // Slice already delivered as coverage (stamped while scheduled, or
+      // settled at completion by the active-term dispatch path).
+      if (row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+        && String(row.annual_prepay_term_id || '') === String(term.id)) continue;
+      const invoice = await conn('invoices')
+        .where({ scheduled_service_id: row.id })
+        .whereNotIn('status', ['void', 'canceled', 'cancelled', 'refunded'])
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!invoice) continue;
+      const invoiceStatus = String(invoice.status || '').toLowerCase();
+      if (invoiceStatus === 'prepaid'
+        || String(invoice.annual_prepay_covered_term_id || '') === String(term.id)) continue;
+      let settledHere = false;
+      if (!['paid', 'processing'].includes(invoiceStatus) && !invoice.payment_recorded_at) {
+        try {
+          const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
+          if (res?.settled) { summary.settled += 1; settledHere = true; }
+        } catch (err) {
+          logger.warn(`[annual-prepay] pending-completion settle failed for invoice ${invoice.id}: ${err.message}`);
+        }
+      }
+      if (settledHere) continue;
+      const visitSlice = slices[index] ?? slices[0] ?? 0;
+      if (!(visitSlice > 0)) continue;
+      const marker = `term ${term.id}, visit ${row.id}`;
+      try {
+        const dup = await conn('customer_credit_ledger')
+          .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+          .where('note', 'like', `%${marker}%`)
+          .first('id');
+        if (dup) continue;
+        const { postCreditMovement } = require('./customer-credit');
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: visitSlice,
+          source: 'adjustment',
+          invoiceId: invoice.id,
+          note: `Annual prepay paid after this visit already billed — the visit's prepay share returned as account credit (${marker})`,
+          createdBy: PENDING_COMPLETION_CREDIT_BY,
+        }, conn === db ? null : conn);
+        summary.credited += 1;
+      } catch (err) {
+        logger.warn(`[annual-prepay] pending-completion credit skipped for visit ${row.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] pending-window completion reconcile skipped for term ${term?.id}: ${err.message}`);
+  }
+  return summary;
+}
+
 // When a paid prepay invoice is voided/refunded the term flips to 'cancelled',
 // but its not-yet-completed covered visits keep the per-visit prepaid_amount
 // stamp that suppresses completion billing — so they'd be serviced free even
@@ -917,6 +999,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
     if (ACTIVE_STATUSES.includes(current.status)) {
       await syncCustomerRenewalDate(current.customer_id, dateOnly(current.term_end), conn);
       const refreshed = await refreshTermSnapshot(current, conn);
+      // After attach+stamp: covered-window visits that completed (and billed
+      // per application) BEFORE this payment would otherwise be paid twice —
+      // settle their open invoices as coverage / credit back their slice.
+      // Idempotent, so retried webhooks and later syncs are safe.
+      await reconcilePendingWindowCompletions(refreshed || current, conn);
       results.push(refreshed || current);
     } else {
       results.push(current);
@@ -1927,6 +2014,7 @@ module.exports = {
   checkAndSendPaymentReminders,
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
+  reconcilePendingWindowCompletions,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,

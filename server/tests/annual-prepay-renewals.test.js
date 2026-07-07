@@ -13,6 +13,16 @@ jest.mock('../services/sms-template-renderer', () => ({
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipRenewalReminder: jest.fn(),
 }));
+// Lazy-required by reconcilePendingWindowCompletions (and the cancel-path
+// invoice reopen) — mocked so the unit tests don't pull real invoice/credit
+// machinery.
+jest.mock('../services/invoice', () => ({
+  settleInvoiceAsAnnualPrepayCovered: jest.fn(),
+  reopenAnnualPrepayCoveredInvoicesForTerm: jest.fn(),
+}));
+jest.mock('../services/customer-credit', () => ({
+  postCreditMovement: jest.fn(),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -832,5 +842,109 @@ describe('annual prepay renewal helpers', () => {
       notice_30_sent_at: expect.any(Date),
       notice_30_claimed_at: null,
     }));
+  });
+});
+
+describe('reconcilePendingWindowCompletions (pending-window double-bill guard)', () => {
+  const InvoiceService = require('../services/invoice');
+  const { postCreditMovement } = require('../services/customer-credit');
+
+  const TERM = {
+    id: 'term-1',
+    customer_id: 'customer-1',
+    prepay_amount: 400,
+    term_start: '2026-06-15',
+    term_end: '2027-06-15',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+  };
+  const completedRow = (over = {}) => ({
+    id: 'svc-done',
+    customer_id: 'customer-1',
+    scheduled_date: '2026-06-20',
+    service_type: 'Quarterly Pest Control',
+    status: 'completed',
+    prepaid_amount: null,
+    prepaid_method: null,
+    annual_prepay_term_id: null,
+    ...over,
+  });
+  const pendingRow = (id, date) => ({
+    id, customer_id: 'customer-1', scheduled_date: date,
+    service_type: 'Quarterly Pest Control', status: 'pending',
+  });
+
+  beforeEach(() => {
+    InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockReset();
+    postCreditMovement.mockReset();
+  });
+
+  test('settles a still-open completion invoice as coverage (the paid annual IS that visit\'s payment)', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'pending', payment_recorded_at: null, annual_prepay_covered_term_id: null } })],
+    });
+    InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockResolvedValueOnce({ settled: true });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 1, credited: 0 });
+    expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).toHaveBeenCalledWith('inv-visit', 'term-1');
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('a PAID completion invoice returns the visit\'s slice as account credit (ledger-deduped)', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 1 });
+    expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: 100, // 400 / 4 covered visits — the completed visit's slice
+      source: 'adjustment',
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion',
+    }), null);
+  });
+
+  test('an existing ledger entry for the term+visit blocks a second credit (idempotent on retried webhooks)', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      customer_credit_ledger: [query({ first: { id: 'ledger-1' } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('never-invoiced and already-covered completions need nothing', async () => {
+    setDbQueues({
+      scheduled_services: [query({
+        rows: [
+          // Never billed — the annual slice IS this visit's payment.
+          completedRow(),
+          // Already delivered as coverage (settled at completion by dispatch).
+          completedRow({ id: 'svc-covered', scheduled_date: '2026-09-20', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' }),
+          pendingRow('s3', '2026-12-20'),
+          pendingRow('s4', '2027-03-20'),
+        ],
+      })],
+      invoices: [query({ first: undefined })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    expect(postCreditMovement).not.toHaveBeenCalled();
   });
 });
