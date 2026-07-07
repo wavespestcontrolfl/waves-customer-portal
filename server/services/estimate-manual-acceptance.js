@@ -72,10 +72,14 @@ function isCommercialProposalEstimate(estimate = {}) {
 // The amount actually INVOICED when this estimate is accepted as annual prepay:
 // the undiscounted recurring annual run through the converter's shared resolver,
 // which applies the prepay discount (non-membership-fee mixes) and the
-// non-discountable floor. Same resolver the public render + accept use, so a
+// non-discountable floor — PLUS, for commercial recurring quotes, the same
+// blended commercial sales tax the converter passes to InvoiceService.create
+// (the customer is marked property_type='commercial' on accept, so the minted
+// invoice is tax-inclusive). Same resolvers the accept path uses, so a
 // Schedule-modal preview matches the invoice the booking mints (no
-// pre-discount-vs-invoice drift). Null when there's no recurring annual.
-function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
+// pre-discount-vs-invoice and no pre-tax-vs-invoice drift). Null when there's
+// no recurring annual.
+async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   const baseAnnual = resolveAnnualPrepayAmount(estimate);
   if (!baseAnnual) return null;
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
@@ -86,7 +90,28 @@ function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     recurringServices: recurringSvcList,
     estimateData: data,
   });
-  return resolved?.amount != null ? Number(resolved.amount) : null;
+  if (resolved?.amount == null) return null;
+  const amount = Number(resolved.amount);
+  // Same commercial detection as the converter (recurringServiceKey prefix) —
+  // non-commercial prepay stays residential-exempt, so no tax leg at all.
+  const hasCommercialRecurring = (recurringSvcList || []).some(
+    (svc) => String(EstimateConverter.recurringServiceKey(svc) || '').startsWith('commercial_')
+  );
+  if (!hasCommercialRecurring) return amount;
+  // Effective (exemption/county-aware) base rate for this customer, blended by
+  // the taxable pest share of the plan — mirrors the converter's
+  // prepayTaxRate. Fails soft to the FL default inside the resolver, like the
+  // accept path. Tax dollars round to cents exactly as InvoiceService does
+  // (rate * after-discount subtotal), so preview == minted total.
+  const baseRate = await EstimateConverter.resolveCommercialPrepayBaseRate(
+    estimate.customer_id || estimate.customerId || null, {}
+  );
+  const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
+    prepayDiscountApplied: Number(resolved.discount) > 0,
+    baseRate,
+  });
+  const taxDollars = Math.round(amount * taxRate * 100) / 100;
+  return Math.round((amount + taxDollars) * 100) / 100;
 }
 
 // Can this estimate be accepted as annual prepay WHILE booking (the Schedule
@@ -96,8 +121,9 @@ function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
 // single-recurring-unit rule (one coverage_service_type per term; the shared
 // annualPrepayRecurringUnitCount also counts a supplemental companion a solo
 // primary absorbs, mirroring the converter's multi-service 422).
-// Returns { eligible, invoiceTotal, reason }.
-function prepayBookingEligibility(estimate = {}) {
+// Returns { eligible, invoiceTotal, reason }. Async because the eligible-path
+// invoiceTotal resolves the customer's effective commercial tax rate.
+async function prepayBookingEligibility(estimate = {}) {
   const ineligible = (reason) => ({ eligible: false, invoiceTotal: null, reason });
   const baseAnnual = resolveAnnualPrepayAmount(estimate);
   if (!baseAnnual) return ineligible('no_recurring_annual');
@@ -109,7 +135,7 @@ function prepayBookingEligibility(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   const units = EstimateConverter.annualPrepayRecurringUnitCount(data);
   if (units !== 1) return ineligible(units > 1 ? 'multi_service' : 'no_recurring_rows');
-  return { eligible: true, invoiceTotal: annualPrepayInvoiceTotalForEstimate(estimate), reason: null };
+  return { eligible: true, invoiceTotal: await annualPrepayInvoiceTotalForEstimate(estimate), reason: null };
 }
 
 function httpError(message, statusCode = 400) {

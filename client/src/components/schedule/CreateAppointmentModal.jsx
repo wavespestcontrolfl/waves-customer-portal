@@ -238,7 +238,8 @@ function formatMoney(value) {
 // cadence when no override is sent.
 function visitsPerYearForCadence(cadence) {
   switch (String(cadence || '').trim().toLowerCase()) {
-    case 'monthly': return 12;
+    // monthly_nth_weekday is a 1-month interval pinned to an nth weekday.
+    case 'monthly': case 'monthly_nth_weekday': return 12;
     case 'every_6_weeks': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
@@ -1071,8 +1072,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const hasFiniteRecurringCount = Number.isInteger(parsedRecurringCount) && parsedRecurringCount >= 2;
         // Guarded so a stale toggle can't leak onto an already-accepted or
         // ineligible estimate; the server re-validates and downgrades with a
-        // warning regardless.
+        // warning regardless. Add-on lines / booster months ride the same POST
+        // and the server downgrades a prepay request that carries them — the
+        // UI disables the choice in that state (prepayBlockReason), this is
+        // the belt-and-suspenders for a stale selection.
+        const groupHasBoosters = group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0);
         const attachAnnualPrepay = billAsAnnualPrepay && isRecurring && !prepayAttachedThisSubmit
+          && extras.length === 0 && !groupHasBoosters
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
         const body = {
           customerId: selectedCustomer.id,
@@ -1586,6 +1592,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           : annual;
                         const recurringSvc = services.find((s) => s.cadence && s.cadence !== 'one_time');
                         const defaultVisits = visitsPerYearForCadence(recurringSvc?.cadence);
+                        // Why the CURRENT booking group can't carry annual
+                        // prepay (null = it can). The server downgrades a
+                        // prepay request that rides with add-on lines or
+                        // booster months, so surface that BEFORE submit by
+                        // disabling the choice instead of booking standard
+                        // with only a post-save warning.
+                        const submitGroup = groupServicesForAppointmentSubmit(services)[0] || null;
+                        const prepayBlockReason = !submitGroup || submitGroup.cadence === 'one_time'
+                          ? 'needs a recurring visit'
+                          : submitGroup.lines.length > 1
+                            ? 'can’t be combined with add-on service lines — book them as a separate appointment'
+                            : submitGroup.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)
+                              ? 'can’t be combined with booster months'
+                              : null;
                         const segStyle = (active) => ({
                           flex: 1,
                           padding: '6px 10px',
@@ -1603,18 +1623,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                               Billing on acceptance
                             </div>
                             <div style={{ display: 'flex', gap: 8 }}>
-                              <button type="button" onClick={() => setBillAsAnnualPrepay(false)} style={segStyle(!billAsAnnualPrepay)}>
+                              {/* Standard reads active whenever prepay is blocked —
+                                  that IS the term the submit will use. */}
+                              <button type="button" onClick={() => setBillAsAnnualPrepay(false)} style={segStyle(!billAsAnnualPrepay || !!prepayBlockReason)}>
                                 Standard
                               </button>
                               <button
                                 type="button"
+                                disabled={!!prepayBlockReason}
                                 onClick={() => { setBillAsAnnualPrepay(true); setCollectPrepay(false); }}
-                                style={segStyle(billAsAnnualPrepay)}
+                                style={{
+                                  ...segStyle(billAsAnnualPrepay && !prepayBlockReason),
+                                  ...(prepayBlockReason ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+                                }}
                               >
                                 Annual prepay — invoice {formatMoney(invoiceAmount)}
                               </button>
                             </div>
-                            {billAsAnnualPrepay && (
+                            {prepayBlockReason && (
+                              <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                                Annual prepay {prepayBlockReason}.
+                              </div>
+                            )}
+                            {billAsAnnualPrepay && !prepayBlockReason && (
                               <div style={{ marginTop: 8 }}>
                                 <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: D.muted }}>
                                   <span>Covered visits / year</span>

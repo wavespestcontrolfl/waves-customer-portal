@@ -1448,7 +1448,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // accept would reject. Fail-soft: no prepay offer on error.
     let prepay = { eligible: false, invoiceTotal: null };
     try {
-      const e = require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+      const e = await require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
       prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
     } catch { prepay = { eligible: false, invoiceTotal: null }; }
 

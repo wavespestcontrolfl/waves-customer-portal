@@ -3,6 +3,12 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
   resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
+  // Real-enough commercial helpers for the taxed invoiceTotal path: key from
+  // the row's service field, flat base rate, and a blended rate equal to the
+  // base (single-line commercial quotes in these tests are fully taxable).
+  recurringServiceKey: jest.fn((svc) => svc?.service || null),
+  resolveCommercialPrepayBaseRate: jest.fn(async () => 0.07),
+  resolveCommercialPrepayTaxRate: jest.fn(() => 0.07),
   // Mirror the real unit-count shape closely enough for the eligibility gate:
   // count the recurring service lines (companion-absorption specifics are
   // covered by the converter's own tests).
@@ -1067,14 +1073,23 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     estimate_data: { recurring: { services } },
   });
 
-  test('a single recurring service is eligible and returns the resolved invoice total', () => {
-    const r = prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
+  test('a single recurring service is eligible and returns the resolved invoice total', async () => {
+    const r = await prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
     expect(r.eligible).toBe(true);
     expect(r.invoiceTotal).toBe(627); // from the mocked resolveAnnualPrepayInvoiceTotal
   });
 
-  test('a bundled multi-recurring quote is NOT eligible (one covered service per term)', () => {
-    const r = prepayBookingEligibility(recurring([
+  test('a commercial recurring quote returns the TAX-INCLUSIVE invoice total', async () => {
+    // The converter invoices commercial prepay tax-inclusive (blended
+    // commercial rate passed to InvoiceService), so the modal preview must
+    // match: 627 + round(627 * 0.07) = 627 + 43.89.
+    const r = await prepayBookingEligibility(recurring([{ service: 'commercial_pest', name: 'Commercial Pest Control', frequency: 'monthly' }]));
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(670.89);
+  });
+
+  test('a bundled multi-recurring quote is NOT eligible (one covered service per term)', async () => {
+    const r = await prepayBookingEligibility(recurring([
       { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' },
       { service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' },
     ]));
@@ -1082,8 +1097,8 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     expect(r.reason).toBe('multi_service');
   });
 
-  test('a commercial proposal is not eligible', () => {
-    const r = prepayBookingEligibility({
+  test('a commercial proposal is not eligible', async () => {
+    const r = await prepayBookingEligibility({
       monthly_total: '55.00',
       annual_total: '660.00',
       estimate_data: { proposal: { enabled: true }, recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } },
@@ -1092,14 +1107,14 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     expect(r.reason).toBe('commercial_proposal');
   });
 
-  test('invoice-mode and one-time-option quotes are not eligible', () => {
+  test('invoice-mode and one-time-option quotes are not eligible', async () => {
     const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
-    expect(prepayBookingEligibility({ ...base, bill_by_invoice: true }).reason).toBe('invoice_mode');
-    expect(prepayBookingEligibility({ ...base, show_one_time_option: true }).reason).toBe('one_time_option');
+    expect((await prepayBookingEligibility({ ...base, bill_by_invoice: true })).reason).toBe('invoice_mode');
+    expect((await prepayBookingEligibility({ ...base, show_one_time_option: true })).reason).toBe('one_time_option');
   });
 
-  test('a quote with no recurring annual is not eligible', () => {
-    const r = prepayBookingEligibility({ monthly_total: '0.00', annual_total: '0.00', onetime_total: '250.00', estimate_data: {} });
+  test('a quote with no recurring annual is not eligible', async () => {
+    const r = await prepayBookingEligibility({ monthly_total: '0.00', annual_total: '0.00', onetime_total: '250.00', estimate_data: {} });
     expect(r.eligible).toBe(false);
     expect(r.reason).toBe('no_recurring_annual');
   });

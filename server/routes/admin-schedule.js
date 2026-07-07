@@ -73,7 +73,9 @@ function finiteNumber(value) {
 // cadence produce the same coverage count.
 function visitsPerYearForCadence(cadence) {
   switch (String(cadence || '').trim().toLowerCase()) {
-    case 'monthly': return 12;
+    // monthly_nth_weekday pins the visit to e.g. "3rd Tuesday" but is still a
+    // 1-month interval (see nextRecurringDate), so it covers 12 visits/year.
+    case 'monthly': case 'monthly_nth_weekday': return 12;
     case 'every_6_weeks': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
@@ -1774,31 +1776,33 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(recurringPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
-      // The quote's (single) recurring service name — same expression the
-      // converter derives coverage from. Used to reject booking a DIFFERENT
-      // service as prepay against this quote: coverage stamps the BOOKED
-      // series, so a mismatched booking would cover the wrong visits while the
-      // quoted service billed normally. Fuzzy (canonical-key) match tolerates
-      // label drift like "Pest Control" vs "Quarterly Pest Control Service".
+      // The quote's (single) recurring service name — sourced through the same
+      // acceptanceServiceLists extractor the eligibility check and converter
+      // use, so engine-backed estimates (quote wizard / IB drafts, whose
+      // recurring rows live only under estimate_data.engineResult.lineItems)
+      // resolve a name too instead of silently skipping the mismatch guard.
+      // Used to reject booking a DIFFERENT service as prepay against this
+      // quote: coverage stamps the BOOKED series, so a mismatched booking
+      // would cover the wrong visits while the quoted service billed normally.
+      // Fuzzy (canonical-key) match tolerates label drift like "Pest Control"
+      // vs "Quarterly Pest Control Service".
       const quoteRecurringName = (() => {
         try {
           const data = typeof linkedEstimate?.estimate_data === 'string'
             ? JSON.parse(linkedEstimate.estimate_data)
             : (linkedEstimate?.estimate_data || {});
-          const lists = [
-            data.recurring?.services,
-            data.result?.recurring?.services,
-            data.result?.results?.recurring?.services,
-          ];
-          const list = lists.find((l) => Array.isArray(l) && l.length > 0) || [];
+          const { acceptanceServiceLists } = require('./estimate-public');
+          const list = acceptanceServiceLists(data).recurringSvcList || [];
           const svc = list[0] || {};
-          return svc.name || svc.serviceName || svc.service_name || null;
+          // Engine lineItems rows carry `service` (canonical key) / `label`
+          // rather than the manual rows' name fields — accept either shape.
+          return svc.name || svc.serviceName || svc.service_name || svc.service || svc.label || null;
         } catch { return null; }
       })();
       const { serviceMatchesCoverage } = require('../services/annual-prepay-renewals');
       if (!linkedEstimate || !acceptEstimateOnBook) {
         downgrade('Appointment booked as standard — annual prepay on book needs an open (not yet accepted) linked quote. Use the estimate’s Annual Prepay action instead.');
-      } else if (!prepayBookingEligibility(linkedEstimate).eligible) {
+      } else if (!(await prepayBookingEligibility(linkedEstimate)).eligible) {
         downgrade('Appointment booked, but annual prepay was not applied — this quote is not prepay-eligible for one-step booking (it needs a single recurring service). Use the estimate’s Annual Prepay action instead.');
       } else if (visitOverride.error) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
