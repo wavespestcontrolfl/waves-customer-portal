@@ -30,6 +30,7 @@ const MODELS = require('../config/models');
 const db = require('../models/db');
 const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
+const { createDeepMessage } = require('./llm/deep');
 
 const PROMPT_VERSION = 'shadow_judge_v1';
 const REPLY_WINDOW_HOURS = 24;
@@ -211,9 +212,9 @@ async function judgeOne(draft, humanReply) {
 
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const resp = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 400,
+  const resp = await createDeepMessage(client, {
+    model: MODELS.DEEP,
+    max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
     messages: [{
       role: 'user',
       content: buildJudgePrompt({
@@ -238,7 +239,9 @@ async function judgeOne(draft, humanReply) {
     verdict: parsed.verdict,
     scores: JSON.stringify(parsed.scores),
     notes: parsed.notes,
-    model: MODELS.FLAGSHIP,
+    // Record the model that actually judged (refusal fallback can answer on
+    // FLAGSHIP) — judgments are compared per-model, so this must be truthful.
+    model: resp.model || MODELS.DEEP,
   };
 }
 
