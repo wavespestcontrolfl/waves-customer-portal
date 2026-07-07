@@ -241,6 +241,28 @@ describe('POST /:id/claim', () => {
     });
   });
 
+  test('termite claims report as termite_inspection, not the quarterly_pest fallthrough', async () => {
+    const entry = libraryEntry('subterranean-termite');
+    mockIdentificationRow = analyzedRow({
+      species_slug: 'subterranean-termite',
+      report_contract: {
+        identification: { slug: entry.slug, label: entry.label, group: entry.group, category: 'insect', confidence: 'high', contested: false },
+        service: { line: entry.service_line, key: entry.service_key, label: entry.service_label, inspection_required: true },
+        urgency: entry.urgency,
+      },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/public/pest-identifier/${ROW_ID}/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(claimBody()),
+      });
+      expect(res.status).toBe(201);
+      const attribution = inserts.ad_service_attribution[0];
+      expect(attribution.service_line).toBe('termite');
+      expect(attribution.specific_service).toBe('termite_inspection');
+      expect(attribution.service_bucket).toBe('high_ticket_specialty');
+    });
+  });
+
   test('replayed claim writes no attribution row', async () => {
     mockIdentificationRow = analyzedRow();
     mockUpdateResult = 0;

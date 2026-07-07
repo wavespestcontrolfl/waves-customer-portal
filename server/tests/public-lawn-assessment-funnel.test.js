@@ -38,7 +38,9 @@ mockDb.transaction = (cb) => {
 };
 
 const mockGateState = { lawnAssessmentMagnet: true, leadTurnstile: false, pestIdentifier: false };
-let mockHoneypotTripped = false;
+// null → delegate to the REAL isHoneypotTripped (the plausibility predicate
+// tests exercise its actual string/non-string semantics); true/false → force.
+let mockHoneypotTripped = null;
 // Mirrors utils/turnstile contract: a VERIFIED token is { ok:true, enforced:true }.
 let mockTurnstileResult = { ok: true, enforced: false };
 
@@ -48,10 +50,13 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => !!mockGateSta
 jest.mock('../utils/turnstile', () => ({
   verifyTurnstileToken: jest.fn(async () => mockTurnstileResult),
 }));
-jest.mock('../utils/lead-abuse', () => ({
-  isHoneypotTripped: () => mockHoneypotTripped,
-  resolveSubmitHost: () => 'wavespestcontrol.com',
-}));
+jest.mock('../utils/lead-abuse', () => {
+  const actual = jest.requireActual('../utils/lead-abuse');
+  return {
+    isHoneypotTripped: (body) => (mockHoneypotTripped === null ? actual.isHoneypotTripped(body) : mockHoneypotTripped),
+    resolveSubmitHost: () => 'wavespestcontrol.com',
+  };
+});
 const mockLadder = jest.fn();
 jest.mock('../services/lawn-diagnostic-analyze', () => {
   const actual = jest.requireActual('../services/lawn-diagnostic-analyze');
@@ -145,7 +150,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDiagnosticRow = null;
   mockUpdateResult = 1;
-  mockHoneypotTripped = false;
+  mockHoneypotTripped = null;
   mockTurnstileResult = { ok: true, enforced: false };
   mockGateState.lawnAssessmentMagnet = true;
   mockGateState.leadTurnstile = false;
@@ -282,6 +287,10 @@ describe('POST /:id/claim', () => {
       expect(attribution.lead_id).toBe('lead-uuid-1');
       expect(attribution.lead_source).toBe('lawn_assessment');
       expect(attribution.service_line).toBe('lawn');
+      // Explicit lawn program — inferSpecificService('lawn care') would
+      // fall through to quarterly_pest and misreport the magnet.
+      expect(attribution.specific_service).toBe('lawn_program');
+      expect(attribution.service_bucket).toBe('recurring');
       expect(attribution.funnel_stage).toBe('lead');
       expect(attribution.is_paid).toBe(false);
     });
@@ -392,5 +401,17 @@ describe('isPlausibleAnalyzeBody (paid daily-limiter predicate)', () => {
     expect(isPlausibleAnalyzeBody({ photos: Array.from({ length: 6 }, () => ({ data: 'aGVsbG8=' })) })).toBe(false);
     expect(isPlausibleAnalyzeBody({ photos: [{ data: 'a'.repeat(6_000_001) }] })).toBe(false);
     expect(isPlausibleAnalyzeBody({ photos: [{ data: 'aGVsbG8=' }], fax_number: 'bot' })).toBe(false);
+    // Non-string honeypot values trip isHoneypotTripped in the route and must
+    // not burn the budget either.
+    expect(isPlausibleAnalyzeBody({ photos: [{ data: 'aGVsbG8=' }], fax_number: 1 })).toBe(false);
+  });
+});
+
+describe('sanitizeAttribution', () => {
+  const { sanitizeAttribution } = require('../routes/public-lawn-assessment');
+
+  test('fbc alone is signal (minted from a Meta ad click); fbp alone is not (ambient cookie)', () => {
+    expect(sanitizeAttribution({ fbc: 'fb.1.123.abc' })).toMatchObject({ fbc: 'fb.1.123.abc' });
+    expect(sanitizeAttribution({ fbp: 'fb.1.123.def' })).toBeNull();
   });
 });

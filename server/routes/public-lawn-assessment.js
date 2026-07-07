@@ -44,7 +44,6 @@ const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
 const MAX_PHOTOS = 5;
 // Client resizes to 1600px JPEG (~≤500KB); 6M base64 chars ≈ 4.5MB decoded is a
@@ -336,8 +335,11 @@ function sanitizeAttribution(raw) {
     fbc: str(raw.fbc),
     fbp: str(raw.fbp),
   };
+  // fbc counts as signal (it's minted from a Meta ad click); fbp alone does
+  // NOT — Meta sets that browser cookie on every visit, so keeping it as a
+  // qualifying signal would attach an attribution object to all traffic.
   const hasSignal = out.referrer || out.landing_url || out.gclid || out.wbraid || out.gbraid
-    || out.fbclid || Object.values(utm).some(Boolean);
+    || out.fbclid || out.fbc || Object.values(utm).some(Boolean);
   return hasSignal ? out : null;
 }
 
@@ -448,9 +450,13 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
       try {
         await db('ad_service_attribution').insert({
           lead_id: createdLeadId,
-          service_line: inferServiceLine('lawn care'),
-          specific_service: inferSpecificService('lawn care'),
-          service_bucket: inferServiceBucket('lawn care'),
+          // Explicit, not inferred: inferSpecificService('lawn care') falls
+          // through to quarterly_pest and would misreport the magnet in the
+          // service-line ROI views. The magnet's plan IS the recurring lawn
+          // health program.
+          service_line: 'lawn',
+          specific_service: 'lawn_program',
+          service_bucket: 'recurring',
           lead_date: etDateString(),
           lead_source: 'lawn_assessment',
           lead_source_detail: 'wavespestcontrol.com/lawn-assessment',
@@ -496,7 +502,9 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
  */
 function isPlausibleAnalyzeBody(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
-  if (typeof body.fax_number === 'string' && body.fax_number.trim()) return false; // honeypot
+  // The exact predicate the routes drop on — a non-string fax_number (e.g.
+  // fax_number: 1) trips it too and must not burn the budget either.
+  if (isHoneypotTripped(body)) return false;
   const photos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
   if (!photos.length || photos.length > MAX_PHOTOS) return false;
   return photos.some((photo) => photo && typeof photo.data === 'string'

@@ -383,12 +383,21 @@ router.post('/:id/claim', requirePestGate, claimLimiter, async (req, res, next) 
     // claim commits; idempotent via the unique lead_id index.
     if (createdLeadId) {
       const interest = cleanString(service.label, 120) || 'pest control';
+      // The shared inferers key on quote-style interest strings; the library's
+      // inspection-first labels ("Termite Protection", "Rodent Inspection &
+      // Exclusion") fall through to quarterly_pest and would misreport these
+      // leads in the service-line ROI views — map those lines explicitly.
+      const INSPECTION_FIRST_SPECIFIC = {
+        termite: { specific: 'termite_inspection', bucket: 'high_ticket_specialty' },
+        rodent: { specific: 'rodent_inspection', bucket: 'high_ticket_specialty' },
+      };
+      const lineOverride = INSPECTION_FIRST_SPECIFIC[service.line];
       try {
         await db('ad_service_attribution').insert({
           lead_id: createdLeadId,
           service_line: inferServiceLine(interest),
-          specific_service: inferSpecificService(interest),
-          service_bucket: inferServiceBucket(interest),
+          specific_service: lineOverride ? lineOverride.specific : inferSpecificService(interest),
+          service_bucket: lineOverride ? lineOverride.bucket : inferServiceBucket(interest),
           lead_date: etDateString(),
           lead_source: 'pest_identifier',
           lead_source_detail: 'wavespestcontrol.com/pest-identifier',
