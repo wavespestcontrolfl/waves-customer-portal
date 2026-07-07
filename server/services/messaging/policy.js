@@ -148,6 +148,11 @@ const TRUST_RANK = {
  *                             migration-104 channel columns so channel-aware
  *                             senders (estimate-deposits, estimate-card-holds)
  *                             and this gate read the SAME preference.
+ *   - channelGate             Optional. 'opt_in' makes the channelColumn gate
+ *                             apply only when the caller declares an email leg
+ *                             exists (input.hasEmailLeg) — for purposes where
+ *                             some sends are SMS-only confirmations with no
+ *                             email equivalent.
  *   - minIdentityTrust        Minimum identityTrustLevel required to send.
  *   - requireIds              Field names on the input that must be present.
  *
@@ -261,6 +266,13 @@ const PURPOSE_POLICY = {
     // are unaffected.
     prefsColumn: ['payment_receipt', 'payment_confirmation_sms'],
     channelColumn: 'payment_receipt_channel',
+    // 'opt_in': the email-only channel gate only fires when the caller
+    // declares an email leg (input.hasEmailLeg) — the invoice receipt path
+    // does; the SMS-only payment confirmations (billing-cron autopay
+    // successes, invoice thank-yous, balance payment-received, manual-charge
+    // receipts) have no email equivalent, so an email-only preference must
+    // not silence them entirely.
+    channelGate: 'opt_in',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },

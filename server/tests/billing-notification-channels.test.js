@@ -60,7 +60,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
   test("purpose 'payment_receipt': channel 'email' suppresses the SMS leg (account email on file)", async () => {
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
-      smsInput('payment_receipt'),
+      { ...smsInput('payment_receipt'), hasEmailLeg: true },
       policy,
       contactState(
         { sms_enabled: true, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
@@ -77,7 +77,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     // must still be reachable.
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
-      smsInput('payment_receipt'),
+      { ...smsInput('payment_receipt'), hasEmailLeg: true },
       policy,
       contactState(
         { sms_enabled: true, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
@@ -85,6 +85,37 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
       ),
     );
     expect(res.ok).toBe(true);
+  });
+
+  test("payment_receipt gate is OPT-IN — SMS-only confirmations without an email leg are never suppressed", async () => {
+    // billing-cron autopay successes, invoice thank-yous, balance
+    // payment-received and manual-charge receipts send purpose
+    // 'payment_receipt' with NO email sidecar; an email-only preference must
+    // not silence them entirely (Codex P2 on d07235e9). Only callers that
+    // declare hasEmailLeg (the invoice receipt path) get the gate.
+    const policy = resolvePolicy('customer', 'payment_receipt');
+    expect(policy.channelGate).toBe('opt_in');
+    const res = await checkConsentForPurpose(
+      smsInput('payment_receipt'),
+      policy,
+      contactState(
+        { sms_enabled: true, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
+        { id: 'c1', email: 'adam@example.com' },
+      ),
+    );
+    expect(res.ok).toBe(true);
+  });
+
+  test("the 'billing' gate stays unconditional — every billing notice has an email lane", async () => {
+    const policy = resolvePolicy('customer', 'billing');
+    expect(policy.channelGate).toBeUndefined();
+    const res = await checkConsentForPurpose(
+      smsInput('billing'),
+      policy,
+      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
   });
 
   test("channel 'email' outranks a STOP opt-out — the skip must read as the channel preference", async () => {
@@ -95,7 +126,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     // (Codex P2 on 8bcfd5c). The SMS is suppressed either way.
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
-      smsInput('payment_receipt'),
+      { ...smsInput('payment_receipt'), hasEmailLeg: true },
       policy,
       contactState(
         { sms_enabled: false, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
@@ -111,7 +142,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     // still block the leg with SMS_OPTED_OUT.
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
-      smsInput('payment_receipt'),
+      { ...smsInput('payment_receipt'), hasEmailLeg: true },
       policy,
       contactState(
         { sms_enabled: false, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
@@ -127,7 +158,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     // receipt_sent_at off the delivered email leg.
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
-      smsInput('payment_receipt'),
+      { ...smsInput('payment_receipt'), hasEmailLeg: true },
       policy,
       contactState(
         { sms_enabled: true, payment_confirmation_sms: false, payment_receipt_channel: 'email' },

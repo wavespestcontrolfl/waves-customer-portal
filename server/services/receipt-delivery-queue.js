@@ -105,7 +105,10 @@ function actionableSmsFailure(result) {
   // preference: the email leg below carries the receipt.
   // 'receipt_texts_opted_out' is the payment_receipt /
   // payment_confirmation_sms opt-out — also the customer's own choice.
-  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out'].includes(result.reason);
+  // 'sms_suppressed' is a STOP-style opt-out (suppression row or
+  // sms_enabled=false) — permanent until the customer texts START, so a
+  // retry can never deliver it.
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed'].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {
@@ -187,18 +190,28 @@ async function processReceiptDeliveryJob(job) {
     // No receipt_sent_at stamp on this path (the stamp below requires a
     // delivered email) — nothing was sent.
     let receiptKillSwitch = false;
+    let prefsLookupFailed = false;
     if (!invoice.payer_id) {
       const prefs = await db('notification_prefs')
         .where({ customer_id: invoice.customer_id })
         .first()
-        .catch(() => null);
+        .catch(() => {
+          // A transient lookup failure must NOT read as "no opt-out" — that
+          // would email a kill-switch customer on a DB blip. Fail the email
+          // leg actionably so the retry ladder re-runs the lookup (the email
+          // idempotency key makes the eventual send safe to repeat).
+          prefsLookupFailed = true;
+          return null;
+        });
       receiptKillSwitch = prefs?.payment_receipt === false;
     }
-    emailResult = receiptKillSwitch
-      ? { ok: false, error: 'receipt_opted_out' }
-      : await sendReceiptEmail(invoice.id, {
-        idempotencyKey: `receipt_email_auto:${invoice.id}`,
-      }).catch((err) => ({ ok: false, error: err.message }));
+    emailResult = prefsLookupFailed
+      ? { ok: false, error: 'receipt prefs lookup failed' }
+      : receiptKillSwitch
+        ? { ok: false, error: 'receipt_opted_out' }
+        : await sendReceiptEmail(invoice.id, {
+          idempotencyKey: `receipt_email_auto:${invoice.id}`,
+        }).catch((err) => ({ ok: false, error: err.message }));
     if (actionableEmailFailure(emailResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt email not sent for invoice ${invoice.invoice_number}: ${emailResult.error || 'unknown'}`);
     }
@@ -212,9 +225,10 @@ async function processReceiptDeliveryJob(job) {
     // receipt_sent_at), so stamp it here when the payer AP email delivered.
     // Otherwise the invoice stays in the `needs_receipt` filter forever and a
     // batch/manual resend texts/emails the AP a duplicate receipt. Same for a
-    // customer whose payment_receipt_channel is email-only or who opted out
-    // of receipt texts — the delivered email receipt IS the receipt.
-    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
+    // customer whose payment_receipt_channel is email-only, who opted out
+    // of receipt texts, or whose SMS is STOP-suppressed — the delivered
+    // email receipt IS the receipt.
+    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
       await db('invoices')
         .where({ id: invoice.id })
         .whereNull('receipt_sent_at')

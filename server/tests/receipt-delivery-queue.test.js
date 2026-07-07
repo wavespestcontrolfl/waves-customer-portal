@@ -121,6 +121,20 @@ describe('receipt delivery queue retry policy', () => {
       emailResult: { ok: false, error: 'receipt_opted_out' },
     })).toBe(false);
   });
+
+  test('does not retry a STOP-suppressed SMS leg — permanent until the customer texts START', () => {
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'sms_suppressed' },
+      emailResult: { ok: true },
+    })).toBe(false);
+
+    // But a STOP customer whose email leg FAILED is actionable — nothing
+    // was delivered and the email CAN succeed on retry.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'sms_suppressed' },
+      emailResult: { ok: false, error: 'SendGrid unavailable' },
+    })).toBe(true);
+  });
 });
 
 describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switch)', () => {
@@ -179,6 +193,42 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
     // The delivered email IS the receipt — stamped so the needs_receipt
     // filter/batch resend can't double-send.
+    expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
+  });
+
+  test('a prefs lookup failure retries the job instead of emailing a possibly opted-out customer', async () => {
+    // .catch(() => null) on the kill-switch lookup would read a DB blip as
+    // "no opt-out" and email a payment_receipt=false customer anyway
+    // (Codex P2 on d07235e9). The failure must ride the retry ladder.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: null,
+    });
+    prefsTable.first.mockRejectedValue(new Error('connection reset'));
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'receipt_texts_opted_out' });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(false);
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'retry_scheduled' }));
+  });
+
+  test('a STOP-suppressed SMS leg completes off the delivered email — and stamps receipt_sent_at', async () => {
+    // STOP writes a suppression row checked BEFORE consent, so the SMS leg
+    // returns 'sms_suppressed' (not channel_email_only) even for an
+    // email-only customer. The delivered email IS the receipt.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: true, payment_receipt_channel: 'email' },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'sms_suppressed' });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
   });
 

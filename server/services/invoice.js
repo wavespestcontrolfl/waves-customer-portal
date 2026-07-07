@@ -2455,6 +2455,10 @@ const InvoiceService = {
       invoiceId,
       entryPoint: "invoice_receipt_sms",
       metadata: { original_message_type: "receipt" },
+      // Opts in to the email-only channel gate (channelGate 'opt_in' on the
+      // payment_receipt policy): THIS flow has a real email sidecar — the
+      // receipt-delivery queue / webhook pair this SMS with sendReceiptEmail.
+      hasEmailLeg: true,
     });
     if (sendResult.blocked || sendResult.sent === false) {
       // Email-only delivery preference is an intentional suppression, not a
@@ -2475,6 +2479,19 @@ const InvoiceService = {
           `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — customer opted out of receipt texts`,
         );
         return { sent: false, reason: "receipt_texts_opted_out" };
+      }
+      // A STOP-style SMS opt-out is permanent until the customer texts START
+      // — retrying can never deliver this leg, so it must not wedge the
+      // receipt job either. (STOP writes a messaging_suppression row, which
+      // the pipeline checks BEFORE consent, so an email-only customer who
+      // texted STOP surfaces here as SUPPRESSED_OPT_OUT rather than
+      // CHANNEL_EMAIL_ONLY.) The email leg — when the customer has one — is
+      // the receipt.
+      if (sendResult.code === "SUPPRESSED_OPT_OUT" || sendResult.code === "SMS_OPTED_OUT") {
+        logger.info(
+          `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — recipient has opted out of SMS (${sendResult.code})`,
+        );
+        return { sent: false, reason: "sms_suppressed" };
       }
       const err = new Error(
         `receipt SMS blocked: ${sendResult.code || sendResult.reason || "unknown"}`,
