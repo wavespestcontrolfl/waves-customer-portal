@@ -859,10 +859,12 @@ async function blogHeroSocialImageUrl(link) {
 // hero even when Instagram can't consume it. Sync env check; the async
 // connected-probe still gates the actual post.
 function linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo }) {
+  const linkedin = require('./linkedin');
   return !!noAiImage && !hasVideo && BLOG_HERO_SOURCES.has(source)
     && requestedPlatforms.has('linkedin')
     && SOCIAL_FLAGS.linkedinEnabled
-    && require('./linkedin').configured;
+    && linkedin.configured
+    && !!linkedin.companyId;
 }
 
 // Render a deterministic brand card (SVG -> JPEG) and host it on S3/CDN, so
@@ -1199,11 +1201,13 @@ const SocialMediaService = {
       && !!config.s3.bucket && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     // Also require at least one publish target actually ready (creds / GBP
     // locations); otherwise publishToAll skips/fails every platform and the
-    // uploaded card is orphaned. FB/IG are sync checks; only probe GBP (a
-    // DB/OAuth call) when neither is ready.
-    const fbReady = SOCIAL_FLAGS.facebookEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
+    // uploaded card is orphaned. Facebook does NOT count: blog shares post to
+    // /feed as link posts (the preview card renders the og:image hero), so a
+    // Facebook-only deployment must not prefetch an image nothing consumes.
+    // Instagram is a sync check; only probe GBP (a DB/OAuth call) when IG
+    // isn't ready.
     const igReady = SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
-    const metaReady = fbReady || igReady; // FB/IG consume the 1:1 card
+    const metaReady = igReady; // IG consumes the 1:1 image (FB link posts don't)
     let gbpReady = false;                 // GBP consumes the 4:3 card
     if (SOCIAL_FLAGS.gbpEnabled) {
       try { gbpReady = (await gbpService.getConfiguredLocations()).length > 0; } catch { gbpReady = false; }
@@ -1428,7 +1432,13 @@ const SocialMediaService = {
       // LinkedIn does — its Posts API won't scrape the article URL, so the
       // hero must be uploaded as the article thumbnail or the share has no
       // picture at all.
-      linkedinWantsHero = linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo });
+      // The sync predicate can't see the OAuth grant; confirm an admin has
+      // actually connected the page before spending the hero fetch+rehost —
+      // the readiness probe below would skip LinkedIn anyway, orphaning the
+      // upload on every retry. getStatus never throws (a store failure reads
+      // as connected:false).
+      linkedinWantsHero = linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo })
+        && !!(await require('./linkedin').getStatus()).connected;
       if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
@@ -1600,8 +1610,18 @@ const SocialMediaService = {
             // directive 2026-07-06). Instagram captions are plain text — the
             // URL isn't tappable (platform limitation, no link attachment on
             // feed posts) — but it's visible and copyable. The copy prompt
-            // generates the caption WITHOUT a URL; it's appended here.
-            const igCaption = (link && BLOG_HERO_SOURCES.has(source)) ? `${content}\n\n${link}` : content;
+            // generates the caption WITHOUT a URL; it's appended here. The
+            // pre-append caption already passed validateContent, so re-check
+            // the combined length and trim the CAPTION (never the URL) — a
+            // near-limit caption must not become an over-limit publish request.
+            let igCaption = content;
+            if (link && BLOG_HERO_SOURCES.has(source)) {
+              const igLimit = PLATFORM_LENGTH_LIMITS.instagram;
+              const suffix = `\n\n${link}`;
+              igCaption = (content.length + suffix.length > igLimit)
+                ? `${content.slice(0, igLimit - suffix.length - 1).trimEnd()}…${suffix}`
+                : `${content}${suffix}`;
+            }
             // NOT wrapped in withRetry: postToInstagram already polls Meta for
             // media ingestion (bounded ~45s). Retrying the whole call would
             // redo that wait (blocking the request for minutes) and create a

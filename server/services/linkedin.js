@@ -333,12 +333,35 @@ class LinkedInService {
     return { adminedOrganizations: orgs, raw: data.elements || [] };
   }
 
+  // The thumbnail fetch is a server-side request driven by caller-supplied
+  // data (admin publish routes accept imageUrl in the request body), so only
+  // fetch HTTPS URLs from hosts we control — otherwise a portal user could
+  // point the fetch at localhost/private-network/metadata endpoints (SSRF)
+  // and have the response uploaded to LinkedIn.
+  _isTrustedImageUrl(imageUrl) {
+    try {
+      const u = new URL(String(imageUrl));
+      if (u.protocol !== 'https:') return false;
+      const host = u.hostname.toLowerCase();
+      const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '').toLowerCase();
+      return (!!cdn && host === cdn)
+        || host === 'wavespestcontrol.com'
+        || host.endsWith('.wavespestcontrol.com');
+    } catch {
+      return false;
+    }
+  }
+
   // ── Images API: rehost a public image as a LinkedIn image URN ─────────────
-  // initializeUpload → PUT the binary → urn:li:image:… . LinkedIn does NOT
-  // scrape article URLs, so without this the article card renders with no
-  // picture at all. Throws on any failure — the createPost call site treats
-  // the thumbnail as best-effort and never lets it block the post.
+  // initializeUpload → PUT the binary → poll until AVAILABLE → urn:li:image:….
+  // LinkedIn does NOT scrape article URLs, so without this the article card
+  // renders with no picture at all. Throws on any failure — the createPost
+  // call site treats the thumbnail as best-effort and never lets it block the
+  // post.
   async _uploadImageFromUrl(imageUrl, token) {
+    if (!this._isTrustedImageUrl(imageUrl)) {
+      throw new Error(`untrusted thumbnail URL host: ${String(imageUrl).slice(0, 120)}`);
+    }
     const owner = `urn:li:organization:${this.companyId}`;
     const initRes = await fetch(`${IMAGES_URL}?action=initializeUpload`, {
       method: 'POST',
@@ -380,7 +403,37 @@ class LinkedInService {
     if (!putRes.ok) {
       throw new Error(`LinkedIn image upload ${putRes.status}: ${(await putRes.text()).slice(0, 300)}`);
     }
+
+    // Ingestion is asynchronous: a post created while the image is still
+    // PROCESSING can fail or publish without the thumbnail. Poll (bounded)
+    // until AVAILABLE; on FAILED or budget exhaustion, throw — the caller
+    // then posts without a thumbnail rather than risking the whole share.
+    await this._waitForImageAvailable(value.image, token);
     return value.image;
+  }
+
+  async _waitForImageAvailable(imageUrn, token, { attempts = 6, delayMs = 2500 } = {}) {
+    let lastStatus = null;
+    for (let i = 0; i < attempts; i++) {
+      const res = await fetch(`${IMAGES_URL}/${encodeURIComponent(imageUrn)}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'LinkedIn-Version': API_VERSION,
+          'X-Restli-Protocol-Version': '2.0.0',
+        },
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        lastStatus = data?.status || null;
+        if (lastStatus === 'AVAILABLE') return;
+        if (lastStatus && /FAILED/i.test(lastStatus)) {
+          throw new Error(`LinkedIn image processing failed: ${lastStatus}`);
+        }
+      }
+      // Non-200 status reads are transient-retryable within the same budget.
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    throw new Error(`LinkedIn image not AVAILABLE after ${attempts} checks (last: ${lastStatus || 'unknown'})`);
   }
 
   // ── Publish a post to the company page (Posts API) ────────────────────────

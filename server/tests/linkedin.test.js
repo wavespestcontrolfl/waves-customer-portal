@@ -55,14 +55,16 @@ describe('createPost article thumbnail (Images API)', () => {
   beforeEach(() => {
     jest.spyOn(linkedin, '_getValidAccessToken').mockResolvedValue('tok');
     linkedin.companyId = '123';
+    process.env.SOCIAL_MEDIA_CDN_DOMAIN = 'cdn.example.com';
   });
   afterEach(() => {
     global.fetch = realFetch;
     linkedin.companyId = realCompanyId;
+    delete process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     jest.restoreAllMocks();
   });
 
-  function mockRoutes({ initFails = false } = {}) {
+  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE' } = {}) {
     const calls = [];
     global.fetch = jest.fn(async (url, opts = {}) => {
       const u = String(url);
@@ -75,6 +77,9 @@ describe('createPost article thumbnail (Images API)', () => {
           text: async () => '',
         };
       }
+      if (u.startsWith('https://api.linkedin.com/rest/images/')) {
+        return { ok: true, json: async () => ({ status: imageStatus }), text: async () => '' };
+      }
       if (u === IMG) return { ok: true, arrayBuffer: async () => Buffer.from('jpeg-bytes').buffer.slice(0), text: async () => '' };
       if (u === 'https://upload.example.com/u1') return { ok: true, text: async () => '' };
       if (u.startsWith('https://api.linkedin.com/rest/posts')) {
@@ -85,15 +90,52 @@ describe('createPost article thumbnail (Images API)', () => {
     return calls;
   }
 
-  test('uploads the image binary and sets content.article.thumbnail to the image URN', async () => {
+  test('uploads the image binary, waits for AVAILABLE, and sets content.article.thumbnail to the image URN', async () => {
     const calls = mockRoutes();
 
     const res = await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', description: 'Desc', imageUrl: IMG });
 
     expect(res).toMatchObject({ platform: 'linkedin', success: true });
     expect(calls.some((c) => c.url === 'https://upload.example.com/u1' && c.method === 'PUT')).toBe(true);
+    // Ingestion is async — the status poll must run before the post is created.
+    expect(calls.some((c) => c.url.startsWith('https://api.linkedin.com/rest/images/urn%3Ali%3Aimage%3Aabc'))).toBe(true);
     const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
     expect(postBody.content.article).toMatchObject({ source: LINK, thumbnail: 'urn:li:image:abc' });
+  });
+
+  test('image processing FAILED → posts without a thumbnail (best-effort)', async () => {
+    const calls = mockRoutes({ imageStatus: 'PROCESSING_FAILED' });
+
+    const res = await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content.article.thumbnail).toBeUndefined();
+  });
+
+  test('untrusted imageUrl host (SSRF guard) → no fetch of the URL, posts without a thumbnail', async () => {
+    const calls = mockRoutes();
+
+    const res = await linkedin.createPost({
+      text: 'T', link: LINK, title: 'Title',
+      imageUrl: 'https://169.254.169.254/latest/meta-data/',
+    });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    expect(calls.some((c) => c.url.includes('169.254.169.254'))).toBe(false);
+    expect(calls.some((c) => c.url.includes('/rest/images'))).toBe(false);
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content.article.thumbnail).toBeUndefined();
+  });
+
+  test('_isTrustedImageUrl allows only https on the CDN or wavespestcontrol.com hosts', () => {
+    expect(linkedin._isTrustedImageUrl('https://cdn.example.com/x.jpg')).toBe(true);
+    expect(linkedin._isTrustedImageUrl('https://www.wavespestcontrol.com/images/hero.webp')).toBe(true);
+    expect(linkedin._isTrustedImageUrl('http://cdn.example.com/x.jpg')).toBe(false); // not https
+    expect(linkedin._isTrustedImageUrl('https://localhost/x.jpg')).toBe(false);
+    expect(linkedin._isTrustedImageUrl('https://evil.example.com/x.jpg')).toBe(false);
+    expect(linkedin._isTrustedImageUrl('https://notwavespestcontrol.com/x.jpg')).toBe(false);
+    expect(linkedin._isTrustedImageUrl('not a url')).toBe(false);
   });
 
   test('a thumbnail failure never blocks the post — it publishes without an image (best-effort)', async () => {

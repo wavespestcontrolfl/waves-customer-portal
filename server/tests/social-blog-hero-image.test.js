@@ -17,7 +17,11 @@ jest.mock('sharp', () => jest.fn(() => ({
   jpeg: jest.fn().mockReturnThis(),
   toBuffer: jest.fn().mockResolvedValue(Buffer.from('jpeg-bytes')),
 })));
-jest.mock('../services/linkedin', () => ({ configured: true }));
+jest.mock('../services/linkedin', () => ({
+  configured: true,
+  companyId: '123',
+  getStatus: async () => ({ connected: true }),
+}));
 
 // FACEBOOK_PAGE_ID / INSTAGRAM_ACCOUNT_ID are read at module load — set them
 // BEFORE the require so the publishToAll platform-readiness checks pass.
@@ -123,17 +127,19 @@ describe('blogHeroSocialImageUrl', () => {
     beforeEach(() => {
       process.env.SOCIAL_LINKEDIN_ENABLED = 'true';
       require('../services/linkedin').configured = true;
+      require('../services/linkedin').companyId = '123';
     });
     afterEach(() => {
       delete process.env.SOCIAL_LINKEDIN_ENABLED;
       require('../services/linkedin').configured = true;
+      require('../services/linkedin').companyId = '123';
     });
 
     test('true for a LinkedIn-only blog share (no Instagram/GBP needed)', () => {
       expect(social.linkedinWantsBlogHero(base)).toBe(true);
     });
 
-    test('false for every non-hero condition: non-blog source, video, AI path, LinkedIn not requested/enabled/configured', () => {
+    test('false for every non-hero condition: non-blog source, video, AI path, LinkedIn not requested/enabled/configured, no company id', () => {
       expect(social.linkedinWantsBlogHero({ ...base, source: 'newsletter' })).toBe(false);
       expect(social.linkedinWantsBlogHero({ ...base, hasVideo: true })).toBe(false);
       expect(social.linkedinWantsBlogHero({ ...base, noAiImage: false })).toBe(false);
@@ -142,6 +148,9 @@ describe('blogHeroSocialImageUrl', () => {
       expect(social.linkedinWantsBlogHero(base)).toBe(false);
       process.env.SOCIAL_LINKEDIN_ENABLED = 'true';
       require('../services/linkedin').configured = false;
+      expect(social.linkedinWantsBlogHero(base)).toBe(false);
+      require('../services/linkedin').configured = true;
+      require('../services/linkedin').companyId = null;
       expect(social.linkedinWantsBlogHero(base)).toBe(false);
     });
   });
@@ -224,10 +233,24 @@ describe('blogHeroSocialImageUrl', () => {
         expect(res.platforms).toEqual([expect.objectContaining({ platform: 'instagram', success: true })]);
         const containerCall = calls.find((c) => c.url.includes('/ig-acct/media') && !c.url.includes('media_publish'));
         expect(containerCall.body.caption).toBe(`IG caption\n\n#wavespestcontrol\n\n${PAGE}`);
+
+        // A near-limit caption must be trimmed (caption, never the URL) so the
+        // append cannot push the publish request over Instagram's 2200 limit.
+        calls.length = 0;
+        await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['instagram'], customContent: { instagram: 'y'.repeat(2190) },
+          noAiImage: true,
+        });
+        const longCall = calls.find((c) => c.url.includes('/ig-acct/media') && !c.url.includes('media_publish'));
+        expect(longCall.body.caption.length).toBeLessThanOrEqual(2200);
+        expect(longCall.body.caption.endsWith(`\n\n${PAGE}`)).toBe(true);
+        expect(longCall.body.caption).toContain('…');
       } finally {
         delete process.env.SOCIAL_INSTAGRAM_ENABLED;
       }
-    }, 15000);
+    }, 30000);
   });
 
   test('scheduler blog share passes NO imageUrl — a raw .webp hero would bypass the hero branch and fail Instagram (Codex round 1)', () => {
