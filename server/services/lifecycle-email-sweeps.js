@@ -145,7 +145,7 @@ async function runBondRenewalSweep() {
       continue;
     }
     try {
-      const sendResult = await EmailTemplateLibrary.sendTemplate({
+      const sendArgs = (idempotencyKey) => ({
         templateKey: 'termite.bond_renewal',
         to: email,
         payload: {
@@ -158,13 +158,7 @@ async function runBondRenewalSweep() {
         },
         recipientType: 'customer',
         recipientId: bond.customer_id,
-        // renewal_notified_at (stamped only on a REAL send below) is the
-        // cross-day duplicate guard. The key's date component exists because
-        // blocked email_messages rows dedupe FOREVER under a fixed key —
-        // without it, one suppression-blocked attempt killed the once-ever
-        // notice even after the suppression cleared. Same-day re-runs still
-        // dedupe on the key.
-        idempotencyKey: `termite.bond_renewal:${bond.id}:${String(bond.renews_at).slice(0, 10)}:${etDateString()}`,
+        idempotencyKey,
         triggerEventId: `termite.bond_renewal:${bond.id}`,
         categories: ['termite_bond_renewal'],
         // This loop iterates real recipient addresses — SendGrid 4xx bodies
@@ -172,6 +166,20 @@ async function runBondRenewalSweep() {
         // logs and log a redacted reason ourselves below.
         suppressProviderErrorLog: true,
       });
+      // Stable key first: a sent-but-unstamped row (stamp write failed
+      // after the send) dedupes here as sent:true, so the stamp below gets
+      // retried WITHOUT emailing the customer twice.
+      const baseKey = `termite.bond_renewal:${bond.id}:${String(bond.renews_at).slice(0, 10)}`;
+      let sendResult = await EmailTemplateLibrary.sendTemplate(sendArgs(baseKey));
+      if (!sendResult?.sent && sendResult?.blocked && sendResult?.deduped) {
+        // The stable key hit a PRIOR attempt's blocked row — 'blocked' is
+        // in DEDUPE_STATUSES, so under the fixed key that row dedupes
+        // forever and the once-ever notice could never send even after the
+        // suppression cleared. Retry under a day-scoped key: still blocked
+        // → a fresh blocked row for today (alerting dedupes separately);
+        // cleared → the notice finally goes out and gets stamped.
+        sendResult = await EmailTemplateLibrary.sendTemplate(sendArgs(`${baseKey}:${etDateString()}`));
+      }
       if (!sendResult?.sent) {
         // Suppression blocks (and inactive templates) return {sent:false}
         // WITHOUT throwing. Stamping here would permanently record the

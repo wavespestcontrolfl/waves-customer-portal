@@ -13,8 +13,10 @@
  * Contract:
  *  - {sent:false} → renewal_notified_at NOT stamped (bond stays due).
  *  - {sent:true}  → stamped exactly as before.
- *  - the idempotency key carries a date component so the next daily sweep
- *    can retry past a stuck blocked row; base key parts are unchanged.
+ *  - the STABLE key is tried first (a sent-but-unstamped row dedupes as
+ *    sent:true → stamp retried, customer NOT emailed twice); only a
+ *    deduped-BLOCKED result triggers one retry under a day-scoped key so
+ *    a stuck blocked row can't kill the notice forever.
  */
 jest.mock('../models/db', () => {
   const fn = jest.fn();
@@ -90,16 +92,50 @@ describe('runBondRenewalSweep blocked-send handling', () => {
     }));
   });
 
-  test('idempotency key keeps the bond+renewal base and adds a date component', async () => {
-    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+  test('first attempt uses the STABLE key (sent-but-unstamped rows dedupe, no double email)', async () => {
+    // Prior run sent the email but died before stamping: the stable key
+    // dedupes as sent:true and the stamp gets retried — one email total.
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, deduped: true });
 
-    await runBondRenewalSweep();
+    const result = await runBondRenewalSweep();
 
+    expect(result.sent).toBe(1);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
     const args = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
-    // Base parts unchanged (bond id + renewal date), plus a YYYY-MM-DD day
-    // component so a stuck blocked row can't dedupe the retry forever.
-    expect(args.idempotencyKey).toMatch(/^termite\.bond_renewal:bond-1:2026-07-20:\d{4}-\d{2}-\d{2}$/);
+    expect(args.idempotencyKey).toBe('termite.bond_renewal:bond-1:2026-07-20');
     expect(args.triggerEventId).toBe('termite.bond_renewal:bond-1');
+    expect(bondUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      renewal_notified_at: expect.any(Date),
+    }));
+  });
+
+  test('a deduped-BLOCKED stable-key hit retries once under a day-scoped key', async () => {
+    // Attempt 1 (stable key): stuck blocked row from a prior suppressed
+    // run. Attempt 2 (day key): suppression has cleared — sends + stamps.
+    EmailTemplateLibrary.sendTemplate
+      .mockResolvedValueOnce({ sent: false, blocked: true, deduped: true, reason: 'Email suppressed' })
+      .mockResolvedValueOnce({ sent: true });
+
+    const result = await runBondRenewalSweep();
+
+    expect(result.sent).toBe(1);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey)
+      .toBe('termite.bond_renewal:bond-1:2026-07-20');
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[1][0].idempotencyKey)
+      .toMatch(/^termite\.bond_renewal:bond-1:2026-07-20:\d{4}-\d{2}-\d{2}$/);
+    expect(bondUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test('still suppressed on the day-scoped retry: no stamp, bond stays due', async () => {
+    EmailTemplateLibrary.sendTemplate
+      .mockResolvedValueOnce({ sent: false, blocked: true, deduped: true, reason: 'Email suppressed' })
+      .mockResolvedValueOnce({ sent: false, blocked: true, reason: 'Email suppressed' });
+
+    const result = await runBondRenewalSweep();
+
+    expect(result.sent).toBe(0);
+    expect(bondUpdate).not.toHaveBeenCalled();
   });
 
   test('a throwing send is logged and does not stamp', async () => {
