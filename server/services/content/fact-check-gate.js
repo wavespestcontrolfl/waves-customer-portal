@@ -35,10 +35,11 @@ const FACTCHECK_MODEL = process.env.MODEL_FACTCHECK || MODELS.DEEP;
 // advisory check. The SDK default is a 10-minute timeout WITH retries, so a
 // stalled model could hold the pipeline for many minutes before fail-open
 // triggers. Cap it and don't retry — a slow check should just fail open fast.
-// 120s (was 30s): DEEP (fable-5) thinks before answering, so a thorough check
-// of a full post routinely runs past 30s — at 30s the gate would silently
-// fail open on most posts, which is worse than a slower bounded check.
-const FACTCHECK_TIMEOUT_MS = Number.parseInt(process.env.FACTCHECK_TIMEOUT_MS, 10) || 120000;
+// 60s (was 30s): DEEP (fable-5) thinks before answering, so a thorough check
+// of a full post can run past 30s and 30s would silently fail open too often.
+// 60s is the ceiling the publish-lock contract allows (fact-check-gate.test.js
+// bounds it) — raise via FACTCHECK_TIMEOUT_MS only alongside that contract.
+const FACTCHECK_TIMEOUT_MS = Number.parseInt(process.env.FACTCHECK_TIMEOUT_MS, 10) || 60000;
 
 const SYSTEM_PROMPT = `You are a meticulous fact-checker for a Southwest Florida (Manatee/Sarasota/Charlotte county) pest-control and lawn-care blog. The post will publish under a licensed pest-control operator's byline, so factual accuracy is critical.
 
