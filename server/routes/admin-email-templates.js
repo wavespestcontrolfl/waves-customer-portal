@@ -554,6 +554,7 @@ router.get('/suppressions', async (req, res, next) => {
       const emailFields = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
       const customerRows = await db('customers')
         .select('id', 'first_name', 'last_name', 'phone', 'pipeline_stage', ...emailFields)
+        .whereNull('deleted_at')
         .where(function matchAnyEmailField() {
           for (const field of emailFields) {
             this.orWhereIn(db.raw(`LOWER(${field})`), emails);

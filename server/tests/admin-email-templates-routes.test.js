@@ -905,9 +905,10 @@ describe('admin email template routes', () => {
     const blockedRows = [
       { email_lc: 'bad@example.com', blocked_count: '3', last_blocked_at: '2026-07-06T14:00:00.000Z' },
     ];
+    const customersQuery = chain({ result: customerRows });
     setDbQueues({
       'email_suppressions as s': [chain({ result: suppressionRows })],
-      customers: [chain({ result: customerRows })],
+      customers: [customersQuery],
       email_messages: [chain({ result: blockedRows })],
       email_suppressions: [chain({ result: [{ group_key: null, suppression_type: 'bounce', count: '2' }] })],
     });
@@ -935,6 +936,7 @@ describe('admin email template routes', () => {
       expect(orphan.blocked_count).toBe(0);
       expect(orphan.last_blocked_at).toBeNull();
       expect(body.stats).toEqual([{ group_key: null, suppression_type: 'bounce', count: 2 }]);
+      expect(customersQuery.whereNull).toHaveBeenCalledWith('deleted_at');
     });
   });
 });
