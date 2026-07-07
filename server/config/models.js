@@ -23,8 +23,14 @@
  *  model for its job — not the cheapest. The tier names are unchanged so
  *  the 60+ importing services keep working; only the targets moved.
  *
- *  FLAGSHIP   — Best reasoning. Admin Intelligence Bar, advisors, analysis,
- *               agents, adversarial review.                          → Opus 4.8
+ *  DEEP       — Deepest reasoning, latency-tolerant. The agronomic brain /
+ *               wiki lanes and the adversarial judges (draft verifier,
+ *               shadow judge, fact-check gate) — low-volume lanes where a
+ *               wrong answer costs more than a slow one. Callers MUST go
+ *               through services/llm/deep.js (thinking-block strip +
+ *               refusal fallback to FLAGSHIP).                       → Fable 5
+ *  FLAGSHIP   — Best general reasoning. Admin Intelligence Bar, advisors,
+ *               analysis, agents.                                    → Opus 4.8
  *  WORKHORSE  — Drafting + content generation.                       → Opus 4.8
  *  FAST       — High-volume classification, tagging, signals.        → Opus 4.8
  *  VOICE      — Customer-facing copy where a warm, natural human voice beats
@@ -60,6 +66,13 @@ const FAST      = process.env.MODEL_FAST      || 'claude-opus-4-8';
 const VOICE     = process.env.MODEL_VOICE     || 'claude-sonnet-4-6';
 const VISION    = process.env.MODEL_VISION    || 'claude-sonnet-4-6';
 
+// Deepest-reasoning tier (fable-5): always-on thinking, minutes-long turns
+// possible, safety classifiers can refuse benign-adjacent pesticide content.
+// Every DEEP call site goes through services/llm/deep.js, which strips
+// thinking blocks (legacy content[0].text parsing) and retries a refusal on
+// FLAGSHIP. Kill switch: MODEL_DEEP=claude-opus-4-8 (no deploy needed).
+const DEEP = process.env.MODEL_DEEP || 'claude-fable-5';
+
 // Lawn-diagnostic adversarial-challenge reasoner. Pinned independently of FLAGSHIP
 // (which stays Opus 4.7) so the lawn pipeline can run Opus 4.8 without moving the whole
 // app. Lives here (not in the service) so every Anthropic ID stays in the central
@@ -81,8 +94,9 @@ const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash'
 //   tone rewrite + save-the-sale replies  → Claude Sonnet 5 (warm customer voice)
 // "Save-the-sale" = retention-critical inbound (cancellation / complaint /
 // customer-issue intents) — matched by the drafter's SAVE_SALE_INTENT_RE.
-// The drafter's adversarial fact-check verifier intentionally stays on
-// FLAGSHIP: with a mini model drafting, the verify loop is the safety net.
+// The drafter's adversarial fact-check verifier runs on DEEP: with a mini
+// model drafting, the verify loop is the safety net, so it gets the
+// deepest-reasoning model (falls back to FLAGSHIP on refusal).
 const OPENAI_SMS_DRAFT = process.env.MODEL_OPENAI_SMS_DRAFT || 'gpt-5.4-mini';
 const SMS_SONNET       = process.env.MODEL_SMS_SONNET       || 'claude-sonnet-5';
 
@@ -120,6 +134,7 @@ const ROUTES = Object.freeze({
 });
 
 module.exports = {
+  DEEP,
   FLAGSHIP,
   WORKHORSE,
   FAST,

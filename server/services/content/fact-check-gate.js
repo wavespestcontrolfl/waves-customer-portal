@@ -28,12 +28,17 @@ const logger = require('../logger');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const FACTCHECK_MODEL = process.env.MODEL_FACTCHECK || MODELS.FLAGSHIP;
+const { createDeepMessage } = require('../llm/deep');
+
+const FACTCHECK_MODEL = process.env.MODEL_FACTCHECK || MODELS.DEEP;
 // Bound how long a publish (or the autonomous publishing lock) can wait on this
 // advisory check. The SDK default is a 10-minute timeout WITH retries, so a
 // stalled model could hold the pipeline for many minutes before fail-open
 // triggers. Cap it and don't retry — a slow check should just fail open fast.
-const FACTCHECK_TIMEOUT_MS = Number.parseInt(process.env.FACTCHECK_TIMEOUT_MS, 10) || 30000;
+// 120s (was 30s): DEEP (fable-5) thinks before answering, so a thorough check
+// of a full post routinely runs past 30s — at 30s the gate would silently
+// fail open on most posts, which is worse than a slower bounded check.
+const FACTCHECK_TIMEOUT_MS = Number.parseInt(process.env.FACTCHECK_TIMEOUT_MS, 10) || 120000;
 
 const SYSTEM_PROMPT = `You are a meticulous fact-checker for a Southwest Florida (Manatee/Sarasota/Charlotte county) pest-control and lawn-care blog. The post will publish under a licensed pest-control operator's byline, so factual accuracy is critical.
 
@@ -96,9 +101,9 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   });
   let raw;
   try {
-    const response = await anthropic.messages.create({
+    const response = await createDeepMessage(anthropic, {
       model: FACTCHECK_MODEL,
-      max_tokens: 2000,
+      max_tokens: 6000,
       system: SYSTEM_PROMPT,
       messages: [{
         role: 'user',

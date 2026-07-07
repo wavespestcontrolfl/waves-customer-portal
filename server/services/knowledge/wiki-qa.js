@@ -6,6 +6,8 @@ const { etDateString } = require('../../utils/datetime-et');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+const { createDeepMessage } = require('../llm/deep');
+
 class WikiQA {
 
   /**
@@ -40,9 +42,9 @@ class WikiQA {
     // Step 1: Route to relevant articles
     let paths = [];
     try {
-      const routingResponse = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
-        max_tokens: 500,
+      const routingResponse = await createDeepMessage(anthropic, {
+        model: MODELS.DEEP,
+        max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
         messages: [{
           role: 'user',
           content: `Given this question about Waves Pest Control, which wiki articles should I read? Return ONLY a JSON array of file paths (max 8).
@@ -83,9 +85,9 @@ ${liveIndex}`
       .select('path', 'title', 'content');
 
     // Step 3: Answer with full context
-    const answerResponse = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 2000,
+    const answerResponse = await createDeepMessage(anthropic, {
+      model: MODELS.DEEP,
+      max_tokens: 6000,
       system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.`,
       messages: [{
         role: 'user',
