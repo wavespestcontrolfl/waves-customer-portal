@@ -2467,6 +2467,15 @@ const InvoiceService = {
         );
         return { sent: false, reason: "channel_email_only" };
       }
+      // Same for a receipt-texts opt-out (payment_receipt=false or the
+      // portal's payment_confirmation_sms toggle off): the customer asked for
+      // this suppression, so it must not read as a delivery failure.
+      if (sendResult.code === "PURPOSE_OPTED_OUT") {
+        logger.info(
+          `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — customer opted out of receipt texts`,
+        );
+        return { sent: false, reason: "receipt_texts_opted_out" };
+      }
       const err = new Error(
         `receipt SMS blocked: ${sendResult.code || sendResult.reason || "unknown"}`,
       );

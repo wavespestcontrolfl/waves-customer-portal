@@ -72,4 +72,21 @@ describe('receipt delivery queue retry policy', () => {
       emailResult: { ok: false, error: 'SendGrid unavailable' },
     })).toBe(true);
   });
+
+  test('does not retry a receipt-texts opt-out — the suppression is the customer\'s own choice', () => {
+    // payment_receipt=false or the portal "Payment confirmation texts" toggle
+    // off makes InvoiceService.sendReceipt skip with 'receipt_texts_opted_out'
+    // (PURPOSE_OPTED_OUT at the consent gate). Not a delivery failure.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'receipt_texts_opted_out' },
+      emailResult: { ok: true },
+    })).toBe(false);
+
+    // Opted out of texts AND no receipt email recipient: both skips are
+    // expected — complete without a retry storm.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'receipt_texts_opted_out' },
+      emailResult: { ok: false, error: 'No receipt recipient email' },
+    })).toBe(false);
+  });
 });

@@ -99,7 +99,9 @@ function actionableSmsFailure(result) {
   // the other expected skips so the queue doesn't retry/fail the job forever.
   // 'channel_email_only' is the customer's payment_receipt_channel='email'
   // preference: the email leg below carries the receipt.
-  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only'].includes(result.reason);
+  // 'receipt_texts_opted_out' is the payment_receipt /
+  // payment_confirmation_sms opt-out — also the customer's own choice.
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out'].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {
@@ -187,9 +189,9 @@ async function processReceiptDeliveryJob(job) {
     // receipt_sent_at), so stamp it here when the payer AP email delivered.
     // Otherwise the invoice stays in the `needs_receipt` filter forever and a
     // batch/manual resend texts/emails the AP a duplicate receipt. Same for a
-    // customer whose payment_receipt_channel is email-only — the delivered
-    // email receipt IS the receipt.
-    if (['payer_billed', 'channel_email_only'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
+    // customer whose payment_receipt_channel is email-only or who opted out
+    // of receipt texts — the delivered email receipt IS the receipt.
+    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
       await db('invoices')
         .where({ id: invoice.id })
         .whereNull('receipt_sent_at')
