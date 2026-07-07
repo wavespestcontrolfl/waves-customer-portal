@@ -23,6 +23,10 @@ import { isNativeApp, nativePlatform } from './platform';
 export { isNativeApp };
 
 let pendingToken = null;
+// Last token this session posted (or tried to). Capacitor's 'registration'
+// event only fires once per app session, so logout/login and property
+// switches must reuse it to deactivate/re-point the subscription.
+let lastToken = null;
 let listenersBound = false;
 
 function authToken() {
@@ -36,6 +40,7 @@ function authToken() {
 }
 
 async function postToken(token) {
+  lastToken = token;
   const jwt = authToken();
   if (!jwt) {
     // Not authenticated yet — hold the token; the login flow flushes it.
@@ -110,4 +115,38 @@ export function flushNativePushToken() {
   const token = pendingToken;
   pendingToken = null;
   postToken(token);
+}
+
+/**
+ * Deactivate this customer's native push registration. Call from logout
+ * BEFORE tokens are cleared (it needs the JWT) so the device stops
+ * receiving the previous account's service/billing pushes. Best-effort;
+ * no-op on web. Re-arms pendingToken so a later login on this device
+ * re-subscribes (the registration event won't re-fire this session).
+ */
+export async function deactivateNativePushToken() {
+  if (!isNativeApp()) return;
+  const jwt = authToken();
+  if (!jwt) return;
+  const token = lastToken;
+  try {
+    await fetch('/api/push/native-unsubscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify(token ? { token } : {}),
+    });
+  } catch (err) {
+    console.warn('[nativePush] token deactivation failed:', err?.message || err);
+  }
+  if (token) pendingToken = token;
+}
+
+/**
+ * Re-post the current device token under the now-authenticated customer —
+ * used after a property switch so the subscription row re-points to the
+ * new customer_id instead of silently notifying the old one.
+ */
+export function repostNativePushToken() {
+  if (!isNativeApp() || !lastToken) return;
+  postToken(lastToken);
 }

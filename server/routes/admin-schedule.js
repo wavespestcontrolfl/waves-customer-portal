@@ -4722,7 +4722,9 @@ router.put('/:id/status', async (req, res, next) => {
       // In-app notification: service completed
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, { icon: '\u{1F3E0}', link: '/documents' });
+        // PortalPage only honors ?tab= deep links — a '/documents' path just
+        // lands on the Home tab.
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, { icon: '\u{1F3E0}', link: '/?tab=documents' });
       } catch (e) { logger.error(`[notifications] Service completed notification failed: ${e.message}`); }
 
       // --- Post-service automation chain (all fire-and-forget, non-blocking) ---

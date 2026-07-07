@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import api from '../utils/api';
-import { flushNativePushToken } from '../native/nativePush';
+import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 
 const AuthContext = createContext(null);
 
@@ -68,6 +68,10 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    // Deactivate this device's push registration BEFORE dropping the JWT —
+    // otherwise the device keeps receiving the previous account's pushes.
+    // Fire-and-forget: the fetch captures the JWT before clearTokens runs.
+    deactivateNativePushToken();
     api.clearTokens();
     setCustomer(null);
     setProperties([]);
@@ -78,6 +82,9 @@ export function AuthProvider({ children }) {
     try {
       const data = await api.selectAuthProperty(customerId);
       api.setTokens(data.token, data.refreshToken);
+      // Re-point this device's push subscription at the newly selected
+      // customer — otherwise pushes keep flowing to the previous property.
+      repostNativePushToken();
       setProperties(data.properties || []);
       await loadCustomer();
       return true;

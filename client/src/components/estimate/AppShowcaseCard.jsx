@@ -11,6 +11,7 @@
  */
 import { estimateCard } from './cardStyles';
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
+import { isNativeApp } from '../../native/platform';
 import { W } from './tokens';
 
 
@@ -92,6 +93,9 @@ function StoreBadge({ url, label, children }) {
 // only when the page can actually self-book (omitted on accepted/terminal
 // and review-before-booking states).
 export default function AppShowcaseCard({ onBookToday = null }) {
+  // Inside the native app the store badges are dead weight (and an App
+  // Store review flag) — every other surface hides them via isNativeApp().
+  if (isNativeApp()) return null;
   const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
   // Glass copy pack (PR B).
   const glass = glassCopyActive();
