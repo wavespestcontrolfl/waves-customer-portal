@@ -613,7 +613,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         lineId: `estimate_${estimate.id}_${line.serviceId || line.name}_${Math.random().toString(36).slice(2, 8)}`,
         price: line.price != null ? String(line.price) : '',
         cadence: line.cadence || inferred.cadence,
-        intervalDays: inferred.intervalDays,
+        // Line first: the server maps every-6-weeks quotes to custom/42, and
+        // the modal can't re-infer that once the catalog match rewrote the
+        // line's frequency field.
+        intervalDays: line.intervalDays ?? inferred.intervalDays,
         nth: 3,
         weekday: 3,
         boosterMonths: [],

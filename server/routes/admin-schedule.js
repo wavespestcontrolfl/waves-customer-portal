@@ -1962,6 +1962,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // An annual-prepay booking MUST bill per application until the prepay
+    // invoice is paid — the per-visit coverage stamp is what suppresses
+    // billing after payment, and the seeder's own coverage rows are
+    // deliberately create_invoice_on_complete=true. The modal always sends
+    // createInvoice for these; forcing it here means a crafted/omitted flag
+    // can't book a prepay series whose pending-window completions bill
+    // nothing (codex P2).
+    const createInvoiceEffective = bookingBillingTermEffective === 'prepay_annual' ? true : !!createInvoice;
+
     const zone = getZone(customer?.city, customer?.zip);
     // Owner directive (2026-07-03): every service call defaults to 60 minutes;
     // the service-record default or an explicit tech-entered duration wins below.
@@ -2106,7 +2115,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
       if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
       if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = !!createInvoice;
+      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceEffective;
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
@@ -2180,7 +2189,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
         if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = !!createInvoice;
+        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceEffective;
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
@@ -2243,7 +2252,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
           if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
           if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = !!createInvoice;
+          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceEffective;
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
           // Mirror only add-ons due on this booster date; one-time and

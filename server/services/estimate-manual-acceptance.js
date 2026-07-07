@@ -176,14 +176,16 @@ async function prepayBookingEligibility(estimate = {}) {
   // skipAutoSchedule — a billable quoted one-time line would end up neither
   // scheduled nor invoiced (the converter mints just the recurring annual
   // prepay invoice) while the whole estimate is marked accepted: sold work
-  // silently dropped. Non-charges don't block (isBillableOneTimeInvoiceItem
-  // exempts adjustments/discounts and the WaveGuard setup prepay waives),
-  // but a positive onetime_total whose rows can't be parsed at all is NOT
+  // silently dropped. isNonBillableOneTimeRow (NOT
+  // isBillableOneTimeInvoiceItem) is the predicate: a POSITIVE
+  // one_time_adjustment row is a real residual charge and must block, while
+  // discounts/inspections and the WaveGuard setup prepay waives don't. A
+  // positive onetime_total whose rows can't be parsed at all is likewise not
   // proven non-billable — legacy/malformed shapes fail closed too (money).
   try {
-    const { acceptanceServiceLists, isBillableOneTimeInvoiceItem } = require('../routes/estimate-public');
+    const { acceptanceServiceLists, isNonBillableOneTimeRow } = require('../routes/estimate-public');
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
-    if (oneTimeRows.some(isBillableOneTimeInvoiceItem)) return ineligible('one_time_items');
+    if (oneTimeRows.some((row) => !isNonBillableOneTimeRow(row))) return ineligible('one_time_items');
     if (!oneTimeRows.length && asMoneyOrNull(estimate.onetime_total)) return ineligible('one_time_items');
   } catch {
     return ineligible('one_time_items');

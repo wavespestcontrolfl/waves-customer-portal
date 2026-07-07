@@ -1252,6 +1252,23 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     expect(r.eligible).toBe(true);
   });
 
+  test('a POSITIVE one_time_adjustment row blocks (residual charge, not a discount)', async () => {
+    // isBillableOneTimeInvoiceItem exempts one_time_adjustment by service key;
+    // the eligibility gate must use the isNonBillableOneTimeRow predicate so a
+    // positive adjustment (a real residual charge) still fails closed.
+    const base = recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]);
+    const r = await prepayBookingEligibility({
+      ...base,
+      onetime_total: '150.00',
+      estimate_data: {
+        ...base.estimate_data,
+        oneTime: { items: [{ service: 'one_time_adjustment', name: 'Other one-time services', price: 150 }] },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
   test('a positive onetime_total with NO parseable one-time rows fails closed (legacy/malformed shape)', async () => {
     // The rows are what prove a one-time total non-billable; absent rows +
     // positive total could be sold work the accept would silently drop.
