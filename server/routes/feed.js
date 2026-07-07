@@ -130,8 +130,10 @@ function parseItems(channel) {
 // blog item and the portal rendered icon placeholders instead of post heroes.
 // The blog layout stamps each post's hero as og:image on the live page — the
 // same source social-media.js resolves blog-share heroes from — so fill the
-// gap from there. Results (including misses) are cached per link, so a feed
-// refresh costs at most one page fetch per post every 30 minutes.
+// gap from there. The UF/IFAS and MySuncoast feeds get the same fallback for
+// their image-less items. Results (including misses) are cached per link, so
+// a feed refresh costs at most one page fetch per post every 30 minutes.
+// Callers only pass links that already passed safeLink (trusted hosts only).
 const ogImageCache = {};
 async function resolveOgImage(link) {
   if (!link) return null;
@@ -227,14 +229,17 @@ router.get('/experts', async (req, res, next) => {
     // Sort by date desc
     relevant.sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
 
-    const posts = relevant.slice(0, 4).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 180),
-      image: extractImage(item),
-      source: 'ifas',
-      sourceName: item._source,
+    const posts = await Promise.all(relevant.slice(0, 4).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 180),
+        image: extractImage(item) || await resolveOgImage(link),
+        source: 'ifas',
+        sourceName: item._source,
+      };
     }));
 
     res.json({ posts });
@@ -254,14 +259,17 @@ router.get('/local', async (req, res, next) => {
       return RELEVANT_KEYWORDS.test(text) && !EXCLUDE_KEYWORDS.test(text);
     });
 
-    const posts = relevant.slice(0, 3).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 150),
-      image: extractImage(item),
-      source: 'local',
-      sourceName: 'MySuncoast',
+    const posts = await Promise.all(relevant.slice(0, 3).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 150),
+        image: extractImage(item) || await resolveOgImage(link),
+        source: 'local',
+        sourceName: 'MySuncoast',
+      };
     }));
 
     res.json({ posts });

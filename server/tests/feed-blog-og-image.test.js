@@ -11,6 +11,8 @@
  *  - items without one get the page's og:image, host-validated by safeImage
  *  - og:image on an untrusted host, a missing tag, or a fetch failure all
  *    degrade to image:null (client falls back to the icon placeholder)
+ *  - the /experts (UF/IFAS) and /local (MySuncoast) feeds get the same
+ *    fallback for their image-less items
  */
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, res, next) => { req.customerId = 'cust-1'; next(); },
@@ -63,11 +65,60 @@ const FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
   </channel>
 </rss>`;
 
+// /experts and /local fixtures — one relevant image-less item per feed
+// (titles must pass the RELEVANT_KEYWORDS filter), plus one IFAS item with a
+// feed-native content:encoded <img> that must not trigger a page fetch.
+const IFAS_SARASOTA_FEED = 'https://blogs.ifas.ufl.edu/sarasotaco/feed/';
+const IFAS_MANATEE_FEED = 'https://blogs.ifas.ufl.edu/manateeco/feed/';
+const SUNCOAST_FEED = 'https://www.mysuncoast.com/news/local/rss/';
+const IFAS_PAGE = 'https://blogs.ifas.ufl.edu/sarasotaco/2026/07/01/lawn-fungus-watch/';
+const IFAS_HERO = 'https://blogs.ifas.ufl.edu/sarasotaco/files/2026/07/fungus.jpg';
+const IFAS_NATIVE_PAGE = 'https://blogs.ifas.ufl.edu/manateeco/2026/06/28/chinch-bug-scouting/';
+const IFAS_NATIVE_IMG = 'https://blogs.ifas.ufl.edu/manateeco/files/2026/06/chinch.jpg';
+const SUNCOAST_PAGE = 'https://www.mysuncoast.com/2026/07/02/red-tide-update/';
+
+function wpFeed(items) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel><title>WP</title>${items}</channel>
+</rss>`;
+}
+
+const IFAS_SARASOTA_XML = wpFeed(`
+    <item>
+      <title>Lawn Fungus Watch</title>
+      <link>${IFAS_PAGE}</link>
+      <pubDate>Wed, 01 Jul 2026 12:00:00 GMT</pubDate>
+      <description>Large patch season is coming to your lawn.</description>
+    </item>`);
+
+const IFAS_MANATEE_XML = wpFeed(`
+    <item>
+      <title>Chinch Bug Scouting</title>
+      <link>${IFAS_NATIVE_PAGE}</link>
+      <pubDate>Sun, 28 Jun 2026 12:00:00 GMT</pubDate>
+      <description>Scout your turf edges.</description>
+      <content:encoded><![CDATA[<p>Scout.</p><img src="${IFAS_NATIVE_IMG}" alt="chinch">]]></content:encoded>
+    </item>`);
+
+const SUNCOAST_XML = wpFeed(`
+    <item>
+      <title>Red Tide Update for Sarasota</title>
+      <link>${SUNCOAST_PAGE}</link>
+      <pubDate>Thu, 02 Jul 2026 12:00:00 GMT</pubDate>
+      <description>Red tide conditions along the coast.</description>
+    </item>`);
+
 const EXTERNAL_ROUTES = {
   [FEED_URL]: { text: FEED_XML },
   [PAGE_WITH_HERO]: { text: `<html><head><meta property="og:image" content="${HERO}"></head></html>` },
   [PAGE_NO_HERO]: { text: '<html><head><title>no hero</title></head></html>' },
   [PAGE_BAD_HOST_HERO]: { text: '<html><head><meta property="og:image" content="https://evil.example.com/x.png"></head></html>' },
+  [IFAS_SARASOTA_FEED]: { text: IFAS_SARASOTA_XML },
+  [IFAS_MANATEE_FEED]: { text: IFAS_MANATEE_XML },
+  [SUNCOAST_FEED]: { text: SUNCOAST_XML },
+  [IFAS_PAGE]: { text: `<html><head><meta property="og:image" content="${IFAS_HERO}"></head></html>` },
+  [SUNCOAST_PAGE]: { text: '<html><head><title>no og:image</title></head></html>' },
 };
 
 const realFetch = global.fetch;
@@ -121,4 +172,26 @@ test('blog posts missing feed images get the live page og:image; misses and untr
     source: 'blog',
     sourceName: 'Waves Blog',
   });
+});
+
+test('/experts gets the same og:image fallback; feed-native content:encoded images still win without a page fetch', async () => {
+  const res = await fetch(`${base}/api/feed/experts`);
+  expect(res.status).toBe(200);
+  const { posts } = await res.json();
+  expect(posts).toHaveLength(2);
+
+  const fungus = posts.find((p) => p.link === IFAS_PAGE);
+  const chinch = posts.find((p) => p.link === IFAS_NATIVE_PAGE);
+  expect(fungus.image).toBe(IFAS_HERO);
+  expect(chinch.image).toBe(IFAS_NATIVE_IMG);
+  expect(externalCalls).not.toContain(IFAS_NATIVE_PAGE);
+});
+
+test('/local gets the fallback too; a page without og:image degrades to null', async () => {
+  const res = await fetch(`${base}/api/feed/local`);
+  expect(res.status).toBe(200);
+  const { posts } = await res.json();
+  expect(posts).toHaveLength(1);
+  expect(posts[0].link).toBe(SUNCOAST_PAGE);
+  expect(posts[0].image).toBeNull();
 });
