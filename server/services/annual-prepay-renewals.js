@@ -759,7 +759,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
 // later retry never claws back more).
 const PENDING_COMPLETION_REVERSAL_BY = 'system:annual_prepay_pending_completion_reversal';
 
-async function reversePendingWindowCompletionCredits(term, conn = db) {
+async function reversePendingWindowCompletionCredits(term, conn = db, { visitId = null } = {}) {
   let reversedCount = 0;
   try {
     if (!term?.id || !term.customer_id) return reversedCount;
@@ -772,7 +772,9 @@ async function reversePendingWindowCompletionCredits(term, conn = db) {
       let balance = Number(customer.account_credits) || 0;
       const credits = await t('customer_credit_ledger')
         .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
-        .where('note', 'like', `%term ${term.id},%`)
+        // visitId narrows to ONE visit's credit (visit-invoice refund path);
+        // without it, every credit the term issued reverses (prepay refund).
+        .where('note', 'like', visitId ? `%term ${term.id}, visit ${visitId})%` : `%term ${term.id},%`)
         .where('delta', '>', 0)
         .select('*');
       if (!credits.length) return;
@@ -1135,13 +1137,17 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
     }
   }
 
-  // A VISIT invoice resolving as paid can be the missing piece for a
-  // pending-window completion slice the activation reconcile had to leave
-  // unresolved (processing / in-flight / settle-refused): the visit
-  // invoice's own payment never matches prepay_invoice_id, so nothing above
-  // selects a term for it — find the covering term through the visit row's
-  // attach link and re-run its reconcile here.
-  if (nextStatus === 'active' && !terms.length) {
+  // A VISIT invoice resolving can move a pending-window completion slice in
+  // either direction — its own payment/refund never matches
+  // prepay_invoice_id, so nothing above selects a term for it. Find the
+  // covering term through the visit row's attach link:
+  //   - resolves PAID → the activation reconcile may have left this slice
+  //     unresolved (processing / in-flight / settle-refused) — re-run it.
+  //   - resolves REFUNDED/VOID → the customer got the visit payment back, so
+  //     the slice credit issued for that paid visit reverses: the annual's
+  //     slice becomes the visit's payment again (matching the never-billed
+  //     branch). Without this the customer keeps the credit AND the refund.
+  if (!terms.length && (nextStatus === 'active' || nextStatus === 'cancelled')) {
     try {
       const withLink = invoice.scheduled_service_id !== undefined
         ? invoice
@@ -1152,11 +1158,18 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           .where({ id: visitId })
           .first('id', 'annual_prepay_term_id');
         if (visitRow?.annual_prepay_term_id) {
-          const coveringTerm = await conn('annual_prepay_terms')
-            .where({ id: visitRow.annual_prepay_term_id })
-            .whereIn('status', ACTIVE_STATUSES)
-            .first('*');
-          if (coveringTerm) await reconcilePendingWindowCompletions(coveringTerm, conn);
+          if (nextStatus === 'active') {
+            const coveringTerm = await conn('annual_prepay_terms')
+              .where({ id: visitRow.annual_prepay_term_id })
+              .whereIn('status', ACTIVE_STATUSES)
+              .first('*');
+            if (coveringTerm) await reconcilePendingWindowCompletions(coveringTerm, conn);
+          } else {
+            const coveringTerm = await conn('annual_prepay_terms')
+              .where({ id: visitRow.annual_prepay_term_id })
+              .first('*');
+            if (coveringTerm) await reversePendingWindowCompletionCredits(coveringTerm, conn, { visitId });
+          }
         }
       }
     } catch (err) {

@@ -1062,6 +1062,20 @@ describe('reversePendingWindowCompletionCredits (refund claw-back)', () => {
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 
+  test("a visit-invoice refund reverses only THAT visit's credit (visitId narrows the marker)", async () => {
+    const creditsQuery = query({ rows: [creditRow] });
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 150 } })],
+      customer_credit_ledger: [creditsQuery, query({ rows: [] })],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM, undefined, { visitId: 'svc-done' });
+
+    expect(reversed).toBe(1);
+    expect(creditsQuery.where).toHaveBeenCalledWith('note', 'like', '%term term-1, visit svc-done)%');
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: -100 }), db);
+  });
+
   test('an exhausted balance is never pulled negative — shortfall is logged for operator follow-up', async () => {
     setDbQueues({
       customers: [query({ first: { id: 'customer-1', account_credits: 0 } })],
