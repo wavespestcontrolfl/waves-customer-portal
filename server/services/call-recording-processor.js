@@ -2947,9 +2947,14 @@ const CallRecordingProcessor = {
     // Quote signals ride the same extractions. Resolved once here — used by the
     // advisory triage below, the customer_properties persistence, the lead
     // enrichment, and the booking's lead-conversion decision.
-    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2Result?.extraction);
+    // Canonical writes (property records, quote routing, lead enrichment) only
+    // trust a V2 extraction that passed schema validation — a schema_failed
+    // payload is still stored raw for audit (ai_extraction_enriched, triage
+    // payloads) but must not drive customer/lead side effects.
+    const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
-      resolveCallQuoteSignals(extracted, v2Result?.extraction);
+      resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
@@ -2984,7 +2989,7 @@ const CallRecordingProcessor = {
         // Unit/line2 isn't in the legacy extraction or flatView's flat map, so
         // pull it from the V2 service_address when present — otherwise Unit A and
         // Unit B at one building collapse to the same address key.
-        const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
+        const callUnit = extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
         const { addressKey, streetKey, unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
         // When the multi-property table is live, an address already recorded there
         // (the primary OR a prior secondary) is NOT a new second address — don't
@@ -3067,7 +3072,7 @@ const CallRecordingProcessor = {
       try {
         const customerProperties = require('./customer-properties');
         // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
-        const callUnit = extracted.address_line2 || v2Result?.extraction?.property?.service_address?.street_line_2 || null;
+        const callUnit = extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
         // When this call is the customer's PRIMARY street but adds city/ZIP/unit
         // the records lack, complete the mirror AND the existing primary property
         // (recomputing its key) BEFORE snapshotting — otherwise the primary is
@@ -3082,7 +3087,7 @@ const CallRecordingProcessor = {
         // branch never runs once the primary exists → it would otherwise stay the
         // default owner_occupied).
         const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
-          || detectRentalSignal({ extracted, callerRelationship: v2Result?.extraction?.caller?.relationship_to_property });
+          || detectRentalSignal({ extracted, callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property });
         // The rental signal is about THIS CALL's address. ensurePrimaryProperty
         // creates the primary from customers.address_*, which can be a DIFFERENT
         // address (the customer's own home) when the call is about a secondary
@@ -3143,7 +3148,12 @@ const CallRecordingProcessor = {
             city: extraCity,
             state: extra.state || extracted.state,
             zip: extraZip,
-            occupancyType: (extra.is_rental || isRental) ? 'rental_investment' : 'unknown',
+            // Occupancy is per-property: the call-level rental signal (isRental)
+            // belongs to the call's own address, not the extras — a landlord
+            // calling about a rental plus their own home must not get the home
+            // tagged rental_investment. Both extraction paths normalize a
+            // boolean is_rental onto each entry.
+            occupancyType: extra.is_rental ? 'rental_investment' : 'unknown',
             source: 'call_pipeline',
           });
         }
@@ -3593,6 +3603,39 @@ const CallRecordingProcessor = {
         }
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
+      }
+    }
+
+    // Quote promised but NO lead artifact — an established customer past the
+    // lead pipeline stages (or any other shouldCreateLead veto) can still be
+    // promised a post-call quote while booking or discussing service. The
+    // lead-path notification above never fires for them, so the promise would
+    // live only in the recording — the exact failure mode this notification
+    // exists to prevent. Surface it at the customer level instead.
+    if (callQuotePromised && !leadId && !extracted.is_spam) {
+      try {
+        const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+          .filter(Boolean)
+          .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
+        const servicesText = extracted.matched_service || extracted.requested_service || 'service discussed on the call';
+        const propertyCount = 1 + callAdditionalProps.length;
+        await require('./notification-service').notifyAdmin(
+          'lead',
+          'Quote promised on call — send it',
+          `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — no lead is tracking this promise.`,
+          {
+            link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
+            metadata: {
+              customerId: customerId || null,
+              callSid: call.twilio_call_sid,
+              quote_promised: true,
+              property_count: propertyCount,
+              no_lead: true,
+            },
+          },
+        );
+      } catch (notifyErr) {
+        logger.warn(`[call-proc] quote-promised (no-lead) admin notify failed: ${notifyErr.message}`);
       }
     }
 

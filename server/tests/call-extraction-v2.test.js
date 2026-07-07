@@ -305,6 +305,14 @@ describe('schema validation', () => {
       const { valid } = validatePersisted(data);
       expect(valid).toBe(false);
     });
+
+    test('the injected SCHEMA_VERSION validates', () => {
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      const { valid, errors } = validatePersisted(data);
+      expect(errors).toBeNull();
+      expect(valid).toBe(true);
+    });
   });
 });
 

@@ -28,8 +28,8 @@
           "description": "Foreign key to call_log.id. Server-owned — injected after model response."
         },
         "schema_version": {
-          "const": "1.0.0",
-          "description": "Schema version for format detection. Server-owned."
+          "enum": ["1.0.0", "1.1.0"],
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals) — 1.0.0 payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
