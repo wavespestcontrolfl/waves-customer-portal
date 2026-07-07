@@ -135,7 +135,7 @@ describe('track-transitions lifecycle side effects', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('on_property');
-    expect(sendTechArrived).toHaveBeenCalledWith('cust-6', 'Bryan');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-6', 'Bryan', { scheduledServiceId: 'job-6' });
     // Guard is claimed (NULL -> now()) before the send, not stamped after.
     expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
     expect(claim.update).toHaveBeenCalledWith({
@@ -245,7 +245,7 @@ describe('track-transitions lifecycle side effects', () => {
     expect(result.ok).toBe(true);
     // Name resolves from the acting tech the caller passed, not technician_id.
     expect(techLookup.where).toHaveBeenCalledWith({ id: 'tech-acting' });
-    expect(sendTechArrived).toHaveBeenCalledWith('cust-a', 'Acting Andy');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-a', 'Acting Andy', { scheduledServiceId: 'job-a' });
   });
 
   test('markOnProperty suppresses the arrival SMS on the timer-already-running path', async () => {
@@ -301,7 +301,7 @@ describe('track-transitions lifecycle side effects', () => {
     const result = await trackTransitions.markOnProperty('job-l');
 
     expect(result.ok).toBe(true);
-    expect(sendTechArrived).toHaveBeenCalledWith('cust-l', 'Lee');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-l', 'Lee', { scheduledServiceId: 'job-l' });
     expect(claim.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
   });
 
@@ -404,7 +404,7 @@ describe('track-transitions lifecycle side effects', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('on_property');
-    expect(sendTechArrived).toHaveBeenCalledWith('cust-r', 'Casey');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-r', 'Casey', { scheduledServiceId: 'job-r' });
     expect(claim.update).toHaveBeenCalledWith({
       arrival_sms_sent_at: expect.any(Date),
     });

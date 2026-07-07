@@ -422,7 +422,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId) {
       ? await db('technicians').where({ id: techId }).first('name')
       : null;
     const techName = tech?.name || 'Your Waves technician';
-    const result = await TwilioService.sendTechArrived(svc.customer_id, techName);
+    const result = await TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId });
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);

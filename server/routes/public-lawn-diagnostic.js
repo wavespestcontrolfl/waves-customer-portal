@@ -16,6 +16,12 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { scrubCustomerText, safeConditionLabel, safeCustomerSummary, lowerConfidence } = require('../services/lawn-diagnostic-report');
+const {
+  safePublicFirstName,
+  safePublicCity,
+  overallStatusLabel,
+  sanitizePricingSnapshot,
+} = require('../utils/public-report-egress');
 const { etParts } = require('../utils/datetime-et');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
@@ -47,15 +53,6 @@ function parseJson(value, fallback = {}) {
   }
 }
 
-function overallStatusLabel(score) {
-  if (score == null || score === '') return 'Reviewed';
-  const n = Number(score);
-  if (!Number.isFinite(n)) return 'Reviewed';
-  if (n >= 70) return 'Healthy';
-  if (n >= 40) return 'Keep an eye on it';
-  return 'Needs attention';
-}
-
 const CONFIDENCE_VALUES = new Set(['low', 'moderate', 'high', 'unknown']);
 const SEVERITY_VALUES = new Set(['mild', 'moderate', 'severe']);
 
@@ -73,49 +70,6 @@ function safeFindingNote(name, confidence) {
   return confidence === 'high'
     ? `We saw ${lower}.`
     : `We saw signs consistent with ${lower}.`;
-}
-
-// First name shown on the unauthenticated report. normalizeContact accepts arbitrary
-// strings, so a stale/malformed snapshot could stash a street line or "Dana Prospect
-// notes" here. Derive a single name token (letters + hyphen/apostrophe) rather than
-// trusting the regex scrub — anything else (digits, appended notes, extra words) is
-// dropped, not published.
-function safePublicFirstName(value) {
-  if (typeof value !== 'string') return null;
-  const token = value.trim().split(/\s+/)[0] || '';
-  const cleaned = token.replace(/[^\p{L}'-]/gu, '').slice(0, 40);
-  return cleaned && /\p{L}/u.test(cleaned) ? cleaned : null;
-}
-
-// SWFL service-area cities/communities (Manatee / Sarasota / Charlotte). The public
-// report greets a prospect with their city, so the field is allowlisted at egress: a
-// stored value like "Venice gate code BLUE" is not in the set and is omitted entirely,
-// rather than relying on the scrubber to catch an appended note. Cosmetic-only — an
-// unrecognized city simply doesn't render.
-const PUBLIC_CITY_ALLOWLIST = new Set([
-  // Manatee
-  'bradenton', 'bradenton beach', 'west bradenton', 'anna maria', 'holmes beach',
-  'palmetto', 'ellenton', 'parrish', 'lakewood ranch', 'myakka city', 'cortez',
-  'longboat key', 'memphis', 'whitfield', 'bayshore gardens', 'samoset', 'oneco',
-  'rubonia', 'terra ceia', 'duette',
-  // Sarasota
-  'sarasota', 'south sarasota', 'sarasota springs', 'gulf gate estates', 'gulf gate',
-  'fruitville', 'bee ridge', 'vamo', 'southgate', 'kensington park', 'the meadows',
-  'lake sarasota', 'venice', 'north venice', 'south venice', 'venice gardens',
-  'nokomis', 'osprey', 'siesta key', 'laurel', 'englewood', 'north port', 'plantation',
-  'warm mineral springs',
-  // Charlotte
-  'punta gorda', 'port charlotte', 'charlotte harbor', 'rotonda', 'rotonda west',
-  'cleveland', 'harbour heights', 'solana', 'grove city', 'placida', 'cape haze',
-  'manasota key',
-]);
-
-function safePublicCity(value) {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, ' ');
-  if (!PUBLIC_CITY_ALLOWLIST.has(normalized)) return null;
-  // Title-case the allowlisted value for display (the set is the only source of truth).
-  return normalized.replace(/\b\p{L}/gu, (ch) => ch.toUpperCase());
 }
 
 // safeConditionLabel (the allowlist that maps any stored finding name → a fixed
@@ -233,6 +187,9 @@ function buildPublicLawnReport(diagnostic = {}) {
       .map((name) => `We'll keep an eye on ${name.toLowerCase()} and how it responds.`),
     // Server-generated from the report's creation month — never client free text.
     seasonal_context: serverSeasonalNote(diagnostic.created_at),
+    // Server-computed at claim time by the pricing engine (funnel reports only;
+    // tech-sent reports have no snapshot and emit null). Re-clamped at egress.
+    pricing: sanitizePricingSnapshot(parseJson(diagnostic.pricing_snapshot, null)),
   };
 }
 
@@ -289,6 +246,17 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     setPrivacyHeaders(res);
     const row = await loadSentDiagnostic(req.params.token);
     if (!row) return res.status(404).json({ error: 'Report not found' });
+    // Funnel-stage stamp: first successful report view. Intentionally
+    // fire-and-forget (void, .catch attached) — a metrics write must never
+    // add latency or failure to the customer's report load; the guarded
+    // update makes concurrent first views idempotent.
+    if (!row.report_first_viewed_at) {
+      void db('lawn_diagnostics')
+        .where({ id: row.id })
+        .whereNull('report_first_viewed_at')
+        .update({ report_first_viewed_at: db.fn.now() })
+        .catch((err) => logger.warn(`[public-lawn-diagnostic] view stamp failed: ${err.message}`));
+    }
     // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
     // This route only serves the live customer view, which always renders glass.
     return res.json({
@@ -367,6 +335,11 @@ router.post('/:token/quote-request', quoteLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+// Named export for the lawn-assessment funnel route (routes/public-lawn-assessment.js),
+// which builds its teaser from the SAME egress allowlist so the pre-capture
+// payload can never be more permissive than the full report. (Same route-module
+// cross-export precedent as property-lookup-v2's performPropertyLookup.)
+module.exports.buildPublicLawnReport = buildPublicLawnReport;
 module.exports._test = {
   FULL_TOKEN_RE,
   buildPublicLawnReport,
