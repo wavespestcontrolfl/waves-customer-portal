@@ -123,6 +123,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     else setSelected(new Set(sorted.map(s => s.id)));
   };
 
+  // A checked waive must never outlive the selection it was decided for:
+  // Clear, deselecting the last row, and Apply all empty the selection and
+  // drop the flag here (Apply also resets it explicitly on success).
+  useEffect(() => {
+    if (selected.size === 0) setBulkWaiveCardHoldFee(false);
+  }, [selected]);
+
   const executeBulkAction = async () => {
     if (!bulkAction || selected.size === 0) return;
     setBulkBusy(true);
@@ -218,7 +225,8 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
         <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white rounded-sm text-12">
           <span className="u-nums font-medium">{selected.size} selected</span>
           <span className="text-zinc-500">·</span>
-          <select value={bulkAction} onChange={e => setBulkAction(e.target.value)}
+          <select value={bulkAction}
+            onChange={e => { setBulkAction(e.target.value); setBulkWaiveCardHoldFee(false); }}
             className="text-12 px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600">
             <option value="">Choose action…</option>
             <option value="reassign">Reassign tech</option>
