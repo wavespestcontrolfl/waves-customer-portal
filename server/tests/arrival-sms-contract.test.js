@@ -209,7 +209,7 @@ describe('arrival SMS funnel — markOnProperty fires through one self-serializi
     await trackTransitions.markOnProperty('job-1', { actingTechId: 'tech-acting' });
 
     expect(techLookup.where).toHaveBeenCalledWith({ id: 'tech-acting' });
-    expect(sendTechArrived).toHaveBeenCalledWith('cust-1', 'Acting Andy');
+    expect(sendTechArrived).toHaveBeenCalledWith('cust-1', 'Acting Andy', { scheduledServiceId: 'job-1' });
   });
 
   test('race-loser for an already-on_property job still funnels the send', async () => {
