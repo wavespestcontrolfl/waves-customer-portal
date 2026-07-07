@@ -41,9 +41,12 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'orderBy',
     'select',
     'forUpdate',
+    'leftJoin',
+    'whereRaw',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
+  q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
   q.where = jest.fn((arg) => {
     if (typeof arg === 'function') arg.call(q);
     return q;
@@ -1076,15 +1079,315 @@ describe('reversePendingWindowCompletionCredits (refund claw-back)', () => {
     expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: -100 }), db);
   });
 
-  test('an exhausted balance is never pulled negative — shortfall is logged for operator follow-up', async () => {
+  test('an exhausted balance is never pulled negative — a zero-delta marker row still records the reversal as handled', async () => {
+    const markerInsert = query();
     setDbQueues({
       customers: [query({ first: { id: 'customer-1', account_credits: 0 } })],
-      customer_credit_ledger: [query({ rows: [creditRow] }), query({ rows: [] })],
+      customer_credit_ledger: [query({ rows: [creditRow] }), query({ rows: [] }), markerInsert],
     });
 
     const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM);
 
     expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+    // Refund syncs replay (Stripe/admin retries): without a dedupe marker a
+    // later retry — running after UNRELATED credit lands — would claw the
+    // spent slice out of that new balance. The zero-delta row is the marker.
+    expect(markerInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'customer-1',
+      delta: 0,
+      balance_after: 0,
+      created_by: 'system:annual_prepay_pending_completion_reversal',
+      note: expect.stringContaining('(term term-1, visit svc-done)'),
+    }));
+  });
+
+  test('the zero-delta marker row blocks the claw-back on a replayed refund sync after new credit lands', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 250 } })],
+      customer_credit_ledger: [
+        query({ rows: [creditRow] }),
+        query({ rows: [{ note: "Annual prepay refunded — the visit's pending-completion credit was already spent; nothing reversed, operator follow-up needed (term term-1, visit svc-done)" }] }),
+      ],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM);
+
+    expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+});
+
+describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
+  const InvoiceService = require('../services/invoice');
+  const { postCreditMovement } = require('../services/customer-credit');
+
+  // The Customer 360 "record annual prepay" flow marks the invoice paid BEFORE
+  // creating the term, so the term is born active and never passes through
+  // syncTermForInvoicePayment — creation itself must run the pending-window
+  // reconcile or completed covered visits stay double-billed.
+  const TERM = {
+    id: 'term-1',
+    customer_id: 'customer-1',
+    status: 'active',
+    prepay_amount: 400,
+    term_start: '2026-06-15',
+    term_end: '2027-06-15',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+    coverage_cadence: 'quarterly',
+  };
+  const visitRows = [
+    { id: 'svc-done', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'completed', prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
+    { id: 's2', customer_id: 'customer-1', scheduled_date: '2026-09-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+    { id: 's3', customer_id: 'customer-1', scheduled_date: '2026-12-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+    { id: 's4', customer_id: 'customer-1', scheduled_date: '2027-03-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockReset();
+    postCreditMovement.mockReset();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('a term inserted already ACTIVE reconciles its pending-window completions (Customer 360 record-prepay path)', async () => {
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: {} }), // annualPrepayColumns
+        query({ first: undefined }), // existing-term lookup (customer + window)
+        query({ returning: [TERM] }), // insert
+        query({ first: TERM }), // refreshTermSnapshot term read
+        query({ returning: [TERM] }), // refreshTermSnapshot snapshot update
+      ],
+      scheduled_services: [
+        // Minimal column set: seeding/attach/stamp machinery no-ops, which
+        // isolates the creation → reconcile hand-off under test.
+        query({ columnInfo: { scheduled_date: {}, service_type: {} } }),
+        query({ rows: visitRows }), // ensureCoverageRowsForTerm existing-rows read
+        query({ rows: visitRows }), // refreshTermSnapshot covered-rows read
+        query({ rows: visitRows }), // reconcile coverage read
+      ],
+      invoices: [
+        query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } }),
+      ],
+      customers: [
+        query({ columnInfo: {} }), // syncCustomerRenewalDate column probe (no renewal column)
+        query({ first: { id: 'customer-1' } }), // credit-path row lock
+      ],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    const created = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-1',
+      termStart: '2026-06-15',
+      coverageServiceType: 'Quarterly Pest Control',
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
+      prepayAmount: 400,
+    });
+
+    expect(created).toEqual(TERM);
+    // The completed pending-window visit's PAID invoice slice came back as
+    // account credit — proof the reconcile ran at creation time.
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: 100,
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion',
+    }), db);
+  });
+
+  test('inside a caller transaction the born-paid reconcile defers to AFTER commit (settle leg opens its own trx)', async () => {
+    // settleInvoiceAsAnnualPrepayCovered runs on the global pool: inside the
+    // caller trx it would stamp a covered-term marker against a term row the
+    // trx hasn't committed yet (FK wait/fail, swallowed) — so creation inside
+    // a trx must defer the reconcile to trx.executionPromise.
+    let commitResolve;
+    const commitPromise = new Promise((resolve) => { commitResolve = resolve; });
+    const trx = jest.fn((table) => db(table));
+    trx.executionPromise = commitPromise;
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: {} }),
+        query({ first: undefined }),
+        query({ returning: [TERM] }),
+        query({ first: TERM }),
+        query({ returning: [TERM] }),
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {}, service_type: {} } }),
+        query({ rows: visitRows }),
+        query({ rows: visitRows }),
+        query({ rows: visitRows }),
+      ],
+      invoices: [
+        query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } }),
+      ],
+      customers: [
+        query({ columnInfo: {} }),
+        query({ first: { id: 'customer-1' } }),
+      ],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    const created = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-1',
+      termStart: '2026-06-15',
+      coverageServiceType: 'Quarterly Pest Control',
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
+      prepayAmount: 400,
+      conn: trx,
+    });
+
+    expect(created).toEqual(TERM);
+    // Still inside the caller transaction: nothing settled/credited yet.
+    expect(postCreditMovement).not.toHaveBeenCalled();
+
+    commitResolve();
+    await new Promise((resolve) => { setImmediate(resolve); });
+
+    // After commit the reconcile ran on the GLOBAL pool, not the caller trx.
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: 100,
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion',
+    }), db);
+  });
+});
+
+describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics)', () => {
+  const { postCreditMovement } = require('../services/customer-credit');
+
+  const DECIDED_TERM = {
+    id: 'term-1',
+    customer_id: 'customer-1',
+    status: 'renewed',
+    prepay_amount: 400,
+    term_start: '2026-06-15',
+    term_end: '2027-06-15',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+  };
+  const visitRows = [
+    { id: 'svc-done', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'completed', prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
+    { id: 's2', customer_id: 'customer-1', scheduled_date: '2026-09-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+    { id: 's3', customer_id: 'customer-1', scheduled_date: '2026-12-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+    { id: 's4', customer_id: 'customer-1', scheduled_date: '2027-03-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    postCreditMovement.mockReset();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('a visit invoice paid AFTER the term renewal was decided still reconciles the slice (renewed term stays covered)', async () => {
+    // coveredTermsAsOf resolves the covering term — a decided (renewed) term
+    // is covered through term_end, so the late payment still owes its slice
+    // back. The old ACTIVE_STATUSES lookup found nothing here.
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [] }), // prepay_invoice_id match — none (visit invoice)
+      ],
+      // coveredTermsAsOf opens its query on the ALIASED table name.
+      'annual_prepay_terms as t': [
+        query({ first: DECIDED_TERM }), // covering-term lookup
+      ],
+      scheduled_services: [
+        query({ first: { id: 'svc-done', annual_prepay_term_id: 'term-1' } }), // visit attach-link read
+        query({ rows: visitRows }), // reconcile coverage read
+      ],
+      invoices: [
+        query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-07-01', annual_prepay_covered_term_id: null } }),
+      ],
+      customers: [query({ first: { id: 'customer-1' } })],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment({
+      id: 'inv-visit',
+      status: 'paid',
+      paid_at: '2026-07-01',
+      scheduled_service_id: 'svc-done',
+    });
+
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: 100,
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion',
+    }), db);
+  });
+
+  test("a visit invoice resolved as 'prepaid' by the account-credit seam still reconciles (consumed credit = collected money)", async () => {
+    // invoiceTermStatus maps status='prepaid' (no paid_at) to payment_pending,
+    // so the hook must gate on the visit invoice's own collected-ness — the
+    // seam's full-coverage sync passes exactly this shape.
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [] }),
+      ],
+      'annual_prepay_terms as t': [
+        query({ first: DECIDED_TERM }),
+      ],
+      scheduled_services: [
+        query({ first: { id: 'svc-done', annual_prepay_term_id: 'term-1' } }),
+        query({ rows: visitRows }),
+      ],
+      invoices: [
+        query({ first: { id: 'inv-visit', status: 'prepaid', payment_recorded_at: null, annual_prepay_covered_term_id: null } }),
+      ],
+      customers: [query({ first: { id: 'customer-1' } })],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment({
+      id: 'inv-visit',
+      status: 'prepaid',
+      paid_at: null,
+      scheduled_service_id: 'svc-done',
+    });
+
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: 100,
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion',
+    }), db);
+  });
+
+  test('a term whose paid coverage no longer validates mints nothing (coveredTermsAsOf returns no term)', async () => {
+    // e.g. a renewed-status term whose prepay invoice was refunded: the
+    // decided status survives the refund sync, so the status alone must not
+    // gate the credit — coveredTermsAsOf's invoice/payment revalidation does.
+    const coverageLookup = query({ first: undefined }); // revalidation excludes the term
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [] }),
+      ],
+      'annual_prepay_terms as t': [coverageLookup],
+      scheduled_services: [
+        query({ first: { id: 'svc-done', annual_prepay_term_id: 'term-1' } }),
+      ],
+    });
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment({
+      id: 'inv-visit',
+      status: 'paid',
+      paid_at: '2026-07-01',
+      scheduled_service_id: 'svc-done',
+    });
+
+    // The lookup RAN (hook didn't crash) and its exclusion is what blocked the
+    // credit — not an error swallowed by the hook's best-effort catch.
+    expect(coverageLookup.first).toHaveBeenCalled();
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 });

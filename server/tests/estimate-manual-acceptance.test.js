@@ -195,6 +195,10 @@ describe('estimate manual acceptance', () => {
         recurring: {
           services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }],
         },
+        // The $99 one-time is the WaveGuard setup fee (waived on prepay) — the
+        // accept-transaction one-time guard requires the rows to PROVE the
+        // total non-billable, matching prepayBookingEligibility.
+        oneTime: { total: 99, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
       },
     };
     const { database, updates, inserts } = makeDb(estimate);
@@ -700,6 +704,72 @@ describe('estimate manual acceptance', () => {
     expect(updates[0].statusList).toEqual({ column: 'status', values: ['sent', 'viewed'] });
   });
 
+  test('a prepay_annual accept re-runs the one-time guard INSIDE the transaction (billable one-time work fails closed)', async () => {
+    // The booking preflight runs before the schedule POST and direct accepts
+    // never preflight — the claimed row itself is what must prove no billable
+    // one-time charge, or the converter mints only the recurring annual
+    // invoice and the one-time work is silently dropped.
+    const estimate = {
+      id: 'estimate-prepay-onetime',
+      status: 'viewed',
+      customer_id: 'customer-11',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '250.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+        oneTime: { items: [{ service: 'flea_treatment', name: 'Flea Treatment', price: 250 }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const converter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: converter,
+    })).rejects.toMatchObject({
+      statusCode: 422,
+      message: expect.stringContaining('one-time charge'),
+    });
+
+    expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a prepay_annual accept with only waived/discount one-time rows proceeds to conversion', async () => {
+    const estimate = {
+      id: 'estimate-prepay-ok',
+      status: 'viewed',
+      customer_id: 'customer-12',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '49.00',
+      estimate_data: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+        oneTime: { total: 49, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 }] },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const converter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-12', draftInvoiceId: 'inv-prepay' }),
+    };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: converter,
+    });
+
+    expect(converter.convertEstimate).toHaveBeenCalledWith(
+      'estimate-prepay-ok',
+      expect.objectContaining({ billingTerm: 'prepay_annual' }),
+    );
+  });
+
   test('preserves an existing lock timestamp rather than re-stamping it', async () => {
     const estimate = {
       id: 'estimate-prelocked',
@@ -957,6 +1027,8 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
       waveguard_tier: 'Bronze',
       estimate_data: {
         recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] },
+        // Setup fee row proves the $99 one-time non-billable (waived on prepay).
+        oneTime: { total: 99, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
       },
     };
     const { database } = makeDb(estimate);
@@ -1291,6 +1363,49 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     });
     expect(r.eligible).toBe(false);
     expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a residual masked by a nonbillable raw row blocks for TOP-LEVEL legacy shapes too (no result wrapper)', async () => {
+    // normalizeOneTimeBreakdown reads only wrapped shapes (result /
+    // engineResult) — for top-level estData.oneTime it returns NO items, so
+    // the synthetic one_time_adjustment the wrapped-shape check relies on
+    // never exists, while the raw rows' nonzero length also skips the no-rows
+    // total guard. The gate recomputes the residual (explicit total − rows)
+    // for the unwrapped shape and fails closed on any positive remainder.
+    const pest = { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' };
+    const r = await prepayBookingEligibility({
+      status: 'sent',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '150.00',
+      estimate_data: {
+        recurring: { services: [pest] },
+        oneTime: { total: 150, items: [{ service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -20 }] },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
+  test('a top-level legacy shape whose rows fully account for the explicit total stays eligible', async () => {
+    const pest = { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' };
+    const r = await prepayBookingEligibility({
+      status: 'sent',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '29.00',
+      estimate_data: {
+        recurring: { services: [pest] },
+        oneTime: {
+          total: 29,
+          items: [
+            { service: 'waveguard_setup', name: 'WaveGuard Setup', price: 49 },
+            { service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -20 },
+          ],
+        },
+      },
+    });
+    expect(r.eligible).toBe(true);
   });
 
   test('a positive onetime_total with NO parseable one-time rows fails closed (legacy/malformed shape)', async () => {

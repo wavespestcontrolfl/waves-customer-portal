@@ -748,6 +748,29 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
   return summary;
 }
 
+// Runs the pending-window reconcile for a term that is ACTIVE at
+// creation/refresh time (born already paid). The reconcile's settle leg
+// (settleInvoiceAsAnnualPrepayCovered) opens its own global-pool transaction
+// and Stripe PI triage, so INSIDE a caller transaction it would stamp
+// annual_prepay_covered_term_id against a term row that transaction hasn't
+// committed yet — the FK check blocks/fails, the error is swallowed, and the
+// covered visit invoice stays collectible. Defer to after the caller's commit
+// (trx.executionPromise, the dispatch-alerts pattern); a rollback drops the
+// work along with the term. On the global pool it runs inline.
+function reconcileBornPaidTerm(term, conn) {
+  if (conn === db) return reconcilePendingWindowCompletions(term, db);
+  if (conn?.executionPromise) {
+    conn.executionPromise
+      .then(() => reconcilePendingWindowCompletions(term, db))
+      .catch(() => {}); // rolled back — the term never existed
+    return Promise.resolve({ settled: 0, credited: 0, deferred: true });
+  }
+  // No commit hook on this connection (test harness?). The reconcile is
+  // idempotent and re-validates every row live, so run it on the pool.
+  logger.warn(`[annual-prepay] caller trx has no executionPromise — running born-paid reconcile inline for term ${term?.id}`);
+  return reconcilePendingWindowCompletions(term, db);
+}
+
 // Refunding/voiding the annual prepay invoice must also claw back any
 // pending-window completion credits it issued — the refund returns the FULL
 // annual, so a kept visit-slice credit would refund that slice twice.
@@ -790,19 +813,19 @@ async function reversePendingWindowCompletionCredits(term, conn = db, { visitId 
         const reverseAmount = Math.min(balance, creditAmount);
         if (!(reverseAmount > 0)) {
           logger.warn(`[annual-prepay] pending-completion credit ${marker} not reversible — balance exhausted (customer ${term.customer_id}); operator follow-up needed`);
-          // Still write the dedupe marker: refund syncs replay (Stripe/admin
-          // retries), and without a reversal row carrying this marker a later
-          // retry — after the customer receives unrelated account credit —
-          // would claw back the already-spent credit from that new balance.
-          // postCreditMovement rejects zero deltas, so record the 0-delta
-          // marker row directly (no balance movement).
+          // The dedupe row must still be written: refund syncs replay (Stripe
+          // webhook retries, admin re-records), and without a marker a later
+          // retry that runs AFTER unrelated credit lands would claw this
+          // already-spent slice out of that new balance. postCreditMovement
+          // rejects zero deltas, so write the audit row directly — same trx,
+          // customer row already locked above, balance unchanged.
           await t('customer_credit_ledger').insert({
             customer_id: term.customer_id,
             delta: 0,
             balance_after: balance,
             source: 'adjustment',
             invoice_id: credit.invoice_id || null,
-            note: `Annual prepay refunded — visit's pending-completion credit ${marker} already spent; nothing reversible (operator follow-up needed)`,
+            note: `Annual prepay refunded — the visit's pending-completion credit was already spent; nothing reversed, operator follow-up needed ${marker}`,
             created_by: PENDING_COMPLETION_REVERSAL_BY,
           });
           continue;
@@ -1162,7 +1185,15 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   //     the slice credit issued for that paid visit reverses: the annual's
   //     slice becomes the visit's payment again (matching the never-billed
   //     branch). Without this the customer keeps the credit AND the refund.
-  if (!terms.length && (nextStatus === 'active' || nextStatus === 'cancelled')) {
+  // The account-credit seam resolves a fully credit-covered visit invoice as
+  // 'prepaid' with NO paid_at — invoiceTermStatus maps that to payment_pending,
+  // but consumed account credit IS money collected for the visit (the same rule
+  // reconcilePendingWindowCompletions applies via paidForVisit), so it takes
+  // the PAID direction here. Coverage-settled 'prepaid' invoices are harmless
+  // re-entries: the reconcile skips rows carrying a covered-term marker.
+  const visitCollected = nextStatus === 'active'
+    || String(invoice.status || '').toLowerCase() === 'prepaid';
+  if (!terms.length && (visitCollected || nextStatus === 'cancelled')) {
     try {
       const withLink = invoice.scheduled_service_id !== undefined
         ? invoice
@@ -1173,22 +1204,17 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           .where({ id: visitId })
           .first('id', 'annual_prepay_term_id');
         if (visitRow?.annual_prepay_term_id) {
-          if (nextStatus === 'active') {
-            // Covered-status semantics, matching the coverage checks: a term
-            // that has already decided its renewal (renewed / switch_plan, or
-            // a lapse — cancelled WITH a renewal_decision) stays paid-covered
-            // through term_end, so a visit invoice that resolves paid this
-            // late must still get its slice credited. A true void/refund
-            // (cancelled, no decision) stays excluded.
-            const coveringTerm = await conn('annual_prepay_terms')
-              .where({ id: visitRow.annual_prepay_term_id })
-              .where(function covered() {
-                this.whereIn('status', COVERED_STATUSES)
-                  .orWhere(function lapsed() {
-                    this.where('status', 'cancelled').whereNotNull('renewal_decision');
-                  });
-              })
-              .first('*');
+          if (visitCollected) {
+            // Covered-coverage semantics, not just ACTIVE_STATUSES: a term
+            // whose renewal was already decided (renewed / switch_plan, or a
+            // lapse still inside its paid window) stays covered through
+            // term_end, and a visit invoice paid late — after the decision —
+            // still owes its slice back. coveredTermsAsOf also revalidates
+            // the prepay invoice/payment isn't void/refunded, so a refunded
+            // term that kept its decided status can never mint a credit here.
+            const coveringTerm = await coveredTermsAsOf(conn, null)
+              .where('t.id', visitRow.annual_prepay_term_id)
+              .first('t.*');
             if (coveringTerm) await reconcilePendingWindowCompletions(coveringTerm, conn);
           } else {
             const coveringTerm = await conn('annual_prepay_terms')
@@ -1473,13 +1499,14 @@ async function createTermForAnnualPrepay({
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
       await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
-      // A term can be refreshed already-paid (Customer 360 "record annual
-      // prepay" marks the invoice paid BEFORE creating the term), so it never
-      // passes through syncTermForInvoicePayment's pending→active transition
-      // and its reconcile. Run the same pending-window reconcile here —
-      // covered visits that completed and billed per application before this
-      // point would otherwise be paid twice. Idempotent, safe on re-runs.
-      await reconcilePendingWindowCompletions(refreshed, conn);
+      // A term that is ACTIVE here was born (or re-anchored) already paid —
+      // the Customer 360 flow records the invoice payment BEFORE creating the
+      // term, so syncTermForInvoicePayment never fires for it and its
+      // pending-window completed visits would stay double-billed. Run the
+      // same reconcile the payment sync runs (post-commit when inside a
+      // caller trx); idempotent, so terms that DID arrive through the
+      // payment sync are unaffected.
+      await reconcileBornPaidTerm(refreshed, conn);
     }
     return refreshed;
   }
@@ -1511,11 +1538,11 @@ async function createTermForAnnualPrepay({
   const refreshed = await refreshTermSnapshot(term.id, conn);
   if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
     await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
-    // Born-already-paid term (invoice marked paid before creation — the
-    // Customer 360 record-annual-prepay flow): the payment-sync reconcile
-    // never fires for it, so settle/credit covered visits that completed and
-    // billed before this point. Idempotent.
-    await reconcilePendingWindowCompletions(refreshed, conn);
+    // Born already paid (Customer 360 records the payment before creating the
+    // term), so the payment sync's reconcile never fires for this term — run
+    // it here (post-commit when inside a caller trx) or its pending-window
+    // completed visits stay double-billed.
+    await reconcileBornPaidTerm(refreshed, conn);
   }
   return refreshed;
 }

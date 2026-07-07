@@ -142,6 +142,75 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   return Math.round(Math.max(0, total - depositCredit) * 100) / 100;
 }
 
+// True when the quote carries a one-time charge (listed or residual) that a
+// prepay_annual accept would silently drop: the converter mints ONLY the
+// recurring annual prepay invoice, and manual/one-step accepts run with
+// skipAutoSchedule, so a billable one-time line ends up neither scheduled nor
+// invoiced while the whole estimate is marked accepted — sold work dropped.
+// isNonBillableOneTimeRow (NOT isBillableOneTimeInvoiceItem) is the predicate:
+// a POSITIVE one_time_adjustment row is a real residual charge and must block,
+// while discounts/inspections and the WaveGuard setup prepay waives don't.
+// Fail-closed throughout: a positive one-time total whose rows can't be parsed
+// (or don't account for it) is not proven non-billable (money). Shared by the
+// booking/modal preflight (prepayBookingEligibility) AND the accept
+// transaction itself, so a quote edit racing the preflight — or a caller that
+// never preflights — can't slip a billable one-time line through.
+function manualPrepayBlockingOneTimeCharge(estimate = {}) {
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  try {
+    const {
+      acceptanceServiceLists,
+      isNonBillableOneTimeRow,
+      normalizeOneTimeBreakdown,
+    } = require('../routes/estimate-public');
+    const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
+    if (oneTimeRows.some((row) => !isNonBillableOneTimeRow(row))) return true;
+    // The raw-rows list masks the residual: when ANY raw one-time row exists,
+    // acceptanceServiceLists never consults normalizeOneTimeBreakdown, which
+    // is what synthesizes the positive one_time_adjustment for
+    // oneTime.total − rows. A nonbillable raw row plus a positive residual
+    // would pass the check above — re-check the normalized breakdown too.
+    const normalizedRows = normalizeOneTimeBreakdown(data)?.items || [];
+    if (normalizedRows.some((row) => !isNonBillableOneTimeRow(row))) return true;
+    // normalizeOneTimeBreakdown reads only WRAPPED shapes (result /
+    // engineResult); for legacy top-level estData.oneTime it returns NO items,
+    // so the synthetic residual row the check above depends on never exists —
+    // while acceptanceServiceLists DOES surface the raw top-level rows, whose
+    // nonzero length also skips the no-rows total guard below. Recompute the
+    // residual for the unwrapped shape: an explicit one-time total the
+    // parseable raw rows (plus the prepay-waived membership fee, which the
+    // wrapped path accounts for via its synthesized waveguard_setup row) don't
+    // fully cover is an unproven billable charge.
+    const wrapped = (data?.result && typeof data.result === 'object')
+      || (data?.engineResult && typeof data.engineResult === 'object');
+    if (!wrapped && oneTimeRows.length) {
+      const oneTime = data?.oneTime && typeof data.oneTime === 'object' ? data.oneTime : {};
+      const nestedOneTime = data?.results?.oneTime && typeof data.results.oneTime === 'object'
+        ? data.results.oneTime
+        : {};
+      const explicitTotal = [oneTime.total, nestedOneTime.total, estimate.onetime_total]
+        .map((value) => Number(value))
+        .find((value) => Number.isFinite(value));
+      if (Number.isFinite(explicitTotal)) {
+        let accounted = 0;
+        for (const row of oneTimeRows) {
+          const amount = Number(row?.priceAfterDiscount ?? row?.totalAfterDiscount
+            ?? row?.price ?? row?.amount ?? row?.total);
+          if (!Number.isFinite(amount)) return true;
+          accounted += amount;
+        }
+        const membershipFee = Number(oneTime.membershipFee ?? nestedOneTime.membershipFee);
+        if (Number.isFinite(membershipFee) && membershipFee > 0) accounted += membershipFee;
+        if (explicitTotal - accounted > 0.01) return true;
+      }
+    }
+    if (!oneTimeRows.length && !normalizedRows.length && asMoneyOrNull(estimate.onetime_total)) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 // Can this estimate be accepted as annual prepay WHILE booking (the Schedule
 // modal's one-step prepay), and may the modal offer it? Mirrors every guard
 // markEstimateManuallyAccepted enforces for billingTerm='prepay_annual' — so
@@ -172,59 +241,7 @@ async function prepayBookingEligibility(estimate = {}) {
   if (!hasManualAnnualPrepayRecurringRows(estimate)) return ineligible('no_recurring_rows');
   if (!isManualAnnualPrepayEligibleServiceMix(estimate)) return ineligible('ineligible_mix');
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
-  // One-step prepay books ONLY the recurring series and the accept runs with
-  // skipAutoSchedule — a billable quoted one-time line would end up neither
-  // scheduled nor invoiced (the converter mints just the recurring annual
-  // prepay invoice) while the whole estimate is marked accepted: sold work
-  // silently dropped. isNonBillableOneTimeRow (NOT
-  // isBillableOneTimeInvoiceItem) is the predicate: a POSITIVE
-  // one_time_adjustment row is a real residual charge and must block, while
-  // discounts/inspections and the WaveGuard setup prepay waives don't. A
-  // positive onetime_total whose rows can't be parsed at all is likewise not
-  // proven non-billable — legacy/malformed shapes fail closed too (money).
-  try {
-    const {
-      acceptanceServiceLists,
-      isNonBillableOneTimeRow,
-      normalizeOneTimeBreakdown,
-    } = require('../routes/estimate-public');
-    const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
-    if (oneTimeRows.some((row) => !isNonBillableOneTimeRow(row))) return ineligible('one_time_items');
-    // The raw-rows list masks the residual: when ANY raw one-time row exists,
-    // acceptanceServiceLists never consults normalizeOneTimeBreakdown, which
-    // is what synthesizes the positive one_time_adjustment for
-    // oneTime.total − rows. A nonbillable raw row plus a positive residual
-    // would pass the check above — re-check the normalized breakdown too.
-    const normalizedRows = normalizeOneTimeBreakdown(data)?.items || [];
-    if (normalizedRows.some((row) => !isNonBillableOneTimeRow(row))) return ineligible('one_time_items');
-    if (!oneTimeRows.length && !normalizedRows.length && asMoneyOrNull(estimate.onetime_total)) return ineligible('one_time_items');
-    // Legacy TOP-LEVEL shapes (estData.oneTime with no result/engineResult
-    // wrapper): acceptanceServiceLists reads the raw rows but
-    // normalizeOneTimeBreakdown only reads wrapped shapes, so the synthetic
-    // positive one_time_adjustment (oneTime.total − rows) is never
-    // materialized and the onetime_total guard above is skipped because raw
-    // rows exist. Recompute that residual here and fail closed on a positive
-    // remainder — a billable one-time charge must never be silently dropped.
-    if (oneTimeRows.length && !normalizedRows.length) {
-      const topLevelOneTime = data?.oneTime && typeof data.oneTime === 'object' ? data.oneTime : null;
-      const declaredTotal = asMoneyOrNull(topLevelOneTime?.total) ?? asMoneyOrNull(estimate.onetime_total);
-      if (declaredTotal != null) {
-        const rowSum = oneTimeRows.reduce((sum, row) => {
-          // Same amount semantics as normalizeOneTimeBreakdown: discounted
-          // value wins when present, negatives keep their raw price.
-          const rawPrice = Number(row.price ?? row.amount ?? row.total);
-          const discounted = Number(row.priceAfterDiscount ?? row.totalAfterDiscount);
-          const amount = Number.isFinite(rawPrice) && rawPrice < 0
-            ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : rawPrice)
-            : (Number.isFinite(discounted) ? discounted : rawPrice);
-          return sum + (Number.isFinite(amount) ? amount : 0);
-        }, 0);
-        if (declaredTotal - rowSum > 0.005) return ineligible('one_time_items');
-      }
-    }
-  } catch {
-    return ineligible('one_time_items');
-  }
+  if (manualPrepayBlockingOneTimeCharge(estimate)) return ineligible('one_time_items');
   const units = EstimateConverter.annualPrepayRecurringUnitCount(data);
   if (units !== 1) return ineligible(units > 1 ? 'multi_service' : 'no_recurring_rows');
   return { eligible: true, invoiceTotal: await annualPrepayInvoiceTotalForEstimate(estimate), reason: null };
@@ -493,6 +510,22 @@ async function markEstimateManuallyAccepted({
           skipSetupInvoice: !annualPrepaySelected,
         };
         if (annualPrepaySelected) {
+          // Re-run the one-time guard on the row THIS transaction claimed:
+          // the booking preflight (prepayBookingEligibility) ran before the
+          // schedule POST booked, and direct accepts (estimates-page verbal
+          // prepay win) never preflight — an edit landing between preflight
+          // and here, or a direct accept on a quote with one-time work, would
+          // otherwise mark the whole estimate accepted while the converter
+          // mints only the recurring annual prepay invoice, silently dropping
+          // the billable one-time charge.
+          if (manualPrepayBlockingOneTimeCharge(updatedEstimate)) {
+            const oneTimeErr = httpError(
+              'This quote includes a billable one-time charge that an annual-prepay accept would not invoice. Remove the one-time line or convert the estimate normally first.',
+              422,
+            );
+            oneTimeErr.isOperational = true;
+            throw oneTimeErr;
+          }
           convertOptions.billingTerm = 'prepay_annual';
           convertOptions.prepayInvoiceAmount = annualPrepayAmount;
           convertOptions.autoSendInvoice = false;
