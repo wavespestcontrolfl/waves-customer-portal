@@ -35,8 +35,9 @@ npm run build
 # is missing, so a fresh SPM project produces an app with no Face ID lock at all.
 # Pin to CocoaPods until every plugin is SPM-compatible.
 if [ -d "ios/App/CapApp-SPM" ]; then
-  echo "==> 3/5  Existing project is SPM-based (drops the Face ID plugin) — regenerating with CocoaPods…"
-  rm -rf ios
+  echo "==> 3/5  Existing project is SPM-based (drops the Face ID plugin) — moving it to client/ios-spm-backup and regenerating with CocoaPods…"
+  rm -rf ios-spm-backup
+  mv ios ios-spm-backup
 fi
 if [ ! -d "ios/App" ]; then
   echo "==> 3/5  Generating native iOS project (client/ios/App)…"
