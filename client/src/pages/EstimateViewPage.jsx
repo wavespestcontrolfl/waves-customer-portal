@@ -32,7 +32,6 @@ import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
-import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
@@ -447,7 +446,10 @@ function Page({ children }) {
       <EstimateGlassTheme active />
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
-      <div style={{ flex: 1, padding: '32px 20px 110px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Bottom padding: enough that the floating book bar doesn't sit on
+          the last card, without the old 110px dead zone above the footer
+          (owner 2026-07-07: "leave a smaller gap"). */}
+      <div style={{ flex: 1, padding: '32px 20px 48px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
       {/* Standard footer on estimates too (owner 2026-07-06) — same identity/
@@ -2397,7 +2399,14 @@ export function ServiceSection({
                             fontSize: 20, fontWeight: 500, lineHeight: 1.25,
               color: '#1B2C5B', margin: '0 0 4px',
             }}>
-              Same protection — pick the rhythm that fits your home.
+              {/* The pest-branded line is pest-only — a lawn/mosquito/termite
+                  cadence selector labeled "Pest Protection" reads like the
+                  wrong quote, so every other section (incl. the synthetic
+                  'bundle' key, slug null) keeps the generic wording (codex
+                  rd3). */}
+              {sectionSlug === 'pest_control'
+                ? 'Pest Protection by Waves — ride the wave that fits your home.'
+                : 'Same protection — pick the rhythm that fits your home.'}
             </h2>
             <GlassFrequencyPills
               frequencies={frequencies}
@@ -3802,8 +3811,6 @@ export default function EstimateViewPage() {
           <GoogleProfilesCard />
         </>
       )}
-      <QuestionsEscapeHatch estimateSlug={estimate.slug} />
-
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
           slot-aware approve. Configure phase only — during slot review it
           would cover the confirm/cancel buttons. */}
