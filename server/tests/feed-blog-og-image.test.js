@@ -27,8 +27,13 @@ const PAGE_WITH_HERO = 'https://www.wavespestcontrol.com/blog/lizard-faeces-sout
 const PAGE_NO_HERO = 'https://www.wavespestcontrol.com/blog/what-are-maggots/';
 const PAGE_BAD_HOST_HERO = 'https://www.wavespestcontrol.com/blog/dog-fleas-human-hair/';
 const PAGE_WITH_MEDIA = 'https://www.wavespestcontrol.com/blog/chinch-bugs/';
+const PAGE_REDIRECT_EVIL = 'https://www.wavespestcontrol.com/blog/moved-offsite/';
+const EVIL_REDIRECT_TARGET = 'https://evil.example.com/landing';
+const PAGE_REDIRECT_OK = 'https://www.wavespestcontrol.com/blog/old-slug/';
+const PAGE_REDIRECT_TARGET = 'https://www.wavespestcontrol.com/blog/new-slug/';
 const HERO = 'https://www.wavespestcontrol.com/images/blog/lizard-faeces-southwest-florida/hero.webp';
 const MEDIA_IMG = 'https://www.wavespestcontrol.com/images/blog/chinch-bugs/hero.webp';
+const REDIRECTED_HERO = 'https://www.wavespestcontrol.com/images/blog/new-slug/hero.webp';
 
 // Mirrors the Astro hub feed shape: title/link/pubDate/description only —
 // no media:*, no enclosure, no inline <img> — except the last item, which
@@ -61,6 +66,18 @@ const FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <pubDate>Thu, 02 Jul 2026 08:00:00 GMT</pubDate>
       <description>Sunny-edge yellowing.</description>
       <media:content url="${MEDIA_IMG}" medium="image" />
+    </item>
+    <item>
+      <title>Moved Offsite</title>
+      <link>${PAGE_REDIRECT_EVIL}</link>
+      <pubDate>Wed, 01 Jul 2026 08:00:00 GMT</pubDate>
+      <description>Trusted link that redirects off-allowlist.</description>
+    </item>
+    <item>
+      <title>Renamed Post</title>
+      <link>${PAGE_REDIRECT_OK}</link>
+      <pubDate>Tue, 30 Jun 2026 08:00:00 GMT</pubDate>
+      <description>Trusted link that redirects to another trusted page.</description>
     </item>
   </channel>
 </rss>`;
@@ -114,6 +131,11 @@ const EXTERNAL_ROUTES = {
   [PAGE_WITH_HERO]: { text: `<html><head><meta property="og:image" content="${HERO}"></head></html>` },
   [PAGE_NO_HERO]: { text: '<html><head><title>no hero</title></head></html>' },
   [PAGE_BAD_HOST_HERO]: { text: '<html><head><meta property="og:image" content="https://evil.example.com/x.png"></head></html>' },
+  // Redirect hops are validated by safeLink before being followed: the
+  // off-allowlist target must never be fetched; the trusted target is.
+  [PAGE_REDIRECT_EVIL]: { status: 302, location: EVIL_REDIRECT_TARGET },
+  [PAGE_REDIRECT_OK]: { status: 301, location: PAGE_REDIRECT_TARGET },
+  [PAGE_REDIRECT_TARGET]: { text: `<html><head><meta property="og:image" content="${REDIRECTED_HERO}"></head></html>` },
   [IFAS_SARASOTA_FEED]: { text: IFAS_SARASOTA_XML },
   [IFAS_MANATEE_FEED]: { text: IFAS_MANATEE_XML },
   [SUNCOAST_FEED]: { text: SUNCOAST_XML },
@@ -140,7 +162,12 @@ beforeAll(async () => {
     externalCalls.push(u);
     const route = EXTERNAL_ROUTES[u];
     if (!route) throw new Error(`unexpected fetch: ${u}`);
-    return { ok: true, text: async () => route.text };
+    return {
+      ok: route.ok !== false && !route.status,
+      status: route.status || 200,
+      headers: { get: (n) => (String(n).toLowerCase() === 'location' ? route.location || null : null) },
+      text: async () => route.text || '',
+    };
   });
 });
 
@@ -153,7 +180,7 @@ test('blog posts missing feed images get the live page og:image; misses and untr
   const res = await fetch(`${base}/api/feed/blog`);
   expect(res.status).toBe(200);
   const { posts } = await res.json();
-  expect(posts).toHaveLength(4);
+  expect(posts).toHaveLength(6);
 
   // No feed image → resolved from the page's og:image.
   expect(posts[0].image).toBe(HERO);
@@ -164,6 +191,12 @@ test('blog posts missing feed images get the live page og:image; misses and untr
   // Feed-native media:content wins — its page must never be fetched.
   expect(posts[3].image).toBe(MEDIA_IMG);
   expect(externalCalls).not.toContain(PAGE_WITH_MEDIA);
+  // Redirect to an off-allowlist host → degrade to null WITHOUT fetching it.
+  expect(posts[4].image).toBeNull();
+  expect(externalCalls).not.toContain(EVIL_REDIRECT_TARGET);
+  // Redirect to another trusted page → followed, og:image resolved.
+  expect(posts[5].image).toBe(REDIRECTED_HERO);
+  expect(externalCalls).toContain(PAGE_REDIRECT_TARGET);
 
   // Everything else about the item contract is unchanged.
   expect(posts[0]).toMatchObject({

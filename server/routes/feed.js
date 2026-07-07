@@ -135,6 +135,28 @@ function parseItems(channel) {
 // a feed refresh costs at most one page fetch per post every 30 minutes.
 // Callers only pass links that already passed safeLink (trusted hosts only).
 const ogImageCache = {};
+
+// Follow redirects manually so every hop stays on the safeLink allowlist —
+// a trusted publisher must not be able to bounce the server to an arbitrary
+// (or internal) host via a redirect. Off-allowlist hops resolve to null.
+const MAX_OG_REDIRECTS = 5;
+async function fetchTrustedHtml(startUrl) {
+  let url = startUrl;
+  for (let hop = 0; hop <= MAX_OG_REDIRECTS; hop++) {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      const next = location ? safeLink(new URL(location, url).toString()) : null;
+      if (!next) return null;
+      url = next;
+      continue;
+    }
+    if (!res.ok) return null;
+    return res.text();
+  }
+  return null;
+}
+
 async function resolveOgImage(link) {
   if (!link) return null;
   const now = Date.now();
@@ -142,9 +164,8 @@ async function resolveOgImage(link) {
   if (hit && (now - hit.ts) < CACHE_TTL) return hit.image;
   let image = null;
   try {
-    const res = await fetch(link, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    if (res.ok) {
-      const html = await res.text();
+    const html = await fetchTrustedHtml(link);
+    if (html) {
       const match = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
         || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
       if (match) image = safeImage(new URL(match[1], link).toString());
