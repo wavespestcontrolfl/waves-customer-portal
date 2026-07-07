@@ -53,6 +53,11 @@ describe('countUpcomingSeriesVisits', () => {
     expect(conn.calls).toContainEqual(['whereIn', 'status', ['pending', 'confirmed']]);
     // Boosters excluded: base series only.
     expect(conn.calls).toContainEqual(['where', 'is_recurring', true]);
+    // Stale rows whose date passed without completing are not "ahead" —
+    // they must not suppress auto-extends or plan-ending alerts.
+    const dateCutoff = conn.calls.find(([n, col, op]) => n === 'where' && col === 'scheduled_date' && op === '>=');
+    expect(dateCutoff).toBeDefined();
+    expect(dateCutoff[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     // Parent row + children scoped to the series.
     const scoped = conn.calls.find(([n, kind]) => n === 'where' && kind === 'fn');
     expect(scoped[2]).toContainEqual(['where', 'recurring_parent_id', 'parent-1']);

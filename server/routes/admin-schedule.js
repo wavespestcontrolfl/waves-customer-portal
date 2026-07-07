@@ -579,12 +579,16 @@ const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed'];
 
 // Count the still-upcoming visits of a BASE recurring series. Boosters share
 // recurring_parent_id but live on the calendar with is_recurring=false —
-// without that filter they inflate the count and block auto-extend.
+// without that filter they inflate the count and block auto-extend. Only
+// today-or-later dates count: a stale pending/confirmed row whose date
+// passed without completing (the stuck-visit ops leak) is not a visit
+// "ahead" and must not suppress auto-extends or plan-ending alerts.
 async function countUpcomingSeriesVisits(conn, parentId) {
   const row = await conn('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .whereIn('status', UPCOMING_VISIT_STATUSES)
     .where('is_recurring', true)
+    .where('scheduled_date', '>=', etDateString())
     .count('* as c')
     .first();
   return parseInt(row?.c || 0, 10);

@@ -47,7 +47,7 @@ function makeQuery(updateResult = 0) {
     }
     return name === 'update' ? Promise.resolve(updateResult) : q;
   };
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'modify', 'update']
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify', 'update']
     .forEach((m) => { q[m] = record(m); });
   return { q, calls };
 }
@@ -64,7 +64,7 @@ describe('runEstimateExpiration Rule 1 extension carve-out', () => {
     await runEstimateExpiration();
   });
 
-  test('Rule 1 skips rows whose explicit expires_at is still in the future', () => {
+  test('Rule 1 skips only rows whose deadline was EXTENDED beyond the send stamp', () => {
     const grouped = rule1.calls.filter(([name, kind]) => name === 'where' && kind === 'fn');
     const carveOut = grouped.find(([, , nested]) =>
       nested.some(([n, col]) => n === 'whereNull' && col === 'expires_at'));
@@ -76,6 +76,13 @@ describe('runEstimateExpiration Rule 1 extension carve-out', () => {
     expect(orWhere[1]).toBe('expires_at');
     expect(orWhere[2]).toBe('<=');
     expect(orWhere[3]).toBeInstanceOf(Date);
+    // The standard send stamp (expires_at = send + 7d) does NOT suppress
+    // the age rule — only a deadline pushed past the send window does, so
+    // tuning ESTIMATE_EXPIRATION_DAYS below 7 still controls normal sends.
+    const orRaw = nested.find(([n]) => n === 'orWhereRaw');
+    expect(orRaw).toBeDefined();
+    expect(orRaw[1]).toContain('sent_at');
+    expect(orRaw[2]).toEqual([7]);
   });
 
   test('Rule 1 still ages out on sent_at for rows without a live deadline', () => {
