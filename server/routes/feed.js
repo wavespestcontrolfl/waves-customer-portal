@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
+const localNewsStore = require('../services/local-news-store');
 
 router.use(authenticate);
 
@@ -317,21 +318,69 @@ router.get('/local', async (req, res, next) => {
       return RELEVANT_KEYWORDS.test(text) && !EXCLUDE_KEYWORDS.test(text);
     });
 
-    // Feeds arrive per-source in their own order; interleave newest-first.
-    relevant.sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
-
-    const posts = await Promise.all(relevant.slice(0, 5).map(async item => {
-      const link = safeLink(item.link) || '';
-      return {
+    // Normalize to candidate records. Items without a trusted link can't be
+    // banked (link is the dedupe key) and the client hides linkless cards
+    // anyway, so drop them here.
+    const candidates = [];
+    const seenLinks = new Set();
+    for (const item of relevant) {
+      const link = safeLink(item.link);
+      if (!link || seenLinks.has(link)) continue;
+      seenLinks.add(link);
+      const parsed = new Date(item.pubDate || Date.now());
+      candidates.push({
         title: item.title || '',
         link,
-        pubDate: item.pubDate || '',
+        // Unparseable pubDate → treat as "seen now" rather than epoch, so
+        // the story neither fake-tops the card nor instantly prunes.
+        pubDate: Number.isNaN(parsed.getTime()) ? new Date() : parsed,
         description: stripHtml(item.description || '').slice(0, 150),
-        image: extractImage(item) || await resolveOgImage(link),
-        source: 'local',
+        image: extractImage(item),
         sourceName: item._source,
-      };
-    }));
+      });
+    }
+    // Feeds arrive per-source in their own order; interleave newest-first.
+    candidates.sort((a, b) => b.pubDate - a.pubDate);
+
+    // Bank new arrivals, then serve the newest stories ever seen — feeds
+    // only carry each publisher's latest items, so without the bank the
+    // card drains back to empty as stories rotate out. og:image resolves
+    // once, at ingest, and only for genuinely new links.
+    let posts = null;
+    try {
+      const fresh = new Set(await localNewsStore.newLinks(candidates.map(c => c.link)));
+      const arrivals = candidates.filter(c => fresh.has(c.link)).slice(0, 12);
+      await Promise.all(arrivals.map(async item => {
+        item.image = item.image || await resolveOgImage(item.link);
+      }));
+      await localNewsStore.insertItems(arrivals);
+      const rows = await localNewsStore.latestItems(5);
+      posts = rows.map(row => ({
+        title: row.title,
+        link: row.link,
+        pubDate: new Date(row.pub_date).toUTCString(),
+        description: row.description || '',
+        image: row.image || null,
+        source: 'local',
+        sourceName: row.source_name,
+      }));
+    } catch (err) {
+      // Table missing / DB unreachable: degrade to serving this fetch's
+      // items directly (the pre-bank behavior) — never a 500.
+      logger.warn(`[feed] local news store unavailable: ${err.message}`);
+    }
+
+    if (!posts) {
+      posts = await Promise.all(candidates.slice(0, 5).map(async c => ({
+        title: c.title,
+        link: c.link,
+        pubDate: c.pubDate.toUTCString(),
+        description: c.description,
+        image: c.image || await resolveOgImage(c.link),
+        source: 'local',
+        sourceName: c.sourceName,
+      })));
+    }
 
     res.json({ posts });
   } catch (err) { next(err); }

@@ -19,6 +19,13 @@ jest.mock('../middleware/auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/newsletter-feed', () => ({ getPublishedPosts: jest.fn(async () => []) }));
+// No DB in this suite: /local degrades to serving the current fetch
+// directly (the pre-bank path this file's expectations were written for).
+jest.mock('../services/local-news-store', () => ({
+  newLinks: jest.fn(async () => { throw new Error('no db in this suite'); }),
+  insertItems: jest.fn(),
+  latestItems: jest.fn(),
+}));
 
 const express = require('express');
 

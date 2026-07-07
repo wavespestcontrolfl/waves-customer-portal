@@ -13,12 +13,41 @@
  *  - a dead source (bad URL, moved feed, 5xx) contributes zero items and
  *    never breaks the endpoint
  *  - links/images stay allowlist-bound (publisher domains + their CDNs)
+ *  - matched stories bank in local_news_items, so older posts keep the
+ *    card full after they rotate out of the upstream feeds; og:image page
+ *    fetches are spent only on genuinely new links
  */
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, res, next) => { req.customerId = 'cust-1'; next(); },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/newsletter-feed', () => ({ getPublishedPosts: jest.fn(async () => []) }));
+// In-memory stand-in for local_news_items with the real store's semantics
+// (dedupe on link, newest-first reads). Pre-seeded with a story no upstream
+// feed carries anymore — it must still appear in the response.
+jest.mock('../services/local-news-store', () => {
+  const rows = [];
+  let nextId = 1;
+  return {
+    _rows: rows,
+    newLinks: jest.fn(async (links) => links.filter((l) => !rows.some((r) => r.link === l))),
+    insertItems: jest.fn(async (items) => {
+      for (const item of items) {
+        if (rows.some((r) => r.link === item.link)) continue;
+        rows.push({
+          id: nextId++,
+          link: item.link,
+          title: item.title,
+          description: item.description,
+          image: item.image,
+          source_name: item.sourceName,
+          pub_date: item.pubDate,
+        });
+      }
+    }),
+    latestItems: jest.fn(async (limit) => [...rows].sort((a, b) => b.pub_date - a.pub_date).slice(0, limit)),
+  };
+});
 
 const express = require('express');
 
@@ -112,12 +141,28 @@ const EXTERNAL_ROUTES = {
   [SUNCOAST_PAGE]: { text: '<html><head><title>no og:image</title></head></html>' },
 };
 
+// A story banked on an earlier refresh that has since rotated out of every
+// upstream feed — the whole point of the bank is that it still renders.
+const BANKED_PAGE = 'https://www.venicegondolier.com/news/article_banked123.html';
+const BANKED_IMG = 'https://bloximages.newyork1.vip.townnews.com/venicegondolier.com/irrigation.jpg';
+
 const realFetch = global.fetch;
 let server;
 let base;
 let externalCalls;
 
 beforeAll(async () => {
+  const store = require('../services/local-news-store');
+  store._rows.push({
+    id: 999,
+    link: BANKED_PAGE,
+    title: 'Venice tightens irrigation restrictions for summer',
+    description: 'Watering days change citywide.',
+    image: BANKED_IMG,
+    source_name: 'Venice Gondolier',
+    pub_date: new Date('2026-06-20T12:00:00Z'),
+  });
+
   const a = express();
   a.use('/api/feed', require('../routes/feed'));
   server = a.listen(0);
@@ -145,33 +190,49 @@ afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-test('merges all corridor sources newest-first, tags each item with its outlet, and filters keywords across the merged set', async () => {
+test('merges all corridor sources newest-first, tags each item with its outlet, filters keywords, and keeps banked stories that left the feeds', async () => {
   const res = await fetch(`${base}/api/feed/local`);
   expect(res.status).toBe(200);
   const { posts } = await res.json();
 
   // 6 fixture items pass fetch; the restaurant item fails RELEVANT, the
   // theft and baseball items trip EXCLUDE, the Gondolier source is down →
-  // 4 survive, interleaved newest-first across sources.
+  // 4 survive, interleaved newest-first, and the pre-banked story (in no
+  // upstream feed anymore) still renders at the bottom.
   expect(posts.map((p) => [p.sourceName, p.title])).toEqual([
     ['Tampa Bay Times', 'Red tide bloom drifts toward St. Pete beaches'],
     ['Herald-Tribune', 'Hurricane season lawn prep tips for Sarasota homeowners'],
     ['Bradenton Herald', 'Palmetto expands mosquito control spraying this week'],
     ['MySuncoast', 'Red Tide Update for Sarasota'],
+    ['Venice Gondolier', 'Venice tightens irrigation restrictions for summer'],
   ]);
 
   // Every source was actually attempted, in parallel, including the dead one.
   expect(externalCalls).toEqual(expect.arrayContaining([SUNCOAST_FEED, HERALD_FEED, BRADENTON_FEED, GONDOLIER_FEED, TAMPABAY_FEED]));
 
   // Images: feed-native wins without a page fetch; image-less items resolve
-  // og:image from the (allowlisted) article page; misses degrade to null.
+  // og:image from the (allowlisted) article page at ingest; misses degrade
+  // to null; the banked story keeps its stored image without any fetch.
   expect(posts[0].image).toBe(TAMPABAY_IMG);
   expect(posts[1].image).toBe(HERALD_IMG);
   expect(externalCalls).not.toContain(HERALD_PAGE);
   expect(externalCalls).not.toContain(TAMPABAY_PAGE);
   expect(posts[2].image).toBe(BRADENTON_IMG);
   expect(posts[3].image).toBeNull();
+  expect(posts[4].image).toBe(BANKED_IMG);
+  expect(externalCalls).not.toContain(BANKED_PAGE);
 
   // All posts keep the shared /local contract.
   for (const p of posts) expect(p.source).toBe('local');
+
+  // Second request: everything is already banked — no new og:image page
+  // fetches are spent (dead feeds may retry: failures are uncached by
+  // design), and the response is stable.
+  const FEED_URLS = [SUNCOAST_FEED, HERALD_FEED, BRADENTON_FEED, GONDOLIER_FEED, TAMPABAY_FEED];
+  const pageCalls = () => externalCalls.filter((u) => !FEED_URLS.includes(u)).length;
+  const pageCallsBefore = pageCalls();
+  const res2 = await fetch(`${base}/api/feed/local`);
+  const { posts: posts2 } = await res2.json();
+  expect(posts2.map((p) => p.title)).toEqual(posts.map((p) => p.title));
+  expect(pageCalls()).toBe(pageCallsBefore);
 });
