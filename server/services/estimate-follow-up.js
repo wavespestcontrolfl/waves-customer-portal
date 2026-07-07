@@ -22,6 +22,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
@@ -157,6 +158,9 @@ function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
     service_summary: serviceSummary || "",
     property_address: est.address || "",
     price_summary: moneySummary(est),
+    // Templates render "call {{company_phone}}" lines — a missing payload
+    // value renders as an empty string in customer copy.
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     ...extra,
   };
 }
@@ -253,6 +257,9 @@ async function sendDualChannel(est, { sms, email }) {
         triggerEventId: `estimate_followup_${email.stage}:${est.id}`,
         idempotencyKey: `estimate_followup_${email.stage}:${est.id}`,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
+        // SendGrid rejection bodies can echo the recipient address — keep
+        // them out of the provider log; the catch below redacts too.
+        suppressProviderErrorLog: true,
       });
       if (result?.blocked) {
         logger.warn(
@@ -268,7 +275,7 @@ async function sendDualChannel(est, { sms, email }) {
       }
     } catch (e) {
       logger.error(
-        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${e.message}`,
+        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${EmailTemplateLibrary.redactEmailAddresses(e.message)}`,
       );
     }
   }
@@ -277,13 +284,13 @@ async function sendDualChannel(est, { sms, email }) {
 
 // 5. Deposit started but never completed (2-72h after the last pending
 // PaymentIntent). Highest-intent drop-off: the customer clicked accept and
-// reached the Stripe card form. Gated separately because it's a new
+// reached the Stripe card form. Gated separately because it's a
 // customer-facing auto-send — until GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS is
 // on, candidates are only counted in the log (shadow, no claims) so the
-// volume can be judged before any text goes out. SMS-only stage: there is no
-// email template for it, so a missing/disabled SMS template skips WITHOUT
-// claiming (nothing could send on either channel — claiming would burn the
-// stage for nothing).
+// volume can be judged before anything goes out; the gate arms BOTH
+// channels. Dual-channel like the other stages (estimate.deposit_abandoned
+// email + estimate_followup_deposit SMS); a claim requires at least one
+// deliverable leg, so nothing can silently burn the stage.
 async function checkDepositAbandoned(now = new Date()) {
   let sent = 0;
   const nowMs = now.getTime();
@@ -302,7 +309,12 @@ async function checkDepositAbandoned(now = new Date()) {
     .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
     .whereIn("estimates.status", ["sent", "viewed"])
     .whereNull("estimates.archived_at")
-    .whereNotNull("estimates.customer_phone")
+    // Channel-aware: email-only estimates are nudgeable too — they started
+    // paying through the tokened estimate page, same audience the deposit
+    // receipt email serves.
+    .where((q) =>
+      q.whereNotNull("estimates.customer_phone").orWhereNotNull("estimates.customer_email"),
+    )
     .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
     .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
     .where((q) =>
@@ -352,32 +364,68 @@ async function checkDepositAbandoned(now = new Date()) {
         continue;
       }
       const firstName = (est.customer_name || "").split(" ")[0] || "there";
-      const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-      const url = await shortenOrPassthrough(longUrl, {
-        kind: "estimate",
-        entityType: "estimates",
-        entityId: est.id,
-        customerId: est.customer_id,
-        leadId: await leadIdForEstimate(est),
-        channel: "sms",
-        purpose: "estimate_followup_deposit",
-      });
-      const smsBody = await renderTemplate("estimate_followup_deposit", {
-        first_name: firstName,
-        // Whole dollars render bare ("$49"); a refund-netted remainder with
-        // cents renders exactly ("$29.50") instead of misquoting via round.
-        deposit_amount: Number.isInteger(depositAmount)
-          ? String(depositAmount)
-          : depositAmount.toFixed(2),
-        estimate_url: url,
-      }, {
-        workflow: "estimate_follow_up",
-        entity_type: "estimate",
-        entity_id: est.id,
-      });
-      if (!smsBody) {
+      // Whole dollars render bare ("$49"); a refund-netted remainder with
+      // cents renders exactly ("$29.50") instead of misquoting via round.
+      const depositAmountText = Number.isInteger(depositAmount)
+        ? String(depositAmount)
+        : depositAmount.toFixed(2);
+      const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_deposit");
+      const smsBody = est.customer_phone
+        ? await renderTemplate("estimate_followup_deposit", {
+          first_name: firstName,
+          deposit_amount: depositAmountText,
+          estimate_url: smsUrl,
+        }, {
+          workflow: "estimate_follow_up",
+          entity_type: "estimate",
+          entity_id: est.id,
+        })
+        : null;
+      if (est.customer_phone && !smsBody) {
         logger.warn(
-          `[est-followup] estimate_followup_deposit template missing/disabled — skipping est ${est.id} without claiming`,
+          `[est-followup] estimate_followup_deposit template missing/disabled — continuing without SMS for est ${est.id}`,
+        );
+      }
+      // Portal-wide email opt-out for customer-linked estimates — the
+      // template library only enforces email_suppressions, not
+      // notification_prefs.email_enabled (same gate the welcome sender
+      // applies). Fails CLOSED: an unreadable pref means no email leg this
+      // tick; if that leaves zero legs the stage skips WITHOUT claiming and
+      // retries next tick.
+      let emailAllowed = !!est.customer_email;
+      if (emailAllowed && est.customer_id) {
+        try {
+          const prefs = await db("notification_prefs")
+            .where({ customer_id: est.customer_id })
+            .first("email_enabled");
+          if (prefs?.email_enabled === false) {
+            emailAllowed = false;
+            logger.info(
+              `[est-followup] Deposit-abandoned email leg skipped for est ${est.id} — email disabled in prefs`,
+            );
+          }
+        } catch (err) {
+          emailAllowed = false;
+          logger.warn(
+            `[est-followup] Deposit-abandoned email leg skipped for est ${est.id} — prefs unverifiable: ${err.message}`,
+          );
+        }
+      }
+      // At least one deliverable leg or skip WITHOUT claiming — a claim with
+      // zero legs would permanently mark the stage sent while sending nothing
+      // (the exact silent-skip this stage used to have).
+      const emailLeg = emailAllowed
+        ? {
+          templateKey: "estimate.deposit_abandoned",
+          stage: "deposit_abandoned",
+          payload: estimateEmailPayload(est, firstName, emailUrl, {
+            deposit_amount: depositAmountText,
+          }),
+        }
+        : null;
+      if (!smsBody && !emailLeg) {
+        logger.warn(
+          `[est-followup] Deposit-abandoned skip ${est.id}: no deliverable channel (SMS template off, no email)`,
         );
         continue;
       }
@@ -388,7 +436,10 @@ async function checkDepositAbandoned(now = new Date()) {
         continue;
       }
       claimed = true;
-      const ok = await sendDualChannel(est, { sms: smsBody });
+      const ok = await sendDualChannel(est, {
+        sms: smsBody || undefined,
+        email: emailLeg || undefined,
+      });
       if (ok) {
         await db("estimates")
           .where({ id: est.id })

@@ -12,6 +12,8 @@ let mockPriorServiceRecord = null;
 let mockDueSequences = [];
 let mockStaleSequences = [];
 let mockSmsLogProviderRow = null;
+let mockPrefsRow = null;
+let mockPrefsError = null;
 let mockClaimResults = []; // shift()ed per sms_sequences update; empty = always 1
 let mockCustomerRow = null;
 let mockScheduledServiceRow = null;
@@ -51,6 +53,10 @@ const mockDb = jest.fn((table) => {
       }
       if (table === 'sms_log') {
         return mockSmsLogProviderRow;
+      }
+      if (table === 'notification_prefs') {
+        if (mockPrefsError) throw mockPrefsError;
+        return mockPrefsRow;
       }
       return null;
     }),
@@ -103,6 +109,16 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: mockGetTemplate,
 }));
+// Email twin of the welcome: SendGrid configured so the leg runs;
+// sendTemplate captured.
+const mockSendTemplate = jest.fn(async () => ({ sent: true }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => true),
+}));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: (...args) => mockSendTemplate(...args),
+  redactEmailAddresses: (s) => String(s || ''),
+}));
 
 describe('new recurring welcome SMS', () => {
   let service;
@@ -115,6 +131,8 @@ describe('new recurring welcome SMS', () => {
     mockDueSequences = [];
     mockStaleSequences = [];
     mockSmsLogProviderRow = null;
+    mockPrefsRow = null;
+    mockPrefsError = null;
     mockClaimResults = [];
     mockCustomerRow = null;
     mockScheduledServiceRow = null;
@@ -384,7 +402,7 @@ describe('new recurring welcome SMS', () => {
       step: 0,
       metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
     }];
-    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234', email: 'ada@example.com' };
     mockScheduledServiceRow = { status: 'cancelled' };
 
     const results = await service.processDueWelcomes();
@@ -392,11 +410,162 @@ describe('new recurring welcome SMS', () => {
     expect(results.sent).toBe(0);
     expect(results.skipped).toBe(1);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    // No welcome at all for a cancelled appointment — email leg included.
+    expect(mockSendTemplate).not.toHaveBeenCalled();
     expect(mockUpdates).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'sms_sequences',
         data: expect.objectContaining({ status: 'cancelled' }),
       }),
     ]));
+  });
+
+  test('email-only customer still queues the welcome (partial caller shape re-reads the row)', async () => {
+    // Caller shape has no phone AND no email field (the appointment tagger
+    // passes only id/name/phone) — the enqueue gate must consult the
+    // customer row instead of silently skipping.
+    mockCustomerRow = { id: 'customer-1', email: 'ada@example.com' };
+    const result = await service.sendNewRecurringWelcome({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '' },
+      scheduledServiceId: 'svc-1',
+    });
+
+    expect(result).toEqual({ sent: false, queued: true });
+    expect(mockInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'sms_sequences' }),
+    ]));
+  });
+
+  test('no phone and no email skips the enqueue entirely', async () => {
+    mockCustomerRow = { id: 'customer-1', email: '' };
+    const result = await service.sendNewRecurringWelcome({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '' },
+      scheduledServiceId: 'svc-1',
+    });
+
+    expect(result).toEqual({ sent: false, skipped: true, reason: 'no_contact' });
+    expect(mockInserts).toEqual([]);
+  });
+
+  test('delivery fires the welcome email twin alongside the SMS', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(1);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Direct sender (NOT the gated automation executor); once-ever per
+    // customer via the idempotency key the draft automation row specified.
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'welcome.new_recurring',
+      to: 'ada@example.com',
+      recipientId: 'customer-1',
+      idempotencyKey: 'welcome.new_recurring:customer-1',
+      // Rejection bodies can echo the address — never let the provider log
+      // them raw.
+      suppressProviderErrorLog: true,
+      payload: expect.objectContaining({
+        first_name: 'Ada',
+        // The template's CTA renders customer_portal_url — a blank href
+        // makes renderBlocks DROP the portal button entirely.
+        customer_portal_url: expect.stringContaining('/login'),
+      }),
+    }));
+  });
+
+  test('phoneless customer with an email gets the welcome email; sequence COMPLETES via email', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+
+    const results = await service.processDueWelcomes();
+
+    // The email IS the welcome — the sequence settles as completed, and the
+    // run counts it as sent.
+    expect(results.sent).toBe(1);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'sms_sequences',
+        data: expect.objectContaining({ status: 'completed' }),
+      }),
+    ]));
+  });
+
+  test('email-only transient email failure REQUEUES instead of burning the once-ever guard', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockSendTemplate.mockRejectedValueOnce(new Error('SendGrid 503'));
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    // Claim released back to active with a pushed-out next_send_at — never
+    // cancelled: that would permanently block their only welcome channel.
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
+    const requeue = statusUpdates.find((u) => u.data.status === 'active');
+    expect(requeue.data.next_send_at).toBeInstanceOf(Date);
+  });
+
+  test('unverifiable prefs fail CLOSED: email not sent, email-only row requeued', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+    // notification_prefs lookup rejects — the sender exists to enforce the
+    // opt-out, so it must not send on an unverified pref.
+    mockPrefsError = new Error('db down');
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
+  });
+
+  test('no email on the customer: SMS-only welcome, no sendTemplate call', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true });
+
+    await service.processDueWelcomes();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 });
