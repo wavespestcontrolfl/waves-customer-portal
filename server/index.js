@@ -220,6 +220,28 @@ app.use('/api/pay/statement', (req, res, next) => {
   }
   next();
 });
+// Dark photo-assessment funnels carry the same unobservable-when-dark
+// contract: while the gate is off the surface must read 404 even for an IP
+// that already exhausted the global /api/ limiter (a 429 would reveal it).
+app.use('/api/public/lawn-assessment', (req, res, next) => {
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+app.use('/api/public/pest-identifier', (req, res, next) => {
+  // Tokenized report READS stay available while the funnel is dark — sent
+  // reports are owner-initiated communications (admin manual send), and an
+  // invalid token 404s exactly like the dark surface (see the matching
+  // carve-out in routes/public-pest-identifier.js).
+  if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -273,6 +295,29 @@ const askWavesDailyLimiter = rateLimit({
     || !/^\/message\/?$/.test(req.path)
     || !require('./config/feature-gates').isEnabled('askWaves')
     || !require('./routes/public-ai-intake').isPlausibleMessageBody(req.body),
+});
+// Photo-assessment lead magnets (lawn-assessment + pest-identifier): each
+// accepted /analyze is a paid dual-model vision call, so both funnels share one
+// daily ceiling on top of their 5/hr in-route limiters — same spend rationale
+// as paidEstimatorDailyLimiter. Counts ONLY POSTs to /analyze with the owning
+// feature gate on; claim submits, tokenized report reads, and dark-launch
+// probes while the gate is off resolve without a model call and never burn the
+// paid budget for a shared/NAT'd IP.
+const photoAssessmentDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 40,
+  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
+  keyGenerator: rateLimitKey,
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || req.method !== 'POST'
+    || !/^\/analyze\/?$/.test(req.path)
+    || !require('./config/feature-gates').isEnabled(
+      String(req.baseUrl || '').includes('pest-identifier') ? 'pestIdentifier' : 'lawnAssessmentMagnet',
+    )
+    // Only requests that could reach a paid vision call burn the budget —
+    // malformed/empty floods and honeypot trips are rejected without a model
+    // call and must not 429 real prospects behind a shared IP.
+    || !require('./routes/public-lawn-assessment').isPlausibleAnalyzeBody(req.body),
 });
 
 // Body parsing
@@ -390,6 +435,8 @@ app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
+app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
+app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));

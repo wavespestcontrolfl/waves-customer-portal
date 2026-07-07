@@ -23,6 +23,8 @@
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
+ *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
+ *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
@@ -43,6 +45,14 @@ const gates = {
   // AP), so it must never turn on silently in tests/dev. due_on_receipt payers
   // — i.e. everyone today — are unaffected at any setting.
   payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
+
+  // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
+  // /pest-identifier). Public, unauthenticated, and every accepted upload is a
+  // paid dual-model vision call — explicit opt-in in EVERY environment, and the
+  // whole /api/public/lawn-assessment / /api/public/pest-identifier surface
+  // 404s while off (same unobservable-when-dark contract as payerStatements).
+  lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
+  pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,

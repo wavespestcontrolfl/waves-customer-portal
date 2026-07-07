@@ -40,6 +40,9 @@ function makeCaptureDb({ updatedRows = 1, throwOnUpdate = false } = {}) {
     };
     return q;
   };
+  // The customer_id stamp uses handle.raw(...) — capture the SQL fragment so
+  // tests can assert the COALESCE-from-lead behavior.
+  database.raw = (sql) => ({ __raw: sql });
   database._captured = captured;
   return database;
 }
@@ -96,6 +99,12 @@ describe('bridgeLeadFunnelStage — advancing stages', () => {
     expect(c.whereInByCol.funnel_stage).toEqual(['lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'lost']);
     expect(c.patch).toMatchObject({ funnel_stage: 'booked' });
     expect(c.patch.updated_at).toBeInstanceOf(Date);
+    // Every stage advance back-fills customer_id from the lead (COALESCE —
+    // never overwrites an already-stamped customer) so lead-only funnel rows
+    // (photo-assessment claims) become visible to the customer-keyed revenue
+    // sync once the lead converts.
+    expect(c.patch.customer_id.__raw).toContain('COALESCE(ad_service_attribution.customer_id');
+    expect(c.patch.customer_id.__raw).toContain('SELECT l.customer_id FROM leads l WHERE l.id = ad_service_attribution.lead_id');
   });
 
   test('estimate_viewed advances from lead/contacted/estimate_sent only — never out of lost', async () => {
@@ -219,6 +228,7 @@ describe('savepoint isolation for transactional callers', () => {
       };
       return q;
     };
+    spHandle.raw = (sql) => ({ __raw: sql });
     const trx = () => { throw new Error('caller trx queried directly — bridge must use the savepoint'); };
     trx.isTransaction = true;
     trx.transaction = async (cb) => { state.savepointUsed = true; return cb(spHandle); };
