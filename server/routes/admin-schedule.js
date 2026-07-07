@@ -1845,6 +1845,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const pestSelectionCadence = converter.recurringServiceKey(svc) === 'pest_control'
             ? prepayCoverageCadenceForPattern(data.customerSelection?.frequency)
             : null;
+          // The line's RAW frequency fields through the coverage mapper
+          // FIRST: every_6_weeks is a supported coverage cadence but the
+          // shared normalizeRecurringPattern inside explicitServiceCadence
+          // doesn't know it — the literal key normalizes to null and its 9
+          // visits/year alias to bimonthly — so a 6-week quote would never
+          // match its 6-week booking and always downgrade (pre-push P1).
+          // Only an exact cadence token short-circuits here; everything else
+          // still resolves through the converter's full precedence.
+          const rawLineCadence = [svc.frequency, svc.frequencyKey, svc.frequency_key, svc.recurringPattern, svc.recurring_pattern]
+            .map((value) => prepayCoverageCadenceForPattern(value))
+            .find(Boolean) || null;
           return {
             // Engine lineItems rows carry `service` (canonical key) / `label`
             // rather than the manual rows' name fields — accept either shape.
@@ -1857,6 +1868,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             // when unresolvable — the guard below fails CLOSED on that,
             // never skips.
             quoteRecurringCadence: pestSelectionCadence
+              || rawLineCadence
               || prepayCoverageCadenceForPattern(converter.explicitServiceCadence(svc)),
           };
         } catch { return { quoteRecurringName: null, quoteRecurringCadence: null }; }
