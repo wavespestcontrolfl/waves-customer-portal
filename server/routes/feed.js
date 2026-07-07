@@ -32,17 +32,19 @@ const ALLOWED_LINK_HOSTS = new Set([
   'blogs.ifas.ufl.edu', 'ifas.ufl.edu', 'www.ifas.ufl.edu',
   'mysuncoast.com', 'www.mysuncoast.com',
   'weather.gov', 'api.weather.gov',
-  // Local newspapers (Venice → Palmetto corridor) + their image CDNs.
-  // heraldtribune.com covers rssfeeds.heraldtribune.com via the subdomain
-  // rule; gannett-cdn.com hosts Herald-Tribune article images. bradenton.com
-  // serves its own images through its on-domain Arc resizer. townnews.com
-  // covers the bloximages.*.vip.townnews.com CDN the Gondolier's BLOX CMS
-  // serves photos from.
+  // Local newspapers (Venice → Palmetto corridor + Tampa Bay) + their image
+  // CDNs. heraldtribune.com covers rssfeeds.heraldtribune.com via the
+  // subdomain rule; gannett-cdn.com hosts Herald-Tribune article images.
+  // bradenton.com and tampabay.com serve their own images through their
+  // on-domain Arc resizers. townnews.com covers the
+  // bloximages.*.vip.townnews.com CDN the Gondolier's BLOX CMS serves
+  // photos from.
   'heraldtribune.com', 'www.heraldtribune.com', 'gannett-cdn.com',
   'bradenton.com', 'www.bradenton.com',
   'venicegondolier.com', 'www.venicegondolier.com',
   'yoursun.com', 'www.yoursun.com',
   'townnews.com',
+  'tampabay.com', 'www.tampabay.com',
 ]);
 
 function hostAllowed(host) {
@@ -283,18 +285,21 @@ router.get('/experts', async (req, res, next) => {
 // =========================================================================
 // GET /api/feed/local — Local SWFL news (filtered)
 // =========================================================================
-// Every major outlet in the Venice → Palmetto corridor, merged into one
-// stream. Each fetch degrades independently: a moved/dead feed URL logs a
-// `[feed] Upstream <key> ...` warning and contributes zero items — it never
-// breaks the endpoint. Feed URLs follow each publisher's platform
-// conventions (FeedBlitz for Gannett's Herald-Tribune, the rssfeed widget
-// for McClatchy's Bradenton Herald, BLOX search RSS for the Gondolier); if
-// one goes quiet permanently, check the warn logs and swap the URL here.
+// Every major outlet from the Venice → Palmetto corridor up through Tampa
+// Bay (the Tampa Bay Times is the daily for both Tampa and St. Pete),
+// merged into one stream. Each fetch degrades independently: a moved/dead
+// feed URL logs a `[feed] Upstream <key> ...` warning and contributes zero
+// items — it never breaks the endpoint. Feed URLs follow each publisher's
+// platform conventions (FeedBlitz for Gannett's Herald-Tribune, the rssfeed
+// widget for McClatchy's Bradenton Herald, BLOX search RSS for the
+// Gondolier, the rss3 template for the Times); if one goes quiet
+// permanently, check the warn logs and swap the URL here.
 const LOCAL_NEWS_SOURCES = [
   { key: 'mysuncoast', name: 'MySuncoast', url: 'https://www.mysuncoast.com/news/local/rss/' },
   { key: 'heraldtribune', name: 'Herald-Tribune', url: 'https://rssfeeds.heraldtribune.com/sarasota/topstories' },
   { key: 'bradenton_herald', name: 'Bradenton Herald', url: 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true' },
   { key: 'venice_gondolier', name: 'Venice Gondolier', url: 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc' },
+  { key: 'tampabay_times', name: 'Tampa Bay Times', url: 'https://www.tampabay.com/news/?template=rss3' },
 ];
 
 router.get('/local', async (req, res, next) => {

@@ -3,8 +3,9 @@
  *
  * The section originally pulled only MySuncoast (WWSB), whose general local
  * feed rarely survives the relevance filter — the portal card sat on "0
- * items". The route now fans out to every major outlet in the Venice →
- * Palmetto corridor and merges the survivors newest-first. Contract:
+ * items". The route now fans out to every major outlet from the Venice →
+ * Palmetto corridor up through Tampa Bay and merges the survivors
+ * newest-first. Contract:
  *  - all sources fetch in parallel; each item carries its outlet's
  *    sourceName
  *  - the relevance/exclusion keyword filters apply across the merged set
@@ -25,12 +26,15 @@ const SUNCOAST_FEED = 'https://www.mysuncoast.com/news/local/rss/';
 const HERALD_FEED = 'https://rssfeeds.heraldtribune.com/sarasota/topstories';
 const BRADENTON_FEED = 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true';
 const GONDOLIER_FEED = 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc';
+const TAMPABAY_FEED = 'https://www.tampabay.com/news/?template=rss3';
 
 const HERALD_PAGE = 'https://www.heraldtribune.com/story/news/local/2026/07/06/hurricane-lawn-prep/';
 const HERALD_IMG = 'https://www.gannett-cdn.com/presto/2026/07/06/hurricane-prep.jpg';
 const BRADENTON_PAGE = 'https://www.bradenton.com/news/local/article301234567.html';
 const BRADENTON_IMG = 'https://www.bradenton.com/resizer/v2/mosquito-truck.jpg';
 const SUNCOAST_PAGE = 'https://www.mysuncoast.com/2026/07/02/red-tide-update/';
+const TAMPABAY_PAGE = 'https://www.tampabay.com/news/environment/2026/07/07/red-tide-st-pete/';
+const TAMPABAY_IMG = 'https://www.tampabay.com/resizer/v2/red-tide-pier.jpg';
 
 function feed(items) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -80,12 +84,30 @@ const SUNCOAST_XML = feed(`
       <description>Deputies recovered stolen mowers.</description>
     </item>`);
 
+// Newest item overall — proves a Tampa Bay source interleaves ahead of the
+// corridor papers. Sports noise must trip EXCLUDE despite "storm".
+const TAMPABAY_XML = feed(`
+    <item>
+      <title>Red tide bloom drifts toward St. Pete beaches</title>
+      <link>${TAMPABAY_PAGE}</link>
+      <pubDate>Tue, 07 Jul 2026 12:00:00 GMT</pubDate>
+      <description>Officials track the bloom across Tampa Bay.</description>
+      <media:content url="${TAMPABAY_IMG}" medium="image" />
+    </item>
+    <item>
+      <title>Rays weather the storm in extra innings baseball thriller</title>
+      <link>${TAMPABAY_PAGE}</link>
+      <pubDate>Tue, 07 Jul 2026 11:00:00 GMT</pubDate>
+      <description>A wild ninth at the Trop.</description>
+    </item>`);
+
 const EXTERNAL_ROUTES = {
   [SUNCOAST_FEED]: { text: SUNCOAST_XML },
   [HERALD_FEED]: { text: HERALD_XML },
   [BRADENTON_FEED]: { text: BRADENTON_XML },
   // Dead source: the Gondolier feed 500s — must degrade to zero items.
   [GONDOLIER_FEED]: { status: 500 },
+  [TAMPABAY_FEED]: { text: TAMPABAY_XML },
   [BRADENTON_PAGE]: { text: `<html><head><meta property="og:image" content="${BRADENTON_IMG}"></head></html>` },
   [SUNCOAST_PAGE]: { text: '<html><head><title>no og:image</title></head></html>' },
 };
@@ -128,23 +150,27 @@ test('merges all corridor sources newest-first, tags each item with its outlet, 
   expect(res.status).toBe(200);
   const { posts } = await res.json();
 
-  // 4 fixture items pass fetch; the restaurant item fails RELEVANT, the
-  // theft item trips EXCLUDE, the Gondolier source is down → 3 survive.
+  // 6 fixture items pass fetch; the restaurant item fails RELEVANT, the
+  // theft and baseball items trip EXCLUDE, the Gondolier source is down →
+  // 4 survive, interleaved newest-first across sources.
   expect(posts.map((p) => [p.sourceName, p.title])).toEqual([
+    ['Tampa Bay Times', 'Red tide bloom drifts toward St. Pete beaches'],
     ['Herald-Tribune', 'Hurricane season lawn prep tips for Sarasota homeowners'],
     ['Bradenton Herald', 'Palmetto expands mosquito control spraying this week'],
     ['MySuncoast', 'Red Tide Update for Sarasota'],
   ]);
 
   // Every source was actually attempted, in parallel, including the dead one.
-  expect(externalCalls).toEqual(expect.arrayContaining([SUNCOAST_FEED, HERALD_FEED, BRADENTON_FEED, GONDOLIER_FEED]));
+  expect(externalCalls).toEqual(expect.arrayContaining([SUNCOAST_FEED, HERALD_FEED, BRADENTON_FEED, GONDOLIER_FEED, TAMPABAY_FEED]));
 
   // Images: feed-native wins without a page fetch; image-less items resolve
   // og:image from the (allowlisted) article page; misses degrade to null.
-  expect(posts[0].image).toBe(HERALD_IMG);
+  expect(posts[0].image).toBe(TAMPABAY_IMG);
+  expect(posts[1].image).toBe(HERALD_IMG);
   expect(externalCalls).not.toContain(HERALD_PAGE);
-  expect(posts[1].image).toBe(BRADENTON_IMG);
-  expect(posts[2].image).toBeNull();
+  expect(externalCalls).not.toContain(TAMPABAY_PAGE);
+  expect(posts[2].image).toBe(BRADENTON_IMG);
+  expect(posts[3].image).toBeNull();
 
   // All posts keep the shared /local contract.
   for (const p of posts) expect(p.source).toBe('local');
