@@ -18,14 +18,22 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));
 jest.mock('../utils/datetime-et', () => ({
-  etDateString: jest.fn(() => '2026-07-04'),
+  // No-arg call = "today"; the confirmation copy also calls it with the
+  // addETDays result to compute "tomorrow".
+  etDateString: jest.fn((d) => (d ? '2026-07-05' : '2026-07-04')),
   // Default "now" = 1:30 PM ET, inside the 1:00-3:00 PM quoted window.
   etParts: jest.fn(() => ({ hour: 13, minute: 30 })),
+  addETDays: jest.fn(() => new Date('2026-07-05T12:00:00Z')),
+}));
+jest.mock('../services/appointment-reminders', () => ({
+  handleReschedule: jest.fn().mockResolvedValue({}),
+  markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 1 }),
 }));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
-const { etParts } = require('../utils/datetime-et');
+const AppointmentReminders = require('../services/appointment-reminders');
+const { etParts, etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const RescheduleSMS = require('../services/reschedule-sms');
 
@@ -82,6 +90,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     etParts.mockReturnValue({ hour: 13, minute: 30 });
+    etDateString.mockImplementation((d) => (d ? '2026-07-05' : '2026-07-04'));
   });
 
   test('reply "1" on the live slot, inside the quoted window, confirms WITHOUT re-booking', async () => {
@@ -93,7 +102,41 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain('1:00 PM - 3:00 PM');
+    // Confirm-in-place never re-booked, so the rain-out route's own reminder
+    // sync is still accurate — no second sync from this path.
+    expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
     expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-04' });
+  });
+
+  test('same-day confirmation never promises a day-before reminder', async () => {
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    const body = sendCustomerMessage.mock.calls[0][0].body;
+    expect(body).toContain('See you today.');
+    expect(body).not.toContain('day before');
+  });
+
+  test('next-day confirmation says "See you tomorrow." instead of promising a day-before reminder', async () => {
+    // Make OPTION2's date (2026-07-06) read as tomorrow.
+    etDateString.mockImplementation((d) => (d ? '2026-07-06' : '2026-07-05'));
+    wire({ scheduled_date: '2026-07-05', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    const body = sendCustomerMessage.mock.calls[0][0].body;
+    expect(body).toContain('See you tomorrow.');
+    expect(body).not.toContain('day before');
+  });
+
+  test('a confirmation two or more days out still promises the day-before reminder', async () => {
+    // Today 2026-07-04, tomorrow 2026-07-05; OPTION2 is 2026-07-06.
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    expect(sendCustomerMessage.mock.calls[0][0].body).toContain("We'll remind you the day before.");
   });
 
   test('scheduled_date as a JS Date still matches (no "Sat Jul 04" stringify bug)', async () => {
@@ -113,6 +156,11 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-06', { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
       'weather_rain', 'customer_sms',
+    );
+    // The re-book moved the visit, so the reminder row must be re-armed onto
+    // the new slot — otherwise the promised day-before reminder never fires.
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(
+      'svc-1', '2026-07-06T08:00', { sendNotification: false, coverDueWindows: true },
     );
     expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-06' });
   });
