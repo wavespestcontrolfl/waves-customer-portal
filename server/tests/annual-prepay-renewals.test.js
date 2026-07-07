@@ -935,6 +935,32 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 
+  test('a PROCESSING completion invoice gets neither settle nor credit (in-flight money can still fail)', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'processing', payment_recorded_at: null, annual_prepay_covered_term_id: null } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('a settle-refused OPEN invoice is left alone (no credit for money never collected)', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'pending', payment_recorded_at: null, annual_prepay_covered_term_id: null } })],
+    });
+    InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockResolvedValueOnce({ settled: false, reason: 'has_add_ons' });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
   test('never-invoiced and already-covered completions need nothing', async () => {
     setDbQueues({
       scheduled_services: [query({

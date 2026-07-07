@@ -682,7 +682,8 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       if (invoiceStatus === 'prepaid'
         || String(invoice.annual_prepay_covered_term_id || '') === String(term.id)) continue;
       let settledHere = false;
-      if (!['paid', 'processing'].includes(invoiceStatus) && !invoice.payment_recorded_at) {
+      const paidForVisit = invoiceStatus === 'paid' || !!invoice.payment_recorded_at;
+      if (!paidForVisit && invoiceStatus !== 'processing') {
         try {
           const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
           if (res?.settled) { summary.settled += 1; settledHere = true; }
@@ -691,6 +692,16 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         }
       }
       if (settledHere) continue;
+      // Only money actually COLLECTED for the visit justifies returning the
+      // annual's slice: a 'processing' ACH/card can still fail, and a
+      // settle-refused open invoice (add-ons / deposit credit / payer) may
+      // yet be voided — crediting now could hand back a slice for a visit
+      // the customer never pays. Leave those rows alone; the payment
+      // webhook re-enters this reconcile when the invoice resolves.
+      if (!paidForVisit) {
+        logger.warn(`[annual-prepay] pending-completion slice unresolved for visit ${row.id} (invoice ${invoice.id} status=${invoiceStatus}) — will reconcile when the invoice resolves`);
+        continue;
+      }
       const visitSlice = slices[index] ?? slices[0] ?? 0;
       if (!(visitSlice > 0)) continue;
       const marker = `term ${term.id}, visit ${row.id}`;
