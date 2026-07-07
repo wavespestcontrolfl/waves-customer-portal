@@ -400,6 +400,9 @@ describe('isPlausibleAnalyzeBody (paid daily-limiter predicate)', () => {
     expect(isPlausibleAnalyzeBody({ photos: [{ data: '' }] })).toBe(false);
     expect(isPlausibleAnalyzeBody({ photos: Array.from({ length: 6 }, () => ({ data: 'aGVsbG8=' })) })).toBe(false);
     expect(isPlausibleAnalyzeBody({ photos: [{ data: 'a'.repeat(6_000_001) }] })).toBe(false);
+    // A mixed batch (one valid photo + one oversized) is 413'd by the routes
+    // as a whole before any model call — it must not count either.
+    expect(isPlausibleAnalyzeBody({ photos: [{ data: 'aGVsbG8=' }, { data: 'a'.repeat(6_000_001) }] })).toBe(false);
     expect(isPlausibleAnalyzeBody({ photos: [{ data: 'aGVsbG8=' }], fax_number: 'bot' })).toBe(false);
     // Non-string honeypot values trip isHoneypotTripped in the route and must
     // not burn the budget either.
