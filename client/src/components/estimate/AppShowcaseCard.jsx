@@ -11,15 +11,13 @@
  */
 import { estimateCard } from './cardStyles';
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
+import { W } from './tokens';
 
-const W = {
-  blueDeeper: '#1B2C5B', blueDark: '#065A8C', blueLight: '#E3F5FD',
-  textBody: '#3F4A65', textCaption: '#64748B', white: '#FFFFFF',
-};
 
 const APP_STORE_URL = import.meta.env.VITE_IOS_APP_URL
   || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
-const PLAY_STORE_URL = import.meta.env.VITE_ANDROID_APP_URL || '';
+const PLAY_STORE_URL = import.meta.env.VITE_ANDROID_APP_URL
+  || 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
 const APP_SHOTS = [
   { src: '/images/app/app-tracking.webp', alt: 'Waves app visit screen with a live-GPS tech-en-route update before arrival', title: 'See your tech coming', caption: 'Live GPS, the hour before arrival' },
@@ -95,20 +93,19 @@ function StoreBadge({ url, label, children }) {
 // and review-before-booking states).
 export default function AppShowcaseCard({ onBookToday = null }) {
   const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
-  // Glass copy pack (?glass=1, PR B).
+  // Glass copy pack (PR B).
   const glass = glassCopyActive();
   return (
     <section style={estimateCard()}>
       <div style={{
         fontSize: 12, fontWeight: 700, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
         The Waves app
       </div>
       <h2 style={{
-        fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
-        color: W.blueDeeper, margin: '0 0 6px',
+        color: W.blueDeeper, margin: '0 0 8px',
       }}>
         {glass ? GLASS_COPY.appTitle : 'Watch every visit — right from your phone'}
       </h2>
@@ -133,10 +130,10 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             />
           </div>
           <div className="gc-av-right">
-            <div style={{ fontSize: '1.3rem', fontWeight: 600, letterSpacing: '-0.02em', color: '#04395E' }}>
+            <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: W.navyDeep }}>
               It&rsquo;s all in the Waves app
             </div>
-            <p style={{ fontSize: 14, color: W.textBody, margin: '6px 0 0', lineHeight: 1.5 }}>
+            <p style={{ fontSize: 14, color: W.textBody, margin: '8px 0 0', lineHeight: 1.5 }}>
               {GLASS_COPY.appHouseholdLine}
             </p>
             <div className="gc-av-chips">
@@ -144,7 +141,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
                 <span key={label} className="gc-av-chip">{label}</span>
               ))}
             </div>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
               {(APP_STORE_URL || !PLAY_STORE_URL) ? (
                 <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
               ) : null}
@@ -160,7 +157,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
           </div>
         </div>
       ) : (
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 16, margin: '4px 0 18px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 16, margin: '4px 0 20px' }}>
         {APP_SHOTS.map((shot) => (
           <figure key={shot.src} style={{ margin: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{
@@ -178,7 +175,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             </div>
             <figcaption style={{ marginTop: 11 }}>
               <strong style={{ display: 'block', fontSize: 14, fontWeight: 700, lineHeight: 1.2, color: W.blueDeeper }}>{shot.title}</strong>
-              <span style={{ display: 'block', marginTop: 2, fontSize: 12.5, fontWeight: 500, lineHeight: 1.35, color: W.textBody }}>{shot.caption}</span>
+              <span style={{ display: 'block', marginTop: 2, fontSize: 13, fontWeight: 500, lineHeight: 1.35, color: W.textBody }}>{shot.caption}</span>
             </figcaption>
           </figure>
         ))}
@@ -193,7 +190,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             {glass ? GLASS_COPY.appHouseholdLine : 'One login for your whole household — everything in one place.'}
           </span>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, margin: '12px 0 14px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, margin: '12px 0 16px' }}>
           {APP_FEATURES.map(([icon, label]) => (
             <div key={label} style={{
               display: 'flex', alignItems: 'center', gap: 9,
@@ -208,11 +205,11 @@ export default function AppShowcaseCard({ onBookToday = null }) {
                   {FEATURE_ICONS[icon]}
                 </svg>
               </span>
-              <span style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.25, color: W.blueDeeper }}>{label}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.25, color: W.blueDeeper }}>{label}</span>
             </div>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 2, opacity: anyStoreLive ? 1 : 0.92 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 2, opacity: anyStoreLive ? 1 : 0.92 }}>
           {(APP_STORE_URL || !PLAY_STORE_URL) ? (
             <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
           ) : null}
@@ -229,14 +226,14 @@ export default function AppShowcaseCard({ onBookToday = null }) {
       )}
 
       {onBookToday ? (
-        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 18 }}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
           <button
             type="button"
             onClick={onBookToday}
             style={{
               minHeight: 44,
               minWidth: 220,
-              padding: '0 28px',
+              padding: '0 24px',
               background: W.blueDeeper,
               color: W.white,
               border: 'none',

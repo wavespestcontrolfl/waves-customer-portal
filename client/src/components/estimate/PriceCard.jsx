@@ -2,17 +2,13 @@ import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
+import { fmtMoney, fmtMoneySigned } from '../../lib/money';
+import { W, PRICE_FONT } from './tokens';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
  * service-tier programs can keep a monthly bill while showing visit cadence.
  */
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
-  yellow: '#FFD700', green: '#16A34A',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0', border: '#CBD5E1',
-};
 
 const SERVICE_INCLUSIONS = {
   pest_control: [
@@ -57,11 +53,6 @@ const SERVICE_INCLUSIONS = {
   ],
 };
 
-function fmtMoney(n) {
-  if (n == null) return '—';
-  const v = Math.round(Number(n) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
-}
 
 function normalizedTier(value) {
   const raw = String(value || '').replace(/^WaveGuard\s+/i, '');
@@ -136,7 +127,7 @@ function RowInclusions({ items, collapsible = false }) {
   const list = (
     <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
       {items.map((item) => (
-        <li key={item} style={{ position: 'relative', paddingLeft: 18, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
+        <li key={item} style={{ position: 'relative', paddingLeft: 20, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
           <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
           {item}
         </li>
@@ -162,7 +153,7 @@ function RowInclusions({ items, collapsible = false }) {
 export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
   if (!frequency) return null;
 
-  // Glass copy pack (?glass=1, PR B): tier display + pest inclusion swaps
+  // Glass copy pack (PR B): tier display + pest inclusion swaps
   // live here because they're card-internal content the parent never
   // threads through props.
   const glass = glassCopyActive();
@@ -242,27 +233,29 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
 
   return (
     <div style={{
-      padding: '8px 0 14px',
-      marginBottom: 6,
+      padding: '8px 0 16px',
+      marginBottom: 8,
     }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
         {showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
-            fontFamily: "'Source Serif 4', Georgia, serif",
-            fontSize: 14,
-            color: '#9CA3AF',
+            fontSize: 15,
+            color: '#64748B',
             textDecoration: 'line-through',
             lineHeight: 1,
+            fontVariantNumeric: 'tabular-nums',
           }}>
             {fmtMoney(anchorPrice)}{periodLabel}
           </span>
         ) : null}
         <span style={{
-          fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: quoteRequired ? 26 : showLowConfidenceRange ? 24 : 26,
-          fontWeight: 500,
+          // Promoted 26->40 (design audit 2026-07-06): the price is the
+          // decision number — SSR renders it 62-84px; 26px lost to headings.
+          fontSize: quoteRequired ? 24 : showLowConfidenceRange ? 32 : PRICE_FONT,
+          fontWeight: 600,
           color: W.blueDeeper,
           lineHeight: 1,
+          fontVariantNumeric: 'tabular-nums',
         }}>
         {quoteRequired
           ? 'Quote required'
@@ -277,7 +270,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           <span style={{
             display: 'inline-block',
             padding: '5px 11px',
-            background: '#EEF2FF',
+            background: W.badgeWash,
             color: W.blueDeeper,
             borderRadius: 6,
             fontSize: 13,
@@ -290,8 +283,8 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       </div>
 
       {showVisitsLine ? (
-        <div style={{ marginTop: 10, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
-          <span aria-hidden="true" style={{ color: W.green, marginRight: 6 }}>&#10003;</span>
+        <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
+          <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
           {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
         </div>
       ) : null}
@@ -301,19 +294,19 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           its annual band, since the ranged /mo figure alone understates
           the commitment being confirmed on site. */}
       {!quoteRequired && annual && showLowConfidenceRange ? (
-        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
           {`${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`}
         </div>
       ) : null}
 
       {showLowConfidenceRange ? (
-        <div style={{ fontSize: 14, color: '#475569', marginTop: 10, lineHeight: 1.5, fontWeight: 600 }}>
+        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5, fontWeight: 600 }}>
           Estimated range — we confirm your exact price with a quick site visit before your first service.
         </div>
       ) : null}
 
       {quoteRequired && quoteReason ? (
-        <div style={{ fontSize: 15, color: '#92400E', marginTop: 10, lineHeight: 1.45, fontWeight: 700 }}>
+        <div style={{ fontSize: 15, color: W.noticeText, marginTop: 12, lineHeight: 1.45, fontWeight: 700 }}>
           {quoteReason}
         </div>
       ) : null}
@@ -325,17 +318,17 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           gap: 12,
           alignItems: 'center',
           marginTop: 12,
-          padding: '10px 12px',
+          padding: '12px 12px',
           border: '1px solid #DCFCE7',
           borderRadius: 10,
-          background: '#F0FDF4',
+          background: W.successWash,
           color: W.green,
           fontSize: 14,
           fontWeight: 800,
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
-          <strong style={{ whiteSpace: 'nowrap' }}>-{fmtMoney(manualDiscountInterval)}{periodLabel}</strong>
+          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</strong>
         </div>
       ) : null}
 
@@ -352,14 +345,14 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       ) : null}
 
       {treatmentRows.length ? (
-        <div style={{ display: 'grid', gap: 12, marginTop: 18 }}>
+        <div style={{ display: 'grid', gap: 12, marginTop: 20 }}>
           {treatmentRows.map((row, index) => (
             <div
               key={`${row.service || row.label || 'service'}-${index}`}
               style={{
                 border: `1px solid ${W.border}`,
                 borderRadius: 10,
-                padding: 14,
+                padding: 16,
                 background: W.white,
               }}
             >
@@ -374,7 +367,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                     breakdowns keep per-row prices — there the split IS the
                     information. */}
                 {glass && treatmentRows.length === 1 ? null : (
-                  <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap' }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                     {fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span>
                   </div>
                 )}

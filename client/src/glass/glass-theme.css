@@ -12,7 +12,8 @@ html[data-glass-theme] {
   --accent: 10, 126, 194;
   --brand: #04395e;
   --ts: rgba(12, 21, 40, 0.7);
-  --tt: rgba(12, 21, 40, 0.52);
+  /* .66 (was .52): AA-safe on white AND the translucent cards. */
+  --tt: rgba(12, 21, 40, 0.66);
   scroll-behavior: smooth;
   background-attachment: fixed;
   /* Brand-token chrome (WavesShell pages): the page wash drops so the
@@ -55,13 +56,15 @@ html[data-glass-theme] [data-glass-ink="light"] h4 {
 
 /* ---------- type system ---------- */
 html[data-glass-theme] *:not(svg):not(path) {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
-    "Inter", "Helvetica Neue", Arial, sans-serif !important;
+  /* Owner-approved stack 2026-07-06 — the ONLY customer type family;
+     serif declarations were removed from the estimate components to match. */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 html[data-glass-theme] h1 {
-  font-size: clamp(2.4rem, 4.5vw, 3.3rem) !important;
+  font-size: clamp(2.125rem, 4.5vw, 3.3rem) !important;
   font-weight: 700 !important;
   line-height: 1.04 !important;
   letter-spacing: -0.035em !important;
@@ -112,7 +115,7 @@ html[data-glass-theme] [data-gt="metric"] {
   color: var(--brand) !important;
 }
 html[data-glass-theme] [data-gt="fine"] {
-  font-size: 11.5px !important;
+  font-size: 12px !important; /* 12px floor (was 11.5) — a11y pass 2026-07-06 */
   line-height: 1.45 !important;
   font-weight: 400 !important;
   letter-spacing: 0.005em !important;
@@ -304,7 +307,7 @@ html[data-glass-theme] [data-glass-accent]::after {
 }
 html[data-glass-theme] [data-glass-accent]:hover {
   transform: translateY(-1px);
-  box-shadow: 0 14px 34px rgba(180, 110, 0, 0.26), 0 0 24px rgba(240, 165, 0, 0.28),
+  box-shadow: 0 10px 24px rgba(180, 110, 0, 0.18), 0 0 14px rgba(240, 165, 0, 0.16),
     inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
 }
 html[data-glass-theme] [data-glass-accent]:active {
@@ -422,5 +425,42 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
   html[data-glass-theme] [data-glass="soft"],
   html[data-glass-theme] [data-glass="chip"] {
     background: rgba(255, 255, 255, 0.93) !important;
+  }
+}
+
+/* ---------- print (a11y/design audit 2026-07-06) ----------
+   Estimates had NO print path: grain printed over content, sticky bars
+   repeated every page, translucent cards collapsed to faint washes. */
+@media print {
+  .glass-scene-orbs,
+  .glass-scene-grain,
+  .gc-mbb,
+  html[data-glass-theme] .gc-mbb,
+  [data-waves-shell-header] {
+    display: none !important;
+    visibility: hidden !important;
+  }
+  /* Below-fold cards are opacity:0 until the reveal IntersectionObserver
+     fires — nothing scrolls in print, so without this everything below the
+     first viewport prints BLANK (verified via print-to-pdf 2026-07-07). */
+  html[data-glass-theme] [data-glass].glass-reveal-pending {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  [data-glass] {
+    break-inside: avoid;
+  }
+  html[data-glass-theme],
+  html[data-glass-theme] body {
+    background: #fff !important;
+  }
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass-clear],
+  html[data-glass-theme] [data-g-footer] {
+    background: #fff !important;
+    box-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border-color: #d7d2c4 !important;
   }
 }

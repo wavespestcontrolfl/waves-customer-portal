@@ -10,12 +10,8 @@ import { useEffect, useRef, useState } from 'react';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
 import { fiveStarReviews, GlassReviewMarquee, GlassSectionCta } from './glass/GlassEstimateExtras';
+import { W } from './tokens';
 
-const W = {
-  blueDeeper: '#1B2C5B', yellow: '#FFD700',
-  textBody: '#3F4A65', textCaption: '#64748B',
-  white: '#FFFFFF', warmBorder: '#E7E2D7',
-};
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // 3 reviews per page on desktop, 2 on phones (owner directive) — the
@@ -43,7 +39,7 @@ const REVIEW_FALLBACKS = [
 function Stars({ rating }) {
   const filled = Math.max(1, Math.min(5, Math.round(Number(rating || 5))));
   return (
-    <div aria-hidden="true" style={{ color: W.yellow, fontSize: 14, letterSpacing: 1, marginBottom: 8 }}>
+    <div role="img" aria-label={`Rated ${filled} out of 5 stars`} style={{ color: W.yellow, fontSize: 14, letterSpacing: 1, marginBottom: 8 }}>
       {'★'.repeat(filled)}{'☆'.repeat(5 - filled)}
     </div>
   );
@@ -144,14 +140,13 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
     <section style={estimateCard()}>
       <div style={{
         fontSize: 12, fontWeight: 700, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
         Reviews
       </div>
       <h2 style={{
-        fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
-        color: W.blueDeeper, margin: '0 0 6px',
+        color: W.blueDeeper, margin: '0 0 8px',
       }}>
         {glassCopyActive() ? GLASS_COPY.reviewsTitle : 'Customer reviews'}
       </h2>
@@ -160,9 +155,6 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
           ? GLASS_COPY.reviewsExcerpt
           : 'Real Google reviews from homeowners across our service area.'}
       </p>
-      {glassCopyActive() && onJoinNeighbors ? (
-        <GlassSectionCta label="Join your neighbors →" onClick={onJoinNeighbors} style={{ margin: '0 0 10px' }} />
-      ) : null}
       {glassMarquee || (
         <div style={{
           display: 'grid', gap: 12,
@@ -173,8 +165,13 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
           ))}
         </div>
       )}
+      {/* CTA sits BELOW the reviews, centered (owner 2026-07-06) — read the
+          proof first, then the ask. */}
+      {glassCopyActive() && onJoinNeighbors ? (
+        <GlassSectionCta label="Join your neighbors →" onClick={onJoinNeighbors} style={{ margin: '16px 0 0', justifyContent: 'center' }} />
+      ) : null}
       {pageCount > 1 && !glassMarquee ? (
-        <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16 }}>
           {Array.from({ length: pageCount }, (_, i) => (
             <button
               key={i}
@@ -182,11 +179,17 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
               aria-label={`Review group ${i + 1}`}
               onClick={() => showPage(i)}
               style={{
-                width: 9, height: 9, borderRadius: '50%', border: 0, padding: 0,
-                cursor: 'pointer',
-                background: i === page ? W.blueDeeper : W.warmBorder,
+                // 32px hit area around a 9px dot (touch-target audit 2026-07-06).
+                width: 32, height: 32, borderRadius: '50%', border: 0, padding: 0,
+                cursor: 'pointer', background: 'transparent',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}
-            />
+            >
+              <span aria-hidden="true" style={{
+                width: 9, height: 9, borderRadius: '50%', display: 'block',
+                background: i === page ? W.blueDeeper : W.warmBorder,
+              }} />
+            </button>
           ))}
         </div>
       ) : null}

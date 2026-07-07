@@ -3,7 +3,7 @@
  * real React components for the behaviors the approved blueprint prototyped
  * with DOM injection (injected nodes kept getting teleported by re-renders).
  * Every component here no-ops or is simply not rendered unless the page is
- * under the ?glass=1 dark launch; chrome lives in glass-components.css,
+ * under the glass theme (now unconditional); chrome lives in glass-components.css,
  * scoped to html[data-glass-theme].
  */
 import { useEffect, useState } from 'react';

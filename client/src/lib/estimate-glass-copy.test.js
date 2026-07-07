@@ -29,48 +29,45 @@ afterEach(() => {
 });
 
 describe('glassCopyActive', () => {
-  it('is active only when the URL carries ?glass=1 (pre-release default)', () => {
+  it('follows the server glassDefault flag only', () => {
     expect(glassCopyActive()).toBe(false);
-    setSearch('?glass=1');
-    expect(glassCopyActive()).toBe(true);
-    setSearch('?glass=0');
-    expect(glassCopyActive()).toBe(false);
-  });
-
-  it('is active by default once the server releases it (GATE_ESTIMATE_GLASS → glassDefault)', () => {
     setGlassDefault(true);
     expect(glassCopyActive()).toBe(true);
-    // ?glass=0 stays the per-link escape hatch back to the old page.
-    setSearch('?glass=0');
-    expect(glassCopyActive()).toBe(false);
-    setSearch('');
     // Only a literal payload true releases.
     setGlassDefault(undefined);
     expect(glassCopyActive()).toBe(false);
+  });
+
+  it('ignores the retired ?glass URL param (2026-07-07 owner decision)', () => {
+    setSearch('?glass=1');
+    expect(glassCopyActive()).toBe(false);
+    setGlassDefault(true);
+    setSearch('?glass=0');
+    expect(glassCopyActive()).toBe(true);
   });
 });
 
 describe('glassEstimateCopyFor', () => {
   it('returns a pack for every service category under glass, none when glass is off', () => {
-    setSearch('?glass=1');
-    expect(glassEstimateCopyFor('pest_control').heroH1).toMatch(/pest-free home plan/);
+    setGlassDefault(true);
+    expect(glassEstimateCopyFor('pest_control').heroH1).toMatch(/pest-free \{city\} plan/);
     expect(glassEstimateCopyFor('lawn_care').heroH1).toMatch(/lawn/i);
     expect(glassEstimateCopyFor('mosquito').heroH1).toMatch(/mosquito/i);
     expect(glassEstimateCopyFor('termite_bait').heroH1).toMatch(/termite/i);
     expect(glassEstimateCopyFor('termite_trenching').heroH1).toMatch(/barrier/i);
     expect(glassEstimateCopyFor('bundle').heroH1).toMatch(/complete home protection/i);
-    setSearch('');
+    setGlassDefault(false);
     expect(glassEstimateCopyFor('pest_control')).toBeNull();
     expect(glassEstimateCopyFor('lawn_care')).toBeNull();
   });
 
   it('falls back to the property-generic bundle pack for unknown categories', () => {
-    setSearch('?glass=1');
+    setGlassDefault(true);
     expect(glassEstimateCopyFor('mystery_service')).toEqual(glassEstimateCopyFor('bundle'));
   });
 
   it('every pack carries the full field set the page consumes', () => {
-    setSearch('?glass=1');
+    setGlassDefault(true);
     const categories = [
       'pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait',
       'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',

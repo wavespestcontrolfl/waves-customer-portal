@@ -55,10 +55,8 @@ function Page({ children }) {
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
         }
       `}</style>
-      <header data-glass="soft" style={{ background: CARD, borderBottom: `1px solid ${BORDER}`, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontFamily: FONTS.display, fontSize: 22, color: TEXT, letterSpacing: '0.01em' }}>Waves Pest Control &amp; Lawn</span>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: COLORS.blueDeeper, textDecoration: 'none' }}>{WAVES_PHONE_DISPLAY}</a>
-      </header>
+      {/* Page-local header removed — the WavesShell top bar (App.jsx route
+          wrap, owner 2026-07-06) provides the standard chrome. */}
       <main style={{ flex: 1, width: '100%', maxWidth: 720, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
       <BrandFooter variant="light" />
     </div>

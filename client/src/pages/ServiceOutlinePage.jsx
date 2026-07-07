@@ -106,10 +106,12 @@ export default function ServiceOutlinePage() {
 
   return (
     <div data-glass-clear="" className="min-h-screen bg-[#f7f4ee] text-zinc-950">
-      <header data-glass-clear="" className="border-b border-zinc-200 bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4">
-          <Link to="/" className="text-lg font-semibold tracking-tight text-zinc-950">Waves</Link>
-          {estimatePath && (
+      {/* Wordmark row removed — the WavesShell top bar (App.jsx route wrap,
+          owner 2026-07-06) provides the brand chrome; this strip keeps only
+          the View Estimate CTA. */}
+      {estimatePath && (
+        <header data-glass-clear="" className="border-b border-zinc-200 bg-white">
+          <div className="mx-auto flex max-w-6xl items-center justify-end gap-4 px-4 py-3">
             <a
               href={estimatePath}
               onClick={() => trackCtaClick(estimatePath)}
@@ -118,9 +120,9 @@ export default function ServiceOutlinePage() {
             >
               View Estimate
             </a>
-          )}
-        </div>
-      </header>
+          </div>
+        </header>
+      )}
 
       <main>
         <section data-glass-clear="" className="bg-white">

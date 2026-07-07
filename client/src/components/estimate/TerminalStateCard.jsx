@@ -1,5 +1,6 @@
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { estimateCard, estimateInnerBox } from './cardStyles';
+import { W } from './tokens';
 
 /**
  * Rendered in place of the slider / picker / CTAs when the estimate is
@@ -9,12 +10,6 @@ import { estimateCard, estimateInnerBox } from './cardStyles';
  * booked upcoming visit shows the visit date instead of "we'll follow
  * up" — they booked; we'll see them at the appointment.
  */
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
-  green: '#16A34A', red: '#C8102E',
-  yellow: '#FFD700', navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', border: '#CBD5E1',
-};
 
 const WAVES_PHONE = '(941) 297-5749';
 const WAVES_TEL = '+19412975749';
@@ -40,14 +35,14 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
   if (state === 'accepted') {
     return (
       <div style={{ ...estimateCard(), borderTop: `4px solid ${W.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
+        <div style={{ fontSize: 22, lineHeight: 1.3, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
           Thanks, {who} — you're booked.
         </div>
         <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.55 }}>
           Your estimate for {address || 'your property'} is accepted.
         </div>
         {appointmentLabel ? (
-          <div style={estimateInnerBox({ marginTop: 14, padding: '14px 16px' })}>
+          <div style={estimateInnerBox({ marginTop: 16, padding: '16px 16px' })}>
             <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
               Your visit
             </div>
@@ -74,14 +69,14 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
   if (state === 'declined') {
     return (
       <div style={{ ...estimateCard(), borderTop: `4px solid ${W.red}` }}>
-        <div style={{ fontSize: 20, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
+        <div style={{ fontSize: 20, lineHeight: 1.3, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
           This estimate was declined.
         </div>
         <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.55 }}>
           Changed your mind, {who}? Give us a call and we'll put together a fresh quote.
         </div>
         <a href={`tel:${WAVES_TEL}`} style={{
-          display: 'inline-block', marginTop: 14, padding: '12px 20px',
+          display: 'inline-block', marginTop: 16, padding: '12px 20px',
           background: W.blueBright, color: W.white, textDecoration: 'none',
           borderRadius: 12, fontWeight: 600, fontSize: 15,
         }}>Call {WAVES_PHONE}</a>
@@ -92,7 +87,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
   if (state === 'quote_required') {
     return (
       <div style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
-        <div style={{ fontSize: 20, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
+        <div style={{ fontSize: 20, lineHeight: 1.3, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
           {isProposal
             ? 'Your formal proposal is ready.'
             : isAccountManagerFinalize
@@ -130,11 +125,11 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
         {quoteReasonText ? (
           <div style={{
             marginTop: 12,
-            padding: '10px 12px',
+            padding: '12px 12px',
             border: '1px solid #FED7AA',
             borderRadius: 10,
             background: '#FFF7ED',
-            color: '#92400E',
+            color: W.noticeText,
             fontSize: 15,
             fontWeight: 700,
             lineHeight: 1.45,
@@ -143,7 +138,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
           </div>
         ) : null}
         <a href={`tel:${WAVES_TEL}`} style={{
-          display: 'inline-block', marginTop: 14, padding: '12px 20px',
+          display: 'inline-block', marginTop: 16, padding: '12px 20px',
           background: W.blueBright, color: W.white, textDecoration: 'none',
           borderRadius: 12, fontWeight: 600, fontSize: 15,
         }}>Call {WAVES_PHONE}</a>
@@ -154,7 +149,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
   // expired (or anything else)
   return (
     <div style={{ ...estimateCard(), borderTop: `4px solid ${W.textCaption}` }}>
-      <div style={{ fontSize: 20, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
+      <div style={{ fontSize: 20, lineHeight: 1.3, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
         This estimate has expired.
       </div>
       <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.55 }}>
@@ -162,7 +157,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
         Give us a minute on the phone and we'll refresh the numbers.
       </div>
       <a href={`tel:${WAVES_TEL}`} style={{
-        display: 'inline-block', marginTop: 14, padding: '12px 20px',
+        display: 'inline-block', marginTop: 16, padding: '12px 20px',
         background: W.blueBright, color: W.white, textDecoration: 'none',
         borderRadius: 12, fontWeight: 600, fontSize: 15,
       }}>Call {WAVES_PHONE}</a>

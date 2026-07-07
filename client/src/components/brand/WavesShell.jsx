@@ -26,13 +26,16 @@ export default function WavesShell({
   const resolvedFooterTone = footerTone || (isTransparent ? 'light' : 'dark');
 
   const topBarStyle = {
-    position: isTransparent ? 'absolute' : 'relative',
+    // Sticky (owner 2026-07-06) — the bar stays pinned while scrolling.
+    position: isTransparent ? 'absolute' : 'sticky',
     top: 0,
     left: 0,
     right: 0,
     zIndex: 10,
     background: isTransparent ? 'transparent' : 'var(--surface)',
     borderBottom: isTransparent ? 'none' : '1px solid var(--border)',
+    // viewport-fit=cover: keep the bar's content below a notch/status bar.
+    paddingTop: 'env(safe-area-inset-top, 0px)',
   };
 
   return (
@@ -47,7 +50,10 @@ export default function WavesShell({
           fontFamily: "'Inter', system-ui, sans-serif",
         }}
       >
-        <header style={topBarStyle}>
+        {/* data-waves-shell-header: EstimateGlassTheme's classify walker must
+            NOT pill-compact the standard shell bar (it hides the icon row
+            behind the centered logo). */}
+        <header data-waves-shell-header="" style={topBarStyle}>
           <div style={{
             width: 'min(100%, 1120px)',
             margin: '0 auto',

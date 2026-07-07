@@ -160,11 +160,20 @@ function classify(revealIO, statIO, pro) {
   if (contact && !contact.hasAttribute('data-g-contact')) contact.setAttribute('data-g-contact', '');
 
   // footer: brand-blue text + icons
-  const social = Array.from(document.querySelectorAll('a')).find((a) => (a.href || '').includes('facebook.com'));
-  if (social) {
-    let f = social.parentElement;
-    while (f && !f.textContent.includes('All rights reserved')) f = f.parentElement;
-    if (f && !f.hasAttribute('data-g-footer')) f.setAttribute('data-g-footer', '');
+  // The standard BrandFooter styles itself (navy social chips, badge SVGs
+  // with white text) — the [data-g-footer] fill:brand rule would paint its
+  // glyphs navy-on-navy. Skip footer restyling entirely when it's present;
+  // the legacy text-climb only runs for old footers, guarded so it can never
+  // tag an ancestor of the header (© line now lives in TrustFooter).
+  if (!document.querySelector('[data-brand-footer]')) {
+    const social = Array.from(document.querySelectorAll('a')).find((a) => (a.href || '').includes('facebook.com'));
+    if (social) {
+      const pageHeader = document.querySelector('header');
+      let f = social.parentElement;
+      while (f && !f.textContent.includes('All rights reserved')) f = f.parentElement;
+      if (f && pageHeader && f.contains(pageHeader)) f = null; // never tag an ancestor of the header
+      if (f && !f.hasAttribute('data-g-footer')) f.setAttribute('data-g-footer', '');
+    }
   }
 
   // compact stat tiles under the satellite image
@@ -176,8 +185,10 @@ function classify(revealIO, statIO, pro) {
     });
   }
 
-  // floating pill nav (estimate page only — financial pages keep their headers)
-  const header = pro ? null : document.querySelector('header, [role="banner"]');
+  // floating pill nav (estimate page only — financial pages keep their
+  // headers; the standard WavesShell bar keeps its full-width layout, the
+  // pill compaction hides its icon row behind the centered logo)
+  const header = pro ? null : document.querySelector('header:not([data-waves-shell-header]), [role="banner"]');
   if (header && !header.hasAttribute('data-g-nav')) {
     header.setAttribute('data-g-nav', '');
     Object.assign(header.style, { position: 'sticky', top: '10px', zIndex: '60', margin: '10px auto 0', maxWidth: '780px', borderRadius: '999px', padding: '8px 26px' });

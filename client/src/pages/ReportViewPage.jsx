@@ -7376,13 +7376,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
       `}</style>
 
-      <header data-glass="soft" className="sr-top">
-        <div className="sr-top-inner">
-          <a className="sr-top-phone" href={`tel:${WAVES_PHONE_TEL}`}>{WAVES_PHONE_DISPLAY}</a>
-          <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
-        </div>
-      </header>
-
+      {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
+          route wrap, owner 2026-07-06) provides the standard chrome. */}
       <main className="sr-shell">
         {mode === 'live' && (data.internalOnly
           ? <InternalReviewBar />

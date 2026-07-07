@@ -6,12 +6,8 @@
  */
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
+import { W } from './tokens';
 
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', green: '#16A34A',
-  navy: '#0F172A', blueDeeper: '#1B2C5B', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', border: '#E7E2D7', borderLight: '#F1F5F9',
-};
 
 function savingsFromDetail(detail) {
   const match = String(detail || '').match(/Save\s+(.+?)\s+if removed/i);
@@ -25,11 +21,10 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
   return (
     <div style={estimateCard()}>
       <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6 }}>
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8 }}>
         Customize your visit
       </div>
       <div style={{
-        fontFamily: "'Source Serif 4', Georgia, serif",
         fontSize: 24,
         fontWeight: 500,
         color: W.blueDeeper,
@@ -38,7 +33,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
       }}>
         Skip parts you don't need
       </div>
-      <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.5, marginBottom: 18 }}>
+      <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.5, marginBottom: 20 }}>
         {disabled
           ? "The add-ons included in the visit you booked."
           : "These are on by default. Toggle off whatever you don't want and the price adjusts instantly."}
@@ -49,7 +44,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
         const savings = savingsFromDetail(item.detail);
         return (
           <label key={item.key} style={{
-            ...estimateInnerBox({ background: checked ? W.white : '#F7F5EE' }),
+            ...estimateInnerBox({ background: checked ? W.white : W.warmBg }),
             display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16,
             padding: 16,
             marginTop: 12,
@@ -65,7 +60,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
                 </div>
               ) : null}
               {savings ? (
-                <div style={{ fontSize: 14, color: checked ? W.green : '#9CA3AF', fontWeight: 800, marginTop: 6 }}>
+                <div style={{ fontSize: 14, color: checked ? W.green : '#9CA3AF', fontWeight: 800, marginTop: 8 }}>
                   {checked ? `Save ${savings}` : 'Savings applied to your estimate'}
                 </div>
               ) : null}

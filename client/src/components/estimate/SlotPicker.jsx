@@ -22,13 +22,8 @@ import {
 } from '../../lib/estimate-glass-copy';
 import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/estimate-glass-slots';
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
+import { W } from './tokens';
 
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
-  green: '#16A34A', greenLight: '#DCFCE7',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0', border: '#E2E8F0', warmBorder: '#E7E2D7',
-};
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -63,15 +58,16 @@ function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) 
       className={stale ? 'gc-slot-stale' : undefined}
       disabled={stale}
       aria-disabled={stale || undefined}
+      aria-pressed={isSelected}
       onClick={() => onSelect(slot)}
       style={{
         textAlign: 'left', width: '100%',
         background: isSelected ? W.blueDeeper : W.white,
         color: isSelected ? W.white : W.blueDeeper,
-        border: `2px solid ${isSelected ? W.blueDeeper : W.border}`,
-        borderRadius: 12, padding: '14px 16px',
+        border: `2px solid ${isSelected ? W.blueDeeper : W.borderCool}`,
+        borderRadius: 12, padding: '16px 16px',
         boxShadow: ESTIMATE_INNER_SHADOW,
-        cursor: 'pointer', marginBottom: 10,
+        cursor: 'pointer', marginBottom: 12,
         display: 'flex', flexDirection: 'column', gap: 4,
         transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
       }}
@@ -85,7 +81,7 @@ function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) 
         <span className="gc-slot-priority">⚡ Tech nearby — priority</span>
       ) : slot.routeOptimal ? (
         <div style={{
-          marginTop: 6, fontSize: 12, fontWeight: 700, color: isSelected ? W.white : W.green,
+          marginTop: 8, fontSize: 12, fontWeight: 700, color: isSelected ? W.white : W.green,
           background: isSelected ? 'rgba(255,255,255,.16)' : W.greenLight, padding: '4px 8px', borderRadius: 999,
           alignSelf: 'flex-start',
         }}>
@@ -96,7 +92,9 @@ function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) 
   );
 }
 
-const INITIAL_VISIBLE = 6;
+// Fold early (owner 2026-07-06): 3 slots up front, everything else
+// behind the "Show N more open slots" toggle.
+const INITIAL_VISIBLE = 3;
 
 export default function SlotPicker({
   token,
@@ -109,8 +107,11 @@ export default function SlotPicker({
   refreshSignal,
   serviceMode = 'recurring',
   selectedFrequency = null,
+  onFirstSlotDate = null,
+  cityLabel = null,
 }) {
   const [data, setData] = useState(null);
+  // Report the first open slot date up (hero {date} token).
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showMore, setShowMore] = useState(false);
@@ -122,7 +123,7 @@ export default function SlotPicker({
   const [pickedDateFocused, setPickedDateFocused] = useState(false);
   const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
-  // Glass copy pack (?glass=1, PR B) — availability-first phrasing.
+  // Glass copy pack (PR B) — availability-first phrasing.
   const glass = glassCopyActive();
   // Slot freshness (glass, PR C): re-evaluate the 2-hour booking lead every
   // minute so a page left open grays out windows the server would now
@@ -134,6 +135,13 @@ export default function SlotPicker({
     const id = setInterval(() => setFreshnessTick((t) => t + 1), 60000);
     return () => clearInterval(id);
   }, [glass]);
+
+  // Report the first open slot's date up to the page (hero {date} token).
+  useEffect(() => {
+    if (!onFirstSlotDate) return;
+    const first = data?.primary?.[0]?.date || data?.expander?.[0]?.date || null;
+    if (first) onFirstSlotDate(first);
+  }, [data, onFirstSlotDate]);
 
   const selectSlot = (slot) => {
     onSelect(slot ? slot.slotId : null);
@@ -285,7 +293,7 @@ export default function SlotPicker({
   const SoftRouteBanner = () => (
     <div style={{
       background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
-      padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 10, lineHeight: 1.4,
+      padding: '12px 12px', fontSize: 14, color: '#9A3412', marginBottom: 12, lineHeight: 1.4,
     }}>
       No route near you that day yet — here&apos;s what&apos;s close.
     </div>
@@ -325,7 +333,7 @@ export default function SlotPicker({
   const finder = (
     <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
-        theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.border, surface: W.white, inputBg: W.offWhite }}
+        theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.borderCool, surface: W.white, inputBg: W.offWhite }}
         showEyebrow={false}
         subtitle={null}
         onSearch={runAiSearch}
@@ -339,13 +347,14 @@ export default function SlotPicker({
             justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
             color: W.blueDeeper, fontSize: 13, fontWeight: 700, cursor: 'pointer',
             textDecoration: 'underline', textUnderlineOffset: 3,
+            padding: '12px 8px', minHeight: 44, // touch audit 2026-07-06
           }}
         >
           Clear search — show the soonest openings
         </button>
       ) : null}
-      <div style={{ border: `1px solid ${W.border}`, borderRadius: 12, padding: 14, background: W.white, boxShadow: ESTIMATE_INNER_SHADOW }}>
-        <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
+      <div style={{ border: `1px solid ${W.borderCool}`, borderRadius: 12, padding: 16, background: W.white, boxShadow: ESTIMATE_INNER_SHADOW }}>
+        <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
           Can't find a date? Pick one that works for you.
         </label>
         {/* iOS Safari renders an empty <input type="date"> as a blank box
@@ -353,9 +362,9 @@ export default function SlotPicker({
             our own text and the native input sits invisibly on top to keep
             the tap-to-open picker, label wiring, and keyboard access. */}
         <div style={{
-          position: 'relative', display: 'flex', alignItems: 'center', gap: 10,
-          minHeight: 48, boxSizing: 'border-box', padding: '12px 14px',
-          border: `1px solid ${pickedDateFocused ? W.blueDeeper : W.border}`,
+          position: 'relative', display: 'flex', alignItems: 'center', gap: 12,
+          minHeight: 48, boxSizing: 'border-box', padding: '12px 16px',
+          border: `1px solid ${pickedDateFocused ? W.blueDeeper : W.borderCool}`,
           borderRadius: 10, background: W.white,
         }}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={W.blueDeeper} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
@@ -423,28 +432,37 @@ export default function SlotPicker({
   const allSlots = [...primary, ...expander];
 
   // Glass heading claims a soonest-opening window only from the REAL first
-  // slot (today/tomorrow/this week); with nothing inside a week it falls
-  // back to the standard heading rather than overpromise.
-  const glassHeading = glass ? glassSchedTitle(glassSchedQualifier(allSlots[0]?.date)) : null;
+  // slot; owner 2026-07-06: name the actual date + city ("...as soon as
+  // Tuesday, July 7 in Venice"). Falls back to the qualifier form, then the
+  // standard heading, rather than overpromise.
+  const firstYmd = allSlots[0]?.date || null;
+  const firstDateLabel = firstYmd
+    ? new Date(`${firstYmd}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })
+    : null;
+  const glassHeading = glass
+    ? (firstDateLabel
+      ? `Lock in your spot — openings as soon as ${firstDateLabel}${cityLabel ? ` in ${cityLabel}` : ''}`
+      : glassSchedTitle(glassSchedQualifier(firstYmd)))
+    : null;
   const heading = (
     <>
       <div style={{
         fontSize: 12, fontWeight: 700, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 6,
+        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
         Schedule your visit
       </div>
-      <div style={{
-        fontFamily: "'Source Serif 4', Georgia, serif",
+      {/* Real h2 (semantics audit 2026-07-06) — was a styled div. */}
+      <h2 style={{
         fontSize: 24,
         fontWeight: 500,
         color: W.blueDeeper,
         letterSpacing: 0,
         lineHeight: 1.2,
-        marginBottom: 8,
+        margin: '0 0 8px',
       }}>
         {glassHeading || 'Find a date & time that works for you'}
-      </div>
+      </h2>
       <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.55, marginBottom: 16 }}>
         {glass
           ? GLASS_COPY.schedExcerpt
@@ -466,7 +484,7 @@ export default function SlotPicker({
   }
 
   const initial = allSlots.slice(0, INITIAL_VISIBLE);
-  const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
+  const more = allSlots.slice(INITIAL_VISIBLE); // uncapped — the label carries the real count
 
   return (
     <div style={estimateCard()}>
@@ -497,7 +515,7 @@ export default function SlotPicker({
             type="button"
             onClick={() => setShowMore((v) => !v)}
             style={{
-              marginTop: 8, padding: '10px 16px', background: 'transparent',
+              marginTop: 8, padding: '13px 16px', minHeight: 44, background: 'transparent',
               color: W.blueDeeper, border: `1px solid ${W.blueDeeper}`, borderRadius: 12,
               cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
             }}
@@ -505,7 +523,7 @@ export default function SlotPicker({
             {showMore ? 'Hide extra slots' : `Show ${more.length} more open slot${more.length === 1 ? '' : 's'}`}
           </button>
           {showMore ? (
-            <div style={{ marginTop: 14 }}>
+            <div style={{ marginTop: 16 }}>
               {more.map((slot) => (
                 <SlotCard
                   key={slot.slotId}

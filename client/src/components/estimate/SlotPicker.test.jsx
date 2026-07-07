@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SlotPicker from './SlotPicker';
+import { setGlassDefault } from '../../lib/estimate-glass-copy';
 
 vi.mock('../booking/WavesAIScheduleSearch', () => ({
   default: () => null,
@@ -44,7 +45,7 @@ afterEach(() => {
 });
 
 describe('SlotPicker (glass stale-selection sweep)', () => {
-  const setGlass = (on) => window.history.replaceState(null, '', on ? '/?glass=1' : '/');
+  const setGlass = (on) => setGlassDefault(on);
 
   it('preserves a selected slot while the availability fetch is still pending', async () => {
     setGlass(true);
