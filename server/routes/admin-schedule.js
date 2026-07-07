@@ -1856,13 +1856,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (visitOverride.visitCount && visitsPerYearForCadence(recurringPattern)
-        && visitOverride.visitCount > visitsPerYearForCadence(recurringPattern)) {
-        // More covered visits than the cadence can produce inside the 12-month
-        // term: the coverage seeder stops at term_end, so only the in-term
-        // rows would attach while splitCoverageAmount divides the prepaid
-        // total by the FULL override — the excess prepaid value never stamps
-        // and later visits bill again. Fail closed.
-        downgrade(`Appointment booked as standard — ${visitOverride.visitCount} covered visits exceed what a ${recurringPattern} cadence produces in a 12-month term (${visitsPerYearForCadence(recurringPattern)}). Lower the covered-visit count or leave it at the cadence default.`);
+        && visitOverride.visitCount !== visitsPerYearForCadence(recurringPattern)) {
+        // The covered-visit count is FIXED by the cadence for quote-derived
+        // prepay — the invoice prices exactly that plan. Any other count
+        // corrupts money: higher → splitCoverageAmount divides the prepaid
+        // total by more visits than the term can seed (excess prepaid value
+        // never stamps, later visits bill again); lower → the full quoted
+        // annual is invoiced but only that many visits stamp covered and the
+        // rest of the year bills again on top. The modal no longer sends a
+        // count; this rejects crafted/stale requests. Fail closed.
+        downgrade(`Appointment booked as standard — the covered-visit count for a ${recurringPattern} annual prepay is fixed at ${visitsPerYearForCadence(recurringPattern)} by the quoted plan (got ${visitOverride.visitCount}). Omit the count to use the cadence default.`);
       } else if (!quoteRecurringCadence) {
         // Can't prove the booked cadence matches the quoted plan — fail
         // CLOSED (money correctness), never skip the comparison: the prepay

@@ -481,15 +481,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // step instead of the Annual Prepay button + Schedule dance). Distinct from
   // collectPrepay (cash/card in person) — mutually exclusive with it.
   const [billAsAnnualPrepay, setBillAsAnnualPrepay] = useState(false);
-  // Operator override for covered visits/year on an annual-prepay booking.
-  // Empty = let the server default from the booked cadence.
-  const [prepayVisitCount, setPrepayVisitCount] = useState('');
   // A stale prepay choice must not survive switching or clearing the linked
   // quote — the option is quote-specific (eligibility + invoice amount).
   const linkedEstimateIdForPrepay = linkedEstimate?.id ?? null;
   useEffect(() => {
     setBillAsAnnualPrepay(false);
-    setPrepayVisitCount('');
   }, [linkedEstimateIdForPrepay]);
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
@@ -1158,10 +1154,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           } : undefined,
           // Accept the linked open quote as annual prepay on book — the server
           // creates the pending prepay invoice + renewal term in the same step.
+          // NO prepayVisitCount: the covered-visit count is fixed by the booked
+          // (= quoted) cadence — the server derives it and rejects any override
+          // that differs, since the invoice prices exactly that plan.
           billingTerm: attachAnnualPrepay ? 'prepay_annual' : undefined,
-          // Operator's covered-visits/year override (server defaults from the
-          // booked cadence when omitted).
-          prepayVisitCount: attachAnnualPrepay && prepayVisitCount ? Number(prepayVisitCount) : undefined,
         };
         if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
@@ -1652,20 +1648,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             )}
                             {billAsAnnualPrepay && !prepayBlockReason && (
                               <div style={{ marginTop: 8 }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: D.muted }}>
+                                {/* The covered-visit count is FIXED by the quoted
+                                    cadence — the prepay invoice prices exactly that
+                                    plan, so any other count corrupts coverage
+                                    (server rejects mismatches). Display, not input. */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: D.muted }}>
                                   <span>Covered visits / year</span>
-                                  <input
-                                    type="number"
-                                    min="1"
-                                    max={defaultVisits || 24}
-                                    value={prepayVisitCount}
-                                    onChange={(e) => setPrepayVisitCount(e.target.value)}
-                                    placeholder={defaultVisits ? String(defaultVisits) : '—'}
-                                    style={{ width: 72, padding: '4px 8px', borderRadius: 6, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 12 }}
-                                  />
-                                </label>
+                                  <span style={{ fontWeight: 600, color: D.text }}>{defaultVisits || '—'}</span>
+                                </div>
                                 <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                                  Creates a pending annual prepay invoice ({formatMoney(invoiceAmount)}) + renewal term anchored to this visit. The invoice is NOT auto-sent — send it from the customer&rsquo;s invoices. Until it&rsquo;s paid, visits bill per application as usual; on payment the year&rsquo;s {prepayVisitCount || defaultVisits || ''} covered visit{(Number(prepayVisitCount || defaultVisits) === 1) ? '' : 's'} are marked prepaid.
+                                  Creates a pending annual prepay invoice ({formatMoney(invoiceAmount)}) + renewal term anchored to this visit. The invoice is NOT auto-sent — send it from the customer&rsquo;s invoices. Until it&rsquo;s paid, visits bill per application as usual; on payment the year&rsquo;s {defaultVisits || ''} covered visit{(Number(defaultVisits) === 1) ? '' : 's'} are marked prepaid.
                                 </div>
                               </div>
                             )}
