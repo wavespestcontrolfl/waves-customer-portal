@@ -7546,30 +7546,37 @@ function MyPlanTab({ customer }) {
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
-            <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
+            <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {includedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
-                  <div key={svc.id}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 850, marginBottom: 8 }}>
-                      <Icon name={iconName(svc.icon)} size={14} strokeWidth={1.8} />
+                  <div key={svc.id} style={{
+                    background: subtle,
+                    border: '1px solid rgba(255,255,255,0.65)',
+                    borderRadius: 14,
+                    padding: '12px 12px 10px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 700, marginBottom: 10 }}>
+                      <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
-                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#D8D0C0' : 'transparent';
-                        const border = isScheduled ? fill : '#E7E2D7';
+                        const isFilled = isCompleted || isOverdue || (isCurrentMonth && isScheduled);
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
+                        const border = isFilled ? 'rgba(255,255,255,0.55)' : isScheduled ? 'rgba(27,44,91,0.35)' : 'rgba(27,44,91,0.14)';
                         const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
+                        const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 0 }}>
+                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -7579,17 +7586,34 @@ function MyPlanTab({ customer }) {
                               onBlur={() => setHoveredCalendarItem(null)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 999,
-                              background: fill,
-                              border: `1px solid ${border}`,
-                              opacity: isScheduled ? 1 : 0.45,
-                              boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
-                              padding: 0,
-                              cursor: isScheduled ? 'pointer' : 'default',
-                            }}
-                            />
+                                width: '100%',
+                                height: 26,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                background: 'transparent',
+                                border: 'none',
+                                padding: 0,
+                                cursor: isScheduled ? 'pointer' : 'default',
+                              }}
+                            >
+                              <span aria-hidden="true" style={{
+                                display: 'block',
+                                boxSizing: 'border-box',
+                                width: 15,
+                                height: 15,
+                                borderRadius: 999,
+                                background: fill,
+                                border: `1.5px solid ${border}`,
+                                boxShadow: isFilled
+                                  ? `inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 6px rgba(4,57,94,0.22)${isCurrentMonth ? `, 0 0 0 3px ${B.wavesBlue}2E` : ''}`
+                                  : isScheduled
+                                    ? 'inset 0 1px 0 rgba(255,255,255,0.8), 0 1px 3px rgba(4,57,94,0.12)'
+                                    : 'none',
+                                transform: isHovered ? 'scale(1.35)' : 'scale(1)',
+                                transition: 'transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 200ms ease',
+                              }} />
+                            </button>
                             {isScheduled && hoveredCalendarItem === tooltipKey && (
                               <div role="tooltip" style={{
                                 position: 'absolute',
@@ -7615,7 +7639,12 @@ function MyPlanTab({ customer }) {
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
+                            <div style={{
+                              fontSize: 10,
+                              fontWeight: isCurrentMonth ? 800 : 600,
+                              letterSpacing: '0.02em',
+                              color: isCurrentMonth ? B.wavesBlue : 'rgba(27,44,91,0.5)',
+                            }}>{month[0]}</div>
                           </div>
                         );
                       })}
