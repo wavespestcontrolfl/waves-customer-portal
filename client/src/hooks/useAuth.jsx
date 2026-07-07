@@ -34,7 +34,13 @@ export function AuthProvider({ children }) {
       flushNativePushToken();
     } catch (err) {
       console.error('Failed to load customer:', err);
-      api.clearTokens();
+      // Only a real auth rejection invalidates the session — a network drop
+      // or server 5xx on launch must not wipe a valid 30-day login.
+      if (err?.status === 401 || err?.status === 403 || err?.sessionExpired) {
+        api.clearTokens();
+      } else {
+        setError('Unable to reach the server. Your saved session will resume once you’re back online.');
+      }
       setCustomer(null);
       setProperties([]);
     } finally {

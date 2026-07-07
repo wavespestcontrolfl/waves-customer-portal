@@ -664,8 +664,12 @@ export default function TrackPage() {
         setNotFound(true);
         return;
       }
+      // Non-OK bodies (500s, expired-token JSON errors) must never become
+      // tracker state — that blanked the page and could clobber a live
+      // en-route render. Only accept payloads with a recognized state.
+      if (!r.ok) return;
       const body = await r.json();
-      if (body) setData(body);
+      if (body?.state) setData(body);
     } catch {
       // Don't clobber an existing render on a transient network blip;
       // the next broadcast (or page refresh) will recover.

@@ -84,14 +84,18 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating }),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
+      if (res.status === 409) {
+        // Already recorded (another tab/device) — reflect the submitted
+        // state instead of surfacing a raw error code.
+        if (onSubmitted) onSubmitted(null, rating);
+        return;
       }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
-      if (onSubmitted) onSubmitted(body.pestPressure);
-    } catch (err) {
-      setError(err.message || 'Could not submit rating');
+      if (onSubmitted) onSubmitted(body.pestPressure, rating);
+    } catch {
+      // Server codes are snake_case internals — never show them verbatim.
+      setError('Couldn’t save your rating — please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -222,7 +226,13 @@ export default function PestPressureCard({ data, token }) {
         <ClientRatingPicker
           token={token}
           question={effective.clientRatingQuestion || 'Over the past 3 months, how much pest activity have you noticed?'}
-          onSubmitted={(updated) => setOverride(updated || effective)}
+          onSubmitted={(updated, rating) => setOverride(updated || {
+            // Server returned no refreshed view (or 409 already-submitted):
+            // mark the rating consumed locally so the picker doesn't re-show.
+            ...effective,
+            canCaptureClientRating: false,
+            submittedClientRating: rating,
+          })}
         />
       ) : null}
 

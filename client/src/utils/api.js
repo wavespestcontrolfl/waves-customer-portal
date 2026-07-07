@@ -61,10 +61,15 @@ class ApiClient {
           headers.Authorization = `Bearer ${this.token}`;
           response = await fetch(url, { ...options, headers });
         } else {
-          // Refresh failed — force logout
+          // Refresh failed — force logout, preserving the return path so
+          // re-login lands back on this page (mirrors ProtectedRoute).
           this.clearTokens();
-          window.location.href = '/login';
-          return;
+          const next = `${window.location.pathname}${window.location.search}`;
+          window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
+          const sessionErr = new Error('Session expired. Please sign in again.');
+          sessionErr.status = 401;
+          sessionErr.sessionExpired = true;
+          throw sessionErr;
         }
       }
 
@@ -79,7 +84,9 @@ class ApiClient {
           message = (await response.text().catch(() => '')).trim();
         }
 
-        throw new Error(message || `Request failed (${response.status})`);
+        const requestErr = new Error(message || `Request failed (${response.status})`);
+        requestErr.status = response.status;
+        throw requestErr;
       }
 
       const data = await response.json();

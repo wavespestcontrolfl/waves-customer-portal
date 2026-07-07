@@ -132,6 +132,39 @@ function showReloadToast() {
   document.body.appendChild(el);
 }
 
+// Rendered when a lazy chunk still fails after the one automatic reload —
+// a friendly retry beats the blank screen the rethrow used to produce.
+function ChunkLoadFallback() {
+  return (
+    <div style={{
+      minHeight: '100vh', background: '#FAF8F3', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', padding: 24, fontFamily: FONTS.body, boxSizing: 'border-box',
+    }}>
+      <div style={{
+        width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
+        borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+      }}>
+        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.blueDeeper, marginBottom: 8, fontFamily: FONTS.heading }}>
+          Couldn&rsquo;t load this page
+        </div>
+        <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
+          Check your connection and try again.
+        </div>
+        <button
+          onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+          style={{
+            minHeight: 42, padding: '0 18px', background: COLORS.blueDeeper, color: '#fff',
+            border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 850,
+            fontFamily: FONTS.heading, cursor: 'pointer',
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function lazyWithRetry(factory) {
   return lazy(async () => {
     try {
@@ -141,11 +174,16 @@ function lazyWithRetry(factory) {
     } catch (err) {
       const msg = String(err?.message || '');
       const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
-      if (isChunkError && !sessionStorage.getItem('chunk-reload-attempted')) {
-        sessionStorage.setItem('chunk-reload-attempted', '1');
-        showReloadToast();
-        setTimeout(() => window.location.reload(), 1200);
-        return { default: () => null };
+      if (isChunkError) {
+        if (!sessionStorage.getItem('chunk-reload-attempted')) {
+          sessionStorage.setItem('chunk-reload-attempted', '1');
+          showReloadToast();
+          setTimeout(() => window.location.reload(), 1200);
+          return { default: () => null };
+        }
+        // Already auto-reloaded once — show a retry screen instead of
+        // rethrowing into a blank page.
+        return { default: ChunkLoadFallback };
       }
       throw err;
     }
@@ -228,6 +266,14 @@ function EstimatePublicGateway() {
   return <WavesShell><EstimateViewPage /></WavesShell>;
 }
 
+// Route-tree error boundary: keyed on pathname so navigating away from a
+// crashed page automatically clears the fallback. Customer routes previously
+// had NO boundary — any render crash blanked the whole app.
+function RoutesErrorBoundary({ children }) {
+  const location = useLocation();
+  return <PageErrorBoundary key={location.pathname}>{children}</PageErrorBoundary>;
+}
+
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
   const location = useLocation();
@@ -292,6 +338,7 @@ export default function App() {
         <PublicFunnelTracking />
         <InstallPrompt />
         <BiometricGate>
+        <RoutesErrorBoundary>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           {/* WavesShell wraps (owner 2026-07-06): every customer page gets
@@ -407,6 +454,7 @@ export default function App() {
             }
           />
         </Routes>
+        </RoutesErrorBoundary>
         </BiometricGate>
       </BrowserRouter>
     </AuthProvider>

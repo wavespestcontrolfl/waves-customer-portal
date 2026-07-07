@@ -1750,6 +1750,14 @@ function InternalReviewBar() {
 }
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
+  const [copied, setCopied] = useState(false);
+  const handleShare = async () => {
+    const result = await onShare();
+    if (result === 'copied') {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
   return (
     <section data-glass="card" className="report-action-bar" aria-label="Report tools">
       <div className="section-eyebrow">Report Tools</div>
@@ -1759,7 +1767,7 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
         {pdfUrl
           ? <a data-glass-accent="" href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
           : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
-        <button data-glass-accent="" type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? 'Link copied' : 'Share'}</button>
         <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
         <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
@@ -4618,14 +4626,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     || /tree|shrub/.test(String(data.serviceLine || ''))
     || Boolean(data.pestReportV2);
 
+  // Returns 'copied' when the clipboard fallback ran so the action bar can
+  // show feedback. Canceling the native share sheet is not an error and
+  // records no event (mirrors RecapViewPage.share).
   const share = async () => {
-    if (navigator.share) {
-      await navigator.share({ title: 'Waves service report', url: reportUrl });
-      trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
-      return;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: 'Waves service report', url: reportUrl });
+        trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
+        return null;
+      }
+    } catch {
+      return null; // share sheet canceled
     }
-    await navigator.clipboard?.writeText(reportUrl);
-    trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
+    try {
+      await navigator.clipboard?.writeText(reportUrl);
+      trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
+      return 'copied';
+    } catch {
+      return null; // clipboard unavailable
+    }
   };
 
   if (mode === 'sms_preview') return <SmsReportPreview data={data} />;
