@@ -19,7 +19,9 @@ const SURFACE = {
   body: '#3F4A65',
   muted: CUSTOMER_SURFACE.muted,
   calloutBg: '#FDF6EC',
-  calloutBorder: '#FFD700',
+  // Glass gold, not the old marketing #FFD700 — border colors aren't
+  // repainted by the glass theme CSS, so the literal must be spec-correct.
+  calloutBorder: '#F0A500',
   detailBg: '#F9F8F5',
 };
 
