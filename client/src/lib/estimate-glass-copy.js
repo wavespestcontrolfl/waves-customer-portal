@@ -103,7 +103,7 @@ const GLASS_PACKS = {
     heroH1: 'Hello {first}, your greener-lawn game plan is ready!',
     heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by a 90-day money-back guarantee.',
     eyebrow: 'Your custom lawn program',
-    aiTitle: 'Your price was built from your lawn — not somebody else’s average',
+    aiTitle: 'Your price was built from your lawn — not somebody else’s',
     aiBody: 'We reviewed your lawn size, turf type, and current condition before pricing this program — your lawn, your price, nothing generic.',
     askChips: [
       'When will I see results?',
@@ -228,8 +228,8 @@ const GLASS_PACKS = {
     heroH1: 'Hello {first}, your complete home protection plan is ready!',
     heroSub: 'Every service on this plan was priced from your actual property — one plan, one team accountable for all of it.',
     eyebrow: 'Your custom Waves plan',
-    aiTitle: 'Your price was built from your property — not somebody else’s average',
-    aiBody: 'We reviewed your home, lot, and every service on this plan before pricing it — nothing here is a generic average.',
+    aiTitle: 'Your price was built from your property — not somebody else’s',
+    aiBody: 'We reviewed your home, lot, and every service on this plan before pricing it — nothing here is generic.',
     askChips: [
       'What’s included in this plan?',
       'How do the services work together?',
