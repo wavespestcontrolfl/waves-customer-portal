@@ -1831,11 +1831,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
             // Engine lineItems rows carry `service` (canonical key) / `label`
             // rather than the manual rows' name fields — accept either shape.
             quoteRecurringName: svc.name || svc.serviceName || svc.service_name || svc.service || svc.label || null,
-            // Normalized through the same mapper as the booked pattern so the
-            // comparison is apples-to-apples; null when the quote row has no
-            // resolvable frequency (the guard then skips — can't compare).
+            // Resolved with the SAME converter logic conversion uses
+            // (frequency-ish fields, then visitsPerYear/apps-style visit
+            // counts, then pattern text in the display name — see
+            // explicitServiceCadence), then normalized through the same
+            // mapper as the booked pattern so the comparison is
+            // apples-to-apples. Null when unresolvable — the guard below
+            // fails CLOSED on that, never skips.
             quoteRecurringCadence: prepayCoverageCadenceForPattern(
-              svc.frequency || svc.cadence || svc.recurringPattern || null
+              require('../services/estimate-converter').explicitServiceCadence(svc)
             ),
           };
         } catch { return { quoteRecurringName: null, quoteRecurringCadence: null }; }
@@ -1859,7 +1863,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // total by the FULL override — the excess prepaid value never stamps
         // and later visits bill again. Fail closed.
         downgrade(`Appointment booked as standard — ${visitOverride.visitCount} covered visits exceed what a ${recurringPattern} cadence produces in a 12-month term (${visitsPerYearForCadence(recurringPattern)}). Lower the covered-visit count or leave it at the cadence default.`);
-      } else if (quoteRecurringCadence && quoteRecurringCadence !== prepayCoverageCadence) {
+      } else if (!quoteRecurringCadence) {
+        // Can't prove the booked cadence matches the quoted plan — fail
+        // CLOSED (money correctness), never skip the comparison: the prepay
+        // invoice prices the quoted plan, so an unverifiable cadence could
+        // stamp the wrong number of covered visits for that price.
+        downgrade('Appointment booked as standard — the quoted plan’s cadence could not be determined, so annual prepay can’t verify the booked series matches what was sold. Use the estimate’s Annual Prepay action or set up prepay from Customer 360.');
+      } else if (quoteRecurringCadence !== prepayCoverageCadence) {
         // The prepay invoice prices the QUOTED cadence's annual — booking a
         // different cadence would stamp a different number of visits as
         // covered for that price (quoted quarterly → booked monthly = 12
