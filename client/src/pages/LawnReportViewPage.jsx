@@ -14,7 +14,10 @@ const WAVES_PHONE_TEL = '+19412975749';
 // Warm-brand tokens — mirror the public estimate view (customer surface, not admin).
 const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
-const TEXT = '#1B2C5B';
+// Canonical glass ink (owner ruling 2026-07-05) — this page is glass-only
+// (useGlassSurface mounts unconditionally), so the old marketing navy
+// #1B2C5B has no remaining render path here.
+const TEXT = '#04395E';
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
@@ -175,7 +178,6 @@ export default function LawnReportViewPage() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const [glassDefault, setGlassDefault] = useState(false);
 
   // Liquid-glass theme — now unconditional. This page has no pdf/static
   // render modes — the route only ever serves the live customer view.
@@ -190,7 +192,6 @@ export default function LawnReportViewPage() {
       if (!res.ok) throw new Error(`lawn report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
-      setGlassDefault(body.glassDefault === true);
     } catch {
       setNotFound(true);
     } finally {

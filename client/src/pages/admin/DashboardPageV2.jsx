@@ -162,7 +162,9 @@ export default function DashboardPageV2() {
     setMobileTab(id);
     const scroller = document.querySelector(".admin-main");
     if (scroller && typeof scroller.scrollTo === "function") {
-      scroller.scrollTo({ top: 0 });
+      // "instant" opts out of the shell's smooth scroll-behavior — the
+      // content swaps at the same moment, so animating would be jarring.
+      scroller.scrollTo({ top: 0, behavior: "instant" });
     }
   }, []);
   // On mobile only the active tab's section mounts (five sections of recharts

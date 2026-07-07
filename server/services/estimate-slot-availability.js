@@ -986,6 +986,10 @@ function firstDayAvailability(bookable) {
   return { date: firstDay, openCount: dates.filter((d) => d === firstDay).length };
 }
 
+// Matches the scarcity badge's threshold (client glassScarcityInfo shows
+// "Only N openings" for openCount 1–2). Keep the two in sync.
+const SCARCE_FIRST_DAY_MAX = 2;
+
 function selectCustomerFacingSlots(slots, limit) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
@@ -993,8 +997,25 @@ function selectCustomerFacingSlots(slots, limit) {
   const sorted = (Array.isArray(slots) ? slots : [])
     .filter(Boolean)
     .sort(compareCustomerFacingSlots);
+  if (!sorted.length) return [];
 
-  return diversifyByDay(sorted).slice(0, safeLimit);
+  const diversified = diversifyByDay(sorted);
+
+  // Scarce first day (≤2 bookable windows): pin ALL of that day's slots
+  // ahead of the cross-day spread. The scarcity badge counts the full
+  // first-day pool (firstDayAvailability), so every opening it advertises
+  // must survive into the customer-facing list — under the spread alone,
+  // the day's second window ranks behind every other day's first and the
+  // display slice cuts it, leaving the badge claiming "2 openings today"
+  // over a single bookable card (owner bug report 2026-07-07).
+  const firstDay = sorted[0].date;
+  const firstDaySlots = sorted.filter((s) => s?.date === firstDay);
+  if (firstDaySlots.length > 1 && firstDaySlots.length <= SCARCE_FIRST_DAY_MAX) {
+    const rest = diversified.filter((s) => s?.date !== firstDay);
+    return [...firstDaySlots, ...rest].slice(0, safeLimit);
+  }
+
+  return diversified.slice(0, safeLimit);
 }
 
 // Drop any candidate whose rounded display window collides with a real

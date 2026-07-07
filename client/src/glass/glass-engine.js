@@ -17,7 +17,7 @@
  * All visual rules are in glass-theme.css, scoped under
  * html[data-glass-theme] so nothing leaks while a gate is off.
  */
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 import './glass-theme.css';
 
 /**
@@ -174,9 +174,13 @@ export function fireGlassConfetti(cx, cy) {
  * reports, future glass adoptions). Mounts the scene + pointer FX and tears
  * both down on unmount — no auto-tagging, no observers. Legacy inline-styled
  * pages that need DOM tagging use useGlassTheme from EstimateGlassTheme.
+ *
+ * Layout effect, not effect: the theme attribute must be on <html> before
+ * the browser paints the first frame, or every glass surface flashes its
+ * un-themed (legacy-token) styling for a frame before the scene mounts.
  */
 export function useGlassSurface(active, variant = 'full') {
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;

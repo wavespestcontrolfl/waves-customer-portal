@@ -32,7 +32,6 @@ import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
-import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
@@ -447,7 +446,10 @@ function Page({ children }) {
       <EstimateGlassTheme active />
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
-      <div style={{ flex: 1, padding: '32px 20px 110px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Bottom padding: enough that the floating book bar doesn't sit on
+          the last card, without the old 110px dead zone above the footer
+          (owner 2026-07-07: "leave a smaller gap"). */}
+      <div style={{ flex: 1, padding: '32px 20px 48px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
       {/* Standard footer on estimates too (owner 2026-07-06) — same identity/
@@ -1166,6 +1168,34 @@ function isBoraCareBreakdownItem(item = {}) {
   return raw.includes('bora care') || raw.includes('boracare');
 }
 
+function isWaveGuardSetupBreakdownRow(item = {}) {
+  if (item?.service === 'waveguard_setup') return true;
+  const raw = [item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('waveguard setup') || raw.includes('membership setup');
+}
+
+// Total for PaymentPreferenceButtons' "one-time services billed separately
+// after completion" note. The WaveGuard setup row rides oneTimeBreakdown, but
+// it's invoiced up front with the accept (PPB previews it as its own invoice
+// line from `setupFee`), so counting it here would claim the same fee a
+// second time as an after-completion charge. With showOneTimeOption the
+// breakdown is the ALTERNATE one-time price (either/or), not extras on top —
+// same gate OneTimeBreakdownCard uses.
+export function oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode) {
+  if (serviceMode === 'one_time' || estimate?.showOneTimeOption) return 0;
+  const breakdown = pricing?.oneTimeBreakdown;
+  const total = Number(breakdown?.total) || 0;
+  if (total <= 0) return 0;
+  const setup = (Array.isArray(breakdown?.items) ? breakdown.items : [])
+    .filter(isWaveGuardSetupBreakdownRow)
+    .reduce((sum, row) => sum + (Number(row.amount ?? row.price ?? row.total) || 0), 0);
+  return Math.max(0, Math.round((total - setup) * 100) / 100);
+}
+
 // Mirrors the server isNonBillableOneTimeRow: inspections, the WaveGuard setup
 // fee, and any discount/credit/zero row (amount <= 0) carry no billable service
 // of their own. A positive unrecognized charge is intentionally treated as
@@ -1404,11 +1434,20 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service));
   if (items.length === 0) return null;
+  // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
+  // fed by pricing.firstVisitFees so the note only shows when the server says
+  // the fee is actually waivable. Legacy label-only setup rows carry no
+  // `service`, so fall back to the same label match the payment note uses.
+  const prepayWaived = new Set(prepayWaivedServices.filter(Boolean));
+  const isPrepayWaivedRow = (item) => prepayWaived.size > 0 && (
+    prepayWaived.has(item?.service)
+    || (prepayWaived.has('waveguard_setup') && isWaveGuardSetupBreakdownRow(item))
+  );
   const hasQuoteRequired = items.some((item) => item?.quoteRequired === true || item?.kind === 'quote_required');
   const total = excludeServices.length === 0 && Number.isFinite(Number(breakdown?.total))
     ? Number(breakdown.total)
@@ -1426,6 +1465,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           const amount = Number(item.amount) || 0;
           const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
           const isIncluded = !isQuoteRequired && item.kind === 'included';
+          const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
@@ -1447,6 +1487,11 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
                     {quoteNote}
                   </div>
                 ) : null}
+                {showPrepayWaiverNote ? (
+                  <div style={{ fontSize: 12, color: COLORS.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                    * {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
+                  </div>
+                ) : null}
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
@@ -1454,6 +1499,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
                 whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
               }}>
                 {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
+                {showPrepayWaiverNote ? '*' : ''}
               </div>
             </div>
           );
@@ -1903,7 +1949,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -1965,7 +2011,11 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
             ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
             : manualScheduling
               ? 'Scheduling: a Waves team member will reach out to set up your visit.'
-              : `Slot: ${slotId}`}
+              : slotMeta?.date
+                // Human-readable date/time; the raw internal slot id only
+                // appears when the slot metadata is missing.
+                ? `Visit: ${new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${slotMeta.time ? ` · ${slotMeta.time}` : ''}`
+                : `Slot: ${slotId}`}
       </div>
       {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
@@ -2365,7 +2415,14 @@ export function ServiceSection({
                             fontSize: 20, fontWeight: 500, lineHeight: 1.25,
               color: '#1B2C5B', margin: '0 0 4px',
             }}>
-              Same protection — pick the rhythm that fits your home.
+              {/* The pest-branded line is pest-only — a lawn/mosquito/termite
+                  cadence selector labeled "Pest Protection" reads like the
+                  wrong quote, so every other section (incl. the synthetic
+                  'bundle' key, slug null) keeps the generic wording (codex
+                  rd3). */}
+              {sectionSlug === 'pest_control'
+                ? 'Pest Protection by Waves — ride the wave that fits your home.'
+                : 'Same protection — pick the rhythm that fits your home.'}
             </h2>
             <GlassFrequencyPills
               frequencies={frequencies}
@@ -2587,8 +2644,11 @@ export default function EstimateViewPage() {
   }, [token, addServiceOffer?.serviceKey]);
 
   const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
-    setLoading(true);
     const isRefresh = initialViewCountedRef.current;
+    // Refreshes keep the loaded UI on screen instead of dropping back to the
+    // skeleton — a failed refresh used to leave the skeleton up forever
+    // because nothing on the error path reset `loading`.
+    if (!isRefresh) setLoading(true);
     const params = [];
     if (isRefresh) params.push('refresh=1');
     let fetchOpts;
@@ -2607,7 +2667,10 @@ export default function EstimateViewPage() {
       setLoading(false);
       return;
     }
-    if (!r.ok) throw new Error(`estimate fetch failed: ${r.status}`);
+    if (!r.ok) {
+      setLoading(false);
+      throw new Error(`estimate fetch failed: ${r.status}`);
+    }
     initialViewCountedRef.current = true;
     const body = await r.json();
     // Glass COPY default: set the module state BEFORE setData so every
@@ -2917,6 +2980,18 @@ export default function EstimateViewPage() {
             await loadEstimate();
             return;
           }
+          if (/existing appointment is no longer available/i.test(body.error || '')) {
+            // Not a slot conflict: the customer's already-scheduled visit
+            // changed underneath them — there's no slot picker to "pick
+            // another" from. Reload so acceptance mode re-derives.
+            setCtaPhase('configure');
+            setReservation(null);
+            setSelectedSlotId(null);
+            setSelectedSlotMeta(null);
+            setPaymentPreference(null);
+            await loadEstimate();
+            return;
+          }
           const expired = /expired|no active reservation/i.test(body.error || '');
           setCtaPhase(expired ? 'reservation_expired' : 'slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
@@ -3114,7 +3189,7 @@ export default function EstimateViewPage() {
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
   const estimateCity = (() => {
     const m = /,\s*([^,]+),\s*FL\b/i.exec(String(estimate.address || ''));
-    return m ? m[1].trim() : 'your city';
+    return m ? m[1].trim() : null;
   })();
   const soonestSlotLabel = firstSlotDate
     ? new Date(`${firstSlotDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })
@@ -3123,10 +3198,19 @@ export default function EstimateViewPage() {
   // openings), the "as soon as {date}" clause is dropped rather than guessed
   // — a "tomorrow" placeholder can contradict the slot picker below (codex
   // P2, PR #2439). The residual-token replace guards any future pack string
-  // that uses {date} outside that phrase.
+  // that uses {date} outside that phrase. {city} gets the same treatment:
+  // when the address doesn't parse, strip the clause position-safely — a
+  // literal 'your city' substitution rendered "your pest-free your city
+  // plan is ready!".
   const fillGlassTokens = (str) => {
     if (!str) return str;
-    const withCity = String(str).replace(/\{city\}/g, estimateCity);
+    const withCity = estimateCity
+      ? String(str).replace(/\{city\}/g, estimateCity)
+      : String(str)
+        .replace(/\s+in \{city\}/gi, '')
+        .replace(/\{city\}\s+home/gi, 'home')
+        .replace(/\s*\{city\}\s*/g, ' ')
+        .replace(/ {2,}/g, ' ');
     return soonestSlotLabel
       ? withCity.replace(/\{date\}/g, soonestSlotLabel)
       : withCity.replace(/\s*as soon as \{date\}/gi, '').replace(/\{date\}/g, 'soon');
@@ -3182,8 +3266,8 @@ export default function EstimateViewPage() {
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
   // Live price for the glass sticky book bar — it must quote exactly what
-  // the cards quote. Bundles: combinedFrequency.monthly IS the monthly
-  // total CombinedRecurringPriceCard renders as /mo — no cadence multiply.
+  // the cards quote. Bundles: combinedFrequency.monthly IS the bundle's
+  // monthly total (accept charges this /mo number) — no cadence multiply.
   // Single service: the cadence price PriceCard renders.
   const stickyBarPrice = (() => {
     const HIDDEN = { label: null, period: null };
@@ -3219,6 +3303,14 @@ export default function EstimateViewPage() {
   const renderQuoteDetailCards = (readOnly = false, modeOverride = null) => {
     const cardsDisabled = readOnly || ctaPhase === 'submitting';
     const mode = modeOverride || serviceMode;
+    // Service keys whose one-time fee is waived with annual prepay (the
+    // WaveGuard setup fee) — the breakdown card marks these rows with an
+    // asterisk + waiver note when they render inside the one-time list.
+    const prepayWaivedServices = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+      ? pricing.firstVisitFees
+      : (pricing.setupFee ? [pricing.setupFee] : []))
+      .filter((fee) => fee?.waivedWithPrepay === true)
+      .map((fee) => fee.service);
     if (mode === 'recurring') {
       return (
         <>
@@ -3251,7 +3343,14 @@ export default function EstimateViewPage() {
                 {!estimate.showOneTimeOption ? (
                   <OneTimeBreakdownCard
                     breakdown={pricing.oneTimeBreakdown}
-                    excludeServices={setupFees.map((fee) => fee.service)}
+                    // Only exclude fees that actually render their own
+                    // SetupFeeCard — a glass-suppressed card must stay in
+                    // this list or the one-time total understates itself
+                    // and stops reconciling with the surcharge line.
+                    excludeServices={setupFees
+                      .filter((fee) => !(glassContent && fee.waivedWithPrepay && section.isPest === true))
+                      .map((fee) => fee.service)}
+                    prepayWaivedServices={prepayWaivedServices}
                   />
                 ) : null}
               </>
@@ -3281,19 +3380,9 @@ export default function EstimateViewPage() {
           })}
           </div>
 
-          {/* The combined recurring total is the number the invoice/payment
-              copy uses — the customer has to see it before approving, so it
-              stays even though the per-service boxes each show a price. */}
-          {services.length > 1 && renderFlags.showRecurringSummary ? (
-            <CombinedRecurringPriceCard
-              combined={pricing.combinedRecurring}
-              selectedFrequency={combinedFrequency}
-              // Tier pill already renders ONCE above the service boxes
-              // (owner directive: single WaveGuard pill per bundle).
-              waveGuardTier={null}
-            />
-          ) : null}
-
+          {/* The combined "Recurring total" card was removed (owner directive
+              2026-07-07) — the per-service boxes and the sticky book bar carry
+              the bundle's monthly price. */}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
@@ -3314,7 +3403,12 @@ export default function EstimateViewPage() {
           {services.length > 1 && !estimate.showOneTimeOption ? (
             <OneTimeBreakdownCard
               breakdown={pricing.oneTimeBreakdown}
-              excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
+              // Mirror of the single-service path: keep glass-suppressed
+              // setup fees in the breakdown so the total stays honest.
+              excludeServices={(pricing.firstVisitFees || [])
+                .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
+                .map((fee) => fee.service)}
+              prepayWaivedServices={prepayWaivedServices}
             />
           ) : null}
 
@@ -3506,6 +3600,7 @@ export default function EstimateViewPage() {
                 onSelect={handlePaymentChoice}
                 disabled={adminDraftPreview}
                 serviceMode={serviceMode}
+                oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
@@ -3517,6 +3612,7 @@ export default function EstimateViewPage() {
           ) : null}
           <ReviewPhase
             slotId={selectedSlotId}
+            slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}
             paymentPreference={paymentPreference}
             secondsRemaining={countdownSeconds}
@@ -3657,6 +3753,7 @@ export default function EstimateViewPage() {
               // "expired" card and destroy the preview's purpose.
               disabled={adminDraftPreview || ctaPhase === 'submitting'}
               serviceMode={serviceMode}
+              oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
@@ -3730,8 +3827,6 @@ export default function EstimateViewPage() {
           <GoogleProfilesCard />
         </>
       )}
-      <QuestionsEscapeHatch estimateSlug={estimate.slug} />
-
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
           slot-aware approve. Configure phase only — during slot review it
           would cover the confirm/cancel buttons. */}

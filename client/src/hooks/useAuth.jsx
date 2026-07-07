@@ -1,14 +1,35 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
-import { flushNativePushToken } from '../native/nativePush';
+import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 
 const AuthContext = createContext(null);
+
+// Server auth routes send intentional customer copy in the JSON `error`
+// field ("Invalid code", rate-limit sentences) — show those verbatim. But
+// api.js also throws raw non-JSON bodies (proxy HTML error pages) and
+// "Request failed (502)" fallbacks, which are not customer copy (F-059).
+function authErrorCopy(err) {
+  const msg = String(err?.message || '').trim();
+  const looksCurated = msg
+    && msg.length <= 140
+    && !/[<>]/.test(msg)
+    && !/^Request failed \(/i.test(msg)
+    && !/^HTTP\s*\d{3}/i.test(msg);
+  if (looksCurated) return msg;
+  if (err?.status === 429) return 'Too many attempts. Please wait a few minutes and try again.';
+  return 'Something went wrong. Please try again in a moment.';
+}
 
 export function AuthProvider({ children }) {
   const [customer, setCustomer] = useState(null);
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const retryTimer = useRef(null);
+  // Mirrors `customer` for reads inside the stable loadCustomer callback
+  // (empty deps ⇒ stale closure) — the transient branch needs to know
+  // whether a session is already on screen.
+  const customerRef = useRef(null);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -20,11 +41,22 @@ export function AuthProvider({ children }) {
     } else {
       setLoading(false);
     }
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    };
   }, []);
 
-  const loadCustomer = useCallback(async () => {
+  const loadCustomer = useCallback(async (attempt) => {
+    // `refreshCustomer` gets used as an event handler, so `attempt` may be
+    // anything — only our own retry chain passes a number.
+    const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
     try {
       const data = await api.getMe();
+      customerRef.current = data;
       setCustomer(data);
       const propertyData = await api.getAuthProperties().catch(() => ({ properties: [] }));
       setProperties(propertyData.properties || []);
@@ -34,12 +66,34 @@ export function AuthProvider({ children }) {
       flushNativePushToken();
     } catch (err) {
       console.error('Failed to load customer:', err);
-      api.clearTokens();
-      setCustomer(null);
-      setProperties([]);
-    } finally {
-      setLoading(false);
+      // Only a real auth rejection invalidates the session — a network drop
+      // or server 5xx on launch must not wipe a valid 30-day login.
+      if (err?.status === 401 || err?.status === 403 || err?.sessionExpired) {
+        api.clearTokens();
+        customerRef.current = null;
+        setCustomer(null);
+        setProperties([]);
+        setLoading(false);
+        return;
+      }
+      // Transient failure: keep the session check PENDING instead of letting
+      // a null customer bounce a valid saved session through ProtectedRoute
+      // to /login with nothing scheduled to bring it back. An already-loaded
+      // session keeps its data; startup stays on the checking screen (which
+      // surfaces `error`) and retries with capped backoff.
+      setError('Unable to reach the server. Your saved session will resume once you’re back online.');
+      // Post-login calls (verifyCode/switchProperty) arrive with loading
+      // already false — flip it back so ProtectedRoute holds the checking
+      // card during the retry instead of bouncing the valid session to
+      // /login. A session already on screen keeps rendering untouched.
+      if (!customerRef.current) setLoading(true);
+      retryTimer.current = setTimeout(
+        () => { loadCustomer(n + 1); },
+        Math.min(30000, 2000 * 2 ** Math.min(n, 4)),
+      );
+      return;
     }
+    setLoading(false);
   }, []);
 
   const sendCode = async (phone) => {
@@ -48,7 +102,7 @@ export function AuthProvider({ children }) {
       await api.sendCode(phone);
       return true;
     } catch (err) {
-      setError(err.message);
+      setError(authErrorCopy(err));
       return false;
     }
   };
@@ -62,13 +116,29 @@ export function AuthProvider({ children }) {
       await loadCustomer();
       return true;
     } catch (err) {
-      setError(err.message);
+      setError(authErrorCopy(err));
       return false;
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+    // Deactivate this device's push registration BEFORE dropping the JWT —
+    // otherwise the device keeps receiving the previous account's pushes.
+    // Awaited (with a cap) because the unsubscribe may need the api client's
+    // 401→refresh retry, which dies the moment clearTokens runs; the timeout
+    // keeps a dead network from wedging logout. No-op (instant) on web.
+    try {
+      await Promise.race([
+        deactivateNativePushToken(),
+        new Promise((resolve) => { setTimeout(resolve, 4000); }),
+      ]);
+    } catch { /* best-effort */ }
     api.clearTokens();
+    customerRef.current = null;
     setCustomer(null);
     setProperties([]);
   };
@@ -78,6 +148,15 @@ export function AuthProvider({ children }) {
     try {
       const data = await api.selectAuthProperty(customerId);
       api.setTokens(data.token, data.refreshToken);
+      // Re-point this device's push subscription at the newly selected
+      // customer — otherwise pushes keep flowing to the previous property.
+      repostNativePushToken();
+      // The token now points at the TARGET property — the old customer must
+      // not keep rendering (and firing actions) against it if the reload
+      // hits a transient failure. Go pending until the target customer
+      // loads; loadCustomer's retry branch keeps it pending on failure.
+      customerRef.current = null;
+      setLoading(true);
       setProperties(data.properties || []);
       await loadCustomer();
       return true;

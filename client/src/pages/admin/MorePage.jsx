@@ -27,6 +27,7 @@ import {
   ChevronRight,
   Bot,
   Sprout,
+  Leaf,
   Newspaper,
   Send,
 } from "lucide-react";
@@ -66,6 +67,9 @@ const SECTIONS = [
   {
     section: "Field & Equipment",
     items: [
+      // Restored alongside the desktop sidebar entry — the photo-scoring
+      // assessment flow lost its nav link in the V2 shell cutover.
+      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/turf-height", icon: Sprout, label: "Turf Height Review" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },

@@ -90,6 +90,7 @@ export default function RatePage() {
   const [highlights, setHighlights] = useState([]);
   const [feedback, setFeedback] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   // AI Review Writer state
   const [selectedServices, setSelectedServices] = useState([]);
@@ -178,12 +179,22 @@ export default function RatePage() {
 
   const handleSubmit = async () => {
     setSubmitting(true);
+    setSubmitError('');
     try {
       await scoreSavePromiseRef.current;
       const r = await fetch(`${API_BASE}/rate/${token}/submit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ score, feedback, highlights }),
       });
+      // 409 = the server already has this feedback (first POST committed but
+      // the response was lost, or a second tab submitted). Retrying forever
+      // would trap saved feedback behind an error — it's a success.
+      if (r.status === 409) {
+        setScreen('success');
+        setSubmitting(false);
+        return;
+      }
+      if (!r.ok) throw new Error(`Submit failed (${r.status})`);
       const result = await r.json();
       if (result.redirect) {
         setScreen('redirect');
@@ -191,7 +202,11 @@ export default function RatePage() {
       } else {
         setScreen('success');
       }
-    } catch { setScreen('success'); }
+    } catch {
+      // Keep the feedback on screen — a false "Thank you!" here silently
+      // discarded a detractor's complaint with no retry.
+      setSubmitError("We couldn't send your feedback. Please check your connection and tap Send again.");
+    }
     setSubmitting(false);
   };
 
@@ -233,7 +248,14 @@ export default function RatePage() {
     });
 
     submitPromiseRef.current = submitPromise;
-    await submitPromise;
+    try {
+      await submitPromise;
+    } catch (err) {
+      // Drop the rejected promise so the next attempt re-submits instead of
+      // replaying this failure forever.
+      if (submitPromiseRef.current === submitPromise) submitPromiseRef.current = null;
+      throw err;
+    }
   };
 
   const handleGenerateReview = async ({ services = selectedServices, standouts = selectedStandouts, note = personalNote } = {}) => {
@@ -619,6 +641,11 @@ export default function RatePage() {
             fontSize: 15,
             resize: 'vertical',
           }} />
+          {submitError && (
+            <div style={{ marginTop: 12, fontSize: 14, fontWeight: 700, color: COLORS.red, background: '#FEE2E2', borderRadius: 8, padding: '10px 14px' }}>
+              {submitError}
+            </div>
+          )}
           <Button
             variant="primary"
             onClick={handleSubmit}

@@ -30,6 +30,26 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 
+// Authenticated fetch → blob download for Bearer-only report endpoints. A
+// bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
+// auth) — same path DocumentsTab's handleDownload uses.
+async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
+  const token = localStorage.getItem('waves_token');
+  let abs = url;
+  try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // The arrival window quoted to customers is ALWAYS window_start + 2 hours
 // (owner directive — see server/utils/sms-time-format.js). window_end is the
 // internal job-duration block and must never render on customer surfaces.
@@ -1090,6 +1110,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
@@ -1506,14 +1527,23 @@ function DashboardTab({ customer, onSwitchTab }) {
           {nextService ? (
             <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
-                <button type="button" onClick={() => {
-                  api.confirmAppointment(nextService.id).then(() => {
+                <button type="button" disabled={confirmingVisit} onClick={async () => {
+                  if (confirmingVisit) return;
+                  setConfirmingVisit(true);
+                  try {
+                    await api.confirmAppointment(nextService.id);
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
-                  });
+                  } catch (err) {
+                    console.error(err);
+                    alert('Could not confirm this visit. Please try again.');
+                  } finally {
+                    setConfirmingVisit(false);
+                  }
                 }} data-glass-accent="" style={{
                   ...dashboardPrimaryButton,
+                  ...(confirmingVisit ? { opacity: 0.6, cursor: 'default' } : {}),
                 }}>
-                  Confirm Visit
+                  {confirmingVisit ? 'Confirming…' : 'Confirm Visit'}
                 </button>
               ) : (
                 <span style={{
@@ -2218,18 +2248,39 @@ function ServicesTab() {
                             {/* reportAvailable === false → no button at all: the
                                 fallback generator 404s for internal-only records. */}
                             {(s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false) && (
-                              <a
-                                href={s.reportUrl || api.getServiceReportUrl(s.id)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                data-glass-accent="" style={{
-                                  ...primaryButton, padding: '7px 12px', fontSize: 12,
-                                  textDecoration: 'none',
-                                  borderRadius: 8,
-                                }}
-                              >
-                                <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : s.reportUrl ? 'View report' : 'Download PDF'}
-                              </a>
+                              s.reportUrl ? (
+                                <a
+                                  href={s.reportUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  data-glass-accent="" style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    textDecoration: 'none',
+                                    borderRadius: 8,
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                </a>
+                              ) : (
+                                // No public reportUrl — the fallback endpoint is
+                                // Bearer-only, so a bare anchor opened a raw 401
+                                // JSON page. Download through authed fetch instead.
+                                <button
+                                  type="button"
+                                  data-glass-accent=""
+                                  onClick={() => {
+                                    downloadAuthedPdf(api.getServiceReportUrl(s.id)).catch(() => {
+                                      alert('Could not download this report. Please try again.');
+                                    });
+                                  }}
+                                  style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    borderRadius: 8, cursor: 'pointer',
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
+                                </button>
+                              )
                             )}
                             <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
@@ -2347,6 +2398,8 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
+  'enRouteChannel',
+  'techArrivedChannel',
 ];
 
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
@@ -2969,11 +3022,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'checkCircle', locked: false, defaultOn: true },
                 { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-                { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
+                { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'A message the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Phase 2E: per-customer auto-flip opt-out. Distinct
                 // from techEnRoute — that one fires when the tech taps
                 // "En Route". This one fires automatically when the
@@ -2981,7 +3034,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // (column DEFAULT TRUE); user can toggle off to skip
                 // the auto-detected version while keeping the manual
                 // tap-triggered text.
-                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route text the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
+                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route alert the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
                 { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
                 { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
                 // Kept as the customer's only in-portal opt-out: the irrigation
@@ -3280,6 +3333,7 @@ function BillingTab({ customer }) {
   const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
+  const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
 
   // Stripe card management state
@@ -3705,13 +3759,22 @@ function BillingTab({ customer }) {
 
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
+    setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
     })
-      .then(() => setBillingPrefsSaving(false))
-      .catch(() => setBillingPrefsSaving(false));
+      .then(() => {
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('saved');
+        setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
+      })
+      .catch(() => {
+        // A silent failure here left the customer believing prefs were saved.
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('error');
+      });
   };
 
   return (
@@ -4225,13 +4288,18 @@ function BillingTab({ customer }) {
           </button>
         </div>
 
+        {billingPrefsStatus === 'error' && (
+          <div style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
+            Couldn&rsquo;t save your billing preferences. Please try again.
+          </div>
+        )}
         <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} data-glass-accent="" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
           cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
-          {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
+          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save Billing Preferences'}
         </button>
       </div>
     </div>
@@ -7480,30 +7548,37 @@ function MyPlanTab({ customer }) {
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
-            <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
+            <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {includedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
-                  <div key={svc.id}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 850, marginBottom: 8 }}>
-                      <Icon name={iconName(svc.icon)} size={14} strokeWidth={1.8} />
+                  <div key={svc.id} style={{
+                    background: subtle,
+                    border: '1px solid rgba(255,255,255,0.65)',
+                    borderRadius: 14,
+                    padding: '12px 12px 10px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 700, marginBottom: 10 }}>
+                      <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
-                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#D8D0C0' : 'transparent';
-                        const border = isScheduled ? fill : '#E7E2D7';
+                        const isFilled = isCompleted || isOverdue || (isCurrentMonth && isScheduled);
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
+                        const border = isFilled ? 'rgba(255,255,255,0.55)' : isScheduled ? 'rgba(27,44,91,0.35)' : 'rgba(27,44,91,0.14)';
                         const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
+                        const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 0 }}>
+                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -7513,17 +7588,34 @@ function MyPlanTab({ customer }) {
                               onBlur={() => setHoveredCalendarItem(null)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 999,
-                              background: fill,
-                              border: `1px solid ${border}`,
-                              opacity: isScheduled ? 1 : 0.45,
-                              boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
-                              padding: 0,
-                              cursor: isScheduled ? 'pointer' : 'default',
-                            }}
-                            />
+                                width: '100%',
+                                height: 26,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                background: 'transparent',
+                                border: 'none',
+                                padding: 0,
+                                cursor: isScheduled ? 'pointer' : 'default',
+                              }}
+                            >
+                              <span aria-hidden="true" style={{
+                                display: 'block',
+                                boxSizing: 'border-box',
+                                width: 15,
+                                height: 15,
+                                borderRadius: 999,
+                                background: fill,
+                                border: `1.5px solid ${border}`,
+                                boxShadow: isFilled
+                                  ? `inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 6px rgba(4,57,94,0.22)${isCurrentMonth ? `, 0 0 0 3px ${B.wavesBlue}2E` : ''}`
+                                  : isScheduled
+                                    ? 'inset 0 1px 0 rgba(255,255,255,0.8), 0 1px 3px rgba(4,57,94,0.12)'
+                                    : 'none',
+                                transform: isHovered ? 'scale(1.35)' : 'scale(1)',
+                                transition: 'transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 200ms ease',
+                              }} />
+                            </button>
                             {isScheduled && hoveredCalendarItem === tooltipKey && (
                               <div role="tooltip" style={{
                                 position: 'absolute',
@@ -7549,7 +7641,12 @@ function MyPlanTab({ customer }) {
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
+                            <div style={{
+                              fontSize: 10,
+                              fontWeight: isCurrentMonth ? 800 : 600,
+                              letterSpacing: '0.02em',
+                              color: isCurrentMonth ? B.wavesBlue : 'rgba(27,44,91,0.5)',
+                            }}>{month[0]}</div>
                           </div>
                         );
                       })}
@@ -10748,6 +10845,14 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Lock the page scroll while the sheet is open — on iOS a touch scroll on
+  // the sheet otherwise chains to the page behind it.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
   const muted = PORTAL_SHELL.muted;
   const card = {
     background: PORTAL_SHELL.surface,
@@ -10806,6 +10911,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         maxHeight: 'calc(100vh - 16px)',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
       }}>
         <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
         <div style={{
@@ -10991,6 +11097,27 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Lock the page scroll while the chat is open — on iOS a touch scroll on
+  // the overlay otherwise chains to the page behind it.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
+  // The iOS keyboard doesn't resize the layout viewport — it pans it, which
+  // shoved the sheet (header and close button included) off the top of the
+  // screen while typing. Cap the sheet to the visual viewport instead.
+  const [viewportH, setViewportH] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const update = () => setViewportH(Math.round(vv.height));
+    update();
+    vv.addEventListener('resize', update);
+    return () => vv.removeEventListener('resize', update);
+  }, []);
+
   // A question handed in from the Waves AI bar sends itself on open.
   useEffect(() => {
     if (initialQuestion && !initialSentRef.current) {
@@ -11039,12 +11166,15 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         role="dialog"
         aria-modal="true"
         aria-label="Waves assistant"
-        data-glass=""
+        data-glass="modal"
         style={{
-          background: PORTAL_SHELL.surface,
+          background: PORTAL_SHELL.page,
           position: 'relative',
+          boxSizing: 'border-box',
           borderRadius: compact ? '8px 8px 0 0' : 8,
-          maxHeight: compact ? '85vh' : 'min(760px, calc(100vh - 48px))',
+          maxHeight: compact
+            ? (viewportH ? `min(85dvh, ${viewportH}px)` : '85dvh')
+            : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
           margin: '0 auto',
@@ -11060,6 +11190,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }`}</style>
 
         <div style={{
+          flexShrink: 0,
           padding: '16px 18px',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -11067,7 +11198,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <ShellIconTile icon="waves" size={40} />
+            <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
             <div>
               <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Waves Assistant</div>
               <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
@@ -11080,9 +11211,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
+          overscrollBehavior: 'contain',
           padding: '16px 18px',
-          maxHeight: compact ? '60vh' : 'none',
-          background: PORTAL_SHELL.page,
+          background: 'transparent',
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
@@ -11122,6 +11253,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         </div>
 
         <div style={{
+          flexShrink: 0,
           padding: '12px 16px',
           borderTop: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
@@ -11140,13 +11272,15 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               padding: '0 14px',
               borderRadius: 8,
               border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-              fontSize: 14,
+              // 16px floor: anything smaller makes iOS auto-zoom the page on
+              // focus, which is what pushed the open chat off the screen.
+              fontSize: 16,
               fontFamily: FONTS.body,
               outline: 'none',
               background: '#fff',
               color: PORTAL_SHELL.text,
             }}
-            autoFocus
+            autoFocus={!compact}
           />
           <button onClick={send} disabled={sending || !input.trim()} style={{
             width: 44,
@@ -11258,6 +11392,16 @@ export default function PortalPage() {
       document.removeEventListener('mousedown', onPointer);
       document.removeEventListener('keydown', onKey);
     };
+  }, [showMenu]);
+
+  // Lock the page scroll while the account menu is open — on iOS a touch
+  // scroll on the dropdown otherwise chains to the page behind it, so the
+  // background moved while the menu stayed put.
+  useEffect(() => {
+    if (!showMenu) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
   }, [showMenu]);
 
   if (!customer) return null;
@@ -11428,8 +11572,13 @@ export default function PortalPage() {
                 background: PORTAL_SHELL.page,
                 borderRadius: 16,
                 overflow: 'hidden',
-                maxHeight: 'calc(100vh - 72px)',
+                // dvh + safe-area: the menu sits ~60px below the notch, so a
+                // plain 100vh budget pushed the last rows off-screen on iOS.
+                maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 84px)',
                 overflowY: 'auto',
+                WebkitOverflowScrolling: 'touch',
+                // Keep the menu's scroll from chaining to the page behind it.
+                overscrollBehavior: 'contain',
                 boxShadow: PORTAL_SHELL.shadow,
                 border: `1px solid ${PORTAL_SHELL.border}`,
                 zIndex: 200,

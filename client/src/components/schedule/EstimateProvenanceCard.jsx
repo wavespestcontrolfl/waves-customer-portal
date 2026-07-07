@@ -63,8 +63,12 @@ const CADENCE_LABEL = {
   one_time: 'One-time',
 };
 
-function cadenceLabel(cadence) {
+function cadenceLabel(cadence, intervalDays) {
   if (!cadence) return '';
+  // The scheduler represents every-6-weeks as custom/42 — show the human
+  // cadence, not "custom".
+  if (cadence === 'custom' && Number(intervalDays) === 42) return 'Every 6 weeks';
+  if (cadence === 'custom' && Number(intervalDays) > 0) return `Every ${Number(intervalDays)} days`;
   return CADENCE_LABEL[cadence] || String(cadence).replace(/_/g, ' ');
 }
 
@@ -289,7 +293,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   const serviceLines = (Array.isArray(lines) ? lines : [])
     .map((line) => ({
       name: String(line?.estimateLabel || line?.name || '').trim(),
-      cadence: cadenceLabel(line?.cadence),
+      cadence: cadenceLabel(line?.cadence, line?.intervalDays),
     }))
     .filter((line) => line.name);
   const rows = paymentRows(payment);

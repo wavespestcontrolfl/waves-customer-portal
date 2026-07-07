@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
+const localNewsStore = require('../services/local-news-store');
 
 router.use(authenticate);
 
@@ -32,6 +33,19 @@ const ALLOWED_LINK_HOSTS = new Set([
   'blogs.ifas.ufl.edu', 'ifas.ufl.edu', 'www.ifas.ufl.edu',
   'mysuncoast.com', 'www.mysuncoast.com',
   'weather.gov', 'api.weather.gov',
+  // Local newspapers (Venice → Palmetto corridor + Tampa Bay) + their image
+  // CDNs. heraldtribune.com covers rssfeeds.heraldtribune.com via the
+  // subdomain rule; gannett-cdn.com hosts Herald-Tribune article images.
+  // bradenton.com and tampabay.com serve their own images through their
+  // on-domain Arc resizers. townnews.com covers the
+  // bloximages.*.vip.townnews.com CDN the Gondolier's BLOX CMS serves
+  // photos from.
+  'heraldtribune.com', 'www.heraldtribune.com', 'gannett-cdn.com',
+  'bradenton.com', 'www.bradenton.com',
+  'venicegondolier.com', 'www.venicegondolier.com',
+  'yoursun.com', 'www.yoursun.com',
+  'townnews.com',
+  'tampabay.com', 'www.tampabay.com',
 ]);
 
 function hostAllowed(host) {
@@ -70,7 +84,9 @@ async function fetchWithCache(key, url) {
   if (cache[key] && (now - cache[key].ts) < CACHE_TTL) return cache[key].data;
 
   try {
-    const res = await fetch(url);
+    // /local fans out to several upstreams in one Promise.all — a hanging
+    // publisher must time out rather than stall the whole endpoint.
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) {
       logger.warn(`[feed] Upstream ${key} returned ${res.status}`);
       return null;
@@ -125,6 +141,58 @@ function parseItems(channel) {
   return items;
 }
 
+// The Astro hub's feed.xml carries no media:content/media:thumbnail/enclosure
+// and its <description> has no inline <img>, so extractImage() misses on every
+// blog item and the portal rendered icon placeholders instead of post heroes.
+// The blog layout stamps each post's hero as og:image on the live page — the
+// same source social-media.js resolves blog-share heroes from — so fill the
+// gap from there. The UF/IFAS and local-news feeds get the same fallback for
+// their image-less items. Results (including misses) are cached per link, so
+// a feed refresh costs at most one page fetch per post every 30 minutes.
+// Callers only pass links that already passed safeLink (trusted hosts only).
+const ogImageCache = {};
+
+// Follow redirects manually so every hop stays on the safeLink allowlist —
+// a trusted publisher must not be able to bounce the server to an arbitrary
+// (or internal) host via a redirect. Off-allowlist hops resolve to null.
+const MAX_OG_REDIRECTS = 5;
+async function fetchTrustedHtml(startUrl) {
+  let url = startUrl;
+  for (let hop = 0; hop <= MAX_OG_REDIRECTS; hop++) {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      const next = location ? safeLink(new URL(location, url).toString()) : null;
+      if (!next) return null;
+      url = next;
+      continue;
+    }
+    if (!res.ok) return null;
+    return res.text();
+  }
+  return null;
+}
+
+async function resolveOgImage(link) {
+  if (!link) return null;
+  const now = Date.now();
+  const hit = ogImageCache[link];
+  if (hit && (now - hit.ts) < CACHE_TTL) return hit.image;
+  let image = null;
+  try {
+    const html = await fetchTrustedHtml(link);
+    if (html) {
+      const match = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+        || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+      if (match) image = safeImage(new URL(match[1], link).toString());
+    }
+  } catch (err) {
+    logger.warn(`[feed] og:image fetch failed for ${link}: ${err.message}`);
+  }
+  ogImageCache[link] = { image, ts: now };
+  return image;
+}
+
 // =========================================================================
 // Keyword filter for relevance
 // =========================================================================
@@ -143,15 +211,20 @@ router.get('/blog', async (req, res, next) => {
     const data = await fetchWithCache('blog', 'https://www.wavespestcontrol.com/feed.xml');
     const items = parseItems(data?.rss?.channel);
 
-    const posts = items.slice(0, 6).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 200),
-      image: extractImage(item),
-      category: Array.isArray(item.category) ? item.category[0] : (item.category || 'Blog'),
-      source: 'blog',
-      sourceName: 'Waves Blog',
+    const posts = await Promise.all(items.slice(0, 6).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 200),
+        // Hub RSS items carry no image fields — fall back to the live page's
+        // og:image (safeLink already restricts fetches to trusted hosts).
+        image: extractImage(item) || await resolveOgImage(link),
+        category: Array.isArray(item.category) ? item.category[0] : (item.category || 'Blog'),
+        source: 'blog',
+        sourceName: 'Waves Blog',
+      };
     }));
 
     res.json({ posts });
@@ -193,14 +266,17 @@ router.get('/experts', async (req, res, next) => {
     // Sort by date desc
     relevant.sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
 
-    const posts = relevant.slice(0, 4).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 180),
-      image: extractImage(item),
-      source: 'ifas',
-      sourceName: item._source,
+    const posts = await Promise.all(relevant.slice(0, 4).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 180),
+        image: extractImage(item) || await resolveOgImage(link),
+        source: 'ifas',
+        sourceName: item._source,
+      };
     }));
 
     res.json({ posts });
@@ -210,25 +286,114 @@ router.get('/experts', async (req, res, next) => {
 // =========================================================================
 // GET /api/feed/local — Local SWFL news (filtered)
 // =========================================================================
+// Every major outlet from the Venice → Palmetto corridor up through Tampa
+// Bay (the Tampa Bay Times is the daily for both Tampa and St. Pete),
+// merged into one stream. Each fetch degrades independently: a moved/dead
+// feed URL logs a `[feed] Upstream <key> ...` warning and contributes zero
+// items — it never breaks the endpoint. Feed URLs follow each publisher's
+// platform conventions (FeedBlitz for Gannett's Herald-Tribune, the rssfeed
+// widget for McClatchy's Bradenton Herald, BLOX search RSS for the
+// Gondolier, Arc XP outbound feeds for the Times); if one goes quiet
+// permanently, check the warn logs and swap the URL here.
+const LOCAL_NEWS_SOURCES = [
+  { key: 'mysuncoast', name: 'MySuncoast', url: 'https://www.mysuncoast.com/news/local/rss/' },
+  { key: 'heraldtribune', name: 'Herald-Tribune', url: 'https://rssfeeds.heraldtribune.com/sarasota/topstories' },
+  { key: 'bradenton_herald', name: 'Bradenton Herald', url: 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true' },
+  { key: 'venice_gondolier', name: 'Venice Gondolier', url: 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc' },
+  { key: 'tampabay_times', name: 'Tampa Bay Times', url: 'https://www.tampabay.com/arc/outboundfeeds/rss/?outputType=xml' },
+];
+
 router.get('/local', async (req, res, next) => {
   try {
-    const data = await fetchWithCache('mysuncoast', 'https://www.mysuncoast.com/news/local/rss/');
-    const items = parseItems(data?.rss?.channel);
+    const feeds = await Promise.all(
+      LOCAL_NEWS_SOURCES.map(src => fetchWithCache(src.key, src.url))
+    );
+
+    const items = feeds.flatMap((data, i) =>
+      parseItems(data?.rss?.channel).map(item => ({ ...item, _source: LOCAL_NEWS_SOURCES[i].name }))
+    );
 
     const relevant = items.filter(item => {
       const text = `${item.title || ''} ${stripHtml(item.description || '')}`;
       return RELEVANT_KEYWORDS.test(text) && !EXCLUDE_KEYWORDS.test(text);
     });
 
-    const posts = relevant.slice(0, 3).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 150),
-      image: extractImage(item),
-      source: 'local',
-      sourceName: 'MySuncoast',
-    }));
+    // Normalize to candidate records. Items without a trusted link can't be
+    // banked (link is the dedupe key) and the client hides linkless cards
+    // anyway, so drop them here.
+    const candidates = [];
+    const seenLinks = new Set();
+    for (const item of relevant) {
+      const link = safeLink(item.link);
+      if (!link || seenLinks.has(link)) continue;
+      seenLinks.add(link);
+      const parsed = new Date(item.pubDate || Date.now());
+      candidates.push({
+        title: item.title || '',
+        link,
+        // Unparseable pubDate → treat as "seen now" rather than epoch, so
+        // the story neither fake-tops the card nor instantly prunes.
+        pubDate: Number.isNaN(parsed.getTime()) ? new Date() : parsed,
+        description: stripHtml(item.description || '').slice(0, 150),
+        image: extractImage(item),
+        sourceName: item._source,
+      });
+    }
+    // Feeds arrive per-source in their own order; interleave newest-first.
+    candidates.sort((a, b) => b.pubDate - a.pubDate);
+
+    // Bank new arrivals, then serve the newest stories ever seen — feeds
+    // only carry each publisher's latest items, so without the bank the
+    // card drains back to empty as stories rotate out. og:image resolves
+    // once, at ingest, and only for genuinely new links.
+    let posts = null;
+    try {
+      const fresh = new Set(await localNewsStore.newLinks(candidates.map(c => c.link)));
+      const arrivals = candidates.filter(c => fresh.has(c.link)).slice(0, 12);
+      await Promise.all(arrivals.map(async item => {
+        item.image = item.image || await resolveOgImage(item.link);
+      }));
+      await localNewsStore.insertItems(arrivals);
+      // Banked rows were validated at ingest, but the allowlist can change
+      // after rows are stored — re-validate on the way out so a delisted
+      // publisher's rows stop rendering immediately. Read the whole bank
+      // (≤ KEEP_ROWS small rows): a delisted publisher may own all of the
+      // newest rows, and a short buffer would drain the card in exactly
+      // the event this filter exists for.
+      const rows = await localNewsStore.latestItems(localNewsStore.KEEP_ROWS);
+      posts = rows
+        .map(row => {
+          const link = safeLink(row.link);
+          if (!link) return null;
+          return {
+            title: row.title,
+            link,
+            pubDate: new Date(row.pub_date).toUTCString(),
+            description: row.description || '',
+            image: safeImage(row.image),
+            source: 'local',
+            sourceName: row.source_name,
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 5);
+    } catch (err) {
+      // Table missing / DB unreachable: degrade to serving this fetch's
+      // items directly (the pre-bank behavior) — never a 500.
+      logger.warn(`[feed] local news store unavailable: ${err.message}`);
+    }
+
+    if (!posts) {
+      posts = await Promise.all(candidates.slice(0, 5).map(async c => ({
+        title: c.title,
+        link: c.link,
+        pubDate: c.pubDate.toUTCString(),
+        description: c.description,
+        image: c.image || await resolveOgImage(c.link),
+        source: 'local',
+        sourceName: c.sourceName,
+      })));
+    }
 
     res.json({ posts });
   } catch (err) { next(err); }

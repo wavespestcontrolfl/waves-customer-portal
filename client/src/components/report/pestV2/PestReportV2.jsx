@@ -135,6 +135,7 @@ function SupportingMetric({ metric }) {
 function PestPressureRating({ metric, token, live }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
     return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
@@ -143,12 +144,16 @@ function PestPressureRating({ metric, token, live }) {
   const submit = async (n) => {
     if (busy) return;
     setBusy(true);
+    setFailed(false);
     try {
       const res = await fetch(`${API_BASE}/reports/${token}/pest-pressure/client-rating`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: n }),
       });
-      if (res.ok) setSubmitted(true);
-    } catch { /* leave the picker up for a retry */ } finally { setBusy(false); }
+      // 409 = already recorded (another tab/device) — show the thank-you,
+      // not a dead picker.
+      if (res.ok || res.status === 409) setSubmitted(true);
+      else setFailed(true);
+    } catch { setFailed(true); } finally { setBusy(false); }
   };
   return (
     <div style={{ marginTop: 14, padding: '12px 14px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
@@ -160,6 +165,11 @@ function PestPressureRating({ metric, token, live }) {
         ))}
       </div>
       <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
+      {failed && (
+        <div style={{ fontSize: 12, color: '#991B1B', marginTop: 8 }}>
+          Couldn&rsquo;t save your rating — please tap a number to try again.
+        </div>
+      )}
     </div>
   );
 }

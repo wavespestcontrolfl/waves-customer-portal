@@ -392,6 +392,17 @@ export function invoiceListRowDate(inv = {}) {
   return parseInvoiceCreatedAt(inv.created_at);
 }
 
+// Ledger-backed estimate-deposit credit rides as a negative deposit_credit
+// line item (the server rejects hand-supplied ones, so category is reliable).
+// Returned as a positive dollar total for the row chip — the only list-view
+// trace of deposit money, since deposits are never payments/invoices rows.
+export function invoiceDepositCreditTotal(lineItems) {
+  if (!Array.isArray(lineItems)) return 0;
+  return lineItems
+    .filter((li) => li && li.category === "deposit_credit")
+    .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
+}
+
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
@@ -988,6 +999,17 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
           <span style={{ marginLeft: "auto", fontSize: 12, color: D.muted }}>
             {stats.paid} paid · {stats.outstanding} outstanding ·{" "}
             {stats.overdue} overdue
+            {Number(stats.deposits?.onHand) > 0 && (
+              <>
+                {" · "}
+                <span style={{ color: D.green }}>
+                  ${Number(stats.deposits.onHand).toFixed(2)} deposits on hand
+                  {stats.deposits.onHandCount > 1
+                    ? ` (${stats.deposits.onHandCount})`
+                    : ""}
+                </span>
+              </>
+            )}
           </span>
         )}
       </div>
@@ -1043,6 +1065,7 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                 const canCollect = !invoiceNonCollectibleStatuses.has(
                   inv.status,
                 );
+                const depositApplied = invoiceDepositCreditTotal(lineItems);
                 return (
                   <div
                     key={inv.id}
@@ -1173,6 +1196,11 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                             )}>
                               {annualPrepayInvoiceLabel(inv)}
                               {inv.annual_prepay_term_end ? ` · through ${formatInvoiceDate(inv.annual_prepay_term_end)}` : ""}
+                            </span>
+                          )}
+                          {depositApplied > 0 && (
+                            <span style={sBadge(`${D.green}22`, D.green)}>
+                              ${depositApplied.toFixed(2)} deposit applied
                             </span>
                           )}
                           {cardOnFile && canCollect && (

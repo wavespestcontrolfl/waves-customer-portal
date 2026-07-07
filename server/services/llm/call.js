@@ -123,7 +123,11 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     const content = [...images.map(toAnthropicImage)];
     if (text) content.push({ type: 'text', text });
     const req = { model, max_tokens: maxTokens, messages: [{ role: 'user', content }] };
-    if (system) req.system = system;
+    // Ephemeral cache breakpoint on the system prompt (tools render before
+    // system, so this caches both). Repeat callers with the same prompt reuse
+    // it at ~0.1x input price; prompts under the model's cacheable minimum
+    // are silently not cached — harmless.
+    if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
     if (tools) req.tools = tools;
     const resp = await client.messages.create(req);
     const out = (resp?.content || []).find((b) => b.type === 'text')?.text || '';

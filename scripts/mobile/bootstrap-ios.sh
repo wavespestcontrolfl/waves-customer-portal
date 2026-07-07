@@ -29,15 +29,42 @@ npm install \
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build
 
+# Capacitor 8 defaults new iOS projects to Swift Package Manager, but
+# @aparajita/capacitor-biometric-auth ships no Package.swift — under SPM it is
+# silently EXCLUDED from the build, and biometric.js fails open when the plugin
+# is missing, so a fresh SPM project produces an app with no Face ID lock at all.
+# Pin to CocoaPods until every plugin is SPM-compatible.
+if [ -d "ios/App/CapApp-SPM" ]; then
+  echo "==> 3/5  Existing project is SPM-based (drops the Face ID plugin) — moving it to client/ios-spm-backup and regenerating with CocoaPods…"
+  rm -rf ios-spm-backup
+  mv ios ios-spm-backup
+fi
 if [ ! -d "ios/App" ]; then
   echo "==> 3/5  Generating native iOS project (client/ios/App)…"
-  npx cap add ios
+  npx cap add ios --packagemanager Cocoapods
 else
   echo "==> 3/5  Native iOS project already exists — skipping cap add."
 fi
 
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
+
+# Replace the stock Capacitor launch screen (white background + Capacitor logo)
+# with the Waves splash checked in at client/resources/. The generated template's
+# LaunchScreen.storyboard renders the "Splash" imageset full-bleed (aspectFill),
+# so overwriting its PNGs is all that's needed. Idempotent: overwrites every
+# splash-*.png in the imageset each run, so `cap add ios` regenerations can never
+# resurrect the Capacitor-logo default.
+SPLASH_SRC="resources/splash-2732x2732.png"
+SPLASH_SET="ios/App/App/Assets.xcassets/Splash.imageset"
+if [ -f "$SPLASH_SRC" ] && [ -d "$SPLASH_SET" ]; then
+  for f in "$SPLASH_SET"/splash-*.png; do
+    [ -e "$f" ] && cp "$SPLASH_SRC" "$f"
+  done
+  echo "==> Waves splash installed into Splash.imageset ✓"
+else
+  echo "==> WARNING: splash source or imageset missing — launch screen keeps the Capacitor default."
+fi
 
 # Capacitor's iOS push plugin only fires the JS 'registration' event if
 # AppDelegate forwards the UIKit APNs callbacks to Capacitor's NotificationCenter

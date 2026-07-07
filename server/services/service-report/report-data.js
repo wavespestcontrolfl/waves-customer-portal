@@ -2003,12 +2003,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // not a lawn visit or no reading was captured. The trend is capped at THIS
   // report's reading time so a long-lived report token can't expose later visits.
   let mowingHeight = null;
+  let mowingTrendFallback = null;
   if (serviceLine === 'lawn') {
     const turfReading = await getTurfHeightForVisit(service.id, knex);
     const turfTrend = turfReading
       ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at)
       : [];
     mowingHeight = buildMowingHeightContext(turfReading, turfTrend);
+    // No gauge reading THIS visit → the trends grid can still show the mowing
+    // history, capped at this visit's completion time (same later-visit guard).
+    if (!mowingHeight) {
+      const historyCap = validTimestamp(service.completed_at) || validTimestamp(service.updated_at) || null;
+      const priorTrend = historyCap
+        ? await getTurfHeightTrend(service.customer_id, 12, knex, historyCap)
+        : [];
+      const withHeights = priorTrend.filter((r) => r && r.manual_height_in != null
+        && Number.isFinite(Number(r.manual_height_in)));
+      if (withHeights.length >= 2) {
+        const latest = withHeights[0]; // getTurfHeightTrend returns newest-first
+        mowingTrendFallback = {
+          band: { min: Number(latest.target_min_in), max: Number(latest.target_max_in) },
+          trend: withHeights.map((r) => ({ heightIn: Number(r.manual_height_in), measuredAt: r.measured_at })),
+        };
+      }
+    }
   }
   const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
@@ -2428,6 +2446,26 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         }
       } catch { /* area calibration optional (tables may be unmigrated/unseeded) */ }
 
+      // Water-gap trend — every persisted per-visit snapshot up to and including
+      // this visit (capped so a permanent report token can't expose later visits).
+      let waterGapHistory = [];
+      try {
+        const gapCap = lawnAssessment.assessmentDate || service.service_date || null;
+        if (gapCap) {
+          const gapRows = await knex('lawn_water_intake_snapshots')
+            .where({ customer_id: service.customer_id })
+            .whereNotNull('water_gap_inches')
+            .whereNotNull('service_date')
+            .where('service_date', '<=', gapCap)
+            .orderBy('service_date', 'asc')
+            .select('service_date', 'water_gap_inches');
+          waterGapHistory = gapRows.map((r) => ({
+            serviceDate: r.service_date,
+            waterGapInches: r.water_gap_inches,
+          }));
+        }
+      } catch { /* snapshots table optional — trend simply doesn't render */ }
+
       reportV2 = buildLawnReportV2({
         lawnAssessment,
         mowingHeight,
@@ -2435,6 +2473,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structured.customerConcern || structured.customer_concern || '',
         waterSnapshot,
+        waterGapHistory,
+        mowingTrendFallback,
       });
       // 7-day rainfall chart — sourced from the client's exact lat/lng (the same
       // Open-Meteo trailing-7-day series behind waterContext.rainfallInches7d), so

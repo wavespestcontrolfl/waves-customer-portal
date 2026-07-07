@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -19,6 +20,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [pushOn, setPushOn] = useState(false);
   const [pushEnabling, setPushEnabling] = useState(false);
   const [pushError, setPushError] = useState(null);
+  const bellRef = useRef(null);
   const panelRef = useRef(null);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
@@ -43,14 +45,26 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     return () => clearInterval(iv);
   }, []);
 
-  // Close on click outside
+  // Close on click outside. The panel is portaled to document.body, so it
+  // is NOT a DOM descendant of the bell wrapper — check both refs.
   useEffect(() => {
     const handler = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false);
+      if (bellRef.current && bellRef.current.contains(e.target)) return;
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      setOpen(false);
     };
     if (open) document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
+
+  // Lock the page scroll while the customer panel is open — on iOS a touch
+  // scroll on the panel otherwise chains to the page behind it.
+  useEffect(() => {
+    if (!open || type === 'admin') return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open, type]);
 
   // Self-heal the push link on load and on PWA resume (admin only). iOS
   // Safari rotates/drops push endpoints, and the server deactivates a
@@ -168,10 +182,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const isDark = type === 'admin';
   const colors = isDark
     ? { bg: '#FFFFFF', border: '#E2E8F0', text: '#334155', muted: '#64748B', teal: '#0A7EC2', unreadBg: '#F0F7FC', white: '#0F172A', badge: '#C0392B' }
-    : { bg: '#FFFFFF', border: '#CBD5E1', text: '#1B2C5B', muted: '#64748B', teal: '#009CDE', unreadBg: '#E3F5FD', white: '#FFFFFF', badge: '#C8102E' };
+    : { bg: '#FFFFFF', border: 'rgba(27,44,91,0.12)', text: '#1B2C5B', muted: '#64748B', teal: '#009CDE', unreadBg: 'rgba(0,156,222,0.10)', white: '#FFFFFF', badge: '#C8102E' };
 
   return (
-    <div ref={panelRef} style={{ position: 'relative' }}>
+    <div ref={bellRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
       <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
         background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
@@ -194,12 +208,28 @@ export default function NotificationBell({ type = 'admin', customerId }) {
         )}
       </button>
 
-      {/* Panel — IMG_3718 style on mobile (full-screen, pill tabs, blue-dot rows); dropdown on desktop */}
-      {open && (
+      {/* Panel — IMG_3718 style on mobile (full-screen, pill tabs, blue-dot rows); dropdown on desktop.
+          Portaled to <body>: the customer portal header is a glass surface
+          (backdrop-filter), which makes it the containing block for fixed
+          descendants — rendered in place, the panel would collapse to the
+          header's box instead of covering the viewport. */}
+      {open && createPortal(
         isMobile ? (
-          <div style={{
-            position: 'fixed', top: isDark ? 56 : 0, left: 0, right: 0, bottom: 56,
+          // Customer: floating glass sheet (data-glass="modal" picks up the
+          // liquid-glass material from glass-theme.css — same idiom as the
+          // account menu). Inset so the rounded sheet floats over the scene
+          // and clears the notch + bottom tab bar. Admin: unchanged white
+          // full-screen panel (no glass theme mounted on /admin).
+          <div ref={panelRef} data-glass={isDark ? undefined : 'modal'} style={{
+            position: 'fixed',
+            top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
+            left: isDark ? 0 : 10,
+            right: isDark ? 0 : 10,
+            bottom: isDark ? 56 : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
             background: '#FFFFFF', zIndex: 9999,
+            borderRadius: isDark ? 0 : 24,
+            border: isDark ? 'none' : '1px solid #E7E2D7',
+            boxShadow: isDark ? 'none' : '0 18px 45px rgba(27,44,91,0.10)',
             display: 'flex', flexDirection: 'column', overflow: 'hidden',
           }}>
             {/* Header: close + "Notifications" title + mark-all */}
@@ -214,7 +244,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 )}
                 <button onClick={() => setOpen(false)} aria-label="Close" style={{
                   width: 36, height: 36, borderRadius: 18, border: 'none',
-                  background: '#F4F4F5', color: '#18181B', fontSize: 18, lineHeight: 1,
+                  background: isDark ? '#F4F4F5' : 'rgba(255,255,255,0.6)',
+                  color: '#18181B', fontSize: 18, lineHeight: 1,
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>&#x2715;</button>
               </div>
@@ -223,7 +254,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Pill tabs: Account / What's new */}
             <div style={{ padding: '8px 20px 16px', flexShrink: 0 }}>
               <div style={{
-                display: 'flex', gap: 4, background: '#F4F4F5',
+                display: 'flex', gap: 4,
+                background: isDark ? '#F4F4F5' : 'rgba(27,44,91,0.07)',
                 borderRadius: 999, padding: 4, width: 'fit-content',
               }}>
                 {[
@@ -260,8 +292,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               />
             )}
 
-            {/* Notification list */}
-            <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {/* Notification list — overscroll containment keeps the sheet's
+                scroll from chaining to the page behind it on iOS. */}
+            <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: '#71717A', fontSize: 14 }}>Loading…</div>}
               {!loading && tab === 'account' && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
@@ -281,7 +314,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   }}
                   style={{
                     padding: '14px 20px', cursor: n.link ? 'pointer' : 'default',
-                    borderBottom: '1px solid #F4F4F5',
+                    borderBottom: `1px solid ${isDark ? '#F4F4F5' : 'rgba(27,44,91,0.08)'}`,
                     display: 'flex', gap: 12, alignItems: 'flex-start',
                   }}
                 >
@@ -316,11 +349,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             </div>
           </div>
         ) : (
-          <div style={{
-            position: 'fixed', top: isDark ? 56 : 0, right: 0, bottom: 0,
+          // Desktop: admin keeps the flush right-edge drawer; customer gets a
+          // floating glass panel (data-glass="modal" material, inset so the
+          // rounded corners read intentionally).
+          <div ref={panelRef} data-glass={isDark ? undefined : 'modal'} style={{
+            position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,
-            boxShadow: '-4px 0 20px rgba(0,0,0,0.15)', zIndex: 9999,
+            borderRadius: isDark ? 0 : 24,
+            boxShadow: isDark ? '-4px 0 20px rgba(0,0,0,0.15)' : '0 18px 45px rgba(27,44,91,0.10)',
+            zIndex: 9999,
             display: 'flex', flexDirection: 'column', overflow: 'hidden',
           }}>
             {/* Header */}
@@ -356,7 +394,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             )}
 
             {/* Notification List */}
-            <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: colors.muted }}>Loading...</div>}
               {!loading && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
@@ -372,7 +410,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{
                     padding: '8px 20px', fontSize: 11, fontWeight: 700, color: colors.muted,
                     textTransform: 'uppercase', letterSpacing: 0.5,
-                    background: isDark ? '#0f172a' : '#f5f5f5', position: 'sticky', top: 0,
+                    background: isDark ? '#0f172a' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
+                    backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
                   }}>{group}</div>
                   {items.map(n => (
                     <div key={n.id}
@@ -417,7 +456,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               ))}
             </div>
           </div>
-        )
+        ),
+        document.body
       )}
     </div>
   );

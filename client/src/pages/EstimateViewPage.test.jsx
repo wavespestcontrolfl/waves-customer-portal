@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimePriceCopy } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -193,6 +193,51 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('Flea Treatment Package')).toBeInTheDocument();
     expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
     expect(screen.getByText('Exterior yard area exceeds automatic quote threshold.')).toBeInTheDocument();
+  });
+
+  it('marks a prepay-waivable WaveGuard setup row with an asterisk and waiver note', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', detail: 'Membership setup fee', amount: 99, kind: 'charge' }],
+        }}
+        prepayWaivedServices={['waveguard_setup']}
+      />,
+    );
+
+    expect(screen.getByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).toBeInTheDocument();
+    expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
+  });
+
+  it('matches legacy label-only setup rows that carry no service key', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ label: 'WaveGuard Membership Setup', amount: 99, kind: 'charge' }],
+        }}
+        prepayWaivedServices={['waveguard_setup']}
+      />,
+    );
+
+    expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
+  });
+
+  it('shows no waiver note when the fee is not prepay-waivable', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', detail: 'Membership setup fee', amount: 99, kind: 'charge' }],
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
+    // Both the row amount and the one-time total render plain $99 — no asterisk.
+    expect(screen.getAllByText('$99').length).toBe(2);
+    expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 });
 
@@ -619,5 +664,59 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     );
     expect(screen.getByText('Invoice due now')).toBeInTheDocument();
     expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
+  });
+});
+
+describe('oneTimeExtrasForPaymentNote', () => {
+  const pricing = {
+    oneTimeBreakdown: {
+      total: 348,
+      items: [
+        { service: 'flea_treatment', name: 'Flea treatment', price: 249 },
+        { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, detail: 'Membership setup fee' },
+      ],
+    },
+  };
+
+  it('subtracts the WaveGuard setup row — PPB already previews it as its own invoice line', () => {
+    expect(oneTimeExtrasForPaymentNote(pricing, {}, 'recurring')).toBe(249);
+  });
+
+  it('returns 0 when the setup fee is the only one-time row', () => {
+    const setupOnly = {
+      oneTimeBreakdown: {
+        total: 99,
+        items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(setupOnly, {}, 'recurring')).toBe(0);
+  });
+
+  it('matches setup rows by label when the service key is missing', () => {
+    const labeled = {
+      oneTimeBreakdown: {
+        total: 149,
+        items: [
+          { name: 'Rodent exclusion', price: 50 },
+          { label: 'WaveGuard Setup', price: 99 },
+        ],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(labeled, {}, 'recurring')).toBe(50);
+  });
+
+  it('stays 0 for one-time mode and for either/or one-time alternatives', () => {
+    expect(oneTimeExtrasForPaymentNote(pricing, {}, 'one_time')).toBe(0);
+    expect(oneTimeExtrasForPaymentNote(pricing, { showOneTimeOption: true }, 'recurring')).toBe(0);
+  });
+
+  it('keeps the full total when no setup row is present', () => {
+    const noSetup = {
+      oneTimeBreakdown: {
+        total: 249,
+        items: [{ service: 'flea_treatment', name: 'Flea treatment', price: 249 }],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(noSetup, {}, 'recurring')).toBe(249);
   });
 });
