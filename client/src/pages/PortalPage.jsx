@@ -20,6 +20,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp } from '../native/platform';
+import { saveBlobNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
@@ -40,6 +41,9 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const blob = await r.blob();
+  // In the Capacitor shell the programmatic <a download> click below is a
+  // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+  if (await saveBlobNative(blob, fileName)) return;
   const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = blobUrl;
@@ -9223,7 +9227,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
     }
   };
 
-  const downloadBlob = (blob, fileName = 'Waves_Document.pdf') => {
+  const downloadBlob = async (blob, fileName = 'Waves_Document.pdf') => {
+    // In the Capacitor shell the programmatic <a download> click below is a
+    // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+    if (await saveBlobNative(blob, fileName)) return;
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;

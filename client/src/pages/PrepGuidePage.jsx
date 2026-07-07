@@ -5,6 +5,7 @@ import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
+import { isNativeApp } from '../native/platform';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -193,6 +194,9 @@ export default function PrepGuidePage() {
             </div>
           </div>
 
+          {/* window.print() is a no-op in the Capacitor webview (F-046) —
+              a dead button is worse than no button, so hide it in-app. */}
+          {isNativeApp() ? null : (
           <div className="prep-no-print" style={{ textAlign: 'center', marginTop: 20 }}>
             <button
               onClick={() => window.print()}
@@ -207,6 +211,7 @@ export default function PrepGuidePage() {
               Print this page
             </button>
           </div>
+          )}
         </div>
       );
 
