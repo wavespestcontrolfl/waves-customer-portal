@@ -88,6 +88,20 @@ describe('glassScarcityInfo', () => {
     )).toBe(null);
   });
 
+  it('says "next at" instead of enumerating when visible times cover fewer than the counted openings', () => {
+    // Server counted 2 openings today (9:00 stale-drifted or sliced away;
+    // only 14:00 still visible). Enumerating "— 2:00 PM" would read as if
+    // 2:00 PM were both openings — soften to "next at" instead.
+    expect(glassScarcityInfo(
+      [
+        { date: '2026-07-05', windowStart: '12:30' }, // inside the 2h lead → stale
+        { date: '2026-07-05', windowStart: '14:00' },
+      ],
+      { date: '2026-07-05', openCount: 2 },
+      NOW,
+    )).toEqual({ count: 2, label: 'Only 2 openings today — next at 2:00 PM' });
+  });
+
   it('handles the weekday form for later-week scarcity', () => {
     expect(glassScarcityInfo(
       [{ date: '2026-07-07', windowStart: '09:00' }],

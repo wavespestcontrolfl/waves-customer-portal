@@ -82,6 +82,11 @@ export function glassSlotMeta(slot) {
  * manufacture scarcity that doesn't exist. Returns null without the
  * server count, when the day has plenty, or when its visible slots have
  * gone stale — the badge self-removes rather than overstate urgency.
+ *
+ * When fewer visible slots remain than the counted openings (one of two
+ * windows drifted inside the booking lead while the page sat open), the
+ * label switches to "next at {time}" instead of enumerating times — never
+ * imply the listed times ARE all the openings when they aren't.
  */
 export function glassScarcityInfo(slots, firstDayAvailability, now = new Date()) {
   const openCount = Number(firstDayAvailability?.openCount);
@@ -99,8 +104,9 @@ export function glassScarcityInfo(slots, firstDayAvailability, now = new Date())
     .map((s) => ({ mins: windowStartMinutes(s.windowStart), label: formatWindowStart(s.windowStart) }))
     .sort((a, b) => (a.mins ?? 0) - (b.mins ?? 0))
     .map((t) => t.label);
+  const timesLabel = times.length < openCount ? `next at ${times[0]}` : times.join(' & ');
   return {
     count: openCount,
-    label: `Only ${openCount} opening${openCount === 1 ? '' : 's'} ${when} — ${times.join(' & ')}`,
+    label: `Only ${openCount} opening${openCount === 1 ? '' : 's'} ${when} — ${timesLabel}`,
   };
 }
