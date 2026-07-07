@@ -4482,13 +4482,15 @@ router.put('/:id/status', async (req, res, next) => {
       // release outside it. This route (the V2 dispatch delete/cancel action)
       // is a separate cancel path from PUT /admin/dispatch/:id/status, so the
       // hook must be mirrored here. waiveCardHoldFee (body) = business-
-      // initiated cancel, release free. Dark until ONE_TIME_CARD_HOLD; no-op
-      // when no hold exists. Best-effort — never block the committed cancel.
+      // initiated cancel, release free — admin-only (route is technician-
+      // reachable and a fee waiver is a billing decision). Dark until
+      // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort — never
+      // block the committed cancel.
       try {
         const CardHolds = require('../services/estimate-card-holds');
         await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: svc.id,
-          waiveFee: req.body?.waiveCardHoldFee === true,
+          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
         });
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
