@@ -1018,6 +1018,31 @@ const EstimateConverter = {
     // converter auto-pick the next feasible zone date. Self-accept paths
     // still auto-schedule when there's no reservation row.
     const skipAutoSchedule = opts.skipAutoSchedule === true;
+    // Prepay-on-book (admin-schedule accept-on-book): the caller books the
+    // first visit itself under skipAutoSchedule, so the converter can't see
+    // that row and would otherwise anchor the renewal term to today — a
+    // future-dated booking could then renew before its first service. The
+    // caller passes the booked first date here (date-only 'YYYY-MM-DD').
+    const annualPrepayTermStart = typeof opts.annualPrepayTermStart === 'string' && opts.annualPrepayTermStart
+      ? opts.annualPrepayTermStart
+      : null;
+    // Coverage override for a prepay accept made WHILE booking: the booked
+    // scheduled_services rows are the coverage series, so the term's
+    // coverage_service_type must equal the BOOKED service_type (and the visit
+    // count/cadence the booked series') for attach/stamp to find them. Only
+    // honored as a pair — a service type without a positive visit count would
+    // create a term applyPrepaidCoverageForTerm can't stamp, so an incomplete
+    // override falls back to the converter's own derivation instead.
+    const annualPrepayCoverageOverride = (
+      typeof opts.coverageServiceType === 'string' && opts.coverageServiceType
+      && Number.isInteger(opts.coverageVisitCount) && opts.coverageVisitCount > 0
+    )
+      ? {
+        serviceType: opts.coverageServiceType,
+        visitCount: opts.coverageVisitCount,
+        cadence: typeof opts.coverageCadence === 'string' && opts.coverageCadence ? opts.coverageCadence : undefined,
+      }
+      : null;
     const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
@@ -1334,6 +1359,10 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `skipAutoSchedule=true (manual Mark Won)`,
       );
+      // Prepay-on-book: the caller booked the first visit itself — align the
+      // annual-prepay renewal term to that booked date (else it defaults to
+      // today in createTermForAnnualPrepay).
+      if (annualPrepayTermStart) termStartDate = annualPrepayTermStart;
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;
@@ -1594,7 +1623,18 @@ const EstimateConverter = {
           let coverageServiceType;
           let coverageVisitCount;
           let coverageCadence;
-          if (recurringServicesForConversion.length === 1) {
+          if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
+            // Prepay-on-book: the caller (admin-schedule accept-on-book) already
+            // created the coverage series with the BOOKED service_type/cadence
+            // and the operator's visit count — those rows, not a derived label,
+            // are what attach/stamp must match, so the override wins. Gated to
+            // the single-recurring case like the derivation below, so the
+            // (0-recurring) prepay edge keeps its no-coverage/no-seeding shape
+            // and can't grow phantom seeded visits from an override.
+            coverageServiceType = annualPrepayCoverageOverride.serviceType;
+            coverageVisitCount = annualPrepayCoverageOverride.visitCount;
+            coverageCadence = annualPrepayCoverageOverride.cadence;
+          } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
             const cadence = RecurringAppointmentSeeder.inferRecurringPattern({
