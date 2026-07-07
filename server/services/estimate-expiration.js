@@ -36,6 +36,15 @@ async function runEstimateExpiration() {
     .where('sent_at', '<', ageCutoff)
     .whereNull('accepted_at')
     .whereNull('declined_at')
+    // An operator-set expires_at in the future overrides the inactivity
+    // rule: POST /:id/extend pushes expires_at (and texts the customer the
+    // new deadline) but leaves sent_at, so without this carve-out every
+    // extension of an estimate older than the threshold is re-expired at
+    // the next 6am run. Passed expires_at rows still age out here (Rule 2
+    // flips them anyway).
+    .where(function () {
+      this.whereNull('expires_at').orWhere('expires_at', '<=', now);
+    })
     // Hold: a first-booking customer's estimate stays live until the visit
     // resolves — the archive sweep (which runs before this in the 6am chain)
     // claims it on completion; expiring it here would strand a booked
