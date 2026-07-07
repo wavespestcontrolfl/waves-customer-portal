@@ -115,9 +115,18 @@ export function etDatetimeLocalValue(date) {
 }
 
 // 'YYYY-MM-DDTHH:mm' ET wall-clock → ISO instant string. Interprets the
-// value as ET: guess the instant as if the wall clock were UTC, then
-// correct by the actual ET offset at that guess (Intl handles DST). One
-// correction is exact except inside the ~1h DST transition seam.
+// value as ET: guess the instant as if the wall clock were UTC, then correct
+// by the actual ET offset (Intl handles DST). Correct twice — a single pass
+// samples the offset at the as-if-UTC guess, which for early-morning times on
+// a DST-change day sits on the wrong side of the transition (e.g. 2026-03-08
+// 03:30 would resolve an hour off); the second pass samples at the corrected
+// instant and lands on the right offset. The one irreducible case is the
+// fall-back repeated hour, where a wall clock maps to two instants and this
+// deterministically picks one.
+function etOffsetAt(instant) {
+  const p = etParts(new Date(instant));
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - instant;
+}
 export function etDatetimeLocalToISO(value) {
   if (!value) return null;
   const [datePart, timePart] = String(value).split('T');
@@ -126,10 +135,9 @@ export function etDatetimeLocalToISO(value) {
   const [h, mi] = timePart.split(':').map(Number);
   if ([y, mo, d, h, mi].some(Number.isNaN)) return null;
   const targetWall = Date.UTC(y, mo - 1, d, h, mi);
-  const p = etParts(new Date(targetWall));
-  const guessWall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
-  const offset = guessWall - targetWall; // ET behind UTC → negative
-  return new Date(targetWall - offset).toISOString();
+  let utc = targetWall - etOffsetAt(targetWall);
+  utc = targetWall - etOffsetAt(utc);
+  return new Date(utc).toISOString();
 }
 
 // ── Day arithmetic anchored to ET ──────────────────────────────────
