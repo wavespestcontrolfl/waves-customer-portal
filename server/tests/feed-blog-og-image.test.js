@@ -126,6 +126,14 @@ const SUNCOAST_XML = wpFeed(`
       <description>Red tide conditions along the coast.</description>
     </item>`);
 
+// The other /local sources answer with empty channels here — this file
+// covers the og:image fallback; the multi-source merge has its own test
+// (feed-local-sources.test.js).
+const HERALD_FEED = 'https://rssfeeds.heraldtribune.com/sarasota/topstories';
+const BRADENTON_FEED = 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true';
+const GONDOLIER_FEED = 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc';
+const EMPTY_XML = wpFeed('');
+
 const EXTERNAL_ROUTES = {
   [FEED_URL]: { text: FEED_XML },
   [PAGE_WITH_HERO]: { text: `<html><head><meta property="og:image" content="${HERO}"></head></html>` },
@@ -139,6 +147,9 @@ const EXTERNAL_ROUTES = {
   [IFAS_SARASOTA_FEED]: { text: IFAS_SARASOTA_XML },
   [IFAS_MANATEE_FEED]: { text: IFAS_MANATEE_XML },
   [SUNCOAST_FEED]: { text: SUNCOAST_XML },
+  [HERALD_FEED]: { text: EMPTY_XML },
+  [BRADENTON_FEED]: { text: EMPTY_XML },
+  [GONDOLIER_FEED]: { text: EMPTY_XML },
   [IFAS_PAGE]: { text: `<html><head><meta property="og:image" content="${IFAS_HERO}"></head></html>` },
   [SUNCOAST_PAGE]: { text: '<html><head><title>no og:image</title></head></html>' },
 };

@@ -32,6 +32,17 @@ const ALLOWED_LINK_HOSTS = new Set([
   'blogs.ifas.ufl.edu', 'ifas.ufl.edu', 'www.ifas.ufl.edu',
   'mysuncoast.com', 'www.mysuncoast.com',
   'weather.gov', 'api.weather.gov',
+  // Local newspapers (Venice → Palmetto corridor) + their image CDNs.
+  // heraldtribune.com covers rssfeeds.heraldtribune.com via the subdomain
+  // rule; gannett-cdn.com hosts Herald-Tribune article images. bradenton.com
+  // serves its own images through its on-domain Arc resizer. townnews.com
+  // covers the bloximages.*.vip.townnews.com CDN the Gondolier's BLOX CMS
+  // serves photos from.
+  'heraldtribune.com', 'www.heraldtribune.com', 'gannett-cdn.com',
+  'bradenton.com', 'www.bradenton.com',
+  'venicegondolier.com', 'www.venicegondolier.com',
+  'yoursun.com', 'www.yoursun.com',
+  'townnews.com',
 ]);
 
 function hostAllowed(host) {
@@ -70,7 +81,9 @@ async function fetchWithCache(key, url) {
   if (cache[key] && (now - cache[key].ts) < CACHE_TTL) return cache[key].data;
 
   try {
-    const res = await fetch(url);
+    // /local fans out to several upstreams in one Promise.all — a hanging
+    // publisher must time out rather than stall the whole endpoint.
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) {
       logger.warn(`[feed] Upstream ${key} returned ${res.status}`);
       return null;
@@ -130,7 +143,7 @@ function parseItems(channel) {
 // blog item and the portal rendered icon placeholders instead of post heroes.
 // The blog layout stamps each post's hero as og:image on the live page — the
 // same source social-media.js resolves blog-share heroes from — so fill the
-// gap from there. The UF/IFAS and MySuncoast feeds get the same fallback for
+// gap from there. The UF/IFAS and local-news feeds get the same fallback for
 // their image-less items. Results (including misses) are cached per link, so
 // a feed refresh costs at most one page fetch per post every 30 minutes.
 // Callers only pass links that already passed safeLink (trusted hosts only).
@@ -270,17 +283,39 @@ router.get('/experts', async (req, res, next) => {
 // =========================================================================
 // GET /api/feed/local — Local SWFL news (filtered)
 // =========================================================================
+// Every major outlet in the Venice → Palmetto corridor, merged into one
+// stream. Each fetch degrades independently: a moved/dead feed URL logs a
+// `[feed] Upstream <key> ...` warning and contributes zero items — it never
+// breaks the endpoint. Feed URLs follow each publisher's platform
+// conventions (FeedBlitz for Gannett's Herald-Tribune, the rssfeed widget
+// for McClatchy's Bradenton Herald, BLOX search RSS for the Gondolier); if
+// one goes quiet permanently, check the warn logs and swap the URL here.
+const LOCAL_NEWS_SOURCES = [
+  { key: 'mysuncoast', name: 'MySuncoast', url: 'https://www.mysuncoast.com/news/local/rss/' },
+  { key: 'heraldtribune', name: 'Herald-Tribune', url: 'https://rssfeeds.heraldtribune.com/sarasota/topstories' },
+  { key: 'bradenton_herald', name: 'Bradenton Herald', url: 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true' },
+  { key: 'venice_gondolier', name: 'Venice Gondolier', url: 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc' },
+];
+
 router.get('/local', async (req, res, next) => {
   try {
-    const data = await fetchWithCache('mysuncoast', 'https://www.mysuncoast.com/news/local/rss/');
-    const items = parseItems(data?.rss?.channel);
+    const feeds = await Promise.all(
+      LOCAL_NEWS_SOURCES.map(src => fetchWithCache(src.key, src.url))
+    );
+
+    const items = feeds.flatMap((data, i) =>
+      parseItems(data?.rss?.channel).map(item => ({ ...item, _source: LOCAL_NEWS_SOURCES[i].name }))
+    );
 
     const relevant = items.filter(item => {
       const text = `${item.title || ''} ${stripHtml(item.description || '')}`;
       return RELEVANT_KEYWORDS.test(text) && !EXCLUDE_KEYWORDS.test(text);
     });
 
-    const posts = await Promise.all(relevant.slice(0, 3).map(async item => {
+    // Feeds arrive per-source in their own order; interleave newest-first.
+    relevant.sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
+
+    const posts = await Promise.all(relevant.slice(0, 5).map(async item => {
       const link = safeLink(item.link) || '';
       return {
         title: item.title || '',
@@ -289,7 +324,7 @@ router.get('/local', async (req, res, next) => {
         description: stripHtml(item.description || '').slice(0, 150),
         image: extractImage(item) || await resolveOgImage(link),
         source: 'local',
-        sourceName: 'MySuncoast',
+        sourceName: item._source,
       };
     }));
 
