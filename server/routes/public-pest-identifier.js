@@ -32,6 +32,8 @@ const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
+const { etDateString } = require('../utils/datetime-et');
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
 const MAX_PHOTOS = 5;
 const MAX_PHOTO_CHARS = 6_000_000;
@@ -306,6 +308,7 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
     };
     const addressSnapshot = Object.values(claim.address).some(Boolean) ? claim.address : null;
 
+    let createdLeadId = null;
     try {
       await db.transaction(async (trx) => {
         const [lead] = await trx('leads').insert({
@@ -350,12 +353,38 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
           err.code = 'ALREADY_CLAIMED';
           throw err;
         }
+        createdLeadId = lead.id;
       });
     } catch (txErr) {
       if (txErr.code === 'ALREADY_CLAIMED') {
         return res.status(409).json({ error: 'This identification has already been unlocked.' });
       }
       throw txErr;
+    }
+
+    // Funnel-by-source attribution (same contract as the lawn claim): one
+    // ad_service_attribution row per lead so the magnet reports alongside
+    // every other channel and the funnel-bridge advances its stage. The
+    // service-line inferers run on the identified service label so a termite
+    // ID buckets under termite ROI, not generic pest. Best-effort after the
+    // claim commits; idempotent via the unique lead_id index.
+    if (createdLeadId) {
+      const interest = cleanString(service.label, 120) || 'pest control';
+      try {
+        await db('ad_service_attribution').insert({
+          lead_id: createdLeadId,
+          service_line: inferServiceLine(interest),
+          specific_service: inferSpecificService(interest),
+          service_bucket: inferServiceBucket(interest),
+          lead_date: etDateString(),
+          lead_source: 'pest_identifier',
+          lead_source_detail: 'wavespestcontrol.com/pest-identifier',
+          funnel_stage: 'lead',
+          is_paid: false,
+        }).onConflict('lead_id').ignore();
+      } catch (attrErr) {
+        logger.error(`[public-pest-identifier] attribution insert failed: ${attrErr.message}`);
+      }
     }
 
     logger.info(`[public-pest-identifier] claim captured for identification ${row.id}`);

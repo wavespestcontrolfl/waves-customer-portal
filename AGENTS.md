@@ -338,7 +338,11 @@ finding and warns on P1. Reviewers must return JSON matching
   atomic status+`whereNull('lead_id')` guard (409 on replay), mints the
   30-day report token served by `/api/public/lawn-diagnostic/:token`, and
   stores a server-computed pricing snapshot from the pricing engine (size-band
-  basis, engine-authoritative — pricing failure never blocks the claim).)
+  basis, engine-authoritative — pricing failure never blocks the claim). After
+  the claim commits it best-effort inserts ONE ad_service_attribution funnel
+  row (lead_source=lawn_assessment, is_paid=false, idempotent on the unique
+  lead_id index) so the magnet reports in funnel-by-source like every other
+  channel.)
   `/api/public/pest-identifier/analyze` (write; prospect pest-photo upload —
   exact mirror of `/api/public/lawn-assessment/analyze` behind
   GATE_PEST_IDENTIFIER, writing `pest_identifications`. Customer-visible copy
@@ -346,10 +350,11 @@ finding and warns on P1. Reviewers must return JSON matching
   services/pest-identification.js — model output never reaches a prospect, and
   low-confidence/conflicting IDs degrade to generic category labels.)
   `/api/public/pest-identifier/:id/claim` (write; mirror of the lawn claim —
-  same one-shot lead+token transaction, 409 on replay, typical-home pricing
-  snapshot only for engine-priceable service lines; termite/rodent/bed-bug
-  style IDs stay inspection-first with fixed suggestive-only copy that must
-  never read like a WDO/confirmed finding.)
+  same one-shot lead+token transaction, 409 on replay, same best-effort
+  ad_service_attribution row (lead_source=pest_identifier), typical-home
+  pricing snapshot only for engine-priceable service lines; termite/rodent/
+  bed-bug style IDs stay inspection-first with fixed suggestive-only copy that
+  must never read like a WDO/confirmed finding.)
   `/api/public/pest-identifier/:token` (read-only tokenized pest report;
   same contract as `/api/public/lawn-diagnostic/:token` — 32-hex format gate,
   60 req/min, privacy headers, only sent/unexpired rows, strictly allowlisted

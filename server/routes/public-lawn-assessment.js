@@ -43,7 +43,8 @@ const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
-const { etParts } = require('../utils/datetime-et');
+const { etParts, etDateString } = require('../utils/datetime-et');
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
 const MAX_PHOTOS = 5;
 // Client resizes to 1600px JPEG (~≤500KB); 6M base64 chars ≈ 4.5MB decoded is a
@@ -336,6 +337,7 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
     };
     const addressSnapshot = Object.values(claim.address).some(Boolean) ? claim.address : null;
 
+    let createdLeadId = null;
     try {
       await db.transaction(async (trx) => {
         const [lead] = await trx('leads').insert({
@@ -382,12 +384,37 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
           err.code = 'ALREADY_CLAIMED';
           throw err;
         }
+        createdLeadId = lead.id;
       });
     } catch (txErr) {
       if (txErr.code === 'ALREADY_CLAIMED') {
         return res.status(409).json({ error: 'This assessment has already been unlocked.' });
       }
       throw txErr;
+    }
+
+    // Funnel-by-source attribution: one ad_service_attribution row per lead
+    // puts the magnet in the SAME reporting funnel as every other channel
+    // (lead-funnel-bridge then advances the stage as the lead progresses to
+    // booked/completed). Organic surface — never paid. Best-effort AFTER the
+    // claim commits: an attribution failure must not cost the unlock, and
+    // the unique lead_id index + ignore keeps it idempotent.
+    if (createdLeadId) {
+      try {
+        await db('ad_service_attribution').insert({
+          lead_id: createdLeadId,
+          service_line: inferServiceLine('lawn care'),
+          specific_service: inferSpecificService('lawn care'),
+          service_bucket: inferServiceBucket('lawn care'),
+          lead_date: etDateString(),
+          lead_source: 'lawn_assessment',
+          lead_source_detail: 'wavespestcontrol.com/lawn-assessment',
+          funnel_stage: 'lead',
+          is_paid: false,
+        }).onConflict('lead_id').ignore();
+      } catch (attrErr) {
+        logger.error(`[public-lawn-assessment] attribution insert failed: ${attrErr.message}`);
+      }
     }
 
     logger.info(`[public-lawn-assessment] claim captured for assessment ${row.id}`);

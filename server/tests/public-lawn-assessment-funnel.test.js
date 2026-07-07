@@ -1,7 +1,7 @@
 // Controls for the db mock — set per test.
 let mockDiagnosticRow = null;      // what lawn_diagnostics .first() returns (claim path)
 let mockUpdateResult = 1;          // rows affected by the one-shot claim update
-const inserts = { lawn_diagnostics: [], lawn_diagnostic_photos: [], leads: [] };
+const inserts = { lawn_diagnostics: [], lawn_diagnostic_photos: [], leads: [], ad_service_attribution: [] };
 
 function builder(table) {
   const b = {
@@ -12,6 +12,7 @@ function builder(table) {
     insert: (obj) => {
       (inserts[table] = inserts[table] || []).push(obj);
       if (table === 'leads') return { returning: () => Promise.resolve([{ id: 'lead-uuid-1' }]) };
+      if (table === 'ad_service_attribution') return { onConflict: () => ({ ignore: () => Promise.resolve() }) };
       if (table === 'lawn_diagnostics') {
         return {
           returning: () => Promise.resolve([{
@@ -259,6 +260,15 @@ describe('POST /:id/claim', () => {
       expect(lead.service_interest).toBe('lawn care');
       expect(lead.status).toBe('new');
       expect(JSON.parse(lead.extracted_data).lawn_size_band).toBe('medium');
+
+      // Funnel-by-source attribution row: reports alongside every other channel.
+      expect(inserts.ad_service_attribution).toHaveLength(1);
+      const attribution = inserts.ad_service_attribution[0];
+      expect(attribution.lead_id).toBe('lead-uuid-1');
+      expect(attribution.lead_source).toBe('lawn_assessment');
+      expect(attribution.service_line).toBe('lawn');
+      expect(attribution.funnel_stage).toBe('lead');
+      expect(attribution.is_paid).toBe(false);
     });
   });
 

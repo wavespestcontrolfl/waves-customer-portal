@@ -1,7 +1,7 @@
 // Controls for the db mock — set per test.
 let mockIdentificationRow = null;  // what pest_identifications .first() returns (claim path)
 let mockUpdateResult = 1;          // rows affected by the one-shot claim update
-const inserts = { pest_identifications: [], pest_identification_photos: [], leads: [] };
+const inserts = { pest_identifications: [], pest_identification_photos: [], leads: [], ad_service_attribution: [] };
 
 function builder(table) {
   const b = {
@@ -12,6 +12,7 @@ function builder(table) {
     insert: (obj) => {
       (inserts[table] = inserts[table] || []).push(obj);
       if (table === 'leads') return { returning: () => Promise.resolve([{ id: 'lead-uuid-1' }]) };
+      if (table === 'ad_service_attribution') return { onConflict: () => ({ ignore: () => Promise.resolve() }) };
       if (table === 'pest_identifications') {
         return { returning: () => Promise.resolve([{ id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' }]) };
       }
@@ -211,6 +212,26 @@ describe('POST /:id/claim', () => {
       expect(lead.lead_type).toBe('pest_identifier');
       expect(lead.first_contact_channel).toBe('pest_identifier_funnel');
       expect(JSON.parse(lead.extracted_data).species_slug).toBe('ghost-ant');
+
+      // Funnel-by-source attribution row: reports alongside every other channel.
+      expect(inserts.ad_service_attribution).toHaveLength(1);
+      const attribution = inserts.ad_service_attribution[0];
+      expect(attribution.lead_id).toBe('lead-uuid-1');
+      expect(attribution.lead_source).toBe('pest_identifier');
+      expect(attribution.service_line).toBe('pest');
+      expect(attribution.funnel_stage).toBe('lead');
+      expect(attribution.is_paid).toBe(false);
+    });
+  });
+
+  test('replayed claim writes no attribution row', async () => {
+    mockIdentificationRow = analyzedRow();
+    mockUpdateResult = 0;
+    await withServer(async (base) => {
+      await fetch(`${base}/api/public/pest-identifier/${ROW_ID}/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(claimBody()),
+      });
+      expect(inserts.ad_service_attribution).toHaveLength(0);
     });
   });
 
