@@ -124,6 +124,7 @@ describe('StripeService.refund', () => {
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_4000_0',
       pending_refund_request: '4000',
+      pending_refund_at: new Date().toISOString(),
     });
     const StripeService = loadService();
     await StripeService.refund('pay-1', { amount: 40 });
@@ -144,6 +145,7 @@ describe('StripeService.refund', () => {
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_6000_0',
       pending_refund_request: '6000',
+      pending_refund_at: new Date().toISOString(),
     });
     stripeClient.refunds.create.mockResolvedValueOnce({
       id: 're_1', status: 'succeeded', amount: 6000, created: 1780000000,
@@ -170,6 +172,7 @@ describe('StripeService.refund', () => {
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_4000_0',
       pending_refund_request: '4000',
+      pending_refund_at: new Date().toISOString(),
     });
     const StripeService = loadService();
     await StripeService.refund('pay-1', { amount: 40 });
@@ -201,6 +204,7 @@ describe('StripeService.refund', () => {
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_4000_0',
       pending_refund_request: '4000',
+      pending_refund_at: new Date().toISOString(),
     });
     const StripeService = loadService();
     await expect(StripeService.refund('pay-1', { amount: 25 }))
@@ -292,5 +296,62 @@ describe('StripeService.refund', () => {
     expect(updatePayments).toHaveBeenCalledTimes(2);
     const clearedMeta = JSON.parse(updatePayments.mock.calls[1][0].metadata);
     expect(clearedMeta.pending_refund_key).toBeUndefined();
+  });
+
+  test('STALE marker (>20h): adopts the original refund from Stripe instead of replaying the key', async () => {
+    // Stripe prunes idempotency keys after ≥24h — a blind replay would
+    // execute as a NEW request and refund twice. The original $40 refund
+    // is found on the PI and adopted: recorded + marker cleared, no
+    // refunds.create call.
+    paymentRow.refund_amount = '40.00';
+    paymentRow.stripe_refund_id = 're_old';
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => ({
+      data: [{ id: 're_old', status: 'succeeded', amount: 4000, created: Math.floor(Date.now() / 1000) - 30 * 3600 }],
+    }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+    expect(stripeClient.refunds.list).toHaveBeenCalledWith({ payment_intent: 'pi_abc', limit: 100 });
+    // re_old already recorded by the webhook — ledger stays at $40.
+    const finalArgs = updatePayments.mock.calls[0][0];
+    expect(finalArgs).toEqual(expect.objectContaining({ status: 'paid', refund_amount: 40 }));
+    expect(JSON.parse(finalArgs.metadata).pending_refund_key).toBeUndefined();
+  });
+
+  test('STALE marker with NO matching refund at Stripe: starts a validated fresh attempt', async () => {
+    // The day-old attempt never landed. It must be re-validated against
+    // the CURRENT balance and re-persisted with a fresh timestamp.
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => ({ data: [] }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    expect(stripeClient.refunds.create).toHaveBeenCalledTimes(1);
+    const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+    expect(pendingMeta.pending_refund_key).toBe('refund_pay_pay-1_4000_0');
+    expect(Date.parse(pendingMeta.pending_refund_at)).toBeGreaterThan(Date.now() - 60000);
+  });
+
+  test('STALE marker and the Stripe refund list is unreachable: fails CLOSED', async () => {
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => { throw new Error('api down'); });
+    const StripeService = loadService();
+    await expect(StripeService.refund('pay-1', { amount: 40 }))
+      .rejects.toThrow(/Could not verify the earlier refund attempt/);
+    expect(stripeClient.refunds.create).not.toHaveBeenCalled();
   });
 });

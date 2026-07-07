@@ -1451,42 +1451,81 @@ const StripeService = {
       throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
     }
 
-    let idempotencyKey;
-    if (isReplay) {
-      // Replays skip the remaining-balance validation below: the webhook
-      // may already have recorded the very refund being replayed (a $60
-      // refund on $100 repaired to remaining $40 would otherwise be
-      // rejected here and wedge the payment), and Stripe replays the key
-      // idempotently — no new money moves either way.
-      idempotencyKey = meta.pending_refund_key;
-    } else {
-      // Cents math against what's already been refunded: partials must
-      // ACCUMULATE (two 50% refunds = fully refunded), and a NEW request
-      // beyond the remaining balance is rejected with a clear message
-      // instead of surfacing as an opaque Stripe error.
+    // NEW-attempt validation: partials must ACCUMULATE (two 50% refunds =
+    // fully refunded), and a request beyond the remaining balance is
+    // rejected with a clear message instead of an opaque Stripe error.
+    // Replays skip this — the webhook may already have recorded the very
+    // refund being replayed (a $60 refund on $100 repaired to remaining
+    // $40 would otherwise wedge here).
+    const assertNewAttemptRefundable = () => {
       if (remainingCents <= 0) throw new Error('Payment is already fully refunded');
       if (requestCents !== null && (requestCents <= 0 || requestCents > remainingCents)) {
         throw new Error(`Refund amount must be between $0.01 and the remaining $${(remainingCents / 100).toFixed(2)}`);
       }
+    };
+    let idempotencyKey;
+    const persistPendingAttempt = async () => {
       idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
       await db('payments').where({ id: paymentId }).update({
-        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag }),
+        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_at: new Date().toISOString() }),
       });
+    };
+
+    // Stripe guarantees idempotency keys for at least 24h and may prune
+    // them after — a blind replay of an older key would execute as a
+    // brand-new request and refund twice. Inside a conservative 20h
+    // window the key replays directly; past it (or with no timestamp)
+    // the attempt is reconciled against Stripe's actual refund list.
+    const REPLAY_SAFE_WINDOW_MS = 20 * 60 * 60 * 1000;
+    let adoptedRefund = null;
+    if (isReplay) {
+      const pendingAtMs = Date.parse(meta.pending_refund_at || '') || 0;
+      if (pendingAtMs && (Date.now() - pendingAtMs) <= REPLAY_SAFE_WINDOW_MS) {
+        idempotencyKey = meta.pending_refund_key;
+      } else {
+        let listed;
+        try {
+          listed = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100 });
+        } catch (listErr) {
+          // Fail CLOSED: without seeing Stripe's refunds we can't tell
+          // whether the day-old attempt landed, and guessing risks a
+          // second refund.
+          logger.error(`[stripe] stale refund-attempt reconcile failed for payment ${paymentId}: ${listErr.message}`);
+          throw new Error('Could not verify the earlier refund attempt against Stripe — check the payment in the Stripe dashboard before retrying');
+        }
+        // Adopt the original refund if it landed (right amount, created
+        // at/after the attempt) — record it below without re-sending.
+        adoptedRefund = (listed?.data || []).find((r) =>
+          ['succeeded', 'pending'].includes(r.status)
+          && (requestCents === null || r.amount === requestCents)
+          && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000)) || null;
+        if (!adoptedRefund) {
+          // The original attempt never landed at Stripe — start over as a
+          // validated fresh attempt against the CURRENT balance.
+          assertNewAttemptRefundable();
+          await persistPendingAttempt();
+        }
+      }
+    } else {
+      assertNewAttemptRefundable();
+      await persistPendingAttempt();
     }
     const clearedMeta = { ...meta };
     delete clearedMeta.pending_refund_key;
     delete clearedMeta.pending_refund_request;
 
-    let refund;
+    let refund = adoptedRefund;
     try {
-      const refundParams = {
-        payment_intent: payment.stripe_payment_intent_id,
-        reason: reason || 'requested_by_customer',
-      };
-      if (requestCents !== null) {
-        refundParams.amount = requestCents;
+      if (!refund) {
+        const refundParams = {
+          payment_intent: payment.stripe_payment_intent_id,
+          reason: reason || 'requested_by_customer',
+        };
+        if (requestCents !== null) {
+          refundParams.amount = requestCents;
+        }
+        refund = await stripe.refunds.create(refundParams, { idempotencyKey });
       }
-      refund = await stripe.refunds.create(refundParams, { idempotencyKey });
     } catch (err) {
       // Definitive rejections clear the pending attempt so a corrected
       // retry isn't wedged replaying Stripe's stored error. Ambiguous
