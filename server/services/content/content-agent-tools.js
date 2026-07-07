@@ -229,6 +229,11 @@ async function executeContentTool(toolName, input) {
         link,
         guid: `content_agent_${post.id}`,
         source: 'content_agent',
+        // Blog lanes never AI-generate an image — the hero/thumbnail path
+        // (incl. linkedinWantsBlogHero) is gated on noAiImage, so without it
+        // the share posts LinkedIn without a picture and generates an AI
+        // image for IG/GBP instead of using the live blog hero.
+        noAiImage: true,
       });
 
       // Mark post as shared

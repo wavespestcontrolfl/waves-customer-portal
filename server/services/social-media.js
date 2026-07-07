@@ -486,7 +486,7 @@ function getHookSample() {
   return shuffled.slice(0, 3).join('\n  ');
 }
 
-async function generateContent(platform, { title, description, link, locationName }) {
+async function generateContent(platform, { title, description, link, locationName, source }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY not configured');
   }
@@ -496,6 +496,13 @@ async function generateContent(platform, { title, description, link, locationNam
   const safeDesc = String(description || '').replace(/[\r\n]+/g, ' ').slice(0, 1000);
   const safeLocation = String(locationName || '').replace(/[\r\n]+/g, ' ').slice(0, 100);
   const hooks = getHookSample();
+
+  // The emoji-first, article-pointing GBP format is a BLOG directive (owner
+  // 2026-07-06: blog content less salesy). Non-blog lanes (manual composer,
+  // studio fallbacks) share service/campaign links where "point at the
+  // article" is wrong and a normal service CTA is right — they keep the
+  // original prompt.
+  const blogShare = BLOG_HERO_SOURCES.has(source);
 
   const prompts = {
     facebook: `${POST_PREAMBLE}
@@ -577,7 +584,7 @@ GOOD example:
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
 
-    gbp: `${POST_PREAMBLE}
+    gbp: blogShare ? `${POST_PREAMBLE}
 
 Write a Google Business Profile post for Waves Pest Control ${safeLocation}.
 
@@ -597,6 +604,25 @@ GOOD example:
 "🌱 Seeing crispy St. Augustine in Lakewood Ranch? It may not be drought. Chinch bugs feed near the blade base and spread fast in hot spots. Full breakdown on the blog."
 
 BAD ending (do NOT write like this): "...Schedule a lawn inspection before the patch grows."
+
+Article title: ${safeTitle}
+Article summary: ${safeDesc}` : `${POST_PREAMBLE}
+
+Write a Google Business Profile post for Waves Pest Control ${safeLocation}.
+
+This post appears on Google Search and Maps for local customers.
+
+Format:
+- Mention ${safeLocation || 'the local area'} naturally in the first sentence
+- Lead with a useful seasonal or practical tip
+- Sound like a local expert sharing advice, not an ad
+- End with a clear next step ("Schedule an inspection" or "See the full guide")
+- 150-250 characters total — tight and scannable
+- Do NOT include any URL or phone number — a button will be attached
+- Do NOT use hashtags
+
+GOOD example:
+"Seeing crispy St. Augustine in Lakewood Ranch? It may not be drought. Chinch bugs feed near the blade base and spread fast in hot spots. Schedule a lawn inspection before the patch grows."
 
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
@@ -1553,7 +1579,7 @@ const SocialMediaService = {
       }
 
       try {
-        const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link });
+        const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
         const validation = validateContent(content, p.key);
         if (!validation.valid) {
@@ -1682,7 +1708,7 @@ const SocialMediaService = {
         const gbpCustom = customContent?.gbp;
         const gbpContent =
           (typeof gbpCustom === 'string' ? gbpCustom : gbpCustom?.[loc.id]) ||
-          await generateContent('gbp', { title, description, link, locationName: loc.name });
+          await generateContent('gbp', { title, description, link, locationName: loc.name, source });
 
         const gbpValidation = validateContent(gbpContent, 'gbp');
         if (!gbpValidation.valid) {

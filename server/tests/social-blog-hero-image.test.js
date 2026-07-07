@@ -126,14 +126,33 @@ describe('blogHeroSocialImageUrl', () => {
     expect(social.BLOG_HERO_SOURCES.has('blog')).toBe(true);
   });
 
-  test("the content agent's distribute_to_social tool (source 'content_agent') is a blog lane too (Codex round 4)", () => {
+  test("the content agent's distribute_to_social tool (source 'content_agent') is a blog lane too (Codex rounds 4+5)", () => {
     // distribute_to_social shares live blog_posts through publishToAll — its
     // shares must get the same blog treatment (FB /feed link post, IG caption
     // URL, LinkedIn hero) as every other blog lane, not the brand-card format.
+    // The hero path is additionally gated on noAiImage, so the caller must
+    // pass it or LinkedIn posts pictureless and IG/GBP AI-generate an image.
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/content/content-agent-tools.js'), 'utf8');
     expect(src).toContain("source: 'content_agent'");
+    expect(src).toContain('noAiImage: true');
     expect(social.BLOG_HERO_SOURCES.has('content_agent')).toBe(true);
+  });
+
+  test('the emoji-first article CTA is scoped to blog-share GBP copy — non-blog GBP keeps the service CTA (Codex round 5)', () => {
+    // generateContent('gbp') also serves the manual composer and studio
+    // fallbacks, whose links are service/campaign pages — forcing "point at
+    // the article" there produces wrong customer-facing copy. The blog tone
+    // must be conditional on the share's source being a blog lane.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/social-media.js'), 'utf8');
+    expect(src).toContain('const blogShare = BLOG_HERO_SOURCES.has(source)');
+    expect(src).toContain('gbp: blogShare ?');
+    // Both variants present: blog tone bans the sales CTA, generic keeps it.
+    expect(src).toContain('NEVER "Schedule an inspection"');
+    expect(src).toContain('End with a clear next step ("Schedule an inspection" or "See the full guide")');
+    // The publishToAll lanes thread source through to the prompt build.
+    expect(src).toContain("generateContent('gbp', { title, description, link, locationName: loc.name, source })");
   });
 
   describe('linkedinWantsBlogHero (LinkedIn cannot scrape article URLs — the hero must be uploaded as a thumbnail)', () => {
