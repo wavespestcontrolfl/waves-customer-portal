@@ -575,14 +575,37 @@ const StripeService = {
         logger.warn(`[stripe] Detach warning (proceeding with DB removal): ${err.message}`);
       }
       await db('payment_methods').where({ id: cardId }).del();
+      await this._disableAutopayIfMethodRemoved(customerId, card);
       logger.info(`[stripe] Payment method removed for ${customerId}: ${cardId}`);
       return { success: true };
     }
 
     // Fallback — just remove from DB
     await db('payment_methods').where({ id: cardId }).del();
+    await this._disableAutopayIfMethodRemoved(customerId, card);
     logger.info(`[stripe] Payment method removed (DB only) for ${customerId}: ${cardId}`);
     return { success: true };
+  },
+
+  /**
+   * Removing the card that carried Auto Pay used to leave the customer's
+   * autopay flags pointing at a deleted row — the cron silently stopped
+   * charging while the AutopayCard still showed Active. Disable autopay
+   * honestly so the UI shows Off with a set-up CTA.
+   */
+  async _disableAutopayIfMethodRemoved(customerId, removedCard) {
+    if (!removedCard?.autopay_enabled) return;
+    try {
+      await db('customers')
+        .where({ id: customerId })
+        .update({ autopay_enabled: false, autopay_payment_method_id: null });
+      const { logAutopay } = require('./autopay-log');
+      await logAutopay(customerId, 'autopay_disabled', {
+        details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+      });
+    } catch (err) {
+      logger.warn(`[stripe] autopay cleanup after card removal failed for ${customerId}: ${err.message}`);
+    }
   },
 
   // =========================================================================
@@ -793,6 +816,10 @@ const StripeService = {
             base_amount: baseAmount,
             card_surcharge: surchargeAmount,
             idempotency_key: effectiveIdempotencyKey,
+            // Carried on FAILED rows so retry rungs keep attributing the
+            // charge to the original obligation month (a rung's own row
+            // gets payment_date of the rung day, not the month owed).
+            ...(metadata.billed_month ? { billed_month: metadata.billed_month } : {}),
           }),
         }).returning('*');
         return row;
@@ -888,6 +915,10 @@ const StripeService = {
             card_surcharge: surchargeAmount,
             surcharge_rate_bps: rateBps,
             surcharge_policy_version: policyVersion,
+            // Month-of-obligation stamp: billing-cron's month dedupe and
+            // the retry sweep's already-collected guard match on this
+            // (metadata-first, payment_date window only as legacy fallback).
+            ...(metadata.billed_month ? { billed_month: metadata.billed_month } : {}),
           }),
         }).returning('*');
         return row;
@@ -976,6 +1007,10 @@ const StripeService = {
     return this.charge(customerId, customer.monthly_rate, description, {
       type: 'monthly_autopay',
       tier: customer.waveguard_tier || '',
+      // Month-of-obligation stamp — billing-cron's duplicate guard and the
+      // retry sweep match on this, not on the date the money landed, so a
+      // late-recovered charge can't satisfy the wrong month.
+      billed_month: etDateString().slice(0, 7),
     }, effectiveKey);
   },
 
@@ -1416,67 +1451,232 @@ const StripeService = {
       throw new Error('Payment is not a Stripe payment — cannot refund via Stripe');
     }
 
+    const paidCents = Math.round(parseFloat(payment.amount) * 100);
+    const priorCents = Math.round(parseFloat(payment.refund_amount || 0) * 100);
+    const remainingCents = paidCents - priorCents;
+    const requestCents = amount ? Math.round(amount * 100) : null;
+    const requestTag = requestCents === null ? 'rest' : String(requestCents);
+
+    // Persist the attempt key BEFORE calling Stripe. The retry contract
+    // ("re-running the same refund is safe") must hold even when the
+    // charge.refunded webhook repairs refund_amount before the operator
+    // retries — a key derived from live local state would shift in that
+    // window and mint a brand-new refund. The pending marker survives any
+    // unresolved outcome (network error, DB write failure) and is cleared
+    // on completion or on a definitive Stripe rejection, so a retry always
+    // replays the ORIGINAL attempt's key.
+    let meta = {};
     try {
-      const refundParams = {
-        payment_intent: payment.stripe_payment_intent_id,
-        reason: reason || 'requested_by_customer',
-      };
+      meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+    } catch { meta = {}; }
+    const isReplay = !!(meta.pending_refund_key && meta.pending_refund_request === requestTag);
+    if (meta.pending_refund_key && !isReplay) {
+      throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
+    }
 
-      if (amount) {
-        refundParams.amount = Math.round(amount * 100);
+    // NEW-attempt validation: partials must ACCUMULATE (two 50% refunds =
+    // fully refunded), and a request beyond the remaining balance is
+    // rejected with a clear message instead of an opaque Stripe error.
+    // Replays skip this — the webhook may already have recorded the very
+    // refund being replayed (a $60 refund on $100 repaired to remaining
+    // $40 would otherwise wedge here).
+    const assertNewAttemptRefundable = () => {
+      if (remainingCents <= 0) throw new Error('Payment is already fully refunded');
+      if (requestCents !== null && (requestCents <= 0 || requestCents > remainingCents)) {
+        throw new Error(`Refund amount must be between $0.01 and the remaining $${(remainingCents / 100).toFixed(2)}`);
       }
+    };
+    let idempotencyKey;
+    const attemptReason = reason || 'requested_by_customer';
+    const persistPendingAttempt = async () => {
+      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
+      await db('payments').where({ id: paymentId }).update({
+        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_reason: attemptReason, pending_refund_at: new Date().toISOString() }),
+      });
+    };
 
-      const refund = await stripe.refunds.create(refundParams);
+    // Stripe guarantees idempotency keys for at least 24h and may prune
+    // them after — a blind replay of an older key would execute as a
+    // brand-new request and refund twice. Inside a conservative 20h
+    // window the key replays directly; past it (or with no timestamp)
+    // the attempt is reconciled against Stripe's actual refund list.
+    const REPLAY_SAFE_WINDOW_MS = 20 * 60 * 60 * 1000;
+    let adoptedRefund = null;
+    // A key replay must resend the ORIGINAL request verbatim — Stripe
+    // rejects a reused key whose parameters differ, so a retry that only
+    // changes the reason would wedge on an idempotency error. Legacy
+    // markers without a persisted reason fall through to the incoming one.
+    let replayReason = null;
+    if (isReplay) {
+      const pendingAtMs = Date.parse(meta.pending_refund_at || '') || 0;
+      if (pendingAtMs && (Date.now() - pendingAtMs) <= REPLAY_SAFE_WINDOW_MS) {
+        idempotencyKey = meta.pending_refund_key;
+        replayReason = meta.pending_refund_reason || null;
+      } else {
+        let listed;
+        try {
+          listed = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100 });
+        } catch (listErr) {
+          // Fail CLOSED: without seeing Stripe's refunds we can't tell
+          // whether the day-old attempt landed, and guessing risks a
+          // second refund.
+          logger.error(`[stripe] stale refund-attempt reconcile failed for payment ${paymentId}: ${listErr.message}`);
+          throw new Error('Could not verify the earlier refund attempt against Stripe — check the payment in the Stripe dashboard before retrying');
+        }
+        // Adopt the original refund if it landed (right amount, created
+        // at/after the attempt) — record it below without re-sending. A
+        // 'rest' attempt has no explicit requestCents, but its attempt-time
+        // amount is recoverable as paid minus the key's prior-cents suffix;
+        // the match is REQUIRED, else any later refund (e.g. a dashboard
+        // partial) would be adopted as the full refund and the true
+        // remainder never sent. An unparseable key can't be reconciled —
+        // no adoption; the fresh 'rest' attempt below is still safe because
+        // Stripe computes the remainder from its own ledger.
+        let expectedCents = requestCents;
+        if (requestCents === null) {
+          const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
+          expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
+            ? paidCents - keyPriorCents
+            : NaN;
+        }
+        adoptedRefund = (Number.isFinite(expectedCents) && (listed?.data || []).find((r) =>
+          ['succeeded', 'pending'].includes(r.status)
+          && r.amount === expectedCents
+          && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
+        if (!adoptedRefund) {
+          // The original attempt never landed at Stripe — start over as a
+          // validated fresh attempt against the CURRENT balance.
+          assertNewAttemptRefundable();
+          await persistPendingAttempt();
+        }
+      }
+    } else {
+      assertNewAttemptRefundable();
+      await persistPendingAttempt();
+    }
+    const clearedMeta = { ...meta };
+    delete clearedMeta.pending_refund_key;
+    delete clearedMeta.pending_refund_request;
+    delete clearedMeta.pending_refund_reason;
+    delete clearedMeta.pending_refund_at;
 
-      const refundAmountDollars = amount || parseFloat(payment.amount);
-      const isFullRefund = refundAmountDollars >= parseFloat(payment.amount);
+    let refund = adoptedRefund;
+    try {
+      if (!refund) {
+        const refundParams = {
+          payment_intent: payment.stripe_payment_intent_id,
+          reason: replayReason || attemptReason,
+        };
+        if (requestCents !== null) {
+          refundParams.amount = requestCents;
+        }
+        refund = await stripe.refunds.create(refundParams, { idempotencyKey });
+      }
+    } catch (err) {
+      // Definitive rejections clear the pending attempt so a corrected
+      // retry isn't wedged replaying Stripe's stored error. Ambiguous
+      // outcomes (connection/API errors) KEEP it — replaying the same key
+      // is safe whether or not the original request landed.
+      const definitiveRejection = ['StripeInvalidRequestError', 'StripeCardError'].includes(err?.type);
+      if (definitiveRejection) {
+        await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(clearedMeta) }).catch(() => {});
+      }
+      logger.error(`[stripe] Refund failed for payment ${paymentId}: ${err.message}`);
+      throw new Error('Refund processing failed');
+    }
 
+    // From here the money HAS moved. The cumulative refunded total comes
+    // from Stripe's charge (amount_refunded — the same ground truth the
+    // charge.refunded webhook writes): local math alone DOUBLE-COUNTS when
+    // the webhook repaired refund_amount before an idempotent replay of
+    // this same attempt ($40 refund, webhook wrote 40, replay would record
+    // prior 40 + 40 = 80), and misses dashboard-side partials this table
+    // never saw.
+    const refundAmountDollars = refund.amount / 100;
+    let totalRefundedCents;
+    if (requestCents === null) {
+      // Omitted amount empties the remaining balance — fully refunded by
+      // definition.
+      totalRefundedCents = paidCents;
+    } else if (payment.stripe_refund_id === refund.id) {
+      // Idempotent replay of a refund the webhook already recorded —
+      // prior INCLUDES this refund; adding it again would double-count.
+      totalRefundedCents = priorCents;
+    } else {
+      totalRefundedCents = priorCents + refund.amount;
+    }
+    try {
+      if (refund.charge) {
+        const charge = await stripe.charges.retrieve(refund.charge);
+        if (Number.isFinite(Number(charge?.amount_refunded))) {
+          totalRefundedCents = Number(charge.amount_refunded);
+        }
+      }
+    } catch (chargeErr) {
+      logger.warn(`[stripe] refund cumulative lookup failed for payment ${paymentId} (falling back to local accumulation): ${chargeErr.message}`);
+    }
+    const isFullRefund = totalRefundedCents >= paidCents;
+
+    try {
       await db('payments')
         .where({ id: paymentId })
         .update({
           status: isFullRefund ? 'refunded' : 'paid',
-          refund_amount: refundAmountDollars,
+          refund_amount: totalRefundedCents / 100,
           refund_status: refund.status,
           stripe_refund_id: refund.id,
+          metadata: JSON.stringify(clearedMeta),
         });
-
-      if (isFullRefund) {
-        try {
-          await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
-        } catch (syncErr) {
-          logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
-        }
-        // Return any applied account credit to the customer's balance — a full
-        // refund gives back the cash, so the credit they used must return too
-        // (else it stays consumed). Idempotent vs the charge.refunded webhook.
-        try {
-          const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
-          if (inv) {
-            const { returnAppliedCreditOnRefund } = require('./customer-credit');
-            await db.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx));
-          }
-        } catch (creditErr) {
-          logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
-        }
-      }
-
-      const updated = await db('payments').where({ id: paymentId }).first();
-      PaymentLifecycleEmail.sendRefundIssued({
-        customerId: updated?.customer_id || payment.customer_id,
-        paymentId,
-        refundId: refund.id,
-        refundAmount: refundAmountDollars,
-        refundDate: refund.created ? new Date(refund.created * 1000) : new Date(),
-        refundReason: reason || 'Account adjustment',
-      }).catch((emailErr) => {
-        logger.warn(`[stripe] Refund issued email failed for payment ${paymentId}: ${emailErr.message}`);
-      });
-      logger.info(`[stripe] Refund processed: $${refundAmountDollars} for payment ${paymentId}, refund ${refund.id}`);
-      return updated;
-    } catch (err) {
-      logger.error(`[stripe] Refund failed for payment ${paymentId}: ${err.message}`);
-      throw new Error('Refund processing failed');
+    } catch (dbErr) {
+      // Refund issued, ledger write failed. The pending attempt marker is
+      // still set, so a retry replays the SAME idempotency key regardless
+      // of what the webhook writes to refund_amount in the meantime —
+      // Stripe returns the original refund and this write gets another
+      // chance.
+      logger.error(`[stripe] CRITICAL: refund ${refund.id} ($${refundAmountDollars}) issued for payment ${paymentId} but the payments-row update failed: ${dbErr.message}`);
+      throw new Error(`Refund ${refund.id} WAS issued at Stripe but recording it failed. Re-running the same refund is safe — it will not refund twice, only sync the records.`);
     }
+
+    // Side effects past this point never mask the successful refund as
+    // "Refund processing failed" — each degrades on its own.
+    if (isFullRefund) {
+      try {
+        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
+      } catch (syncErr) {
+        logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
+      }
+      // Return any applied account credit to the customer's balance — a full
+      // refund gives back the cash, so the credit they used must return too
+      // (else it stays consumed). Idempotent vs the charge.refunded webhook.
+      try {
+        const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
+        if (inv) {
+          const { returnAppliedCreditOnRefund } = require('./customer-credit');
+          await db.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx));
+        }
+      } catch (creditErr) {
+        logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
+      }
+    }
+
+    let updated = null;
+    try {
+      updated = await db('payments').where({ id: paymentId }).first();
+    } catch (readErr) {
+      logger.warn(`[stripe] refund post-update read failed for payment ${paymentId}: ${readErr.message}`);
+    }
+    PaymentLifecycleEmail.sendRefundIssued({
+      customerId: updated?.customer_id || payment.customer_id,
+      paymentId,
+      refundId: refund.id,
+      refundAmount: refundAmountDollars,
+      refundDate: refund.created ? new Date(refund.created * 1000) : new Date(),
+      refundReason: reason || 'Account adjustment',
+    }).catch((emailErr) => {
+      logger.warn(`[stripe] Refund issued email failed for payment ${paymentId}: ${emailErr.message}`);
+    });
+    logger.info(`[stripe] Refund processed: $${refundAmountDollars} for payment ${paymentId}, refund ${refund.id}`);
+    return updated || { ...payment, status: isFullRefund ? 'refunded' : 'paid', refund_amount: totalRefundedCents / 100, stripe_refund_id: refund.id };
   },
 
   // =========================================================================

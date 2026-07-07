@@ -520,9 +520,11 @@ function SuppressionsPanel({
                 <thead>
                   <tr className="border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary">
                     <th className="py-2 pr-4 font-medium">Email</th>
+                    <th className="py-2 pr-4 font-medium">Customer</th>
                     <th className="py-2 pr-4 font-medium">Group</th>
                     <th className="py-2 pr-4 font-medium">Type</th>
                     <th className="py-2 pr-4 font-medium">Status</th>
+                    <th className="py-2 pr-4 font-medium">Blocked</th>
                     <th className="py-2 pr-4 font-medium">Source</th>
                     <th className="py-2 pr-4 font-medium">Since</th>
                     <th className="py-2 font-medium">Action</th>
@@ -532,6 +534,25 @@ function SuppressionsPanel({
                   {suppressions.map((s) => (
                     <tr key={s.id}>
                       <td className="py-3 pr-4 whitespace-nowrap text-zinc-900">{s.email}</td>
+                      <td className="py-3 pr-4 whitespace-nowrap">
+                        {s.customer ? (
+                          <div>
+                            <a
+                              href={`/admin/customers?customerId=${encodeURIComponent(s.customer.id)}`}
+                              className="text-zinc-900 underline decoration-zinc-300 underline-offset-2 hover:decoration-zinc-500"
+                            >
+                              {[s.customer.first_name, s.customer.last_name].filter(Boolean).join(" ") || "Unnamed customer"}
+                            </a>
+                            {s.customer.phone ? (
+                              <div className="text-11 text-ink-tertiary">
+                                <a href={`tel:${s.customer.phone}`}>{s.customer.phone}</a>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <span className="text-ink-tertiary">No match</span>
+                        )}
+                      </td>
                       <td className="py-3 pr-4 whitespace-nowrap text-ink-secondary">
                         {s.group_name || s.group_key || "Global"}
                       </td>
@@ -540,6 +561,12 @@ function SuppressionsPanel({
                       </td>
                       <td className="py-3 pr-4 whitespace-nowrap">
                         <Badge tone={s.status === "active" ? "alert" : "neutral"}>{s.status}</Badge>
+                      </td>
+                      <td
+                        className="py-3 pr-4 whitespace-nowrap text-ink-secondary"
+                        title={s.last_blocked_at ? `Last blocked ${formatDateTime(s.last_blocked_at)}` : undefined}
+                      >
+                        {s.blocked_count > 0 ? `${s.blocked_count} ${s.blocked_count === 1 ? "send" : "sends"}` : "—"}
                       </td>
                       <td className="py-3 pr-4 whitespace-nowrap text-ink-tertiary">{s.source || "-"}</td>
                       <td className="py-3 pr-4 whitespace-nowrap text-ink-tertiary">

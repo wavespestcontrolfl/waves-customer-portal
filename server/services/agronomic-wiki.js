@@ -13,7 +13,8 @@ const { loadCustomerGrassContext, irrigationTypeHasSystem } = require('./lawn-gr
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const MODEL = require('../config/models').FLAGSHIP;
+const MODEL = require('../config/models').DEEP;
+const { createDeepMessage } = require('./llm/deep');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -339,9 +340,9 @@ async function callClaude(systemPrompt, userPrompt) {
   }
   try {
     const client = new Anthropic();
-    const response = await client.messages.create({
+    const response = await createDeepMessage(client, {
       model: MODEL,
-      max_tokens: 4096,
+      max_tokens: 8192, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });

@@ -135,8 +135,17 @@ function formatAppointmentWindow(appt) {
   if (!appt) return '';
   const date = formatAppointmentDate(appt.scheduledDate);
   const start = formatAppointmentTime(appt.windowStart);
-  const end = formatAppointmentTime(appt.windowEnd);
-  const window = start && end ? `${start}-${end}` : start || end;
+  // The arrival window quoted to customers is ALWAYS window_start + 2 hours
+  // (owner directive) — appt.windowEnd is the internal job-duration block
+  // and never renders on customer surfaces.
+  const startMatch = /^(\d{1,2}):(\d{2})/.exec(String(appt.windowStart || '').trim());
+  const endMins = startMatch
+    ? ((Number(startMatch[1]) * 60) + Number(startMatch[2]) + 120) % 1440
+    : null;
+  const end = endMins != null
+    ? formatAppointmentTime(`${Math.floor(endMins / 60)}:${String(endMins % 60).padStart(2, '0')}`)
+    : '';
+  const window = start && end ? `${start}-${end}` : start;
   return [date, window].filter(Boolean).join(' ');
 }
 
@@ -447,32 +456,8 @@ export default function ProjectReportViewPage() {
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
         }
       `}</style>
-      {/* Mirrors the pest/lawn service-report top bar (.sr-top): phone left,
-          logo right, same 62px bar on the shared 960px grid. */}
-      <header data-glass="soft" style={{ background: B.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
-        <div style={{
-          maxWidth: 960,
-          margin: '0 auto',
-          minHeight: 62,
-          padding: '16px 24px',
-          boxSizing: 'border-box',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 16,
-        }}>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-            color: ESTIMATE_TEXT,
-            fontSize: 15,
-            fontWeight: 600,
-            textDecoration: 'none',
-          }}>
-            {WAVES_PHONE_DISPLAY}
-          </a>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
-        </div>
-      </header>
-
+      {/* Page-local top bar removed — the WavesShell top bar (App.jsx route
+          wrap, owner 2026-07-06) provides the standard chrome. */}
       <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           {/* The kicker carries what the project is FOR (its title) when one

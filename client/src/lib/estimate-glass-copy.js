@@ -4,21 +4,19 @@
  * the approved blueprint's COPY object in
  * docs/design/estimate-glass-blueprint.js).
  *
- * Content rides the same `?glass=1` dark launch as the visual theme (PR A):
- * nothing here changes the estimate page until the URL opts in, so the
- * current copy stays the control for the planned v1-vs-v2 rollout test.
- * Service-agnostic strings apply to any glass estimate; the pest-specific
- * pack applies only to pest_control — other categories keep the standard
- * copy until their packs are approved (planned follow-up, not PR B).
+ * Content activation is server-driven: the /data payload's glassDefault flag
+ * releases the copy per category (GATE_ESTIMATE_GLASS_CATEGORIES; unset = all).
+ * The old `?glass=1` / `?glass=0` URL override was retired 2026-07-07 (owner
+ * decision) — glass is the only customer theme, so the per-link escape hatch
+ * back to the pre-glass page no longer exists.
  */
 import { etDateString } from './timezone';
 
-// Estimate glass COPY release — category-scoped (pest + lawn shipped; other
-// categories follow once their copy packs are approved). NOTE: only the
+// Estimate glass COPY release — category-scoped server-side. NOTE: only the
 // marketing COPY still rides this flag; the glass THEME is now unconditional
 // on every estimate. The server sends glassDefault per eligible category and
 // EstimateViewPage calls setGlassDefault() from the /data payload before the
-// loaded UI renders. ?glass=1 previews the new copy; ?glass=0 keeps current.
+// loaded UI renders.
 let glassDefaultReleased = false;
 
 export function setGlassDefault(on) {
@@ -26,14 +24,7 @@ export function setGlassDefault(on) {
 }
 
 export function glassCopyActive() {
-  try {
-    const param = new URLSearchParams(window.location.search).get('glass');
-    if (param === '1') return true; // preview the new copy
-    if (param === '0') return false; // keep the current copy
-    return glassDefaultReleased;
-  } catch {
-    return glassDefaultReleased;
-  }
+  return glassDefaultReleased;
 }
 
 // ── Service-agnostic strings ────────────────────────────────────────────────
@@ -81,10 +72,10 @@ export const GLASS_FOOTER_CITY_LINKS = [
 // The voice repositioning changes TONE only — no new guarantees, products,
 // or numbers are introduced here.
 const GLASS_PEST = {
-  heroH1: '{first}, your pest-free home plan is ready.',
-  heroSub: 'We can start protecting your home as soon as tomorrow — quarterly exterior protection, interior treatment when needed, unlimited free callbacks, and a 90-day money-back guarantee.',
+  heroH1: 'Hello {first}, your pest-free {city} plan is ready!',
+  heroSub: 'We can start protecting your home as soon as {date}. Your plan includes quarterly exterior barrier service, interior treatment when needed, unlimited free callbacks, and a 90-day money-back guarantee \u2014 so you\u2019re not paying and praying the bugs stay gone in {city}.',
   eyebrow: 'Your pest-free home plan',
-  aiTitle: 'Your price was built from your home — not somebody else’s average',
+  aiTitle: 'Your price was built from your {city} home — not somebody else’s.',
   aiBody: 'We didn’t guess. We measured your home, lot, roofline, and access points so your plan fits your actual property — not a generic average.',
   askChips: [
     'Is this safe for pets and kids?',

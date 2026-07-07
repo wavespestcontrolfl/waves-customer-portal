@@ -5,6 +5,8 @@ const MODELS = require('../config/models');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+const { createDeepMessage } = require('./llm/deep');
+
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
 // ══════════════════════════════════════════════════════════════
@@ -223,9 +225,9 @@ const KnowledgeBaseService = {
 
     for (const entry of entries) {
       try {
-        const response = await client.messages.create({
-          model: MODELS.FLAGSHIP,
-          max_tokens: 600,
+        const response = await createDeepMessage(client, {
+          model: MODELS.DEEP,
+          max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
           messages: [{
             role: 'user',
             content: `You are auditing a knowledge base entry for a pest control & lawn care company (Waves Pest Control) in Southwest Florida. Review this entry for accuracy.

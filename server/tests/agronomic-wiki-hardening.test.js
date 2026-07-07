@@ -17,7 +17,7 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
-jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
+jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model' }));
 jest.mock('../services/lawn-grass-context', () => ({
   loadCustomerGrassContext: jest.fn(async () => ({
     trackKey: 'st_augustine',

@@ -64,6 +64,10 @@ function makeDb(estimate, claimedOverrides = null) {
         this.statusList = { column, values };
         return this;
       },
+      whereNull(column) {
+        this.nullColumns = [...(this.nullColumns || []), column];
+        return this;
+      },
       whereRaw(clause) {
         this.rawClause = clause;
         return this;
@@ -77,14 +81,19 @@ function makeDb(estimate, claimedOverrides = null) {
           table,
           clause: this.clause,
           statusList: this.statusList,
+          nullColumns: this.nullColumns || null,
           rawClause: this.rawClause,
           patch,
         });
+        // Honor whereNull guards against the estimate row so the claim
+        // fails like the real SQL would (e.g. price_locked_at IS NULL).
+        const guardBlocked = table === 'estimates'
+          && (this.nullColumns || []).some((column) => estimate[column] != null);
         // claimedOverrides simulates the row mutating between the pre-claim SELECT
         // and this guarded UPDATE (e.g. a concurrent proposal-mode toggle).
         const updated = { ...estimate, ...patch, ...(claimedOverrides || {}) };
         return {
-          returning: async () => [updated],
+          returning: async () => (guardBlocked ? [] : [updated]),
         };
       },
       insert: async (row) => {
@@ -700,8 +709,10 @@ describe('estimate manual acceptance', () => {
       price_locked_by: 'manual_accept',
       pricing_authority: 'LOCKED',
     });
-    // The status guard is what prevents a second accept from re-pricing.
+    // The status + lock guards are what prevent a second accept from
+    // re-pricing or re-converting.
     expect(updates[0].statusList).toEqual({ column: 'status', values: ['sent', 'viewed'] });
+    expect(updates[0].nullColumns).toEqual(['price_locked_at']);
   });
 
   test('a prepay_annual accept re-runs the one-time guard INSIDE the transaction (billable one-time work fails closed)', async () => {
@@ -770,7 +781,11 @@ describe('estimate manual acceptance', () => {
     );
   });
 
-  test('preserves an existing lock timestamp rather than re-stamping it', async () => {
+  test('rejects a pre-locked estimate regressed to sent/viewed instead of rerunning conversion', async () => {
+    // A locked price means a prior accept already committed money
+    // (conversion + invoicing). Even when some path returned the row to a
+    // manually-acceptable status, a second accept must be refused — same
+    // price_locked_at IS NULL claim guard as the public accept path.
     const estimate = {
       id: 'estimate-prelocked',
       status: 'viewed',
@@ -782,14 +797,21 @@ describe('estimate manual acceptance', () => {
       price_locked_at: '2026-05-12T09:00:00.000Z',
     };
     const { database, updates } = makeDb(estimate);
-    await markEstimateManuallyAccepted({
+    const convertEstimate = jest.fn().mockResolvedValue({ customerId: 'customer-10' });
+    await expect(markEstimateManuallyAccepted({
       estimateId: estimate.id,
       adminUserId: 'admin-10',
       database,
       leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
-      estimateConverter: { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-10' }) },
+      estimateConverter: { convertEstimate },
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'This estimate was already accepted and its price locked — accepting it again would duplicate the conversion and invoicing. Review the linked customer/invoices instead.',
     });
-    expect(updates[0].patch.price_locked_at).toBe('2026-05-12T09:00:00.000Z');
+    expect(convertEstimate).not.toHaveBeenCalled();
+    // The claim carried the lock guard and nothing after it ran.
+    expect(updates[0].nullColumns).toEqual(['price_locked_at']);
+    expect(updates).toHaveLength(1);
   });
 });
 

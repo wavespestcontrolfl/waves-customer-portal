@@ -32,9 +32,14 @@ function estimateViewUrl(token) {
   return `https://portal.wavespestcontrol.com/estimate/${token}`;
 }
 
+// Standard send-time expiry window. Also consumed by the expiration cron
+// to tell an operator EXTENSION (expires_at pushed beyond this window)
+// apart from the stamp every normal send writes.
+const ESTIMATE_SEND_EXPIRY_DAYS = 7;
+
 function estimateExpiresAt(now = () => new Date()) {
   const expiresAt = new Date(now().getTime());
-  expiresAt.setDate(expiresAt.getDate() + 7);
+  expiresAt.setDate(expiresAt.getDate() + ESTIMATE_SEND_EXPIRY_DAYS);
   return expiresAt;
 }
 
@@ -579,6 +584,7 @@ module.exports = {
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,
+  ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,

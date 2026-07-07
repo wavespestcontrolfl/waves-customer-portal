@@ -782,3 +782,165 @@ describe('schema-shape consistency (r7)', () => {
     expect(rem.schemaShapeChanged('a', 'b', { schemaTypesForContent: () => { throw new Error('boom'); } })).toBe(true);
   });
 });
+
+describe('deterministic date-restamp carve-out', () => {
+  const fmLib = require('../services/content-astro/frontmatter');
+  const { etDateString } = require('../utils/datetime-et');
+  const { isDateStampFinding, restampFrontmatterDates } = rem;
+  const TODAY = etDateString();
+  const DATED_MD = [
+    '---',
+    'title: Roaches',
+    "published: '1970-01-01'",
+    "updated: '1970-01-01'",
+    "technically_reviewed: '1970-01-01'",
+    "fact_checked: '1970-01-01'",
+    '---',
+    '',
+    'BODY TEXT',
+    '',
+  ].join('\n');
+  const dateFinding = (body) => finding({ path: 'src/content/blog/pest-control/roaches.mdx', body });
+  const NEW_PUBLISH_CTX = { ...CTX, restampPublished: true };
+
+  test('isDateStampFinding classifies date-stamp findings, not body findings', () => {
+    expect(isDateStampFinding({ body: 'Use a non-future publish date. These dates are set to July 7.' })).toBe(true);
+    expect(isDateStampFinding({ body: 'Use current dates before publishing' })).toBe(true);
+    expect(isDateStampFinding({ body: 'Replace the placeholder 1970-01-01 dates in the frontmatter' })).toBe(true);
+    expect(isDateStampFinding({ body: 'Fix the broken link.' })).toBe(false);
+    expect(isDateStampFinding({ body: 'The updated copy overstates the guarantee.' })).toBe(false);
+    expect(isDateStampFinding({})).toBe(false);
+  });
+
+  test('restampFrontmatterDates restamps all four date fields to today ET on a new publish, preserving everything else', () => {
+    const r = restampFrontmatterDates(DATED_MD, { includePublished: true });
+    expect(r.changed).toBe(true);
+    const parsed = fmLib.parse(r.markdown);
+    for (const k of ['published', 'updated', 'technically_reviewed', 'fact_checked']) expect(parsed.data[k]).toBe(TODAY);
+    expect(parsed.data.title).toBe('Roaches');
+    expect(parsed.content).toContain('BODY TEXT');
+  });
+
+  test('restampFrontmatterDates leaves `published` alone by default (refresh lanes must not rewrite publication dates)', () => {
+    const r = restampFrontmatterDates(DATED_MD);
+    expect(r.changed).toBe(true);
+    const parsed = fmLib.parse(r.markdown);
+    expect(parsed.data.published).toBe('1970-01-01');
+    for (const k of ['updated', 'technically_reviewed', 'fact_checked']) expect(parsed.data[k]).toBe(TODAY);
+  });
+
+  test('restampFrontmatterDates is a no-op on current dates and on files without frontmatter', () => {
+    expect(restampFrontmatterDates(DATED_MD.replace(/1970-01-01/g, TODAY), { includePublished: true }).changed).toBe(false);
+    expect(restampFrontmatterDates('plain body, no frontmatter').changed).toBe(false);
+  });
+
+  test('a datetime `modified` field restamps to noon today ET', () => {
+    const md = `---\ntitle: X\nmodified: '2026-01-01T12:00:00'\n---\nBODY`;
+    const r = restampFrontmatterDates(md);
+    expect(r.changed).toBe(true);
+    expect(fmLib.parse(r.markdown).data.modified).toBe(`${TODAY}T12:00:00`);
+  });
+
+  test('pure date findings → deterministic restamp commit with NO LLM call', async () => {
+    const db = makeDb();
+    let llmCalled = false;
+    const gh = makeGh({ fileContent: DATED_MD, reviewComments: [dateFinding('Use a non-future publish date. These dates are wrong.')] });
+    const r = await runRemediationForPr(NEW_PUBLISH_CTX, {
+      db, gh,
+      callAnthropic: async () => { llmCalled = true; return { ok: true, text: 'SHOULD NOT RUN' }; },
+      validateFixedBlogFile: PASS,
+    });
+    expect(r.remediated).toBe(true);
+    expect(llmCalled).toBe(false);
+    const committed = fmLib.parse(gh._calls.putFile[0].content);
+    expect(committed.data.published).toBe(TODAY);
+    expect(committed.data.fact_checked).toBe(TODAY);
+    expect(committed.content).toContain('BODY TEXT');
+    expect(gh._calls.comments[0].body).toMatch(/@codex review/);
+  });
+
+  test('without the new-publish assertion the restamp never touches `published`', async () => {
+    const gh = makeGh({ fileContent: DATED_MD, reviewComments: [dateFinding('Use current dates before publishing.')] });
+    const r = await runRemediationForPr(CTX, {
+      db: makeDb(), gh,
+      callAnthropic: async () => { throw new Error('LLM must not run on a pure-date round'); },
+      validateFixedBlogFile: PASS,
+    });
+    expect(r.remediated).toBe(true);
+    const committed = fmLib.parse(gh._calls.putFile[0].content);
+    expect(committed.data.published).toBe('1970-01-01');
+    expect(committed.data.updated).toBe(TODAY);
+    expect(committed.data.fact_checked).toBe(TODAY);
+  });
+
+  test('mixed findings → dates restamped in code, only body findings sent to the LLM', async () => {
+    const db = makeDb();
+    const prompts = [];
+    const baseline = restampFrontmatterDates(DATED_MD, { includePublished: true }).markdown;
+    const gh = makeGh({
+      fileContent: DATED_MD,
+      reviewComments: [dateFinding('Use current dates before publishing.'), dateFinding('Fix the broken link.')],
+    });
+    const call = async ({ text }) => { prompts.push(text); return { ok: true, text: baseline.replace('BODY TEXT', 'FIXED BODY') }; };
+    const r = await runRemediationForPr(NEW_PUBLISH_CTX, { db, gh, callAnthropic: call, validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Fix the broken link.');
+    expect(prompts[0]).not.toContain('Use current dates');
+    const committed = fmLib.parse(gh._calls.putFile[0].content);
+    expect(committed.data.published).toBe(TODAY);
+    expect(committed.content).toContain('FIXED BODY');
+  });
+
+  test('an LLM frontmatter change beyond the restamp still parks (body-only contract intact)', async () => {
+    const baseline = restampFrontmatterDates(DATED_MD).markdown;
+    const p = fmLib.parse(baseline);
+    const evil = fmLib.stringify({ ...p.data, title: 'Hacked' }, p.content.replace('BODY TEXT', 'FIXED BODY'));
+    const gh = makeGh({
+      fileContent: DATED_MD,
+      reviewComments: [dateFinding('Use current dates before publishing.'), dateFinding('Fix the broken link.')],
+    });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall(evil), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/frontmatter/);
+  });
+
+  test('date findings with already-current dates fall through to the LLM false-positive park path', async () => {
+    const current = DATED_MD.replace(/1970-01-01/g, TODAY);
+    const gh = makeGh({ fileContent: current, reviewComments: [dateFinding('Use current dates before publishing.')] });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall(current), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/no change/);
+  });
+
+  test('scheduler lane syncs restamped dates into the blog_posts row alongside the body', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    try {
+      const db = makeDb({
+        blog_posts: [{
+          id: 1, publish_status: 'publishing', astro_pr_number: 5,
+          astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches',
+          category: 'pest-control', tag: 'Roaches', title: 'T', city: 'Sarasota', keyword: 'k',
+          publish_date: '1970-01-01', technically_reviewed_at: '1970-01-01', fact_checked_at: '1970-01-01',
+        }],
+      });
+      const gh = makeGh({
+        fileContent: DATED_MD,
+        reviewComments: [finding({ body: 'Use current dates before publishing.' })],
+      });
+      const r = await rem.maybeRemediateBlogPost({ id: 1 }, {
+        db, gh,
+        callAnthropic: async () => { throw new Error('LLM must not run on a pure-date round'); },
+        validateFixedBlogFile: PASS,
+      });
+      expect(r.remediated).toBe(true);
+      const row = db._tables.blog_posts[0];
+      expect(row.publish_date).toBe(TODAY);
+      expect(row.technically_reviewed_at).toBe(TODAY);
+      expect(row.fact_checked_at).toBe(TODAY);
+      expect(row.content).toContain('BODY TEXT');
+    } finally {
+      delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    }
+  });
+});

@@ -619,6 +619,31 @@ function recurringTemplateTechnicianId(parent) {
   return parent?.recurring_technician_id || parent?.technician_id || null;
 }
 
+// Statuses that mean a series visit is still ahead of us. Confirmed counts:
+// portal-confirm and the reschedule flows flip pending→confirmed, and a
+// pending-only count made a fully-confirmed plan read as empty — ongoing
+// plans kept auto-extending (extra billable visits), fixed plans raised
+// false plan_ending alerts that invite extending a plan the customer
+// already paid through.
+const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed'];
+
+// Count the still-upcoming visits of a BASE recurring series. Boosters share
+// recurring_parent_id but live on the calendar with is_recurring=false —
+// without that filter they inflate the count and block auto-extend. Only
+// today-or-later dates count: a stale pending/confirmed row whose date
+// passed without completing (the stuck-visit ops leak) is not a visit
+// "ahead" and must not suppress auto-extends or plan-ending alerts.
+async function countUpcomingSeriesVisits(conn, parentId) {
+  const row = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .whereIn('status', UPCOMING_VISIT_STATUSES)
+    .where('is_recurring', true)
+    .where('scheduled_date', '>=', etDateString())
+    .count('* as c')
+    .first();
+  return parseInt(row?.c || 0, 10);
+}
+
 function shouldPreserveParentTemplateForThisOnlyAssignment(job, technicianId) {
   if (technicianId === undefined || (technicianId !== null && typeof technicianId !== 'string')) return false;
   if (!job?.is_recurring || job.recurring_parent_id || job.recurring_technician_override) return false;
@@ -2876,11 +2901,16 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
             await voidOpenInvoicesForCancelledService(id);
             // One-time card-on-file hold: charge in-window late-cancel fee or
-            // release outside it — same as the single-cancel paths. Dark until
-            // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort.
+            // release outside it — same as the single-cancel paths.
+            // payload.waiveCardHoldFee = business-initiated cancel, release
+            // free. Dark until ONE_TIME_CARD_HOLD; no-op when no hold exists.
+            // Best-effort.
             try {
               const CardHolds = require('../services/estimate-card-holds');
-              await CardHolds.handleCardHoldCancellation({ scheduledServiceId: id });
+              await CardHolds.handleCardHoldCancellation({
+                scheduledServiceId: id,
+                waiveFee: payload?.waiveCardHoldFee === true,
+              });
             } catch (e) { logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`); }
             break;
           }
@@ -2912,6 +2942,90 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
+
+// Void a visit's stale invoices for a re-service conversion, one at a time,
+// restoring any consumed deposit credit and auto-applied account credit in the
+// SAME transaction — mirroring InvoiceService.voidInvoice, which never voids
+// away credit (a blind bulk void left estimate_deposits rows 'credited'
+// against a void invoice: the deposit never rolled forward and never
+// refunded). Invoices with money in flight — a paid/processing payments row,
+// a recorded payment, or an attached PaymentIntent that is processing/
+// succeeded/unverifiable — are SKIPPED, not voided; a still-cancelable open
+// payment session is cancelled first so its client secret can't confirm
+// against a void invoice. Restore shortfalls THROW by contract so the whole
+// conversion rolls back rather than stranding money. Returns the ids
+// actually voided.
+const RESERVICE_PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
+
+async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) {
+  const { restoreDepositCreditForVoidedInvoice } = require('../services/estimate-deposits');
+  const { restoreAccountCreditForVoidedInvoice } = require('../services/customer-credit');
+  const voided = [];
+  for (const id of ids) {
+    // Lock the row through triage + void: /api/pay/:token/setup can mint a
+    // fresh PaymentIntent onto this invoice concurrently, and the lock
+    // guarantees the PI we triage is the PI the row carries when the void
+    // commits.
+    const invoice = await trx('invoices').where({ id }).forUpdate().first();
+    if (!invoice || ['paid', 'prepaid', 'void'].includes(invoice.status)) continue;
+    // Money guards (mirror InvoiceService.voidInvoice): recorded or in-flight
+    // money means refund/settle, never void.
+    if (invoice.payment_recorded_at) {
+      logger.warn('[admin-schedule] re-service void skipped — payment recorded on invoice', { invoiceId: id });
+      continue;
+    }
+    const inFlight = await trx('payments')
+      .whereIn('status', ['paid', 'processing'])
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(id)])
+      .first('id')
+      .catch(() => null);
+    if (inFlight) {
+      logger.warn('[admin-schedule] re-service void skipped — payment in flight on invoice', { invoiceId: id, paymentId: inFlight.id });
+      continue;
+    }
+    // PI triage: an open /pay session's client secret can still be confirmed
+    // AFTER a void — the webhook would then see a terminal invoice and orphan
+    // the collected money. Cancel a still-cancelable intent before voiding;
+    // SKIP the invoice entirely when the PI has money in flight or can't be
+    // verified/cancelled (leaving it live beats voiding away a charge).
+    const piId = invoice.stripe_payment_intent_id || null;
+    if (piId) {
+      const StripeService = require('../services/stripe');
+      let pi = null;
+      try {
+        pi = await StripeService.retrievePaymentIntent(piId);
+      } catch (err) {
+        logger.warn('[admin-schedule] re-service void skipped — open payment session unverifiable', { invoiceId: id, piId, error: err.message });
+        continue;
+      }
+      if (!pi) {
+        logger.warn('[admin-schedule] re-service void skipped — open payment session unverifiable', { invoiceId: id, piId });
+        continue;
+      }
+      if (RESERVICE_PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+        logger.warn('[admin-schedule] re-service void skipped — payment in flight on open session', { invoiceId: id, piId, piStatus: pi.status });
+        continue;
+      }
+      if (pi.status !== 'canceled') {
+        try {
+          await StripeService.cancelPaymentIntent(piId, { cancellation_reason: 'abandoned' });
+        } catch (err) {
+          logger.warn('[admin-schedule] re-service void skipped — open payment session not cancelable', { invoiceId: id, piId, error: err.message });
+          continue;
+        }
+      }
+    }
+    const updated = await trx('invoices')
+      .where({ id, status: invoice.status })
+      .whereNotIn('status', ['paid', 'prepaid', 'void'])
+      .update(voidUpdate);
+    if (!updated) continue;
+    await restoreDepositCreditForVoidedInvoice({ invoice, trx });
+    await restoreAccountCreditForVoidedInvoice({ invoice, createdBy: 'system:void' }, trx);
+    voided.push(id);
+  }
+  return voided;
+}
 
 // PUT /api/admin/schedule/:id/update-details — edit service fields
 router.put('/:id/update-details', async (req, res, next) => {
@@ -3429,13 +3543,15 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (hasInvoiceLink) {
           const voidUpdate = { status: 'void' };
           if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidUpdate.updated_at = trx.fn.now();
-          // Non-accrued invoices: bulk void as before.
-          await trx('invoices')
+          // Non-accrued invoices: void one-by-one, restoring consumed
+          // deposit/account credit and skipping in-flight payments.
+          const nonAccruedIds = await trx('invoices')
             .where({ scheduled_service_id: req.params.id })
             .whereNotIn('status', ['paid', 'prepaid', 'void'])
             .whereNull('payer_statement_id')
-            .update(voidUpdate)
-            .catch(() => {});
+            .pluck('id')
+            .catch(() => []);
+          await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });
           // Phase 2 accrued statement children: only void those on an OPEN
           // statement (a frozen statement's line is already billed — leave it),
           // and reroll the parent in the SAME transaction so its total drops the
@@ -3452,8 +3568,8 @@ router.put('/:id/update-details', async (req, res, next) => {
             for (const inv of accrued) {
               const stmt = await trx('payer_statements').where({ id: inv.payer_statement_id }).forUpdate().first('status');
               if (!stmt || stmt.status !== 'open') continue; // frozen → billed line, leave it
-              await trx('invoices').where({ id: inv.id }).whereNotIn('status', ['paid', 'prepaid', 'void']).update(voidUpdate);
-              rerollIds.add(inv.payer_statement_id);
+              const voidedIds = await voidConversionInvoicesRestoringCredits({ trx, ids: [inv.id], voidUpdate });
+              if (voidedIds.length > 0) rerollIds.add(inv.payer_statement_id);
             }
             for (const sid of rerollIds) {
               await require('../services/payer-statements').rollupStatement(sid, trx);
@@ -3513,13 +3629,15 @@ router.put('/:id/update-details', async (req, res, next) => {
                 if (hasInvLink) {
                   const voidSiblings = { status: 'void' };
                   if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidSiblings.updated_at = trx.fn.now();
-                  // Non-accrued siblings: bulk void as before.
-                  await trx('invoices')
+                  // Non-accrued siblings: void one-by-one, restoring consumed
+                  // deposit/account credit and skipping in-flight payments.
+                  const siblingInvoiceIds = await trx('invoices')
                     .whereIn('scheduled_service_id', siblingIds)
                     .whereNotIn('status', ['paid', 'prepaid', 'void'])
                     .whereNull('payer_statement_id')
-                    .update(voidSiblings)
-                    .catch(() => {});
+                    .pluck('id')
+                    .catch(() => []);
+                  await voidConversionInvoicesRestoringCredits({ trx, ids: siblingInvoiceIds, voidUpdate: voidSiblings });
                   // Phase 2 accrued siblings: void only those on an OPEN statement
                   // (frozen = billed line, left) and reroll the parent in the same
                   // txn. GATE off ⇒ no accrued children, so a no-op then.
@@ -3535,8 +3653,8 @@ router.put('/:id/update-details', async (req, res, next) => {
                     for (const inv of accruedSibs) {
                       const stmt = await trx('payer_statements').where({ id: inv.payer_statement_id }).forUpdate().first('status');
                       if (!stmt || stmt.status !== 'open') continue;
-                      await trx('invoices').where({ id: inv.id }).whereNotIn('status', ['paid', 'prepaid', 'void']).update(voidSiblings);
-                      rerollSibs.add(inv.payer_statement_id);
+                      const voidedSibIds = await voidConversionInvoicesRestoringCredits({ trx, ids: [inv.id], voidUpdate: voidSiblings });
+                      if (voidedSibIds.length > 0) rerollSibs.add(inv.payer_statement_id);
                     }
                     for (const sid of rerollSibs) {
                       await require('../services/payer-statements').rollupStatement(sid, trx);
@@ -4796,11 +4914,17 @@ router.put('/:id/status', async (req, res, next) => {
       // One-time card-on-file hold: charge the in-window late-cancel fee or
       // release outside it. This route (the V2 dispatch delete/cancel action)
       // is a separate cancel path from PUT /admin/dispatch/:id/status, so the
-      // hook must be mirrored here. Dark until ONE_TIME_CARD_HOLD; no-op when no
-      // hold exists. Best-effort — never block the committed cancel.
+      // hook must be mirrored here. waiveCardHoldFee (body) = business-
+      // initiated cancel, release free — admin-only (route is technician-
+      // reachable and a fee waiver is a billing decision). Dark until
+      // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort — never
+      // block the committed cancel.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+        await CardHolds.handleCardHoldCancellation({
+          scheduledServiceId: svc.id,
+          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+        });
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 
@@ -4975,21 +5099,14 @@ router.put('/:id/status', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         const parent = await db('scheduled_services').where({ id: parentId }).first();
         if (parent && parent.is_recurring && parent.recurring_pattern) {
-          // pendingCount + latest must reflect the BASE recurring series
-          // only — boosters share recurring_parent_id but live on the
-          // calendar with is_recurring=false. Without this filter,
-          // future boosters inflate the count (blocking auto-extend) and
-          // a booster date can become "latest" so the next-quarterly math
-          // keys off the wrong row.
-          const pendingCount = parseInt((await db('scheduled_services')
-            .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-            .where('status', 'pending')
-            .where('is_recurring', true)
-            .count('* as c').first())?.c || 0);
+          // upcomingCount + latest must reflect the BASE recurring series
+          // only — see countUpcomingSeriesVisits for the booster and
+          // pending-vs-confirmed rationale.
+          const upcomingCount = await countUpcomingSeriesVisits(db, parentId);
 
           const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
 
-          if (isOngoing && pendingCount < 2) {
+          if (isOngoing && upcomingCount < 2) {
             // Find latest visit (pending or completed) to calculate next date
             const latest = await db('scheduled_services')
               .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
@@ -5146,7 +5263,7 @@ router.put('/:id/status', async (req, res, next) => {
                 }
               }
             }
-          } else if (!isOngoing && pendingCount === 0) {
+          } else if (!isOngoing && upcomingCount === 0) {
             // Fixed plan just finished — queue an alert if table exists and not already open
             try {
               const existing = await db('recurring_plan_alerts')
@@ -6204,21 +6321,19 @@ router.get('/recurring-alerts', async (req, res, next) => {
           );
 
         for (const plan of ending) {
+          // Confirmed visits are upcoming too — counting only pending made a
+          // customer-confirmed plan read as ending and raised false alerts.
           const pending = await db('scheduled_services')
             .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
             .where('is_recurring', true)
-            .where('status', 'pending')
+            .whereIn('status', ['pending', 'confirmed'])
             .where('scheduled_date', '>=', today)
             .orderBy('scheduled_date', 'desc').limit(1);
           const latestPending = pending[0];
           if (!latestPending) continue;
           if (latestPending.scheduled_date && dateOnly(latestPending.scheduled_date) > soonStr) continue;
 
-          const pendingCount = parseInt((await db('scheduled_services')
-            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
-            .where('is_recurring', true)
-            .where('status', 'pending')
-            .count('* as c').first())?.c || 0);
+          const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
           if (pendingCount > 1) continue;
 
           // Skip if already queued
@@ -6466,11 +6581,10 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
           .where('is_recurring', true)
           .update({ recurring_ongoing: true });
       }
-      // Also ensure at least 3 pending visits scheduled ahead
-      const pendingCount = parseInt((await db('scheduled_services')
-        .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-        .where('is_recurring', true)
-        .where('status', 'pending').count('* as c').first())?.c || 0);
+      // Also ensure at least 3 upcoming visits scheduled ahead. Confirmed
+      // visits count — otherwise a series whose future visits the customer
+      // confirmed gets topped up with extra (billable) duplicates.
+      const pendingCount = await countUpcomingSeriesVisits(db, parentId);
       const need = Math.max(0, 3 - pendingCount);
       const seen = new Set(seriesDateSeed);
       const maxAttempts = need * 4 + 30;
@@ -6584,6 +6698,8 @@ router._test = {
   reportCopyRejection,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
+  voidConversionInvoicesRestoringCredits,
+  countUpcomingSeriesVisits,
 };
 
 module.exports = router;

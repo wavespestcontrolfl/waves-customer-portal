@@ -11,7 +11,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/sendgrid-mail', () => ({ serviceGroupId: () => 0, newsletterGroupId: () => 0 }));
 
 const { renderTemplate } = require('../services/email-template-library');
-const { TEMPLATE } = require('../models/migrations/20260626000004_seed_app_intro_email_template');
+const { TEMPLATE } = require('../models/migrations/20260707000020_app_intro_email_lawn_waves_ai');
 
 const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
@@ -37,8 +37,10 @@ describe('app_intro email content contract', () => {
 
   test('includes the app screenshots and personalizes the name', () => {
     const { html } = renderAppIntro({ first_name: 'Dana' });
-    expect(html).toContain('app-tracking.png');
-    expect(html).toContain('app-visits.png');
+    expect(html).toContain('app-home.png');
+    expect(html).toContain('app-report.png');
+    expect(html).toContain('app-reschedule.png');
+    expect(html).toContain('app-waves-ai.png');
     expect(html).toContain('Dana');
   });
 

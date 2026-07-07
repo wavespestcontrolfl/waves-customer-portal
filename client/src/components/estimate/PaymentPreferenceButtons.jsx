@@ -1,5 +1,7 @@
 import React from 'react';
 import { estimateCard } from './cardStyles';
+import { fmtMoney } from '../../lib/money';
+import { W } from './tokens';
 
 /**
  * Payment preference picker. Rendered after a slot is selected. Clicking
@@ -14,21 +16,9 @@ import { estimateCard } from './cardStyles';
  * Selection encodes as 'pay_at_visit' or 'prepay_annual'. After confirmation
  * the server creates/sends the matching invoice and returns a pay link.
  */
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
-  yellow: '#FFD700', yellowHover: '#FFF176',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', border: '#CBD5E1',
-  green: '#16A34A', greenDark: '#15803D',
-};
 
 const ACTION_BG = W.blueDeeper;
 
-function fmtMoney(n) {
-  if (n == null) return '—';
-  const v = Math.round(Number(n) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
-}
 
 function billingIntervalMonths(frequency = {}) {
   const key = frequency.billingFrequencyKey || frequency.key;
@@ -169,7 +159,7 @@ export default function PaymentPreferenceButtons({
     return (
       <div style={estimateCard()}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
-          textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
+          textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
           {oneTimeBooking ? 'Book your visit' : 'Accept your estimate'}
         </div>
 
@@ -206,7 +196,7 @@ export default function PaymentPreferenceButtons({
     return (
       <div style={estimateCard()}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
-          textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
+          textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
           {holdRequired ? 'Hold your appointment' : 'Book your visit'}
         </div>
 
@@ -231,11 +221,11 @@ export default function PaymentPreferenceButtons({
   return (
     <div style={estimateCard()}>
       <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
+        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
         {isOneTime ? 'Book your visit' : 'Reserve your spot'}
       </div>
 
-      <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+      <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
         <div style={optionWrap}>
           <button
             type="button"
@@ -246,10 +236,10 @@ export default function PaymentPreferenceButtons({
           <div style={optionNote}>{payPerApplicationOptionNote}</div>
           {invoiceRows.length > 0 ? (
             <div style={{
-              marginTop: 14,
+              marginTop: 16,
               border: `1px solid ${W.border}`,
               borderRadius: 12,
-              padding: 14,
+              padding: 16,
               background: '#F8FAFC',
               textAlign: 'left',
             }}>
@@ -268,13 +258,13 @@ export default function PaymentPreferenceButtons({
                   }}
                 >
                   <span>{row.label}</span>
-                  <strong style={{ whiteSpace: 'nowrap' }}>{fmtMoney(row.amount)}</strong>
+                  <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(row.amount)}</strong>
                 </div>
               ))}
               {invoiceTotal > 0 ? (
                 <div style={{
                   borderTop: `1px solid ${W.border}`,
-                  paddingTop: 10,
+                  paddingTop: 12,
                   marginTop: 2,
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -285,10 +275,10 @@ export default function PaymentPreferenceButtons({
                   color: W.blueDeeper,
                 }}>
                   <span>Invoice total</span>
-                  <strong>{fmtMoney(invoiceTotal)}</strong>
+                  <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(invoiceTotal)}</strong>
                 </div>
               ) : null}
-              <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 10 }}>
+              <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 12 }}>
                 No payment is charged on this page. After confirmation, we open the invoice
                 {invoiceTotal > 0 ? ` for ${fmtMoney(invoiceTotal)}` : ''} so you can pay in-flow.
               </div>

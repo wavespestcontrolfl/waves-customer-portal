@@ -25,6 +25,7 @@ const MODELS = require('../config/models');
 const db = require('../models/db');
 const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
+const { createDeepMessage } = require('./llm/deep');
 
 const DRAFTER = 'house_voice';
 // v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
@@ -404,9 +405,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
 
     let verdict;
     try {
-      const vResp = await client.messages.create({
+      const vResp = await createDeepMessage(client, {
         model: verifier.VERIFIER_MODEL,
-        max_tokens: 400,
+        max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
         system: verifier.buildVerifierSystemPrompt(),
         messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
       });

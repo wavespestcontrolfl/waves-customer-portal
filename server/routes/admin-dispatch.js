@@ -1532,6 +1532,18 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 //     is a separate customer-visible state machine; en_route still
 //     fires the tracking-link SMS via that helper).
 //   - activity_log INSERT (admin-side audit, distinct table).
+
+// Read-only card-hold cancel preview: whether this visit carries a held card
+// and whether cancelling RIGHT NOW would charge the late-cancel fee. The
+// cancel UIs call this before the status flip so they only ask the
+// business-initiated-waive question when a fee would actually fire.
+router.get('/:serviceId/card-hold', async (req, res, next) => {
+  try {
+    const CardHolds = require('../services/estimate-card-holds');
+    res.json(await CardHolds.cardHoldCancelPreview(req.params.serviceId));
+  } catch (err) { next(err); }
+});
+
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
@@ -1857,11 +1869,18 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       // One-time card-on-file hold: a cancellation inside the window charges the
       // flat late-cancel fee against the saved card; outside it the hold is
-      // released free. Dark until ONE_TIME_CARD_HOLD; no-op when no hold exists.
-      // Best-effort — never block the committed status change.
+      // released free. waiveCardHoldFee (body) is the business-initiated escape
+      // hatch — WE cancelled, so the hold releases with no fee. Admin-only:
+      // this route is technician-reachable (requireTechOrAdmin) and a fee
+      // waiver is a billing decision, so non-admin JWTs can't release an
+      // in-window hold free. Dark until ONE_TIME_CARD_HOLD; no-op when no
+      // hold exists. Best-effort — never block the committed status change.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+        await CardHolds.handleCardHoldCancellation({
+          scheduledServiceId: svc.id,
+          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+        });
       } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
 
       try {

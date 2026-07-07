@@ -3,7 +3,7 @@
  * real React components for the behaviors the approved blueprint prototyped
  * with DOM injection (injected nodes kept getting teleported by re-renders).
  * Every component here no-ops or is simply not rendered unless the page is
- * under the ?glass=1 dark launch; chrome lives in glass-components.css,
+ * under the glass theme (now unconditional); chrome lives in glass-components.css,
  * scoped to html[data-glass-theme].
  */
 import { useEffect, useState } from 'react';
@@ -24,12 +24,20 @@ export function fiveStarReviews(reviews) {
 }
 
 /**
- * Frequency selector as glass pills (gold when active, "Recommended" chip
- * on quarterly) — same {frequencies, selected, onChange, disabled} contract
- * as FrequencySlider, driving the existing selection state.
+ * Frequency selector as glass pills (gold when active, "Recommended" chip on
+ * the server-recommended cadence) — same {frequencies, selected, onChange,
+ * disabled} contract as FrequencySlider, driving the existing selection state.
  */
 export function GlassFrequencyPills({ frequencies, selected, onChange, disabled = false }) {
   if (!frequencies || frequencies.length === 0) return null;
+  // The pricing payload marks the actual recommendation (lawn/tree tiers can
+  // recommend non-quarterly programs) — keying the chip on `quarterly` would
+  // mislabel those (codex P2, PR #2439). Quarterly is only the fallback when
+  // no frequency in the payload carries the flag (the pest default).
+  const anyFlagged = frequencies.some((frequency) => frequency?.recommended === true);
+  const isRecommended = (frequency) => (anyFlagged
+    ? frequency?.recommended === true
+    : /^quarterly$/i.test(frequency.key));
   return (
     <div role="group" aria-label="Service frequency" style={{ padding: '0 0 6px', marginBottom: 8 }}>
       <div className="gc-freq">
@@ -47,7 +55,7 @@ export function GlassFrequencyPills({ frequencies, selected, onChange, disabled 
               onClick={() => { if (!disabled) onChange(frequency.key); }}
             >
               {frequency.label}
-              {/^quarterly$/i.test(frequency.key) ? (
+              {isRecommended(frequency) ? (
                 <span className="gc-freq-rec" aria-label="Recommended">Recommended</span>
               ) : null}
             </button>

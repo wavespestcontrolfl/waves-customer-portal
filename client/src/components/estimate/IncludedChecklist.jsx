@@ -4,12 +4,8 @@
  * no client-side mutation of the underlying contract.
  */
 import { estimateCard } from './cardStyles';
+import { W } from './tokens';
 
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', green: '#16A34A',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', border: '#CBD5E1', borderLight: '#F1F5F9',
-};
 
 export default function IncludedChecklist({ included }) {
   const items = Array.isArray(included) ? included : [];
@@ -17,7 +13,7 @@ export default function IncludedChecklist({ included }) {
   return (
     <div style={estimateCard()}>
       <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
+        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
         What's included
       </div>
 
@@ -27,8 +23,8 @@ export default function IncludedChecklist({ included }) {
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {items.map((item) => (
             <li key={item.key || item.label} style={{
-              display: 'flex', alignItems: 'flex-start', gap: 10,
-              padding: '10px 0', borderBottom: `1px solid ${W.borderLight}`,
+              display: 'flex', alignItems: 'flex-start', gap: 12,
+              padding: '12px 0', borderBottom: `1px solid ${W.borderLight}`,
             }}>
               <span style={{
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
