@@ -1441,6 +1441,34 @@ const StripeService = {
       throw new Error(`Refund amount must be between $0.01 and the remaining $${(remainingCents / 100).toFixed(2)}`);
     }
 
+    // Persist the attempt key BEFORE calling Stripe. The retry contract
+    // ("re-running the same refund is safe") must hold even when the
+    // charge.refunded webhook repairs refund_amount before the operator
+    // retries — a key derived from live local state would shift in that
+    // window and mint a brand-new refund. The pending marker survives any
+    // unresolved outcome (network error, DB write failure) and is cleared
+    // on completion or on a definitive Stripe rejection, so a retry always
+    // replays the ORIGINAL attempt's key.
+    let meta = {};
+    try {
+      meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+    } catch { meta = {}; }
+    const requestTag = requestCents === null ? 'rest' : String(requestCents);
+    let idempotencyKey;
+    if (meta.pending_refund_key && meta.pending_refund_request === requestTag) {
+      idempotencyKey = meta.pending_refund_key;
+    } else if (meta.pending_refund_key) {
+      throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
+    } else {
+      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
+      await db('payments').where({ id: paymentId }).update({
+        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag }),
+      });
+    }
+    const clearedMeta = { ...meta };
+    delete clearedMeta.pending_refund_key;
+    delete clearedMeta.pending_refund_request;
+
     let refund;
     try {
       const refundParams = {
@@ -1450,26 +1478,28 @@ const StripeService = {
       if (requestCents !== null) {
         refundParams.amount = requestCents;
       }
-
-      // Idempotency-keyed on (payment, requested amount, prior refunded):
-      // a retry of the SAME attempt (e.g. after a network error, or after
-      // the DB write below failed) replays the identical key and Stripe
-      // returns the original refund instead of issuing a second one. A
-      // genuinely new partial after the first was recorded shifts
-      // priorCents, so it mints a fresh key.
-      refund = await stripe.refunds.create(refundParams, {
-        idempotencyKey: `refund_pay_${paymentId}_${requestCents === null ? 'rest' : requestCents}_${priorCents}`,
-      });
+      refund = await stripe.refunds.create(refundParams, { idempotencyKey });
     } catch (err) {
+      // Definitive rejections clear the pending attempt so a corrected
+      // retry isn't wedged replaying Stripe's stored error. Ambiguous
+      // outcomes (connection/API errors) KEEP it — replaying the same key
+      // is safe whether or not the original request landed.
+      const definitiveRejection = ['StripeInvalidRequestError', 'StripeCardError'].includes(err?.type);
+      if (definitiveRejection) {
+        await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(clearedMeta) }).catch(() => {});
+      }
       logger.error(`[stripe] Refund failed for payment ${paymentId}: ${err.message}`);
       throw new Error('Refund processing failed');
     }
 
-    // From here the money HAS moved — record ground truth from Stripe's
-    // response (refund.amount covers the omitted-amount full-refund case,
-    // including any dashboard-side partials this table never saw).
+    // From here the money HAS moved. An omitted-amount refund refunds the
+    // ENTIRE remaining balance at Stripe — including out-of-band partials
+    // this table never recorded — so the charge is fully refunded by
+    // definition. Explicit partials accumulate against the local ledger
+    // (the charge.refunded webhook writes Stripe's cumulative
+    // amount_refunded, converging any residual drift).
     const refundAmountDollars = refund.amount / 100;
-    const totalRefundedCents = priorCents + refund.amount;
+    const totalRefundedCents = requestCents === null ? paidCents : priorCents + refund.amount;
     const isFullRefund = totalRefundedCents >= paidCents;
 
     try {
@@ -1480,12 +1510,14 @@ const StripeService = {
           refund_amount: totalRefundedCents / 100,
           refund_status: refund.status,
           stripe_refund_id: refund.id,
+          metadata: JSON.stringify(clearedMeta),
         });
     } catch (dbErr) {
-      // Refund issued, ledger write failed. Do NOT report this like a
-      // failed refund — with the idempotency key above, re-running the
-      // same refund is safe: Stripe replays the original refund and this
-      // write gets another chance.
+      // Refund issued, ledger write failed. The pending attempt marker is
+      // still set, so a retry replays the SAME idempotency key regardless
+      // of what the webhook writes to refund_amount in the meantime —
+      // Stripe returns the original refund and this write gets another
+      // chance.
       logger.error(`[stripe] CRITICAL: refund ${refund.id} ($${refundAmountDollars}) issued for payment ${paymentId} but the payments-row update failed: ${dbErr.message}`);
       throw new Error(`Refund ${refund.id} WAS issued at Stripe but recording it failed. Re-running the same refund is safe — it will not refund twice, only sync the records.`);
     }
