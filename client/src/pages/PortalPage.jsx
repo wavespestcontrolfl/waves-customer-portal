@@ -1110,6 +1110,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
@@ -1526,14 +1527,23 @@ function DashboardTab({ customer, onSwitchTab }) {
           {nextService ? (
             <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
-                <button type="button" onClick={() => {
-                  api.confirmAppointment(nextService.id).then(() => {
+                <button type="button" disabled={confirmingVisit} onClick={async () => {
+                  if (confirmingVisit) return;
+                  setConfirmingVisit(true);
+                  try {
+                    await api.confirmAppointment(nextService.id);
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
-                  });
+                  } catch (err) {
+                    console.error(err);
+                    alert('Could not confirm this visit. Please try again.');
+                  } finally {
+                    setConfirmingVisit(false);
+                  }
                 }} data-glass-accent="" style={{
                   ...dashboardPrimaryButton,
+                  ...(confirmingVisit ? { opacity: 0.6, cursor: 'default' } : {}),
                 }}>
-                  Confirm Visit
+                  {confirmingVisit ? 'Confirming…' : 'Confirm Visit'}
                 </button>
               ) : (
                 <span style={{
@@ -3321,6 +3331,7 @@ function BillingTab({ customer }) {
   const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
+  const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
 
   // Stripe card management state
@@ -3746,13 +3757,22 @@ function BillingTab({ customer }) {
 
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
+    setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
     })
-      .then(() => setBillingPrefsSaving(false))
-      .catch(() => setBillingPrefsSaving(false));
+      .then(() => {
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('saved');
+        setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
+      })
+      .catch(() => {
+        // A silent failure here left the customer believing prefs were saved.
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('error');
+      });
   };
 
   return (
@@ -4266,13 +4286,18 @@ function BillingTab({ customer }) {
           </button>
         </div>
 
+        {billingPrefsStatus === 'error' && (
+          <div style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
+            Couldn&rsquo;t save your billing preferences. Please try again.
+          </div>
+        )}
         <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} data-glass-accent="" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
           cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
-          {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
+          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save Billing Preferences'}
         </button>
       </div>
     </div>
