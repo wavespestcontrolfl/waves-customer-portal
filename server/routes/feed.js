@@ -293,14 +293,14 @@ router.get('/experts', async (req, res, next) => {
 // items — it never breaks the endpoint. Feed URLs follow each publisher's
 // platform conventions (FeedBlitz for Gannett's Herald-Tribune, the rssfeed
 // widget for McClatchy's Bradenton Herald, BLOX search RSS for the
-// Gondolier, the rss3 template for the Times); if one goes quiet
+// Gondolier, Arc XP outbound feeds for the Times); if one goes quiet
 // permanently, check the warn logs and swap the URL here.
 const LOCAL_NEWS_SOURCES = [
   { key: 'mysuncoast', name: 'MySuncoast', url: 'https://www.mysuncoast.com/news/local/rss/' },
   { key: 'heraldtribune', name: 'Herald-Tribune', url: 'https://rssfeeds.heraldtribune.com/sarasota/topstories' },
   { key: 'bradenton_herald', name: 'Bradenton Herald', url: 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true' },
   { key: 'venice_gondolier', name: 'Venice Gondolier', url: 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc' },
-  { key: 'tampabay_times', name: 'Tampa Bay Times', url: 'https://www.tampabay.com/news/?template=rss3' },
+  { key: 'tampabay_times', name: 'Tampa Bay Times', url: 'https://www.tampabay.com/arc/outboundfeeds/rss/?outputType=xml' },
 ];
 
 router.get('/local', async (req, res, next) => {

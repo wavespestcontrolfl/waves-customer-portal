@@ -139,7 +139,7 @@ const SUNCOAST_XML = wpFeed(`
 const HERALD_FEED = 'https://rssfeeds.heraldtribune.com/sarasota/topstories';
 const BRADENTON_FEED = 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true';
 const GONDOLIER_FEED = 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc';
-const TAMPABAY_FEED = 'https://www.tampabay.com/news/?template=rss3';
+const TAMPABAY_FEED = 'https://www.tampabay.com/arc/outboundfeeds/rss/?outputType=xml';
 const EMPTY_XML = wpFeed('');
 
 const EXTERNAL_ROUTES = {

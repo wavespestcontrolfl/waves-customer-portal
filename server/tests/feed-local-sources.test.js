@@ -58,7 +58,7 @@ const SUNCOAST_FEED = 'https://www.mysuncoast.com/news/local/rss/';
 const HERALD_FEED = 'https://rssfeeds.heraldtribune.com/sarasota/topstories';
 const BRADENTON_FEED = 'https://www.bradenton.com/news/local/?widgetName=rssfeed&widgetContentId=712015&getXmlFeed=true';
 const GONDOLIER_FEED = 'https://www.venicegondolier.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc';
-const TAMPABAY_FEED = 'https://www.tampabay.com/news/?template=rss3';
+const TAMPABAY_FEED = 'https://www.tampabay.com/arc/outboundfeeds/rss/?outputType=xml';
 
 const HERALD_PAGE = 'https://www.heraldtribune.com/story/news/local/2026/07/06/hurricane-lawn-prep/';
 const HERALD_IMG = 'https://www.gannett-cdn.com/presto/2026/07/06/hurricane-prep.jpg';
