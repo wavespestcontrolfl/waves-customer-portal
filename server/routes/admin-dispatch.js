@@ -1532,6 +1532,18 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 //     is a separate customer-visible state machine; en_route still
 //     fires the tracking-link SMS via that helper).
 //   - activity_log INSERT (admin-side audit, distinct table).
+
+// Read-only card-hold cancel preview: whether this visit carries a held card
+// and whether cancelling RIGHT NOW would charge the late-cancel fee. The
+// cancel UIs call this before the status flip so they only ask the
+// business-initiated-waive question when a fee would actually fire.
+router.get('/:serviceId/card-hold', async (req, res, next) => {
+  try {
+    const CardHolds = require('../services/estimate-card-holds');
+    res.json(await CardHolds.cardHoldCancelPreview(req.params.serviceId));
+  } catch (err) { next(err); }
+});
+
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;

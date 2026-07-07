@@ -32,6 +32,11 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../utils/datetime-et', () => ({ etDateString: jest.fn(() => '2026-06-25'), addETDays: jest.fn() }));
+// cardHoldCancelPreview resolves the appointment start via the shared helper
+// when not supplied; the cancel-path tests pass serviceStart explicitly and
+// never hit this mock.
+const mockApptTime = jest.fn();
+jest.mock('../services/appointment-reminders', () => ({ scheduledServiceApptTime: (...a) => mockApptTime(...a) }));
 
 const mockRetrievePaymentIntent = jest.fn(async () => ({ latest_charge: { refunded: false, amount_refunded: 0 } }));
 const mockRetrieveSetupIntent = jest.fn();
@@ -56,6 +61,7 @@ const {
   verifyCardHoldIntent,
   isWithinCancelWindow,
   handleCardHoldCancellation,
+  cardHoldCancelPreview,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -184,6 +190,31 @@ describe('isWithinCancelWindow', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T10:00:00Z'), now })).toBe(false); // exactly grace boundary (start + 2h == now)
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T08:00:00Z'), now })).toBe(false); // same-day morning visit never delivered
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-20T12:00:00Z'), now })).toBe(false); // days-stale (churn-sweep rescheduled phantom)
+  });
+});
+
+describe('cardHoldCancelPreview — cancel-UI preview', () => {
+  const now = new Date('2026-07-06T12:00:00Z');
+  const holdRow = { id: 'h1', cancel_window_hours: 24, no_show_fee_amount: 49 };
+  it('no hold → nothing to ask', async () => {
+    stubDb(null);
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: false, feeApplies: false });
+  });
+  it('held + in-window start → fee applies with the hold\'s own fee amount', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49 });
+  });
+  it('held but start past the arrival-window grace → no fee, no prompt', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-01T12:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+  });
+  it('feature flag off → fee never applies (chargeNoShowFee would no-op)', async () => {
+    process.env.ONE_TIME_CARD_HOLD = 'false';
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
   });
 });
 
