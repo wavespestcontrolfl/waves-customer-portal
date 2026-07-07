@@ -249,13 +249,13 @@ const PURPOSE_POLICY = {
     requireConsent: 'transactional',
     prefsColumn: 'billing_reminder',
     channelColumn: 'billing_channel',
-    // 'opt_in' like payment_receipt: the only live purpose-'billing' SMS
-    // sender is the operator Comms billing reminder (comms-tools), which has
-    // no email branch — an unconditional gate would turn an email-preferring
-    // customer's only billing reminder into silence. (The notification
-    // dispatcher's billing lane pre-filters on billing_channel itself before
-    // this gate ever runs.) A billing sender with a real email sidecar opts
-    // in via input.hasEmailLeg.
+    // 'opt_in' like payment_receipt: an unconditional gate would turn an
+    // email-preferring customer's billing reminder into silence for any
+    // SMS-only automated sender. Callers with an email fallback opt in via
+    // input.hasEmailLeg — the operator Comms billing reminder does (its
+    // block is surfaced to the operator, who can email instead); the
+    // notification dispatcher's billing lane pre-filters on billing_channel
+    // itself before this gate ever runs.
     channelGate: 'opt_in',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],

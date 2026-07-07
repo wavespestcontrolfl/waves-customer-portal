@@ -429,8 +429,15 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
   // transactional_required stream bypasses suppression-group filtering, so
   // it must be honored here (same check the no-show fee receipt does).
   const emailOptOut = prefs?.email_enabled === false;
+  // The receipt-texts opt-outs (the portal "Payment confirmation texts"
+  // toggle, and the STOP/sms_enabled master switch) block the SMS leg at the
+  // consent gate — for a Text-channel customer the email is then the only
+  // receipt left, so it must fall back like the no-phone case or the paid
+  // deposit produces no record at all. payment_receipt=false stays the full
+  // every-channel kill switch.
+  const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
   const wantEmail = estimate.customer_id
-    ? (!receiptOptOut && !emailOptOut && (channel === 'email' || channel === 'both' || (wantSms && !phone)))
+    ? (!receiptOptOut && !emailOptOut && (channel === 'email' || channel === 'both' || (wantSms && (!phone || smsOptedOut))))
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {

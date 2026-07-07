@@ -106,12 +106,13 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.ok).toBe(true);
   });
 
-  test("the 'billing' gate is OPT-IN too — the SMS-only Comms billing reminder is never suppressed", async () => {
-    // The only live purpose-'billing' SMS sender is the operator Comms
-    // billing reminder (comms-tools), which has no email branch — an
-    // unconditional gate would turn an email-preferring customer's only
-    // billing reminder into silence (Codex P2 on 15fc2cf0). The dispatcher's
-    // billing lane pre-filters on billing_channel itself before this gate.
+  test("the 'billing' gate is OPT-IN too — callers without an email fallback are never suppressed", async () => {
+    // An unconditional gate would turn an email-preferring customer's
+    // billing reminder into silence for any SMS-only sender (Codex P2 on
+    // 15fc2cf0). The operator Comms billing reminder DOES opt in
+    // (comms-tools passes hasEmailLeg) because its block is surfaced to the
+    // operator, who is the email fallback (Codex P2 on 4263af95); the
+    // dispatcher's billing lane pre-filters on billing_channel itself.
     const policy = resolvePolicy('customer', 'billing');
     expect(policy.channelGate).toBe('opt_in');
     const res = await checkConsentForPurpose(

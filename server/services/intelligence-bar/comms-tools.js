@@ -553,6 +553,15 @@ async function sendSms(input) {
     purpose: mapCommsMessageTypeToPurpose(message_type),
     customerId: custId || null,
     entryPoint: 'intelligence_bar_comms_send_sms',
+    // billing_reminder honors the portal's Billing Reminder Delivery
+    // dropdown: declaring the email leg makes the consent gate return
+    // CHANNEL_EMAIL_ONLY for an email-preferring customer instead of
+    // texting against their choice. The block is surfaced to the operator
+    // (error/reason below), who IS the email fallback on this manual path —
+    // unlike the automated flows, a block here is a prompt, not silence.
+    // Customers with no billing/account email still fall back to SMS at
+    // the gate itself.
+    hasEmailLeg: message_type === 'billing_reminder' ? true : undefined,
     // metadata.original_message_type preserves the legacy messageType for
     // the admin-sms-templates kill switch + twilio.js manual-vs-MMS
     // logic. metadata.adminUserId populates sms_log.admin_user_id so

@@ -898,6 +898,35 @@ describe('webhook + invoice credit', () => {
     renderSmsTemplate.mockResolvedValue(null);
   });
 
+  it('receipt-texts opt-out on the default sms channel falls back to the email receipt', async () => {
+    // payment_confirmation_sms=false blocks the SMS leg at the consent gate
+    // (PURPOSE_OPTED_OUT since the policy added it as a prefsColumn) — a
+    // default-channel customer would otherwise get NO record of the paid
+    // deposit (Codex P2 on 4263af95). Same fallback as the no-phone case;
+    // payment_receipt=false stays the full kill switch (covered above).
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'PURPOSE_OPTED_OUT' });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      prefsRow: { payment_confirmation_sms: false },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'deposit.receipt' }));
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
   it('leads: SMS when the estimate has a phone; email gap-fill when it only has an email', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

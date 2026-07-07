@@ -2631,9 +2631,25 @@ const InvoiceService = {
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
-        q.where("invoices.status", "paid").whereNull(
-          "invoices.receipt_sent_at",
-        );
+        q.where("invoices.status", "paid")
+          .whereNull("invoices.receipt_sent_at")
+          // payment_receipt=false customers opted out of receipts on every
+          // channel — their paid invoices are handled, not "needing" a
+          // receipt, and listing them here nudges the operator to resend
+          // against the customer's own preference (the manual resend path is
+          // deliberately not gated). Payer-billed invoices stay listed: the
+          // receipt goes to the payer AP inbox, which homeowner prefs don't
+          // govern.
+          .andWhere(function () {
+            this.whereNotNull("invoices.payer_id").orWhereNotExists(
+              db("notification_prefs")
+                .select(db.raw("1"))
+                .whereRaw(
+                  "notification_prefs.customer_id = invoices.customer_id",
+                )
+                .where("notification_prefs.payment_receipt", false),
+            );
+          });
       } else if (directStatuses.has(normalizedStatus)) {
         q.where("invoices.status", normalizedStatus);
       }
