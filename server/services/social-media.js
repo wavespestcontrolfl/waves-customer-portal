@@ -54,10 +54,17 @@ const SOCIAL_FLAGS = {
   get instagramEnabled() { return socialFlag('SOCIAL_INSTAGRAM_ENABLED'); },
   get gbpEnabled() { return socialFlag('SOCIAL_GBP_ENABLED'); },
   get linkedinEnabled() { return socialFlag('SOCIAL_LINKEDIN_ENABLED'); },
+  get twitterEnabled() { return socialFlag('SOCIAL_TWITTER_ENABLED'); },
   get dryRun() { return socialFlag('SOCIAL_DRY_RUN'); },
 };
 
-const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
+const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp', 'twitter'];
+// Omitted-channels default. Twitter is deliberately NOT in it: the admin
+// Publish All flow posts with channels omitted and only previews/edits the
+// four legacy platforms, so a default-set tweet would publish server-side
+// copy the admin never saw. The autonomous blog-share lanes (shareUrlOnce,
+// RSS, scheduled blog shares) opt into Twitter EXPLICITLY via channels.
+const DEFAULT_PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 
 function normalizePublishChannels(channels) {
   // ONLY an omitted value (undefined/null) defaults to all platforms. Any
@@ -65,7 +72,7 @@ function normalizePublishChannels(channels) {
   // "facebook" instead of ["facebook"]) and an all-invalid/empty list both
   // resolve to NO platforms — never "all" — so a malformed filter can't blast
   // everywhere.
-  if (channels == null) return new Set(PUBLISH_PLATFORMS);
+  if (channels == null) return new Set(DEFAULT_PUBLISH_PLATFORMS);
   if (!Array.isArray(channels)) return new Set();
   const selected = channels
     .map((channel) => String(channel || '').trim().toLowerCase())
@@ -103,8 +110,8 @@ async function isPausedByAdmin() {
 // *attempts* all failed.
 const ALERT_THRESHOLD = 3;
 const ALERT_WINDOW = 20; // recent posts to scan — enough to find THRESHOLD attempts per platform
-const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp', 'linkedin'];
-const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business', linkedin: 'LinkedIn' };
+const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp', 'linkedin', 'twitter'];
+const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business', linkedin: 'LinkedIn', twitter: 'X (Twitter)' };
 const SOCIAL_ALERT_KEY = 'social_consecutive_failures_alert';
 
 function parsePlatformResults(value) {
@@ -300,7 +307,7 @@ try {
   if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
 
-const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200 };
+const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
 function validateContent(text, platform) {
   const issues = [];
@@ -549,6 +556,23 @@ Article summary: ${safeDesc}`,
 
 Write a professional LinkedIn post based on this blog article.
 Professional but approachable tone. 100-200 characters. Do NOT include the URL.
+
+Article title: ${safeTitle}
+Article summary: ${safeDesc}`,
+
+    twitter: `${POST_PREAMBLE}
+
+Write a post for X (Twitter) based on this blog article.
+
+Format:
+- One sharp hook or surprising fact, then one concrete takeaway the reader can use
+- Plain, local-expert voice — not an ad
+- 120-230 characters total (the article link is appended automatically — do NOT include any URL)
+- No hashtag stuffing: at most 1 natural hashtag, or none
+- 0-1 emoji, only where natural
+
+GOOD example:
+"That brown patch in your St. Augustine probably isn't drought — chinch bugs feed at the blade base and get a 2-week head start before you notice. Check the sunny strip by the driveway first."
 
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
@@ -1054,6 +1078,11 @@ async function postToLinkedIn(text, link, title, description, imageUrl) { // esl
   return linkedin.createPost({ text, link, title, description });
 }
 
+async function postToTwitter(text, link) {
+  const twitter = require('./twitter');
+  return twitter.createPost({ text, link });
+}
+
 async function postToGBP(locationId, summary, link, imageUrl) {
   const loc = WAVES_LOCATIONS.find(l => l.id === locationId);
   if (!loc?.googleLocationResourceName) throw new Error(`No GBP resource for ${locationId}`);
@@ -1251,6 +1280,9 @@ const SocialMediaService = {
             link: normalizedUrl,
             guid: normalizedGuid,
             source: 'rss',
+            // Blog shares opt into every platform incl. Twitter (the omitted-
+            // channels default excludes it — see DEFAULT_PUBLISH_PLATFORMS).
+            channels: PUBLISH_PLATFORMS,
             imageUrl,
             gbpImageUrl,
             // Autonomous (cron) shares use the brand card or go text-only — never
@@ -1304,6 +1336,9 @@ const SocialMediaService = {
       if (existing) return { skipped: 'already_posted' };
       const result = await this.publishToAll({
         title, description, link: normalized, guid: normalized, source, noAiImage,
+        // Autonomous blog-share lane: opt into every platform incl. Twitter
+        // (the omitted-channels default excludes it).
+        channels: PUBLISH_PLATFORMS,
       });
       return { shared: true, ...result };
     });
@@ -1457,6 +1492,7 @@ const SocialMediaService = {
         else linkedinReady = true;
       }
     }
+    const twitterService = require('./twitter');
     const platforms = [
       {
         key: 'facebook',
@@ -1477,6 +1513,12 @@ const SocialMediaService = {
         key: 'linkedin',
         enabled: linkedinReady,
         reason: linkedinReason,
+      },
+      {
+        key: 'twitter',
+        enabled: SOCIAL_FLAGS.twitterEnabled && twitterService.configured,
+        reason: !SOCIAL_FLAGS.twitterEnabled ? 'Disabled'
+          : 'X credentials not configured (TWITTER_API_KEY/SECRET + TWITTER_ACCESS_TOKEN/SECRET)',
       },
     ].filter((platform) => requestedPlatforms.has(platform.key));
 
@@ -1554,6 +1596,17 @@ const SocialMediaService = {
           }
         } else if (p.key === 'linkedin') {
           const r = await postToLinkedIn(content, link, title, description, generatedImageUrl);
+          platformResults.push({ ...r, content });
+        } else if (p.key === 'twitter') {
+          // Text + article URL; X renders the link card from the page's
+          // og:image, so blog shares need no media upload (mirrors the FB
+          // /feed link-post approach).
+          // NOT wrapped in withRetry: tweet creation is non-idempotent — if X
+          // accepts the create but the response is lost/times out, a retry
+          // publishes a DUPLICATE tweet (same rule as the FB video and IG
+          // container flows). A transient failure surfaces as an X partial
+          // failure and stays retryable through the normal channels.
+          const r = await postToTwitter(content, link);
           platformResults.push({ ...r, content });
         }
       } catch (err) {
@@ -1699,7 +1752,7 @@ const SocialMediaService = {
     if (await isPausedByAdmin()) {
       return { platform, success: false, error: 'Automation is paused' };
     }
-    const flagMap = { facebook: 'facebookEnabled', instagram: 'instagramEnabled', gbp: 'gbpEnabled', linkedin: 'linkedinEnabled' };
+    const flagMap = { facebook: 'facebookEnabled', instagram: 'instagramEnabled', gbp: 'gbpEnabled', linkedin: 'linkedinEnabled', twitter: 'twitterEnabled' };
     const flagKey = flagMap[platform];
     if (flagKey && !SOCIAL_FLAGS[flagKey]) {
       return { platform, success: false, error: `${platform} is disabled` };
@@ -1735,6 +1788,7 @@ const SocialMediaService = {
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     if (platform === 'linkedin') return postToLinkedIn(text, link, title, description, imageUrl);
+    if (platform === 'twitter') return postToTwitter(text, link);
     throw new Error(`Unknown platform: ${platform}`);
   },
 
@@ -1801,4 +1855,6 @@ module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
 module.exports.isImageHostingConfigured = isImageHostingConfigured;
 module.exports.blogHeroSocialImageUrl = blogHeroSocialImageUrl;
 module.exports.BLOG_HERO_SOURCES = BLOG_HERO_SOURCES;
+module.exports.PUBLISH_PLATFORMS = PUBLISH_PLATFORMS;
+module.exports.DEFAULT_PUBLISH_PLATFORMS = DEFAULT_PUBLISH_PLATFORMS;
 module.exports.facebookWantsBlogHero = facebookWantsBlogHero;
