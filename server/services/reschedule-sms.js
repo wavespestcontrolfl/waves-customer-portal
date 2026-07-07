@@ -202,7 +202,7 @@ class RescheduleSMS {
         templateKey,
         { date: displayDate, time: selectedOption.window.display },
         { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
-      )) || `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}`;
+      )) || `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}\n\nReply STOP to opt out.`;
       await sendAppointmentSms({
         to: customer.phone,
         body: confirmedBody,
@@ -231,7 +231,7 @@ class RescheduleSMS {
         'reschedule_call_requested',
         {},
         { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
-      )) || "No problem. We'll give you a call shortly.";
+      )) || "No problem. We'll give you a call shortly.\n\nReply STOP to opt out.";
       await sendAppointmentSms({
         to: customer.phone,
         body: callBody,

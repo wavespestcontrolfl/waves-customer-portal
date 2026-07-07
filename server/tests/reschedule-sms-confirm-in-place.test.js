@@ -171,7 +171,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body)
-      .toBe('Confirmed. Your service is rescheduled for Saturday, Jul 4, 1:00 PM - 3:00 PM.\n\nSee you today.');
+      .toBe('Confirmed. Your service is rescheduled for Saturday, Jul 4, 1:00 PM - 3:00 PM.\n\nSee you today.\n\nReply STOP to opt out.');
   });
 
   test('call-requested reply renders the reschedule_call_requested template with built-in fallback', async () => {
@@ -188,7 +188,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     expect(renderSmsTemplate).toHaveBeenCalledWith(
       'reschedule_call_requested', {}, expect.objectContaining({ workflow: 'reschedule_reply', entity_id: 'svc-1' }),
     );
-    expect(sendCustomerMessage.mock.calls[0][0].body).toBe("No problem. We'll give you a call shortly.");
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe("No problem. We'll give you a call shortly.\n\nReply STOP to opt out.");
     expect(result).toMatchObject({ handled: true, action: 'call_requested', smsSent: true });
   });
 
