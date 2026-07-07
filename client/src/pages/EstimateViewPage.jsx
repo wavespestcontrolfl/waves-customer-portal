@@ -1166,6 +1166,34 @@ function isBoraCareBreakdownItem(item = {}) {
   return raw.includes('bora care') || raw.includes('boracare');
 }
 
+function isWaveGuardSetupBreakdownRow(item = {}) {
+  if (item?.service === 'waveguard_setup') return true;
+  const raw = [item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('waveguard setup') || raw.includes('membership setup');
+}
+
+// Total for PaymentPreferenceButtons' "one-time services billed separately
+// after completion" note. The WaveGuard setup row rides oneTimeBreakdown, but
+// it's invoiced up front with the accept (PPB previews it as its own invoice
+// line from `setupFee`), so counting it here would claim the same fee a
+// second time as an after-completion charge. With showOneTimeOption the
+// breakdown is the ALTERNATE one-time price (either/or), not extras on top —
+// same gate OneTimeBreakdownCard uses.
+export function oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode) {
+  if (serviceMode === 'one_time' || estimate?.showOneTimeOption) return 0;
+  const breakdown = pricing?.oneTimeBreakdown;
+  const total = Number(breakdown?.total) || 0;
+  if (total <= 0) return 0;
+  const setup = (Array.isArray(breakdown?.items) ? breakdown.items : [])
+    .filter(isWaveGuardSetupBreakdownRow)
+    .reduce((sum, row) => sum + (Number(row.amount ?? row.price ?? row.total) || 0), 0);
+  return Math.max(0, Math.round((total - setup) * 100) / 100);
+}
+
 // Mirrors the server isNonBillableOneTimeRow: inspections, the WaveGuard setup
 // fee, and any discount/credit/zero row (amount <= 0) carry no billable service
 // of their own. A positive unrecognized charge is intentionally treated as
@@ -3547,10 +3575,7 @@ export default function EstimateViewPage() {
                 onSelect={handlePaymentChoice}
                 disabled={adminDraftPreview}
                 serviceMode={serviceMode}
-                // With showOneTimeOption the breakdown is the ALTERNATE
-                // one-time price (either/or), not extras billed on top —
-                // same gate OneTimeBreakdownCard uses.
-                oneTimeExtrasTotal={serviceMode !== 'one_time' && !estimate.showOneTimeOption ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
+                oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
@@ -3703,9 +3728,7 @@ export default function EstimateViewPage() {
               // "expired" card and destroy the preview's purpose.
               disabled={adminDraftPreview || ctaPhase === 'submitting'}
               serviceMode={serviceMode}
-              // showOneTimeOption = the breakdown is the alternate one-time
-              // price, not extras on top (mirrors OneTimeBreakdownCard).
-              oneTimeExtrasTotal={serviceMode !== 'one_time' && !estimate.showOneTimeOption ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
+              oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
