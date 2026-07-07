@@ -50,6 +50,24 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   URL.revokeObjectURL(blobUrl);
 }
 
+// The arrival window quoted to customers is ALWAYS window_start + 2 hours
+// (owner directive — see server/utils/sms-time-format.js). window_end is the
+// internal job-duration block and must never render on customer surfaces.
+// Accepts an "HH:MM[:SS]" time string or an ISO datetime; returns the same
+// shape shifted +120 minutes, or null when the start is unparseable.
+const arrivalWindowEnd = (windowStart) => {
+  if (!windowStart) return null;
+  const raw = String(windowStart);
+  const m = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (m) {
+    const mins = ((Number(m[1]) * 60) + Number(m[2]) + 120) % 1440;
+    return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + 120 * 60000).toISOString();
+};
+
 // ---------------------------------------------------------------------------
 // Waves AI bar — the wavespestcontrol.com "Ask Waves" intake, embedded on
 // every portal tab. Pills are screen-aware; asking opens the authenticated
@@ -182,12 +200,19 @@ function utcDayFromDateKey(key) {
   return Date.UTC(y, m - 1, d);
 }
 
-function daysUntilEtDate(d) {
+// Signed ET-calendar-day difference from today (negative = past), null when
+// the input doesn't yield a valid date key.
+function etDayDiff(d) {
   const targetKey = typeof d === 'string' ? d.split('T')[0] : etDateString(new Date(d));
   const targetDay = utcDayFromDateKey(targetKey);
   const todayDay = utcDayFromDateKey(etDateString());
   if (!Number.isFinite(targetDay) || !Number.isFinite(todayDay)) return null;
-  return Math.max(0, Math.round((targetDay - todayDay) / 86400000));
+  return Math.round((targetDay - todayDay) / 86400000);
+}
+
+function daysUntilEtDate(d) {
+  const diff = etDayDiff(d);
+  return diff == null ? null : Math.max(0, diff);
 }
 
 function fmtDate(d, opts) {
@@ -1267,9 +1292,6 @@ function DashboardTab({ customer, onSwitchTab }) {
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
-  const renewalCredit = customer.memberSince
-    ? Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25))
-    : 0;
   const referralReward = Number(referralStats?.rewardPerReferral) || 25;
   // Server-authoritative earned dollars — not an estimate off referrals *sent*.
   const referralCredits = Math.round(Number(referralStats?.totalEarned || 0));
@@ -1284,8 +1306,10 @@ function DashboardTab({ customer, onSwitchTab }) {
     {
       icon: 'coins',
       label: 'WaveGuard Rewards',
-      value: `$${renewalCredit + referralCredits}`,
-      sub: `$${renewalCredit} renewal credit · $${referralCredits} referral credits`,
+      // Server-backed dollars only — the old card summed in a client-invented,
+      // tenure-prorated "renewal credit" no system ever grants.
+      value: `$${referralCredits}`,
+      sub: `$${referralCredits} referral credits earned`,
       actionLabel: null,
     },
     {
@@ -1485,7 +1509,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 </div>
                 {nextService?.windowStart && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {formatTime(nextService.windowStart)} - {formatTime(nextService.windowEnd)}
+                    {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
                   </div>
                 )}
               </div>
@@ -2654,11 +2678,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const enriched = upcoming.map((s, idx) => {
     const svcDate = parseDate(s.date);
     const diffHrs = (svcDate - now) / (1000 * 60 * 60);
-    const isToday = svcDate.toDateString() === now.toDateString();
-    const isSoon = !isToday && diffHrs > 0 && diffHrs <= 48;
-    const isTomorrow = isSoon;
-    const isFuture = diffHrs > 48;
-    const daysUntil = Math.max(0, Math.ceil(diffHrs / 24));
+    // ET-calendar-day math, not rolling hours: a 46-hours-out visit is
+    // "2 days", not "Tomorrow", and the counter can't drift before noon.
+    const dayDiff = etDayDiff(s.date);
+    const isToday = dayDiff === 0;
+    const isTomorrow = dayDiff === 1;
+    const isSoon = isTomorrow;
+    const isFuture = dayDiff != null && dayDiff > 1;
+    const daysUntil = dayDiff == null ? 0 : Math.max(0, dayDiff);
     const visitNum = s.visitNumber || (idx + 1);
     const description = getScheduleVisitDescription(s.serviceType, visitNum);
     return { ...s, svcDate, diffHrs, isToday, isTomorrow, isSoon, isFuture, daysUntil, visitNum, description };
@@ -2770,7 +2797,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
           </div>
 
           {/* Service description */}
@@ -2851,7 +2878,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
         </div>
         <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -3051,20 +3078,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     );
                   })()}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
-                    <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
-                      width: 44, height: 24, borderRadius: 12,
-                      cursor: p.locked ? 'default' : 'pointer',
-                      // Gold = on, light blue = off (owner directive 2026-07-06)
-                      background: isOn ? B.yellow : `${B.wavesBlue}55`,
-                      position: 'relative', transition: 'background 0.3s',
-                      opacity: p.locked ? 0.85 : 1,
-                    }}>
-                      <div style={{
+                    {/* Real switch semantics: the old plain div was invisible
+                        to keyboards and screen readers. */}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isOn}
+                      aria-label={p.label}
+                      disabled={p.locked}
+                      onClick={p.locked ? undefined : () => handleToggle(p.key)}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12, border: 'none', padding: 0,
+                        cursor: p.locked ? 'default' : 'pointer',
+                        // Gold = on, light blue = off (owner directive 2026-07-06)
+                        background: isOn ? B.yellow : `${B.wavesBlue}55`,
+                        position: 'relative', transition: 'background 0.3s',
+                        opacity: p.locked ? 0.85 : 1,
+                      }}
+                    >
+                      <span style={{
                         position: 'absolute', top: 2, width: 20, height: 20,
                         borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
                         left: isOn ? 22 : 2, transition: 'left 0.3s',
                       }} />
-                    </div>
+                    </button>
                     {p.locked && (
                       <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
@@ -3288,6 +3325,7 @@ function BillingTab({ customer }) {
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
+  const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
   const [stripeReady, setStripeReady] = useState(false);
@@ -3418,6 +3456,9 @@ function BillingTab({ customer }) {
     try {
       await api.removeCard(cardId);
       await refreshCards();
+      // Card changes can move or disable Auto Pay server-side — remount the
+      // AutopayCard so it never shows "Active" against a removed card.
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       alert(err.message || 'Failed to remove card');
     }
@@ -3427,6 +3468,7 @@ function BillingTab({ customer }) {
     try {
       await api.setDefaultCard(cardId);
       await refreshCards();
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       alert(err.message || 'Failed to set default card');
     }
@@ -3834,7 +3876,7 @@ function BillingTab({ customer }) {
       </div>
       )}
 
-      <AutopayCard onStateChange={setAutopay} />
+      <AutopayCard key={autopayRefreshKey} onStateChange={setAutopay} />
 
       <div data-glass="card" style={{
         ...card,
@@ -3889,7 +3931,7 @@ function BillingTab({ customer }) {
         )}
       </div>
 
-      <div data-glass="card" style={{ ...card, padding: 20 }}>
+      <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div>
             <div style={sectionTitle}>Payment Methods</div>
@@ -4116,7 +4158,10 @@ function BillingTab({ customer }) {
                 {p.lastFour && ` - ${p.cardBrand || 'Card'} ending in ${p.lastFour}`}
               </div>
               {p.status === 'failed' && (
-                <button type="button" style={{
+                <button type="button" onClick={() => {
+                  document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  handleAddCard();
+                }} style={{
                   marginTop: 8, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
                   background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                 }}>Update Payment Method</button>
@@ -7068,19 +7113,11 @@ function MyPlanTab({ customer }) {
       }
     });
   }
-  // If no activity log, construct from tier
-  if (planTimeline.length === 1 && tierIdx > 0) {
-    const startDate = parseDate(customer.memberSince);
-    const upgradeDate = new Date(startDate);
-    upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
-    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: 'upgrade' });
-  }
-  if (activeTierName && numServices >= 3 && planTimeline.length <= 2) {
-    const startDate = parseDate(customer.memberSince);
-    const addDate = new Date(startDate);
-    addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
-    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: 'bug' });
-  }
+  // No activity log = show only what we actually know (the start entry).
+  // The old fallback FABRICATED account events — an invented "Upgraded to
+  // <tier>" at 40% of tenure (even for customers who started on that tier)
+  // and a hardcoded "Added mosquito service" at 60% (even with no mosquito
+  // service) — real-looking history the customer never lived.
   planTimeline.sort((a, b) => a.date - b.date);
 
   // Current month for calendar
@@ -7124,7 +7161,7 @@ function MyPlanTab({ customer }) {
 
   const calendarTime = (event = {}) => {
     const windowStart = clockLabel(event.windowStart || event.window_start);
-    const windowEnd = clockLabel(event.windowEnd || event.window_end);
+    const windowEnd = clockLabel(arrivalWindowEnd(event.windowStart || event.window_start));
     if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
     if (windowStart) return windowStart;
 
@@ -7210,7 +7247,6 @@ function MyPlanTab({ customer }) {
     ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : 'Not set';
   const currentAnnual = totalFullPrice - annualSavings;
-  const renewalCredit = Math.min(75, Math.round(memberMonths * 6.25));
 
   const card = {
     background: B.white,
@@ -7323,7 +7359,6 @@ function MyPlanTab({ customer }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: `${money(annualSavings)}/yr saved` },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
-            { label: 'Renewal credit', value: money(renewalCredit, 0), sub: 'Month 13' },
           ].map((item) => (
             <div key={item.label} style={{
               border: '1px solid #E7E2D7',
@@ -7581,7 +7616,8 @@ function MyPlanTab({ customer }) {
               <div style={sectionTitle}>Loyalty</div>
               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                 {[
-                  { text: `${money(renewalCredit, 0)} annual renewal credit`, icon: 'money' },
+                  // Renewal-credit bullet removed: it promised a tenure-
+                  // prorated dollar figure no server system grants (F-015).
                   tierIdx < TIER_ORDER.length - 1 && {
                     text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25, 0)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
                     icon: 'upgrade',
@@ -8012,7 +8048,7 @@ function ServiceTracker() {
   const isTermite = svcType.toLowerCase().includes('termite');
 
   const fmtTime = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
-  const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(tracker.service.windowEnd)}` : 'today';
+  const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(arrivalWindowEnd(tracker.service.windowStart))}` : 'today';
   const stepTs = tracker.steps[step - 1]?.completedAt;
   const etaSource = tracker.etaSource || tracker.techPosition?.eta?.source;
   const etaDisplay = eta == null ? '—' : eta < 1 ? 'Now' : Math.round(eta);

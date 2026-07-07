@@ -38,14 +38,24 @@ function ChatIcon() {
   );
 }
 
-export default function QuestionsEscapeHatch({ estimateSlug }) {
+export default function QuestionsEscapeHatch({ estimateSlug, context = 'estimate' }) {
   // Glass copy pack (PR B) — person-first button labels.
   const glass = glassCopyActive();
+  // context 'lawn_report': the lawn-diagnostic page reuses this component,
+  // and the estimate copy composed "question about quote #<report token>" —
+  // a report token isn't a quote number.
+  const isReport = context === 'lawn_report';
   const slugStr = estimateSlug ? `%23${estimateSlug}` : 'my%20estimate';
-  const smsBody = `Hi, I have a question about quote ${slugStr}`;
+  const smsBody = isReport
+    ? 'Hi, I have a question about my Waves lawn report'
+    : `Hi, I have a question about quote ${slugStr}`;
+  const mailSubject = isReport ? 'Question about my Waves lawn report' : 'Question about my Waves estimate';
+  const mailBody = isReport
+    ? 'Hi, I have a question about my Waves lawn report'
+    : `Hi, I have a question about quote ${decodeURIComponent(slugStr)}`;
   const textHref = isLikelyMobile()
     ? `sms:${BUSINESS_LINE}?&body=${smsBody}`
-    : `mailto:${BUSINESS_EMAIL}?subject=Question about my Waves estimate&body=Hi, I have a question about quote ${decodeURIComponent(slugStr)}`;
+    : `mailto:${BUSINESS_EMAIL}?subject=${mailSubject}&body=${mailBody}`;
 
   return (
     <div style={{

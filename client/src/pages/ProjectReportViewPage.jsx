@@ -135,8 +135,17 @@ function formatAppointmentWindow(appt) {
   if (!appt) return '';
   const date = formatAppointmentDate(appt.scheduledDate);
   const start = formatAppointmentTime(appt.windowStart);
-  const end = formatAppointmentTime(appt.windowEnd);
-  const window = start && end ? `${start}-${end}` : start || end;
+  // The arrival window quoted to customers is ALWAYS window_start + 2 hours
+  // (owner directive) — appt.windowEnd is the internal job-duration block
+  // and never renders on customer surfaces.
+  const startMatch = /^(\d{1,2}):(\d{2})/.exec(String(appt.windowStart || '').trim());
+  const endMins = startMatch
+    ? ((Number(startMatch[1]) * 60) + Number(startMatch[2]) + 120) % 1440
+    : null;
+  const end = endMins != null
+    ? formatAppointmentTime(`${Math.floor(endMins / 60)}:${String(endMins % 60).padStart(2, '0')}`)
+    : '';
+  const window = start && end ? `${start}-${end}` : start;
   return [date, window].filter(Boolean).join(' ');
 }
 
