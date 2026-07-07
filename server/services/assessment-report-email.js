@@ -12,6 +12,7 @@
  * assessment.report_link email_templates row.
  */
 
+const crypto = require('crypto');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
@@ -60,8 +61,10 @@ async function sendAssessmentReportEmail({ type, assessmentId, to, firstName, re
       recipientId: recipientId || null,
       triggerEventId: `assessment_report:${type}:${assessmentId}`,
       // Minute-bucketed key: a double-click / double-submit dedupes, while a
-      // deliberate later resend (same assessment, same address) still goes out.
-      idempotencyKey: `assessment_report:${type}:${assessmentId}:${String(to).toLowerCase()}:${Math.floor(Date.now() / 60000)}`,
+      // deliberate later resend (same assessment, same address) still goes
+      // out. The address is hashed so a long-but-valid email can't push the
+      // key past email_messages.idempotency_key's varchar(260).
+      idempotencyKey: `assessment_report:${type}:${assessmentId}:${crypto.createHash('sha256').update(String(to).toLowerCase()).digest('hex').slice(0, 16)}:${Math.floor(Date.now() / 60000)}`,
       categories: ['assessment_report'],
       // Admin-entered lead/customer addresses: keep raw provider error bodies
       // (which can echo the recipient email) out of the logs.

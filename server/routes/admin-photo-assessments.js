@@ -46,6 +46,7 @@ const {
 const { sendAssessmentReportEmail } = require('../services/assessment-report-email');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { overallStatusLabel } = require('../utils/public-report-egress');
+const { portalUrl } = require('../utils/portal-url');
 const { etParts } = require('../utils/datetime-et');
 
 let PhotoService;
@@ -53,7 +54,6 @@ try { PhotoService = require('../services/photos'); } catch { PhotoService = nul
 
 router.use(adminAuthenticate, requireAdmin);
 
-const PORTAL_BASE = 'https://portal.wavespestcontrol.com';
 const REPORT_TTL_DAYS = 30;
 const MAX_PHOTOS = 5;
 const MAX_PHOTO_CHARS = 6_000_000;
@@ -328,7 +328,13 @@ router.get('/:type/:id', async (req, res, next) => {
         prospect_note: analysisMeta.prospect_note || null,
         provenance: analysisMeta.provenance || null,
         ai_summary: row.ai_summary || null,
-        report_url: row.report_token ? `${PORTAL_BASE}${config.reportPath(row.report_token)}` : null,
+        // Copy-link is only offered for links a customer can actually open:
+        // the public readers 404 expired tokens, so an expired report_url is
+        // withheld (the resend path refreshes the expiry).
+        report_url: row.report_token
+          && (!row.report_expires_at || new Date(row.report_expires_at).getTime() > Date.now())
+          ? portalUrl(config.reportPath(row.report_token))
+          : null,
         pricing_snapshot: parseJson(row.pricing_snapshot, null),
       },
       photos,
@@ -423,18 +429,20 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     // double-submits (both requests read back the same persisted token, so
     // neither email carries a link the other invalidated). Every send
     // refreshes the 30-day expiry; resends keep the token stable.
+    // status='sent' is the RELEASED state the tokenized readers require —
+    // it must flip here so copy-link works even when the email fails; the
+    // stage/metric driver (last_sent_at) is stamped only after a real send.
     const candidateToken = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
     const [updated] = await db(config.table).where({ id: row.id }).update({
       report_token: db.raw('COALESCE(report_token, ?)', [candidateToken]),
       report_expires_at: expiresAt,
       status: 'sent',
-      last_sent_at: db.fn.now(),
       updated_at: db.fn.now(),
     }).returning(['report_token']);
     const reportToken = updated?.report_token || candidateToken;
 
-    const reportUrl = `${PORTAL_BASE}${config.reportPath(reportToken)}`;
+    const reportUrl = portalUrl(config.reportPath(reportToken));
     // sendAssessmentReportEmail contains its own failures (sent:false), but a
     // truly unexpected throw must not swallow the minted link either.
     let emailResult;
@@ -452,6 +460,14 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     } catch (emailErr) {
       logger.error(`[admin-photo-assessments] unexpected send error for ${row.id}: ${emailErr.message}`);
       emailResult = { ok: false, error: 'Email send failed — copy the link instead.' };
+    }
+
+    // Stamp the delivery timestamp only when the email actually went out —
+    // stage labels and funnel metrics derive from last_sent_at, and a failed
+    // send must not read as "Report sent".
+    if (emailResult.ok) {
+      await db(config.table).where({ id: row.id }).update({ last_sent_at: db.fn.now(), updated_at: db.fn.now() })
+        .catch((stampErr) => logger.warn(`[admin-photo-assessments] last_sent_at stamp failed: ${stampErr.message}`));
     }
 
     logger.info(`[admin-photo-assessments] ${req.params.type} ${row.id} report send → ${emailResult.ok ? 'sent' : `FAILED (${emailResult.error})`}`);

@@ -256,6 +256,10 @@ describe('POST /:type/:id/send-report', () => {
       const update = updates.lawn_diagnostics[0];
       expect(update.status).toBe('sent');
       expect(update.report_token.__raw).toContain('COALESCE(report_token');
+      // Delivery timestamp is a SECOND update, stamped only after the email
+      // actually went out — the mint update must not carry it.
+      expect(update.last_sent_at).toBeUndefined();
+      expect(updates.lawn_diagnostics[1].last_sent_at).toBe('NOW');
       expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
         type: 'lawn',
         to: 'dana@example.com',
@@ -302,7 +306,7 @@ describe('POST /:type/:id/send-report', () => {
     });
   });
 
-  test('email failure still returns the minted link (sent:false)', async () => {
+  test('email failure still returns the minted link (sent:false) and never stamps last_sent_at', async () => {
     mockSendEmail.mockResolvedValue({ ok: false, error: 'suppressed' });
     mockRows.lawn_diagnostics = [lawnRow()];
     await withServer(async (base) => {
@@ -313,6 +317,21 @@ describe('POST /:type/:id/send-report', () => {
       const body = await res.json();
       expect(body.sent).toBe(false);
       expect(body.reportUrl).toBeTruthy();
+      // Failed sends must not read as "Report sent" in stages/metrics.
+      expect(updates.lawn_diagnostics).toHaveLength(1);
+      expect(updates.lawn_diagnostics[0].last_sent_at).toBeUndefined();
+    });
+  });
+
+  test('an expired report link is withheld from the detail payload (copy-link hides)', async () => {
+    mockRows.pest_identifications = [pestRow({
+      report_token: 'f'.repeat(32),
+      report_expires_at: new Date(Date.now() - 86400000).toISOString(),
+    })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}`);
+      const body = await res.json();
+      expect(body.assessment.report_url).toBeNull();
     });
   });
 });
