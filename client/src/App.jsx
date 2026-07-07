@@ -323,9 +323,12 @@ function ProtectedRoute({ children }) {
             }}
           />
           <div style={{ fontSize: 17, fontWeight: 850, fontFamily: FONTS.heading }}>Loading your portal</div>
-          {/* While useAuth retries a transient failure, tell the customer
-              what's happening instead of an indefinite generic check. */}
-          <p style={{ fontSize: 14, color: '#475569', margin: '6px 0 0', lineHeight: 1.45 }}>{error || 'Checking your secure session.'}</p>
+          {/* Headline + logo only on a normal (fast) load — but while useAuth
+              retries a transient failure, still tell the customer what's
+              happening instead of an indefinite generic check. */}
+          {error && (
+            <p style={{ fontSize: 14, color: '#475569', margin: '6px 0 0', lineHeight: 1.45 }}>{error}</p>
+          )}
         </div>
         <style>{`
           @keyframes portalPulse {

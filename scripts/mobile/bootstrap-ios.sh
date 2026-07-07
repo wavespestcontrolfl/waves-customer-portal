@@ -39,6 +39,23 @@ fi
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
 
+# Replace the stock Capacitor launch screen (white background + Capacitor logo)
+# with the Waves splash checked in at client/resources/. The generated template's
+# LaunchScreen.storyboard renders the "Splash" imageset full-bleed (aspectFill),
+# so overwriting its PNGs is all that's needed. Idempotent: overwrites every
+# splash-*.png in the imageset each run, so `cap add ios` regenerations can never
+# resurrect the Capacitor-logo default.
+SPLASH_SRC="resources/splash-2732x2732.png"
+SPLASH_SET="ios/App/App/Assets.xcassets/Splash.imageset"
+if [ -f "$SPLASH_SRC" ] && [ -d "$SPLASH_SET" ]; then
+  for f in "$SPLASH_SET"/splash-*.png; do
+    [ -e "$f" ] && cp "$SPLASH_SRC" "$f"
+  done
+  echo "==> Waves splash installed into Splash.imageset ✓"
+else
+  echo "==> WARNING: splash source or imageset missing — launch screen keeps the Capacitor default."
+fi
+
 # Capacitor's iOS push plugin only fires the JS 'registration' event if
 # AppDelegate forwards the UIKit APNs callbacks to Capacitor's NotificationCenter
 # names. The default Capacitor template includes these, but a regenerated/older
