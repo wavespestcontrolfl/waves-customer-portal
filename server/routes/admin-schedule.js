@@ -569,6 +569,31 @@ function recurringTemplateTechnicianId(parent) {
   return parent?.recurring_technician_id || parent?.technician_id || null;
 }
 
+// Statuses that mean a series visit is still ahead of us. Confirmed counts:
+// portal-confirm and the reschedule flows flip pending→confirmed, and a
+// pending-only count made a fully-confirmed plan read as empty — ongoing
+// plans kept auto-extending (extra billable visits), fixed plans raised
+// false plan_ending alerts that invite extending a plan the customer
+// already paid through.
+const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed'];
+
+// Count the still-upcoming visits of a BASE recurring series. Boosters share
+// recurring_parent_id but live on the calendar with is_recurring=false —
+// without that filter they inflate the count and block auto-extend. Only
+// today-or-later dates count: a stale pending/confirmed row whose date
+// passed without completing (the stuck-visit ops leak) is not a visit
+// "ahead" and must not suppress auto-extends or plan-ending alerts.
+async function countUpcomingSeriesVisits(conn, parentId) {
+  const row = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .whereIn('status', UPCOMING_VISIT_STATUSES)
+    .where('is_recurring', true)
+    .where('scheduled_date', '>=', etDateString())
+    .count('* as c')
+    .first();
+  return parseInt(row?.c || 0, 10);
+}
+
 function shouldPreserveParentTemplateForThisOnlyAssignment(job, technicianId) {
   if (technicianId === undefined || (technicianId !== null && typeof technicianId !== 'string')) return false;
   if (!job?.is_recurring || job.recurring_parent_id || job.recurring_technician_override) return false;
@@ -4754,21 +4779,14 @@ router.put('/:id/status', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         const parent = await db('scheduled_services').where({ id: parentId }).first();
         if (parent && parent.is_recurring && parent.recurring_pattern) {
-          // pendingCount + latest must reflect the BASE recurring series
-          // only — boosters share recurring_parent_id but live on the
-          // calendar with is_recurring=false. Without this filter,
-          // future boosters inflate the count (blocking auto-extend) and
-          // a booster date can become "latest" so the next-quarterly math
-          // keys off the wrong row.
-          const pendingCount = parseInt((await db('scheduled_services')
-            .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-            .where('status', 'pending')
-            .where('is_recurring', true)
-            .count('* as c').first())?.c || 0);
+          // upcomingCount + latest must reflect the BASE recurring series
+          // only — see countUpcomingSeriesVisits for the booster and
+          // pending-vs-confirmed rationale.
+          const upcomingCount = await countUpcomingSeriesVisits(db, parentId);
 
           const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
 
-          if (isOngoing && pendingCount < 2) {
+          if (isOngoing && upcomingCount < 2) {
             // Find latest visit (pending or completed) to calculate next date
             const latest = await db('scheduled_services')
               .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
@@ -4925,7 +4943,7 @@ router.put('/:id/status', async (req, res, next) => {
                 }
               }
             }
-          } else if (!isOngoing && pendingCount === 0) {
+          } else if (!isOngoing && upcomingCount === 0) {
             // Fixed plan just finished — queue an alert if table exists and not already open
             try {
               const existing = await db('recurring_plan_alerts')
@@ -5983,21 +6001,19 @@ router.get('/recurring-alerts', async (req, res, next) => {
           );
 
         for (const plan of ending) {
+          // Confirmed visits are upcoming too — counting only pending made a
+          // customer-confirmed plan read as ending and raised false alerts.
           const pending = await db('scheduled_services')
             .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
             .where('is_recurring', true)
-            .where('status', 'pending')
+            .whereIn('status', ['pending', 'confirmed'])
             .where('scheduled_date', '>=', today)
             .orderBy('scheduled_date', 'desc').limit(1);
           const latestPending = pending[0];
           if (!latestPending) continue;
           if (latestPending.scheduled_date && dateOnly(latestPending.scheduled_date) > soonStr) continue;
 
-          const pendingCount = parseInt((await db('scheduled_services')
-            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
-            .where('is_recurring', true)
-            .where('status', 'pending')
-            .count('* as c').first())?.c || 0);
+          const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
           if (pendingCount > 1) continue;
 
           // Skip if already queued
@@ -6245,11 +6261,10 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
           .where('is_recurring', true)
           .update({ recurring_ongoing: true });
       }
-      // Also ensure at least 3 pending visits scheduled ahead
-      const pendingCount = parseInt((await db('scheduled_services')
-        .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-        .where('is_recurring', true)
-        .where('status', 'pending').count('* as c').first())?.c || 0);
+      // Also ensure at least 3 upcoming visits scheduled ahead. Confirmed
+      // visits count — otherwise a series whose future visits the customer
+      // confirmed gets topped up with extra (billable) duplicates.
+      const pendingCount = await countUpcomingSeriesVisits(db, parentId);
       const need = Math.max(0, 3 - pendingCount);
       const seen = new Set(seriesDateSeed);
       const maxAttempts = need * 4 + 30;
@@ -6364,6 +6379,7 @@ router._test = {
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
+  countUpcomingSeriesVisits,
 };
 
 module.exports = router;
