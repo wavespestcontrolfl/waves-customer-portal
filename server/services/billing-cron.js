@@ -24,6 +24,29 @@ const AnnualPrepayRenewals = require('./annual-prepay-renewals');
 // Retry schedule: Day 1 → retry Day 3, Day 3 → retry Day 5
 const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
+// 'YYYY-MM' month-of-obligation key from a payments.payment_date value
+// (DATE column — arrives as a Date at UTC midnight or as a 'YYYY-MM-DD'
+// string depending on driver config; both slice safely via ISO).
+function monthKeyOf(paymentDate) {
+  if (!paymentDate) return null;
+  if (paymentDate instanceof Date) {
+    return Number.isNaN(paymentDate.getTime()) ? null : paymentDate.toISOString().slice(0, 7);
+  }
+  const s = String(paymentDate);
+  return /^\d{4}-\d{2}/.test(s) ? s.slice(0, 7) : null;
+}
+
+// 'YYYY-MM-DD' key from a payments.payment_date value (same driver-shape
+// handling as monthKeyOf).
+function dateKeyOf(paymentDate) {
+  if (!paymentDate) return null;
+  if (paymentDate instanceof Date) {
+    return Number.isNaN(paymentDate.getTime()) ? null : paymentDate.toISOString().slice(0, 10);
+  }
+  const s = String(paymentDate);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+}
+
 const { isBillingDayMatch } = require('./billing-helpers');
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint }) {
@@ -160,13 +183,28 @@ const BillingCron = {
           continue;
         }
 
-        // Check if already charged this month (paid or processing)
+        // Check if already charged this month (paid or processing).
+        // Month-of-obligation attribution: rows stamped with
+        // metadata.billed_month match on the month they COLLECT FOR, not
+        // the date the money landed — a July obligation whose retry rung
+        // succeeds Aug 1 must not satisfy August (it silently skipped the
+        // whole next month before the stamp existed). Stamped manual
+        // collections (admin charge-now at the monthly rate) count too.
+        // Legacy rows without the stamp keep the old payment_date-window
+        // + description-marker match.
+        const monthKey = `${year}-${String(month).padStart(2, '0')}`;
         const existingCharge = await db('payments')
           .where({ customer_id: customer.id })
-          .where('payment_date', '>=', monthStart)
-          .where('payment_date', '<=', monthEnd)
-          .where('description', 'like', '%WaveGuard Monthly%')
           .whereIn('status', ['paid', 'processing'])
+          .where(function () {
+            this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+              .orWhere(function () {
+                this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                  .andWhere('payment_date', '>=', monthStart)
+                  .andWhere('payment_date', '<=', monthEnd)
+                  .andWhere('description', 'like', '%WaveGuard Monthly%');
+              });
+          })
           .first();
 
         if (existingCharge) {
@@ -418,6 +456,44 @@ const BillingCron = {
       .where('next_retry_at', '<=', now)
       .select('*');
 
+    // The retry path re-charges the same obligations processMonthlyBilling
+    // originates, so it must honor the same suppression guards (the sweep
+    // used to skip ALL of them — charging paused customers, dunning
+    // deliberately-disabled ones into a service pause, and double-billing
+    // months an annual prepay had since covered).
+    //
+    // Prepay coverage is resolved per OBLIGATION date, not per today:
+    // coverage-as-of-today would also absorb debt from BEFORE the term
+    // started (a failed June monthly retried after a July-starting prepay
+    // is real, uncovered AR — writing it off erases collectible balance).
+    // Memoized per date so a sweep full of same-month rungs costs one
+    // lookup, and failing open on a lookup error (no suppression) so a
+    // transient coverage-query blip can't stall legitimate collection —
+    // a covered customer double-billed in that window is refundable and
+    // alarmed by the prepay lane.
+    const annualPrepayCoveredIdsByDate = new Map();
+    const coveredIdsOn = async (dateKey) => {
+      if (!annualPrepayCoveredIdsByDate.has(dateKey)) {
+        let ids = new Set();
+        try {
+          ids = await AnnualPrepayRenewals.getActivelyCoveredCustomerIds(dateKey);
+        } catch (err) {
+          logger.warn(`[billing-cron] retry-sweep prepay coverage lookup failed for ${dateKey} — proceeding unguarded: ${err.message}`);
+        }
+        annualPrepayCoveredIdsByDate.set(dateKey, ids);
+      }
+      return annualPrepayCoveredIdsByDate.get(dateKey);
+    };
+    let annualPrepayPendingIds = new Set();
+    if (failedPayments.length > 0) {
+      try {
+        annualPrepayPendingIds =
+          await AnnualPrepayRenewals.getPaymentPendingCustomerIds();
+      } catch (err) {
+        logger.warn(`[billing-cron] retry-sweep pending-prepay lookup failed — proceeding unguarded: ${err.message}`);
+      }
+    }
+
     let retried = 0;
     let succeeded = 0;
     let failedAgain = 0;
@@ -436,6 +512,142 @@ const BillingCron = {
       if (customer.deleted_at) {
         logger.warn(`[billing-cron] Customer ${payment.customer_id} is soft-deleted — skipping retry for payment ${payment.id}`);
         continue;
+      }
+
+      // GUARD (mirrors monthly GUARD 1): autopay disabled — the customer
+      // deliberately turned off automatic charging, so the ladder STOPS
+      // (disarm, no supersede: the row stays a visible, collectible debt
+      // for manual follow-up instead of re-charging a card the customer
+      // said not to touch — or, worse, throwing 'no autopay method',
+      // burning retry rungs on decline SMS and auto-pausing service).
+      if (customer.autopay_enabled === false) {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            failure_reason: db.raw(
+              "COALESCE(failure_reason, '') || ' — retry ladder stopped: autopay disabled (collect manually)'",
+            ),
+          }).catch((updErr) => logger.error(`[billing-cron] retry disarm (autopay disabled) failed for payment ${payment.id}: ${updErr.message}`));
+        await logAutopay(payment.customer_id, 'skipped_disabled', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', ladder_stopped: true },
+        }).catch(() => {});
+        logger.info(`[billing-cron] Retry skipped for payment ${payment.id} — autopay disabled, ladder disarmed`);
+        continue;
+      }
+
+      // GUARD (mirrors monthly GUARD 2): autopay paused — temporary by
+      // definition, so skip WITHOUT disarming; the sweep re-evaluates
+      // daily and collection resumes when the pause lapses.
+      if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) >= new Date(new Date().toDateString())) {
+        await logAutopay(payment.customer_id, 'skipped_paused', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', paused_until: customer.autopay_paused_until },
+        }).catch(() => {});
+        continue;
+      }
+
+      // GUARDS (mirror monthly GUARD 4/5) — monthly obligations only:
+      // an annual prepay covering the OBLIGATION absorbs it (charging
+      // would double-bill on top of the prepayment), so the row resolves
+      // non-collectible with the same self-superseding convention as the
+      // parked states. A pending prepay commitment just holds the ladder
+      // (skip, stay armed) until it activates or cancels.
+      //
+      // Month of obligation: the failed row's carried billed_month stamp
+      // (a rung-created row has the rung day as payment_date, not the
+      // month owed); payment_date for pre-stamp legacy rows.
+      const isMonthlyObligation = (payment.description || '').includes('WaveGuard Monthly');
+      let rowMeta = {};
+      try {
+        rowMeta = payment.metadata
+          ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+          : {};
+      } catch (e) { /* unparseable legacy metadata — fall through to payment_date */ }
+      const obligationMonth = rowMeta.billed_month || monthKeyOf(payment.payment_date);
+      // Coverage is checked on the obligation's original attempt date when
+      // the row still carries it (payment_date in the obligation month);
+      // first-of-month otherwise. Coverage-as-of-TODAY would wrongly
+      // write off debt from before the term started. No resolvable
+      // obligation date → no absorb (conservative: keep collecting).
+      const obligationDateKey = (obligationMonth && monthKeyOf(payment.payment_date) === obligationMonth)
+        ? dateKeyOf(payment.payment_date)
+        : (obligationMonth ? `${obligationMonth}-01` : null);
+      const annualPrepayCoveredIds = (isMonthlyObligation && obligationDateKey)
+        ? await coveredIdsOn(obligationDateKey)
+        : new Set();
+      if (isMonthlyObligation && annualPrepayCoveredIds.has(String(payment.customer_id))) {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            superseded_by_payment_id: payment.id,
+            failure_reason: db.raw(
+              "COALESCE(failure_reason, '') || ' — resolved: absorbed by active annual prepay coverage'",
+            ),
+          }).catch((updErr) => logger.error(`[billing-cron] retry absorb (annual prepay) failed for payment ${payment.id}: ${updErr.message}`));
+        await logAutopay(payment.customer_id, 'skipped_annual_prepay', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', ladder_stopped: true },
+        }).catch(() => {});
+        logger.info(`[billing-cron] Retry for payment ${payment.id} absorbed by annual prepay coverage`);
+        continue;
+      }
+      if (isMonthlyObligation && annualPrepayPendingIds.has(String(payment.customer_id))) {
+        await logAutopay(payment.customer_id, 'skipped_annual_prepay_pending', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry' },
+        }).catch(() => {});
+        continue;
+      }
+
+      // GUARD (mirrors the monthly path's month dedupe): obligation month
+      // already collected — the money came in through another door after
+      // this rung was armed (admin charge-now, customer self-pay, an
+      // overlapping collection path), so re-charging would double-bill.
+      // Match metadata-first (billed_month stamp), payment_date window +
+      // description marker as the legacy fallback, exactly like the
+      // monthly dedupe. Resolve the row against the collecting payment.
+      if (isMonthlyObligation) {
+        if (obligationMonth) {
+          const [obYear, obMonth] = obligationMonth.split('-').map(Number);
+          const obStart = `${obligationMonth}-01`;
+          const obLastDay = new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate();
+          const obEnd = `${obligationMonth}-${String(obLastDay).padStart(2, '0')}`;
+          const collected = await db('payments')
+            .where({ customer_id: payment.customer_id })
+            .whereNot({ id: payment.id })
+            .whereIn('status', ['paid', 'processing'])
+            .where(function () {
+              this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
+                .orWhere(function () {
+                  this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                    .andWhere('payment_date', '>=', obStart)
+                    .andWhere('payment_date', '<=', obEnd)
+                    .andWhere('description', 'like', '%WaveGuard Monthly%');
+                });
+            })
+            .first();
+          if (collected) {
+            await db('payments')
+              .where({ id: payment.id })
+              .update({
+                next_retry_at: null,
+                superseded_by_payment_id: collected.id,
+                failure_reason: db.raw(
+                  'COALESCE(failure_reason, \'\') || ? ',
+                  [` — resolved: ${obligationMonth} already collected by payment ${collected.id}`],
+                ),
+              }).catch((updErr) => logger.error(`[billing-cron] retry disarm (already collected) failed for payment ${payment.id}: ${updErr.message}`));
+            await logAutopay(payment.customer_id, 'skipped_already_paid', {
+              paymentId: payment.id,
+              details: { source: 'autopay_retry', collected_by_payment_id: collected.id, billed_month: obligationMonth, ladder_stopped: true },
+            }).catch(() => {});
+            logger.info(`[billing-cron] Retry for payment ${payment.id} skipped — ${obligationMonth} already collected by payment ${collected.id}`);
+            continue;
+          }
+        }
       }
 
       // Ambiguous no-PI failure: paymentIntents.create() died on a
@@ -533,9 +745,15 @@ const BillingCron = {
           const monthlyCustomer = await db('customers').where({ id: payment.customer_id }).first();
           const monthlyDescription = description
             || `${monthlyCustomer?.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${monthlyCustomer?.first_name} ${monthlyCustomer?.last_name}`;
+          // Month-of-obligation stamp: this retry collects the ORIGINAL
+          // failed attempt's month (obligationMonth, resolved above), not
+          // the month the rung happens to land in — a July decline
+          // recovered Aug 1 must not satisfy August's month-window dedupe
+          // and skip a whole billing cycle.
           newPayment = await service.charge(payment.customer_id, baseAmount, monthlyDescription, {
             type: 'monthly_autopay',
             tier: monthlyCustomer?.waveguard_tier || '',
+            billed_month: obligationMonth || undefined,
           }, retryIdempotencyKey);
         } else {
           newPayment = await service.chargeOneTime(

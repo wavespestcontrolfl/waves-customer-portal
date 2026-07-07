@@ -793,6 +793,10 @@ const StripeService = {
             base_amount: baseAmount,
             card_surcharge: surchargeAmount,
             idempotency_key: effectiveIdempotencyKey,
+            // Carried on FAILED rows so retry rungs keep attributing the
+            // charge to the original obligation month (a rung's own row
+            // gets payment_date of the rung day, not the month owed).
+            ...(metadata.billed_month ? { billed_month: metadata.billed_month } : {}),
           }),
         }).returning('*');
         return row;
@@ -888,6 +892,10 @@ const StripeService = {
             card_surcharge: surchargeAmount,
             surcharge_rate_bps: rateBps,
             surcharge_policy_version: policyVersion,
+            // Month-of-obligation stamp: billing-cron's month dedupe and
+            // the retry sweep's already-collected guard match on this
+            // (metadata-first, payment_date window only as legacy fallback).
+            ...(metadata.billed_month ? { billed_month: metadata.billed_month } : {}),
           }),
         }).returning('*');
         return row;
@@ -976,6 +984,10 @@ const StripeService = {
     return this.charge(customerId, customer.monthly_rate, description, {
       type: 'monthly_autopay',
       tier: customer.waveguard_tier || '',
+      // Month-of-obligation stamp — billing-cron's duplicate guard and the
+      // retry sweep match on this, not on the date the money landed, so a
+      // late-recovered charge can't satisfy the wrong month.
+      billed_month: etDateString().slice(0, 7),
     }, effectiveKey);
   },
 
