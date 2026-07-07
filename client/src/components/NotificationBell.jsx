@@ -182,7 +182,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const isDark = type === 'admin';
   const colors = isDark
     ? { bg: '#FFFFFF', border: '#E2E8F0', text: '#334155', muted: '#64748B', teal: '#0A7EC2', unreadBg: '#F0F7FC', white: '#0F172A', badge: '#C0392B' }
-    : { bg: '#FFFFFF', border: 'rgba(27,44,91,0.12)', text: '#1B2C5B', muted: '#64748B', teal: '#009CDE', unreadBg: 'rgba(0,156,222,0.10)', white: '#FFFFFF', badge: '#C8102E' };
+    // Customer palette = glass tokens (#04395E ink, #0A7EC2 accent) — the
+    // old marketing #1B2C5B/#009CDE rendered inside the glassed portal panel.
+    : { bg: '#FFFFFF', border: 'rgba(4,57,94,0.14)', text: '#04395E', muted: '#64748B', teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
 
   return (
     <div ref={bellRef} style={{ position: 'relative' }}>

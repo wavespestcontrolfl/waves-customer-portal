@@ -787,7 +787,9 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
               key={signal}
               style={{
                 border: `1px solid ${ESTIMATE_BORDER}`,
-                borderLeft: `4px solid ${COLORS.blueBright}`,
+                /* glass accent blue — the walker recolors text but never
+                   border-left, so the old #009CDE survived under glass */
+                borderLeft: '4px solid #0A7EC2',
                 borderRadius: 10,
                 background: COLORS.white,
                 padding: '12px 12px',
@@ -871,7 +873,8 @@ function MembershipCard({ membership }) {
       {membership.upgrade ? (
         <div style={{
           background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`,
-          borderLeft: `4px solid ${COLORS.blueBright}`, borderRadius: 10, padding: '12px 16px',
+          /* glass accent blue — walker doesn't repaint border-left */
+          borderLeft: '4px solid #0A7EC2', borderRadius: 10, padding: '12px 16px',
           color: ESTIMATE_TEXT, fontSize: 15, lineHeight: 1.5,
         }}>
           Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}

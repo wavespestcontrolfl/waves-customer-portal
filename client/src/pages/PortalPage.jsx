@@ -433,8 +433,10 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }
     <div style={{
       padding: 16,
       borderRadius: 8,
-      background: PORTAL_SHELL.page,
-      border: `1px solid ${PORTAL_SHELL.border}`,
+      // Whisper-white, not the warm PORTAL_SHELL.page — this inline state
+      // sits inside glass cards and the warm wash read as the old theme.
+      background: GLASS_SUBTLE,
+      border: '1px solid rgba(255,255,255,0.65)',
       display: 'flex',
       gap: 12,
       alignItems: 'flex-start',
@@ -1221,7 +1223,9 @@ function DashboardTab({ customer, onSwitchTab }) {
   // card; inert without the glass theme mounted (no offsets, no stacking context).
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
-  const subtle = PORTAL_SHELL.page;
+  // Whisper-white like every other tab — the warm PORTAL_SHELL.page wash
+  // read as the old theme on the glass scene (portal is glass-only).
+  const subtle = GLASS_SUBTLE;
   const dashboardLabel = {
     fontSize: 14,
     fontWeight: 850,
@@ -1391,8 +1395,8 @@ function DashboardTab({ customer, onSwitchTab }) {
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
-            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#FAF8F3',
-            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E7E2D7'}`,
+            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : GLASS_SUBTLE,
+            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : 'rgba(255,255,255,0.65)'}`,
             cursor: 'pointer',
             textAlign: 'left',
             fontFamily: FONTS.body,
@@ -1442,7 +1446,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   return (
                     <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
                       minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : '#FAF8F3',
+                      background: active ? color : GLASS_SUBTLE,
                       color: active ? '#fff' : B.grayMid,
                       fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
                     }}>{n}</button>
@@ -4557,13 +4561,13 @@ function ServicePrefsSection() {
                 width: 34,
                 height: 34,
                 borderRadius: 8,
-                background: on ? '#F8FCFE' : '#FAF8F3',
+                background: on ? '#F8FCFE' : GLASS_SUBTLE,
                 color: on ? B.blueDeeper : ESTIMATE_MUTED,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                border: '1px solid #E7E2D7',
+                border: '1px solid rgba(255,255,255,0.65)',
               }}>
                 <Icon name={r.icon} size={17} strokeWidth={2} />
               </span>
@@ -6571,7 +6575,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime, 0) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
-                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
+                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
                         <div style={{ color: '#475569', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                         <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                       </div>
@@ -6943,7 +6947,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                           selected.estimatedPlanMonthly ? { label: 'Plan total', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
                           selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                         ].filter(Boolean).map(item => (
-                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
+                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
                             <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                             <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                           </div>
@@ -8718,7 +8722,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
-    pending: { label: 'Pending', color: muted, bg: '#FAF8F3' },
+    pending: { label: 'Pending', color: muted, bg: GLASS_SUBTLE },
     contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#F8FCFE' },
     estimated: { label: 'Estimated', color: B.orange, bg: `${B.orange}14` },
     signed_up: { label: 'Signed up', color: B.blueDeeper, bg: '#F0FDF4' },
@@ -10258,13 +10262,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                       gap: 8,
                     }}>
-                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Plan</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
                           {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
                         </div>
                       </div>
-                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Last service</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
@@ -10545,8 +10549,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     alignItems: photos.length ? 'stretch' : 'center',
                     minHeight: photos.length ? 0 : 92,
                     borderRadius: 8,
-                    border: photos.length ? 'none' : '1px solid #E7E2D7',
-                    background: photos.length ? 'transparent' : '#FAF8F3',
+                    border: photos.length ? 'none' : '1px solid rgba(255,255,255,0.65)',
+                    background: photos.length ? 'transparent' : GLASS_SUBTLE,
                     padding: photos.length ? 0 : 12,
                     color: muted,
                     fontSize: 14,
@@ -10722,9 +10726,9 @@ function MyRequestsCard() {
           const created = new Date(r.createdAt);
           return (
             <article key={r.id} style={{
-              border: '1px solid #E7E2D7',
+              border: '1px solid rgba(255,255,255,0.65)',
               borderRadius: 8,
-              background: '#FAF8F3',
+              background: GLASS_SUBTLE,
               padding: 12,
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
@@ -11062,10 +11066,10 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           <div style={{
             display: 'flex',
             gap: 4,
-            background: '#FAF8F3',
+            background: GLASS_SUBTLE,
             borderRadius: 8,
             padding: 4,
-            border: '1px solid #E7E2D7',
+            border: '1px solid rgba(255,255,255,0.65)',
             minWidth: compact ? '100%' : 260,
           }}>
             {pill('upcoming', 'Upcoming')}
