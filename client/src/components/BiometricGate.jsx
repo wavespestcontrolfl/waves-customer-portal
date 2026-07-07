@@ -171,13 +171,21 @@ export default function BiometricGate({ children }) {
   // Activate the shared glass theme (glass-theme.css) so the overlay's
   // data-glass surfaces render. Attribute-only, and only when no page has
   // already mounted a scene — the pages own their scene lifecycle, we must
-  // never remove an attribute a page set (see the header comment).
+  // never remove an attribute a page set (see the header comment). The value
+  // 'lock' styles identically to 'full' (only "pro" has value-specific CSS)
+  // but marks ownership: if a lazy page's useGlassSurface mounts while the
+  // lock is up, applyGlassScene overwrites the value, and cleanup sees the
+  // attribute is no longer ours and leaves the page's theme in place.
   useEffect(() => {
     if (!locked) return undefined;
     const html = document.documentElement;
     if (html.hasAttribute('data-glass-theme')) return undefined;
-    html.setAttribute('data-glass-theme', 'full');
-    return () => html.removeAttribute('data-glass-theme');
+    html.setAttribute('data-glass-theme', 'lock');
+    return () => {
+      if (html.getAttribute('data-glass-theme') === 'lock') {
+        html.removeAttribute('data-glass-theme');
+      }
+    };
   }, [locked]);
 
   // Children stay mounted (route state preserved); the lock is an overlay on top.

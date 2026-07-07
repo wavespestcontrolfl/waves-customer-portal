@@ -29,9 +29,18 @@ npm install \
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build
 
+# Capacitor 8 defaults new iOS projects to Swift Package Manager, but
+# @aparajita/capacitor-biometric-auth ships no Package.swift — under SPM it is
+# silently EXCLUDED from the build, and biometric.js fails open when the plugin
+# is missing, so a fresh SPM project produces an app with no Face ID lock at all.
+# Pin to CocoaPods until every plugin is SPM-compatible.
+if [ -d "ios/App/CapApp-SPM" ]; then
+  echo "==> 3/5  Existing project is SPM-based (drops the Face ID plugin) — regenerating with CocoaPods…"
+  rm -rf ios
+fi
 if [ ! -d "ios/App" ]; then
   echo "==> 3/5  Generating native iOS project (client/ios/App)…"
-  npx cap add ios
+  npx cap add ios --packagemanager Cocoapods
 else
   echo "==> 3/5  Native iOS project already exists — skipping cap add."
 fi
