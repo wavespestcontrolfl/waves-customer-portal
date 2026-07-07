@@ -961,6 +961,36 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 
+  test('an account-credit-covered (bare prepaid) visit invoice still returns the slice — real credit was consumed', async () => {
+    // The credit seam flips fully credit-covered invoices to 'prepaid' with NO
+    // annual_prepay_covered_term_id — that consumed the customer's actual
+    // credit for the visit, so the annual's slice must still come back.
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'prepaid', payment_recorded_at: null, annual_prepay_covered_term_id: null } })],
+      customers: [query({ first: { id: 'customer-1' } })],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 1 });
+    expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: 100 }), db);
+  });
+
+  test('a coverage-settled visit invoice (covered_term marker set) is skipped — the reopen path owns reversals', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'prepaid', payment_recorded_at: null, annual_prepay_covered_term_id: 'term-other' } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
   test('never-invoiced and already-covered completions need nothing', async () => {
     setDbQueues({
       scheduled_services: [query({
@@ -980,6 +1010,67 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
 
     expect(result).toEqual({ settled: 0, credited: 0 });
     expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+});
+
+describe('reversePendingWindowCompletionCredits (refund claw-back)', () => {
+  const { postCreditMovement } = require('../services/customer-credit');
+  const TERM = { id: 'term-1', customer_id: 'customer-1' };
+  const creditRow = {
+    id: 'cl-1',
+    delta: 100,
+    invoice_id: 'inv-visit',
+    note: "Annual prepay paid after this visit already billed — the visit's prepay share returned as account credit (term term-1, visit svc-done)",
+  };
+
+  beforeEach(() => {
+    postCreditMovement.mockReset();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('reverses an issued pending-completion credit when the annual prepay refunds', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 150 } })],
+      customer_credit_ledger: [query({ rows: [creditRow] }), query({ rows: [] })],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM);
+
+    expect(reversed).toBe(1);
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'customer-1',
+      delta: -100,
+      source: 'adjustment',
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion_reversal',
+    }), db);
+  });
+
+  test('an existing reversal row for the term+visit marker blocks a second claw-back', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 150 } })],
+      customer_credit_ledger: [
+        query({ rows: [creditRow] }),
+        query({ rows: [{ note: 'Annual prepay refunded — reversing the visit\'s pending-completion credit (term term-1, visit svc-done)' }] }),
+      ],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM);
+
+    expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('an exhausted balance is never pulled negative — shortfall is logged for operator follow-up', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 0 } })],
+      customer_credit_ledger: [query({ rows: [creditRow] }), query({ rows: [] })],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM);
+
+    expect(reversed).toBe(0);
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 });

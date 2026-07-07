@@ -679,10 +679,17 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         .first();
       if (!invoice) continue;
       const invoiceStatus = String(invoice.status || '').toLowerCase();
-      if (invoiceStatus === 'prepaid'
-        || String(invoice.annual_prepay_covered_term_id || '') === String(term.id)) continue;
+      // Coverage-settled by a prepay term (this or another) — delivered; the
+      // refund reopen path owns any reversal. A bare 'prepaid' WITHOUT the
+      // coverage marker is different: the account-credit seam flips fully
+      // credit-covered invoices to 'prepaid', which CONSUMED the customer's
+      // real credit for the visit — that collects money and the annual's
+      // slice must still come back below.
+      if (invoice.annual_prepay_covered_term_id) continue;
       let settledHere = false;
-      const paidForVisit = invoiceStatus === 'paid' || !!invoice.payment_recorded_at;
+      const paidForVisit = invoiceStatus === 'paid'
+        || invoiceStatus === 'prepaid'
+        || !!invoice.payment_recorded_at;
       if (!paidForVisit && invoiceStatus !== 'processing') {
         try {
           const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
@@ -739,6 +746,70 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
     logger.warn(`[annual-prepay] pending-window completion reconcile skipped for term ${term?.id}: ${err.message}`);
   }
   return summary;
+}
+
+// Refunding/voiding the annual prepay invoice must also claw back any
+// pending-window completion credits it issued — the refund returns the FULL
+// annual, so a kept visit-slice credit would refund that slice twice.
+// Ledger-deduped per original credit's term+visit marker, under the same
+// customer row lock the grants use. Reversal is capped at the balance still
+// available: credit the customer already SPENT can't be pulled from a
+// non-negative balance — reverse what remains and warn the shortfall for
+// operator follow-up (a partial reversal still writes its dedupe row, so a
+// later retry never claws back more).
+const PENDING_COMPLETION_REVERSAL_BY = 'system:annual_prepay_pending_completion_reversal';
+
+async function reversePendingWindowCompletionCredits(term, conn = db) {
+  let reversedCount = 0;
+  try {
+    if (!term?.id || !term.customer_id) return reversedCount;
+    const work = async (t) => {
+      const customer = await t('customers')
+        .where({ id: term.customer_id })
+        .forUpdate()
+        .first('id', 'account_credits');
+      if (!customer) return;
+      let balance = Number(customer.account_credits) || 0;
+      const credits = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+        .where('note', 'like', `%term ${term.id},%`)
+        .where('delta', '>', 0)
+        .select('*');
+      if (!credits.length) return;
+      const reversalNotes = (await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_REVERSAL_BY })
+        .select('note')).map((r) => String(r.note || ''));
+      const { postCreditMovement } = require('./customer-credit');
+      for (const credit of credits) {
+        const markerMatch = String(credit.note || '').match(/\(term [^)]*\)/);
+        const marker = markerMatch ? markerMatch[0] : `(term ${term.id}, ledger ${credit.id})`;
+        if (reversalNotes.some((note) => note.includes(marker))) continue;
+        const creditAmount = Number(credit.delta) || 0;
+        const reverseAmount = Math.min(balance, creditAmount);
+        if (!(reverseAmount > 0)) {
+          logger.warn(`[annual-prepay] pending-completion credit ${marker} not reversible — balance exhausted (customer ${term.customer_id}); operator follow-up needed`);
+          continue;
+        }
+        if (reverseAmount < creditAmount) {
+          logger.warn(`[annual-prepay] pending-completion credit ${marker} only partially reversible ($${reverseAmount.toFixed(2)} of $${creditAmount.toFixed(2)}) — balance exhausted; operator follow-up needed`);
+        }
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: -reverseAmount,
+          source: 'adjustment',
+          invoiceId: credit.invoice_id || null,
+          note: `Annual prepay refunded — reversing the visit's pending-completion credit ${marker}`,
+          createdBy: PENDING_COMPLETION_REVERSAL_BY,
+        }, t);
+        balance -= reverseAmount;
+        reversedCount += 1;
+      }
+    };
+    if (conn === db) await db.transaction(work); else await work(conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] pending-completion credit reversal skipped for term ${term?.id}: ${err.message}`);
+  }
+  return reversedCount;
 }
 
 // When a paid prepay invoice is voided/refunded the term flips to 'cancelled',
@@ -1014,6 +1085,10 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         } catch (err) {
           logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${term.id}: ${err.message}`);
         }
+        // And claw back the pending-window completion credits this term
+        // issued — the full-annual refund would otherwise refund those
+        // slices twice (once inside the refund, once as kept credit).
+        await reversePendingWindowCompletionCredits(updated, conn);
       }
     }
 
@@ -1046,7 +1121,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             this.where('status', 'cancelled').whereNotNull('renewal_decision');
           });
       })
-      .select('id');
+      .select('id', 'customer_id');
     for (const decided of decidedCoveredTerms) {
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
@@ -1056,6 +1131,36 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       } catch (err) {
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
       }
+      await reversePendingWindowCompletionCredits(decided, conn);
+    }
+  }
+
+  // A VISIT invoice resolving as paid can be the missing piece for a
+  // pending-window completion slice the activation reconcile had to leave
+  // unresolved (processing / in-flight / settle-refused): the visit
+  // invoice's own payment never matches prepay_invoice_id, so nothing above
+  // selects a term for it — find the covering term through the visit row's
+  // attach link and re-run its reconcile here.
+  if (nextStatus === 'active' && !terms.length) {
+    try {
+      const withLink = invoice.scheduled_service_id !== undefined
+        ? invoice
+        : await conn('invoices').where({ id: invoice.id }).first('id', 'scheduled_service_id');
+      const visitId = withLink?.scheduled_service_id;
+      if (visitId) {
+        const visitRow = await conn('scheduled_services')
+          .where({ id: visitId })
+          .first('id', 'annual_prepay_term_id');
+        if (visitRow?.annual_prepay_term_id) {
+          const coveringTerm = await conn('annual_prepay_terms')
+            .where({ id: visitRow.annual_prepay_term_id })
+            .whereIn('status', ACTIVE_STATUSES)
+            .first('*');
+          if (coveringTerm) await reconcilePendingWindowCompletions(coveringTerm, conn);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] visit-invoice reconcile hook skipped for invoice ${invoice.id}: ${err.message}`);
     }
   }
 
@@ -2036,6 +2141,7 @@ module.exports = {
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
   reconcilePendingWindowCompletions,
+  reversePendingWindowCompletionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,
