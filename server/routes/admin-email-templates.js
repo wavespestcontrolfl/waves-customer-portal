@@ -538,13 +538,76 @@ router.get('/suppressions', async (req, res, next) => {
     if (email) query = query.whereRaw('LOWER(s.email) LIKE ?', [`%${email}%`]);
 
     const suppressions = await query;
+
+    // Enrich with the matching customer record and blocked-send tallies so the
+    // panel is workable as a call list (who is this, how do I reach them, how
+    // much mail have they missed). Suppressions are keyed by email string only.
+    const emails = [...new Set(
+      suppressions.map((s) => String(s.email || '').trim().toLowerCase()).filter(Boolean),
+    )];
+    const customersByEmail = new Map();
+    const blockedByEmail = new Map();
+    if (emails.length) {
+      // Any of the four sendable columns can hold the suppressed address
+      // (mirrors CUSTOMER_EMAIL_FIELDS in email-bounce-recovery.js); a
+      // primary-email match wins over a service-contact match.
+      const emailFields = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
+      const customerRows = await db('customers')
+        .select('id', 'first_name', 'last_name', 'phone', 'pipeline_stage', ...emailFields)
+        .where(function matchAnyEmailField() {
+          for (const field of emailFields) {
+            this.orWhereIn(db.raw(`LOWER(${field})`), emails);
+          }
+        });
+      for (const row of customerRows) {
+        for (const field of emailFields) {
+          const lc = String(row[field] || '').trim().toLowerCase();
+          if (!lc || !emails.includes(lc)) continue;
+          const existing = customersByEmail.get(lc);
+          if (existing && existing.matched_field === 'email') continue;
+          if (existing && field !== 'email') continue;
+          customersByEmail.set(lc, {
+            id: row.id,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            phone: row.phone,
+            pipeline_stage: row.pipeline_stage,
+            matched_field: field,
+          });
+        }
+      }
+      const blockedRows = await db('email_messages')
+        .select(db.raw('LOWER(recipient_email_snapshot) as email_lc'))
+        .where({ status: 'blocked' })
+        .whereIn(db.raw('LOWER(recipient_email_snapshot)'), emails)
+        .count('* as blocked_count')
+        .max('created_at as last_blocked_at')
+        .groupBy(db.raw('LOWER(recipient_email_snapshot)'));
+      for (const row of blockedRows) {
+        blockedByEmail.set(row.email_lc, {
+          blocked_count: Number(row.blocked_count || 0),
+          last_blocked_at: row.last_blocked_at,
+        });
+      }
+    }
+    const enriched = suppressions.map((s) => {
+      const lc = String(s.email || '').trim().toLowerCase();
+      const blocked = blockedByEmail.get(lc);
+      return {
+        ...s,
+        customer: customersByEmail.get(lc) || null,
+        blocked_count: blocked ? blocked.blocked_count : 0,
+        last_blocked_at: blocked ? blocked.last_blocked_at : null,
+      };
+    });
+
     const statsRows = await db('email_suppressions')
       .select('group_key', 'suppression_type')
       .where({ status: 'active' })
       .count('* as count')
       .groupBy('group_key', 'suppression_type');
     res.json({
-      suppressions,
+      suppressions: enriched,
       stats: statsRows.map((r) => ({ ...r, count: Number(r.count || 0) })),
     });
   } catch (err) { next(err); }
