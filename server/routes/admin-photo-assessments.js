@@ -395,6 +395,17 @@ router.post('/:type/:id/link', async (req, res, next) => {
   }
 });
 
+// The public /claim transaction is the ONLY writer of lead capture,
+// attribution, and the pricing snapshot — and it 409s once status='sent'.
+// Minting a token for a still-unclaimed public_funnel row would skip all of
+// that AND permanently lock the prospect's own unlock out, so admin minting
+// (Get link / Send report) requires the row to be claimed first. Admin-created
+// rows never claim and are always releasable.
+function isReleasable(row) {
+  return row.source !== 'public_funnel' || !!row.claimed_at;
+}
+const UNCLAIMED_ERROR = 'This prospect has not unlocked the report yet — sending now would skip lead capture and permanently block their claim. Link or create the lead via their unlock instead.';
+
 // Atomic mint: COALESCE keeps the FIRST token under concurrent mints /
 // double-submits (both requests read back the same persisted token, so
 // neither caller carries a link the other invalidated). Every mint refreshes
@@ -429,6 +440,7 @@ router.post('/:type/:id/generate-link', async (req, res, next) => {
     if (!['analyzed', 'sent'].includes(row.status)) {
       return res.status(409).json({ error: `Cannot generate a report link for a ${row.status} assessment` });
     }
+    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
     const { reportToken, expiresAt } = await mintReportToken(config, row.id);
     return res.json({ success: true, reportUrl: portalUrl(config.reportPath(reportToken)), expiresAt });
   } catch (err) {
@@ -450,6 +462,7 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     if (!['analyzed', 'sent'].includes(row.status)) {
       return res.status(409).json({ error: `Cannot send a report for a ${row.status} assessment` });
     }
+    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
 
     const contact = parseJson(row.contact_snapshot, {});
     // Recipient resolution: explicit override → snapshot → linked lead →

@@ -325,7 +325,14 @@ function CustomerPreview({ type, preview }) {
         </Row>
       ) : null}
       {Array.isArray(preview.pricing?.tiers) && preview.pricing.tiers.length ? (
-        <Row label="Pricing shown">{preview.pricing.tiers.map((t) => `${t.label}: $${t.monthly}/mo`).join(" · ")}</Row>
+        <Row label="Pricing shown">
+          {preview.pricing.tiers.map((t) => {
+            const price = t.monthly != null ? `$${t.monthly}/mo`
+              : t.one_time != null ? `$${t.one_time} one-time`
+                : t.annual != null ? `$${t.annual}/yr` : "—";
+            return `${t.label}: ${price}`;
+          }).join(" · ")}
+        </Row>
       ) : null}
     </div>
   );
@@ -357,6 +364,11 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
 
   const assessment = data?.assessment;
   const stage = assessment ? stageOf(assessment) : null;
+  // Server contract: unclaimed public-funnel rows can't mint or send — the
+  // prospect's /claim is the only path that captures the lead and pricing.
+  const canRelease = assessment
+    && ["analyzed", "sent"].includes(assessment.status)
+    && (assessment.source !== "public_funnel" || !!assessment.claimed_at);
   const contactName = assessment
     ? [assessment.contact?.first_name, assessment.contact?.last_name].filter(Boolean).join(" ")
     : "";
@@ -407,13 +419,13 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
           <div className="flex gap-2 flex-wrap">
             {assessment?.report_url ? (
               <Button variant="secondary" onClick={copyLink}>{copied ? "Copied" : "Copy link"}</Button>
-            ) : ["analyzed", "sent"].includes(assessment?.status) ? (
+            ) : canRelease ? (
               <Button variant="secondary" onClick={generateLink} disabled={minting}>
                 {copied ? "Copied" : minting ? "Getting link…" : "Get link"}
               </Button>
             ) : null}
             <Button variant="secondary" onClick={() => setShowLink(true)}>Link…</Button>
-            <Button onClick={() => setShowSend(true)}>Send report</Button>
+            {canRelease ? <Button onClick={() => setShowSend(true)}>Send report</Button> : null}
           </div>
         </div>
       </SheetHeader>

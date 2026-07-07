@@ -202,8 +202,17 @@ export default function PestReportViewPage() {
         <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
           {/* Generic labels arrive lowercase ("an ant species") and read as a
               sentence; named labels ("Ghost Ants", "Likely Ghost Ants") stand
-              alone as the headline. */}
-          {/^[a-z]/.test(report.identified?.label || '') ? `We identified ${report.identified.label}` : (report.identified?.label || 'We took a close look')}
+              alone as the headline. Inspection-first IDs (termite/rodent/
+              bed-bug signs) are hedged even at high confidence — the photo is
+              suggestive, the free inspection confirms — so a plainly-named
+              hedged label must not render as a confirmed finding. */}
+          {(() => {
+            const label = report.identified?.label || '';
+            if (!label) return 'We took a close look';
+            if (/^[a-z]/.test(label)) return `We identified ${label}`;
+            if (report.identified?.hedged && !/^Likely\b/.test(label)) return `Possible ${label}`;
+            return label;
+          })()}
         </p>
         {safetyFlags.length ? (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>

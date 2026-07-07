@@ -106,6 +106,9 @@ function lawnRow(overrides = {}) {
     ai_analysis: JSON.stringify({ prospect_note: 'brown patches', provenance: { source: 'public_funnel' } }),
     contact_snapshot: JSON.stringify({ first_name: 'Dana', email: 'dana@example.com' }),
     created_at: '2026-07-07T12:00:00.000Z',
+    // Claimed by default: public_funnel rows must go through /claim before
+    // the admin can mint or send (the releasability contract).
+    claimed_at: '2026-07-07T12:30:00.000Z',
     lead_id: null,
     customer_id: null,
     report_token: null,
@@ -131,6 +134,7 @@ function pestRow(overrides = {}) {
     ai_analysis: JSON.stringify({ prospect_note: 'kitchen counter' }),
     contact_snapshot: JSON.stringify({ first_name: 'Sam', email: 'sam@example.com' }),
     created_at: '2026-07-07T13:00:00.000Z',
+    claimed_at: '2026-07-07T13:30:00.000Z',
     lead_id: null,
     customer_id: null,
     report_token: null,
@@ -412,6 +416,32 @@ describe('POST /:type/:id/generate-link', () => {
       const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/generate-link`, { method: 'POST' });
       expect(res.status).toBe(409);
       expect(updates.lawn_diagnostics || []).toHaveLength(0);
+    });
+  });
+
+  test('unclaimed public-funnel rows cannot mint OR send — claim is the only unlock path', async () => {
+    // Minting would flip status to sent, which the /claim transaction 409s on
+    // — permanently bypassing lead capture, attribution, and the pricing
+    // snapshot. Both admin release paths must refuse.
+    mockRows.lawn_diagnostics = [lawnRow({ claimed_at: null })];
+    await withServer(async (base) => {
+      const mint = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/generate-link`, { method: 'POST' });
+      expect(mint.status).toBe(409);
+      const send = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      expect(send.status).toBe(409);
+      expect(mockSendEmail).not.toHaveBeenCalled();
+      expect(updates.lawn_diagnostics || []).toHaveLength(0);
+    });
+  });
+
+  test('admin-created rows never claim and stay releasable', async () => {
+    mockRows.pest_identifications = [pestRow({ source: 'admin', claimed_at: null })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}/generate-link`, { method: 'POST' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).reportUrl).toContain('/pest-report/');
     });
   });
 });
