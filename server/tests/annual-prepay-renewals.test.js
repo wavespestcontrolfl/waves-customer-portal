@@ -79,6 +79,18 @@ describe('annual prepay renewal helpers', () => {
     _private.resetCachesForTests();
   });
 
+  test('exposes serviceMatchesCoverage at the module root (the booking preflight destructures it)', () => {
+    // admin-schedule's one-step-prepay preflight does
+    // `const { serviceMatchesCoverage } = require('annual-prepay-renewals')` —
+    // when this only lived under _private the destructure was undefined and
+    // every eligible one-step booking 500'd.
+    expect(typeof AnnualPrepayRenewals.serviceMatchesCoverage).toBe('function');
+    expect(AnnualPrepayRenewals.serviceMatchesCoverage(
+      { service_type: 'Pest Control' },
+      'Quarterly Pest Control',
+    )).toBe(true);
+  });
+
   test('keeps PostgreSQL DATE objects on their calendar day', () => {
     expect(_private.dateOnly(new Date('2026-05-14T00:00:00.000Z'))).toBe('2026-05-14');
   });
@@ -948,6 +960,24 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
 
     expect(result).toEqual({ settled: 0, credited: 0 });
     expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  test('a PARTIALLY paid open invoice (payment_recorded_at, still collectible) gets neither settle nor credit', async () => {
+    // The in-person prepay application reduces the invoice total and stamps
+    // payment_recorded_at while the remainder stays collectible — crediting
+    // the full slice on that stamp alone would over-credit a partly-paid
+    // visit, and the settle helper refuses invoices with payments applied.
+    const InvoiceServiceLocal = require('../services/invoice');
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'pending', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(InvoiceServiceLocal.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 

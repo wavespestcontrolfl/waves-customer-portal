@@ -687,10 +687,18 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       // slice must still come back below.
       if (invoice.annual_prepay_covered_term_id) continue;
       let settledHere = false;
-      const paidForVisit = invoiceStatus === 'paid'
-        || invoiceStatus === 'prepaid'
-        || !!invoice.payment_recorded_at;
-      if (!paidForVisit && invoiceStatus !== 'processing') {
+      const paidForVisit = invoiceStatus === 'paid' || invoiceStatus === 'prepaid';
+      // A recorded payment on a still-OPEN invoice is a PARTIAL collection:
+      // the in-person prepay application (admin-schedule) reduces the total
+      // and stamps payment_recorded_at while leaving the remainder
+      // collectible. That's neither fully collected (crediting the whole
+      // slice would over-credit a partly-paid visit) nor settleable (the
+      // settle helper refuses invoices with payments applied) — leave it
+      // unresolved like the other in-flight shapes; when the remainder
+      // resolves, the invoice flips 'paid' and the payment webhook re-enters
+      // this reconcile.
+      const partiallyCollected = !paidForVisit && !!invoice.payment_recorded_at;
+      if (!paidForVisit && !partiallyCollected && invoiceStatus !== 'processing') {
         try {
           const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
           if (res?.settled) { summary.settled += 1; settledHere = true; }
@@ -2206,6 +2214,12 @@ module.exports = {
   createTermForAnnualPrepay,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
+  // Public: the one-step-prepay booking preflight (admin-schedule) matches the
+  // booked service against the quoted coverage with the SAME matcher that
+  // stamps/gates coverage — destructuring it from the module root must work
+  // (it used to live only under _private, which left the route's destructure
+  // undefined and 500'd the booking).
+  serviceMatchesCoverage,
   syncTermForInvoicePayment,
   syncTermForRefundedPayment,
   activatePaidPendingTerms,
