@@ -2581,3 +2581,38 @@ describe('deploy-match window uses CREATION time, not completion (audit regressi
     expect(PagesPoll.deploymentMatchesMergedPost(deploy, post)).toBe(false);
   });
 });
+
+describe('frontmatter date stamping (ET)', () => {
+  const { etDateString } = require('../utils/datetime-et');
+  const base = {
+    title: 'Date Stamp Test Post',
+    slug: 'date-stamp-test-post',
+    meta_description: 'A short guide used to exercise frontmatter date stamping.',
+    keyword: 'date stamping',
+    tag: 'Ants',
+    content: 'Body copy for the date stamping tests.',
+  };
+
+  test('a corrupt epoch-zero publish_date falls back to today ET (a live post shipped dated 1970-01-01)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: new Date(0) });
+    expect(data.published).toBe(etDateString());
+    expect(data.updated).toBe(etDateString());
+  });
+
+  test('a future publish_date clamps to today ET (posts may not claim a future publish date)', async () => {
+    const future = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: future });
+    expect(data.published).toBe(etDateString());
+  });
+
+  test('a valid past publish_date is kept and rendered in ET, not UTC', async () => {
+    // UTC midnight is still the prior evening in America/New_York.
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: new Date('2026-05-01T00:00:00.000Z') });
+    expect(data.published).toBe('2026-04-30');
+  });
+
+  test('an epoch-zero review stamp is dropped instead of rendering 1970', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, fact_checked_at: new Date(0) });
+    expect(data.fact_checked).toBeUndefined();
+  });
+});

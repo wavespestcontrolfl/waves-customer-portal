@@ -216,7 +216,7 @@ async function buildFrontmatter(post) {
   const author = post.author_slug ? await authorService.getAuthor(post.author_slug) : null;
   const reviewer = post.reviewer_slug ? await authorService.getAuthor(post.reviewer_slug) : null;
 
-  const today = (post.publish_date ? new Date(post.publish_date) : new Date()).toISOString().slice(0, 10);
+  const today = etDateOnly(post.publish_date) || etDateString();
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const canonical = `${hub}/${slug}/`;
 
@@ -225,8 +225,8 @@ async function buildFrontmatter(post) {
         ? post.featured_image_url
         : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${post.hero_image_ext || imageExtFromSource(post.featured_image_url)}`)
     : null;
-  const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
-  const factCheckedDate = dateOnly(post.fact_checked_at);
+  const technicallyReviewedDate = etDateOnly(post.technically_reviewed_at);
+  const factCheckedDate = etDateOnly(post.fact_checked_at);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
@@ -425,13 +425,16 @@ function clampTitle(title) {
 }
 
 function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body = '', { slug, canonical } = {}) {
-  const published = dateOnly(frontmatter.published)
-    || dateOnly(frontmatter.publish_date)
-    || dateOnly(brief.publish_window)
-    || etDateString();
-  const updated = dateOnly(frontmatter.updated) || published;
-  const reviewed = dateOnly(frontmatter.technically_reviewed) || updated;
-  const factChecked = dateOnly(frontmatter.fact_checked) || updated;
+  // Dates are stamped deterministically at PR-open, never taken from the
+  // writer agent's emitted frontmatter — models echo their (UTC) context date,
+  // which reads as "tomorrow" when the PR opens in the ET evening, and
+  // placeholder dates pass schema validation. This lane only ever publishes
+  // brand-new posts (single caller, fresh content/autonomous-* branch), so
+  // PR-open day in ET IS the publication date for all four fields.
+  const published = etDateString();
+  const updated = published;
+  const reviewed = published;
+  const factChecked = published;
   const heroAlt = String(frontmatter?.hero_image?.alt || frontmatter.hero_image_alt || frontmatter.title || '').trim();
   const defaultHeroSrc = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
   const emittedHeroSrc = String(frontmatter?.hero_image?.src || '').trim();
@@ -507,11 +510,21 @@ function estimateReadingTime(text) {
   return Math.max(1, Math.round(words / 220));
 }
 
-function dateOnly(value) {
+// Publish-facing frontmatter dates are stamped in America/New_York, never
+// UTC — UTC stamping put "tomorrow's" date on posts opened in the ET evening,
+// and a corrupt epoch-zero publish_date shipped a live post dated 1970-01-01
+// (both Codex-flagged on real PRs). Dates before the company existed (2024)
+// are treated as corrupt rows, and no post may claim a future publish date.
+const EARLIEST_VALID_CONTENT_DATE = '2024-01-01';
+
+function etDateOnly(value) {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  const s = etDateString(d);
+  if (s < EARLIEST_VALID_CONTENT_DATE) return null;
+  const today = etDateString();
+  return s > today ? today : s;
 }
 
 function imageExtFromMime(mime) {
@@ -1460,7 +1473,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   // RENDERED field actually changed (checked above); mirrors publishRefresh
   // and avoids fake-freshness churn.
   {
-    const today = dateOnly(new Date());
+    const today = etDateString();
     if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
     else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
   }
@@ -1581,7 +1594,7 @@ async function publishRefresh(draft, brief = {}) {
 
   // Conditional freshness bump — only the field the live page already uses
   // (services: `modified`; blog v2: `updated`). Prevents fake-freshness churn.
-  const today = dateOnly(new Date());
+  const today = etDateString();
   if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
   else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
 

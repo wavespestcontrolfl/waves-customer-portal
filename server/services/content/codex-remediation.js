@@ -53,6 +53,7 @@ const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 const contentGuardrails = require('./content-guardrails');
 const comparisonTableGate = require('./comparison-table-gate');
 const factCheckGate = require('./fact-check-gate');
+const { etDateString } = require('../../utils/datetime-et');
 
 const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS || '3', 10) || 3);
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -271,6 +272,45 @@ function immutableFrontmatterChanged(originalMd, fixedMd) {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const k of keys) { if (canonValue(a[k]) !== canonValue(b[k])) return true; }
   return false;
+}
+
+// ── Deterministic date-restamp carve-out ──────────────────────────────────
+//
+// Date-stamp findings ("use a non-future publish date", placeholder 1970
+// dates, "use current dates before publishing") are FRONTMATTER findings, so
+// the body-only LLM fix can never resolve them — every date-flagged PR parked
+// for a human. Unlike the rest of the frontmatter, the date fields don't key
+// routing (slug/canonical/domains) or the pollers' merge-target resolution,
+// and both remediation lanes only ever serve UNMERGED publish PRs — so
+// "today in ET" is by construction the truthful value for all of them at the
+// moment a fix lands. The restamp is pure code (no LLM ever writes
+// frontmatter), and a pure-date round skips the LLM call entirely.
+
+const FRONTMATTER_DATE_FIELDS = ['published', 'updated', 'technically_reviewed', 'fact_checked'];
+
+function isDateStampFinding(finding) {
+  const b = String((finding && finding.body) || '').toLowerCase();
+  if (!/\bdates?\b/.test(b)) return false;
+  return /\b(future|current|past|stale|placeholder|outdated|1970|epoch|today|publish\w*)\b/.test(b);
+}
+
+function restampFrontmatterDates(markdown, today = etDateString()) {
+  let parsed;
+  try { parsed = fm.parse(markdown); } catch (_) { return { markdown, changed: false }; }
+  const data = parsed && parsed.data;
+  if (!data || Object.keys(data).length === 0) return { markdown, changed: false };
+  let changed = false;
+  for (const key of FRONTMATTER_DATE_FIELDS) {
+    if (data[key] !== undefined && data[key] !== today) { data[key] = today; changed = true; }
+  }
+  // Service/location pages carry a datetime `modified` instead of `updated`;
+  // blog files normally won't have it, but restamp it if present.
+  if (data.modified !== undefined && String(data.modified).slice(0, 10) !== today) {
+    data.modified = `${today}T12:00:00`;
+    changed = true;
+  }
+  if (!changed) return { markdown, changed: false };
+  return { markdown: fm.stringify(data, parsed.content), changed: true };
 }
 
 function parseJsonMaybe(v) {
@@ -597,7 +637,27 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const file = await gh.getFile(targetPath, branch);
   if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark);
 
-  const fixed = await generateFix(file.content, findings, deps);
+  // Deterministic date-restamp carve-out: resolve date-stamp findings in code
+  // (today ET), and only send the REMAINING findings to the body-only LLM fix.
+  // If the restamp changed nothing (dates already current), the findings were
+  // misclassified — leave them in the LLM list so the false-positive park
+  // path still applies.
+  const dateFindings = findings.filter(isDateStampFinding);
+  let baseline = file.content;
+  if (dateFindings.length > 0) {
+    const restamp = restampFrontmatterDates(baseline);
+    if (restamp.changed) baseline = restamp.markdown;
+  }
+  const restamped = baseline !== file.content;
+  const llmFindings = restamped ? findings.filter((f) => !isDateStampFinding(f)) : findings;
+
+  let fixed;
+  if (llmFindings.length === 0 && restamped) {
+    // Pure date round — the restamp IS the fix; no LLM in the loop.
+    fixed = baseline;
+  } else {
+    fixed = await generateFix(baseline, llmFindings, deps);
+  }
   if (!fixed) {
     // Bound the failure: an unavailable / repeatedly-truncating LLM would
     // otherwise re-invoke every tick forever. Count the attempt and park at the
@@ -613,8 +673,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // Frontmatter is immutable during remediation (fixes are body-only) — any
   // added/removed/altered key parks: routing keys would mark a different URL
   // published than the portal recorded, and the rest feed merge stamps and
-  // portal columns written before the fix that nothing restamps.
-  if (immutableFrontmatterChanged(file.content, fixed)) {
+  // portal columns written before the fix that nothing restamps. Compared
+  // against the restamped baseline, so the deterministic date restamp above is
+  // the ONLY frontmatter delta that can ever pass — the LLM still can't touch
+  // frontmatter at all.
+  if (immutableFrontmatterChanged(baseline, fixed)) {
     return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark);
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
@@ -814,6 +877,8 @@ module.exports = {
   validateAutonomousRunGates,
   immutableFrontmatterChanged,
   schemaShapeChanged,
+  isDateStampFinding,
+  restampFrontmatterDates,
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
