@@ -334,6 +334,86 @@ describe('POST /:type/:id/send-report', () => {
       expect(body.assessment.report_url).toBeNull();
     });
   });
+
+  test('a phone-only lead falls through to the linked customer email', async () => {
+    const LEAD = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+    const CUSTOMER = 'cccccccc-dddd-4eee-8fff-000000000000';
+    mockRows.lawn_diagnostics = [lawnRow({ contact_snapshot: null, lead_id: LEAD, customer_id: CUSTOMER })];
+    mockLeadRow = { id: LEAD, email: null, first_name: 'Pat' };
+    mockCustomerRow = { id: CUSTOMER, email: 'customer@example.com', first_name: 'Casey' };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'customer@example.com', firstName: 'Casey' }));
+    });
+  });
+
+  test('the detail payload only returns report links the public readers accept (sent + unexpired)', async () => {
+    // Positive case: sent + future expiry → link offered.
+    mockRows.pest_identifications = [pestRow({
+      status: 'sent',
+      report_token: 'f'.repeat(32),
+      report_expires_at: new Date(Date.now() + 86400000).toISOString(),
+    })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}`);
+      const body = await res.json();
+      expect(body.assessment.report_url).toContain(`/pest-report/${'f'.repeat(32)}`);
+    });
+    // Archived rows 404 at the public readers even with a live token —
+    // the copy-link URL would be dead, so it must be withheld.
+    mockRows.pest_identifications = [pestRow({
+      status: 'archived',
+      report_token: 'f'.repeat(32),
+      report_expires_at: new Date(Date.now() + 86400000).toISOString(),
+    })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}`);
+      const body = await res.json();
+      expect(body.assessment.report_url).toBeNull();
+    });
+    // A token with no expiry stamp fails the readers' whereNotNull guard.
+    mockRows.pest_identifications = [pestRow({
+      status: 'sent',
+      report_token: 'f'.repeat(32),
+      report_expires_at: null,
+    })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}`);
+      const body = await res.json();
+      expect(body.assessment.report_url).toBeNull();
+    });
+  });
+});
+
+describe('POST /:type/:id/generate-link', () => {
+  test('mints the released link without sending anything (phone-only path)', async () => {
+    mockRows.lawn_diagnostics = [lawnRow({ contact_snapshot: null })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/generate-link`, { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.reportUrl).toContain('/lawn-report/');
+      expect(body.expiresAt).toBeTruthy();
+      expect(mockSendEmail).not.toHaveBeenCalled();
+      // Same released-state contract as send-report: the public readers
+      // require status='sent'; last_sent_at is NOT stamped (nothing sent).
+      expect(updates.lawn_diagnostics).toHaveLength(1);
+      expect(updates.lawn_diagnostics[0].status).toBe('sent');
+      expect(updates.lawn_diagnostics[0].last_sent_at).toBeUndefined();
+    });
+  });
+
+  test('archived assessments cannot mint a link (public readers 404 them)', async () => {
+    mockRows.lawn_diagnostics = [lawnRow({ status: 'archived' })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/generate-link`, { method: 'POST' });
+      expect(res.status).toBe(409);
+      expect(updates.lawn_diagnostics || []).toHaveLength(0);
+    });
+  });
 });
 
 describe('POST /:type (admin create)', () => {

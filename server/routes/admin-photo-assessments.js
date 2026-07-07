@@ -9,6 +9,8 @@
  *   GET  /:type/:id             detail: photos (signed URLs), tech view, customer preview
  *   POST /:type                 admin-created assessment (phone prospect / existing customer)
  *   POST /:type/:id/link        link/unlink a lead or customer
+ *   POST /:type/:id/generate-link  mint/refresh the report link, no email —
+ *                               for phone-only prospects shared manually
  *   POST /:type/:id/send-report MANUAL report email — the only sender of
  *                               assessment.report_link, fired exclusively by
  *                               the admin's click (owner sends all comms).
@@ -328,11 +330,12 @@ router.get('/:type/:id', async (req, res, next) => {
         prospect_note: analysisMeta.prospect_note || null,
         provenance: analysisMeta.provenance || null,
         ai_summary: row.ai_summary || null,
-        // Copy-link is only offered for links a customer can actually open:
-        // the public readers 404 expired tokens, so an expired report_url is
-        // withheld (the resend path refreshes the expiry).
-        report_url: row.report_token
-          && (!row.report_expires_at || new Date(row.report_expires_at).getTime() > Date.now())
+        // Copy-link is only offered for links a customer can actually open.
+        // Mirror the public readers' exact contract (status='sent' + non-null
+        // FUTURE expiry) — archived rows and missing-expiry tokens 404 there,
+        // so handing staff those URLs would ship dead links.
+        report_url: row.status === 'sent' && row.report_token && row.report_expires_at
+          && new Date(row.report_expires_at).getTime() > Date.now()
           ? portalUrl(config.reportPath(row.report_token))
           : null,
         pricing_snapshot: parseJson(row.pricing_snapshot, null),
@@ -392,6 +395,47 @@ router.post('/:type/:id/link', async (req, res, next) => {
   }
 });
 
+// Atomic mint: COALESCE keeps the FIRST token under concurrent mints /
+// double-submits (both requests read back the same persisted token, so
+// neither caller carries a link the other invalidated). Every mint refreshes
+// the 30-day expiry; the token itself stays stable.
+// status='sent' is the RELEASED state the tokenized readers require — it
+// must flip here so copy-link works even without (or before) an email; the
+// stage/metric driver (last_sent_at) is stamped only after a real delivery.
+async function mintReportToken(config, rowId) {
+  const candidateToken = crypto.randomBytes(16).toString('hex');
+  const expiresAt = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
+  const [updated] = await db(config.table).where({ id: rowId }).update({
+    report_token: db.raw('COALESCE(report_token, ?)', [candidateToken]),
+    report_expires_at: expiresAt,
+    status: 'sent',
+    updated_at: db.fn.now(),
+  }).returning(['report_token']);
+  return { reportToken: updated?.report_token || candidateToken, expiresAt };
+}
+
+// POST /api/admin/photo-assessments/:type/:id/generate-link
+//
+// Mints (or refreshes the expiry of) the tokenized report link WITHOUT
+// sending anything — the path for phone-only prospects (admin-created rows
+// and phone-only public claims) where staff share the link manually. Sends
+// no communication, so the owner-sends-all-comms rule is untouched.
+router.post('/:type/:id/generate-link', async (req, res, next) => {
+  try {
+    const config = typeConfig(req, res);
+    if (!config) return undefined;
+    const row = await loadRow(config, req.params.id);
+    if (!row) return res.status(404).json({ error: 'Assessment not found' });
+    if (!['analyzed', 'sent'].includes(row.status)) {
+      return res.status(409).json({ error: `Cannot generate a report link for a ${row.status} assessment` });
+    }
+    const { reportToken, expiresAt } = await mintReportToken(config, row.id);
+    return res.json({ success: true, reportUrl: portalUrl(config.reportPath(reportToken)), expiresAt });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // POST /api/admin/photo-assessments/:type/:id/send-report  { email? }
 //
 // The ONLY dispatcher of the assessment report email, and it only ever runs
@@ -409,38 +453,29 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
 
     const contact = parseJson(row.contact_snapshot, {});
     // Recipient resolution: explicit override → snapshot → linked lead →
-    // linked customer (so "link a contact first" actually satisfies the send).
+    // linked customer. Each rung falls through when it has NO email (public
+    // claims can create phone-only leads), not just when the link is absent.
     let email = cleanString(req.body?.email, 254) || contact.email || null;
     let firstName = contact.first_name || null;
-    if (!email && (row.lead_id || row.customer_id)) {
-      const linked = row.lead_id
-        ? await db('leads').where({ id: row.lead_id }).select('email', 'first_name').first()
-        : await db('customers').where({ id: row.customer_id }).select('email', 'first_name').first();
-      if (linked?.email) {
-        email = linked.email;
-        firstName = firstName || linked.first_name || null;
+    if (!email && row.lead_id) {
+      const lead = await db('leads').where({ id: row.lead_id }).select('email', 'first_name').first();
+      if (lead?.email) {
+        email = lead.email;
+        firstName = firstName || lead.first_name || null;
+      }
+    }
+    if (!email && row.customer_id) {
+      const customer = await db('customers').where({ id: row.customer_id }).select('email', 'first_name').first();
+      if (customer?.email) {
+        email = customer.email;
+        firstName = firstName || customer.first_name || null;
       }
     }
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return res.status(400).json({ error: 'No valid recipient email — add one to the request or link a contact first' });
     }
 
-    // Atomic mint: COALESCE keeps the FIRST token under concurrent sends /
-    // double-submits (both requests read back the same persisted token, so
-    // neither email carries a link the other invalidated). Every send
-    // refreshes the 30-day expiry; resends keep the token stable.
-    // status='sent' is the RELEASED state the tokenized readers require —
-    // it must flip here so copy-link works even when the email fails; the
-    // stage/metric driver (last_sent_at) is stamped only after a real send.
-    const candidateToken = crypto.randomBytes(16).toString('hex');
-    const expiresAt = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
-    const [updated] = await db(config.table).where({ id: row.id }).update({
-      report_token: db.raw('COALESCE(report_token, ?)', [candidateToken]),
-      report_expires_at: expiresAt,
-      status: 'sent',
-      updated_at: db.fn.now(),
-    }).returning(['report_token']);
-    const reportToken = updated?.report_token || candidateToken;
+    const { reportToken, expiresAt } = await mintReportToken(config, row.id);
 
     const reportUrl = portalUrl(config.reportPath(reportToken));
     // sendAssessmentReportEmail contains its own failures (sent:false), but a

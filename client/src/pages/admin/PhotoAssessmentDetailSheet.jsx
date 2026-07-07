@@ -338,6 +338,7 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
   const [showSend, setShowSend] = useState(false);
   const [showLink, setShowLink] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [minting, setMinting] = useState(false);
 
   const load = useCallback(async () => {
     if (!open || !type || !id) return;
@@ -367,6 +368,31 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
     setTimeout(() => setCopied(false), 1500);
   };
 
+  // Phone-only prospects have no email to send to — mint the link without
+  // sending anything and put it on the clipboard for a manual text/read-out.
+  const generateLink = async () => {
+    if (minting) return;
+    setMinting(true);
+    try {
+      const r = await adminFetch(`/admin/photo-assessments/${type}/${id}/generate-link`, { method: "POST" });
+      const body = r.ok ? await r.json() : null;
+      if (body?.reportUrl) {
+        try {
+          await navigator.clipboard?.writeText(body.reportUrl);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          // Clipboard can be denied — the link is minted either way and
+          // shows via the reloaded detail's Copy link.
+        }
+        load();
+        onChanged?.();
+      }
+    } finally {
+      setMinting(false);
+    }
+  };
+
   return (
     <Sheet open={open} onClose={onClose} width="lg">
       <SheetHeader>
@@ -381,6 +407,10 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
           <div className="flex gap-2 flex-wrap">
             {assessment?.report_url ? (
               <Button variant="secondary" onClick={copyLink}>{copied ? "Copied" : "Copy link"}</Button>
+            ) : ["analyzed", "sent"].includes(assessment?.status) ? (
+              <Button variant="secondary" onClick={generateLink} disabled={minting}>
+                {copied ? "Copied" : minting ? "Getting link…" : "Get link"}
+              </Button>
             ) : null}
             <Button variant="secondary" onClick={() => setShowLink(true)}>Link…</Button>
             <Button onClick={() => setShowSend(true)}>Send report</Button>

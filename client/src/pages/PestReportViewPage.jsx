@@ -117,7 +117,13 @@ function PricingCard({ pricing }) {
           <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
             <div>
               <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>{tier.label}</div>
-              {tier.visits ? <div style={{ fontSize: 14, color: MUTED }}>{tier.visits} visits per year</div> : null}
+              {/* One-time packages count TOTAL visits (flea = 2-visit package),
+                  not a recurring per-year cadence. */}
+              {tier.visits ? (
+                <div style={{ fontSize: 14, color: MUTED }}>
+                  {tier.one_time != null ? `${tier.visits}-visit treatment` : `${tier.visits} visits per year`}
+                </div>
+              ) : null}
             </div>
             <div style={{ textAlign: 'right' }}>
               {tier.monthly != null ? (
@@ -126,6 +132,11 @@ function PricingCard({ pricing }) {
                 </div>
               ) : null}
               {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
+              {tier.one_time != null ? (
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                  ${tier.one_time}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> one-time</span>
+                </div>
+              ) : null}
             </div>
           </div>
         ))}
