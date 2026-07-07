@@ -175,10 +175,22 @@ async function runBondRenewalSweep() {
         // The stable key hit a PRIOR attempt's blocked row — 'blocked' is
         // in DEDUPE_STATUSES, so under the fixed key that row dedupes
         // forever and the once-ever notice could never send even after the
-        // suppression cleared. Retry under a day-scoped key: still blocked
-        // → a fresh blocked row for today (alerting dedupes separately);
-        // cleared → the notice finally goes out and gets stamped.
-        sendResult = await EmailTemplateLibrary.sendTemplate(sendArgs(`${baseKey}:${etDateString()}`));
+        // suppression cleared. Before retrying under a day-scoped key,
+        // check whether an EARLIER day's retry already sent and only the
+        // bond stamp failed — re-sending would email the customer twice;
+        // a sent-ish retry row settles it as sent so the stamp is retried
+        // instead. (A stable ':retry' key can't do this: still-suppressed
+        // retries would park a second blocked row under it and re-wedge.)
+        const priorRetrySent = await db('email_messages')
+          .where('idempotency_key', 'like', `${baseKey}:%`)
+          .whereIn('status', ['sent', 'delivered', 'opened', 'clicked'])
+          .first();
+        sendResult = priorRetrySent
+          ? { sent: true, deduped: true, message: priorRetrySent }
+          // Still nothing delivered: day-scoped retry — still blocked → a
+          // fresh blocked row for today; cleared → the notice finally
+          // goes out and gets stamped.
+          : await EmailTemplateLibrary.sendTemplate(sendArgs(`${baseKey}:${etDateString()}`));
       }
       if (!sendResult?.sent) {
         // Suppression blocks (and inactive templates) return {sent:false}

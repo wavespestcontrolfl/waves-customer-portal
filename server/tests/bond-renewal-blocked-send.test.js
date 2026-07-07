@@ -44,6 +44,7 @@ const BOND = {
 };
 
 let bondUpdate;
+let priorRetryRow;
 
 function chainResolving(rows) {
   const q = {};
@@ -60,10 +61,12 @@ function chainResolving(rows) {
 beforeEach(() => {
   jest.clearAllMocks();
   bondUpdate = jest.fn(async () => 1);
+  priorRetryRow = undefined;
   db.schema.hasTable.mockResolvedValue(true);
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return chainResolving([]); // sync: nothing new
     if (table === 'termite_bonds') return chainResolving([BOND]); // due list + stamp update
+    if (table === 'email_messages') return chainResolving(priorRetryRow ? [priorRetryRow] : []);
     throw new Error(`unexpected table ${table}`);
   });
 });
@@ -125,6 +128,26 @@ describe('runBondRenewalSweep blocked-send handling', () => {
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[1][0].idempotencyKey)
       .toMatch(/^termite\.bond_renewal:bond-1:2026-07-20:\d{4}-\d{2}-\d{2}$/);
     expect(bondUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a PRIOR day-scoped retry that sent (stamp then failed) is settled without a second email', async () => {
+    // Day 1: stable key blocked-deduped, day-key retry SENT, bond stamp
+    // write died. Day 2: stable key still dedupes to the old blocked row —
+    // the sent retry row must settle the bond (stamp) without generating a
+    // fresh day key and emailing the customer again.
+    priorRetryRow = { id: 'em-retry-1', idempotency_key: 'termite.bond_renewal:bond-1:2026-07-20:2026-07-06', status: 'sent' };
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({
+      sent: false, blocked: true, deduped: true, reason: 'Email suppressed',
+    });
+
+    const result = await runBondRenewalSweep();
+
+    expect(result.sent).toBe(1);
+    // Only the stable-key attempt hit the template library — no re-send.
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(bondUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      renewal_notified_at: expect.any(Date),
+    }));
   });
 
   test('still suppressed on the day-scoped retry: no stamp, bond stays due', async () => {
