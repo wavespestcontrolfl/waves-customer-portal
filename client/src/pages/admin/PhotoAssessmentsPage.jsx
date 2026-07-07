@@ -53,10 +53,12 @@ const dateTimeET = (v) =>
       })
     : "—";
 
-// Funnel stage, derived from the per-stage timestamps (newest rung wins).
+// Funnel stage, deepest rung first. Viewed outranks sent: the public claim
+// path stamps last_sent_at when it mints the link, so a claimed-then-viewed
+// row must read "Viewed", not stay stuck at "Report sent".
 export function stageOf(row) {
-  if (row.last_sent_at) return { key: "sent", label: "Report sent" };
   if (row.report_first_viewed_at) return { key: "viewed", label: "Viewed" };
+  if (row.last_sent_at) return { key: "sent", label: "Report sent" };
   if (row.claimed_at) return { key: "unlocked", label: "Unlocked" };
   if (row.status === "archived") return { key: "archived", label: "Archived" };
   return { key: "teaser", label: "Teaser only" };

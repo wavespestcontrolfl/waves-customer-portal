@@ -14,6 +14,7 @@
 
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
+const logger = require('./logger');
 
 const TYPE_LABELS = {
   lawn: 'Lawn Assessment',
@@ -41,28 +42,48 @@ async function sendAssessmentReportEmail({ type, assessmentId, to, firstName, re
     ? `This private link is just for you and expires on ${new Date(expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })}.`
     : 'This private link is just for you.';
 
-  const result = await EmailTemplateLibrary.sendTemplate({
-    templateKey: 'assessment.report_link',
-    to,
-    payload: {
-      first_name: firstName || 'there',
-      report_type_label: TYPE_LABELS[type] || 'Assessment Report',
-      report_url: reportUrl,
-      expires_note: expiresNote,
-    },
-    recipientType: recipientType || null,
-    recipientId: recipientId || null,
-    triggerEventId: `assessment_report:${type}:${assessmentId}`,
-    // Minute-bucketed key: a double-click / double-submit dedupes, while a
-    // deliberate later resend (same assessment, same address) still goes out.
-    idempotencyKey: `assessment_report:${type}:${assessmentId}:${String(to).toLowerCase()}:${Math.floor(Date.now() / 60000)}`,
-    categories: ['assessment_report'],
-  });
+  try {
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'assessment.report_link',
+      to,
+      payload: {
+        first_name: firstName || 'there',
+        report_type_label: TYPE_LABELS[type] || 'Assessment Report',
+        report_url: reportUrl,
+        expires_note: expiresNote,
+        // Shared template variables — the seeded copy renders
+        // "call {{company_phone}}"; omitting them would ship a broken line.
+        company_phone: '(941) 297-5749',
+        company_email: 'contact@wavespestcontrol.com',
+      },
+      recipientType: recipientType || null,
+      recipientId: recipientId || null,
+      triggerEventId: `assessment_report:${type}:${assessmentId}`,
+      // Minute-bucketed key: a double-click / double-submit dedupes, while a
+      // deliberate later resend (same assessment, same address) still goes out.
+      idempotencyKey: `assessment_report:${type}:${assessmentId}:${String(to).toLowerCase()}:${Math.floor(Date.now() / 60000)}`,
+      categories: ['assessment_report'],
+      // Admin-entered lead/customer addresses: keep raw provider error bodies
+      // (which can echo the recipient email) out of the logs.
+      suppressProviderErrorLog: true,
+    });
 
-  if (result.blocked) {
-    return { ok: false, blocked: true, error: result.reason || 'Email suppressed for this recipient' };
+    if (result.blocked) {
+      return { ok: false, blocked: true, error: result.reason || 'Email suppressed for this recipient' };
+    }
+    return { ok: !!result.sent, messageId: result.message?.provider_message_id || null };
+  } catch (err) {
+    // A paused/archived template (the documented kill switch) or a provider
+    // throw must degrade to a sanitized sent:false — the route still returns
+    // the minted link so the admin can copy/share it manually.
+    logger.warn(`[assessment-report-email] send failed for ${type} ${assessmentId}: ${err.code || err.name || 'error'}`);
+    return {
+      ok: false,
+      error: err.code === 'EMAIL_TEMPLATE_DISABLED'
+        ? 'The assessment report email template is paused — copy the link instead.'
+        : 'Email send failed — copy the link instead.',
+    };
   }
-  return { ok: !!result.sent, messageId: result.message?.provider_message_id || null };
 }
 
 module.exports = { sendAssessmentReportEmail, TYPE_LABELS };

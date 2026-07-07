@@ -41,17 +41,19 @@ function ChatIcon() {
 export default function QuestionsEscapeHatch({ estimateSlug, context = 'estimate' }) {
   // Glass copy pack (PR B) — person-first button labels.
   const glass = glassCopyActive();
-  // context 'lawn_report': the lawn-diagnostic page reuses this component,
-  // and the estimate copy composed "question about quote #<report token>" —
-  // a report token isn't a quote number.
-  const isReport = context === 'lawn_report';
+  // Report contexts ('lawn_report' / 'pest_report'): the tokenized report
+  // pages reuse this component, and the estimate copy composed "question
+  // about quote #<report token>" — a report token isn't a quote number.
+  const REPORT_LABELS = { lawn_report: 'lawn report', pest_report: 'pest report' };
+  const reportLabel = REPORT_LABELS[context];
+  const isReport = !!reportLabel;
   const slugStr = estimateSlug ? `%23${estimateSlug}` : 'my%20estimate';
   const smsBody = isReport
-    ? 'Hi, I have a question about my Waves lawn report'
+    ? `Hi, I have a question about my Waves ${reportLabel}`
     : `Hi, I have a question about quote ${slugStr}`;
-  const mailSubject = isReport ? 'Question about my Waves lawn report' : 'Question about my Waves estimate';
+  const mailSubject = isReport ? `Question about my Waves ${reportLabel}` : 'Question about my Waves estimate';
   const mailBody = isReport
-    ? 'Hi, I have a question about my Waves lawn report'
+    ? `Hi, I have a question about my Waves ${reportLabel}`
     : `Hi, I have a question about quote ${decodeURIComponent(slugStr)}`;
   const textHref = isLikelyMobile()
     ? `sms:${BUSINESS_LINE}?&body=${smsBody}`

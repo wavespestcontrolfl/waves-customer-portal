@@ -190,7 +190,10 @@ router.get('/', async (req, res, next) => {
 
 async function funnelCounts(type, sinceDate) {
   const config = TYPES[type];
-  let qb = db(config.table);
+  // Funnel rates are LEAD-MAGNET metrics: only public-funnel rows count —
+  // admin-created phone-prospect assessments never saw the teaser → unlock
+  // funnel and would skew unlock/booking rates. They're reported separately.
+  let qb = db(config.table).where({ source: 'public_funnel' });
   if (type === 'lawn') qb = scopeLawn(qb);
   if (sinceDate) qb = qb.where('created_at', '>=', sinceDate);
   const [counts] = await qb
@@ -199,8 +202,18 @@ async function funnelCounts(type, sinceDate) {
       db.raw('COUNT(claimed_at)::int AS claimed'),
       db.raw('COUNT(report_first_viewed_at)::int AS viewed'),
       db.raw('COUNT(lead_id)::int AS leads'),
-      db.raw(`COUNT(*) FILTER (WHERE source = 'public_funnel')::int AS from_public_funnel`),
     );
+
+  let adminCreated = 0;
+  try {
+    let adminQb = db(config.table).where({ source: 'admin' });
+    if (type === 'lawn') adminQb = scopeLawn(adminQb);
+    if (sinceDate) adminQb = adminQb.where('created_at', '>=', sinceDate);
+    const [row] = await adminQb.count('* as n');
+    adminCreated = Number(row?.n || 0);
+  } catch (err) {
+    logger.warn(`[admin-photo-assessments] admin-created count failed (${type}): ${err.message}`);
+  }
 
   // Booked/completed comes from the SAME funnel machinery every channel uses:
   // the lead's ad_service_attribution row, advanced by lead-funnel-bridge.
@@ -208,6 +221,7 @@ async function funnelCounts(type, sinceDate) {
   try {
     let bookedQb = db(`${config.table} as a`)
       .join('ad_service_attribution as asa', 'asa.lead_id', 'a.lead_id')
+      .where('a.source', 'public_funnel')
       .whereIn('asa.funnel_stage', ['booked', 'completed']);
     if (type === 'lawn') bookedQb = bookedQb.where('a.mode', 'prospect');
     if (sinceDate) bookedQb = bookedQb.where('a.created_at', '>=', sinceDate);
@@ -217,7 +231,7 @@ async function funnelCounts(type, sinceDate) {
     logger.warn(`[admin-photo-assessments] booked count failed (${type}): ${err.message}`);
   }
 
-  return { ...counts, booked };
+  return { ...counts, booked, admin_created: adminCreated };
 }
 
 // GET /api/admin/photo-assessments/funnel?days=30 (days=0 → all time)
@@ -388,34 +402,57 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     }
 
     const contact = parseJson(row.contact_snapshot, {});
-    const email = cleanString(req.body?.email, 254) || contact.email;
+    // Recipient resolution: explicit override → snapshot → linked lead →
+    // linked customer (so "link a contact first" actually satisfies the send).
+    let email = cleanString(req.body?.email, 254) || contact.email || null;
+    let firstName = contact.first_name || null;
+    if (!email && (row.lead_id || row.customer_id)) {
+      const linked = row.lead_id
+        ? await db('leads').where({ id: row.lead_id }).select('email', 'first_name').first()
+        : await db('customers').where({ id: row.customer_id }).select('email', 'first_name').first();
+      if (linked?.email) {
+        email = linked.email;
+        firstName = firstName || linked.first_name || null;
+      }
+    }
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return res.status(400).json({ error: 'No valid recipient email — add one to the request or link a contact first' });
     }
 
-    // Mint on first send; keep the token stable on resends so earlier links
-    // stay valid. Every send refreshes the 30-day expiry.
-    const reportToken = row.report_token || crypto.randomBytes(16).toString('hex');
+    // Atomic mint: COALESCE keeps the FIRST token under concurrent sends /
+    // double-submits (both requests read back the same persisted token, so
+    // neither email carries a link the other invalidated). Every send
+    // refreshes the 30-day expiry; resends keep the token stable.
+    const candidateToken = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
-    await db(config.table).where({ id: row.id }).update({
-      report_token: reportToken,
+    const [updated] = await db(config.table).where({ id: row.id }).update({
+      report_token: db.raw('COALESCE(report_token, ?)', [candidateToken]),
       report_expires_at: expiresAt,
       status: 'sent',
       last_sent_at: db.fn.now(),
       updated_at: db.fn.now(),
-    });
+    }).returning(['report_token']);
+    const reportToken = updated?.report_token || candidateToken;
 
     const reportUrl = `${PORTAL_BASE}${config.reportPath(reportToken)}`;
-    const emailResult = await sendAssessmentReportEmail({
-      type: req.params.type,
-      assessmentId: row.id,
-      to: email,
-      firstName: contact.first_name || null,
-      reportUrl,
-      expiresAt,
-      recipientType: row.customer_id ? 'customer' : (row.lead_id ? 'lead' : null),
-      recipientId: row.customer_id || row.lead_id || null,
-    });
+    // sendAssessmentReportEmail contains its own failures (sent:false), but a
+    // truly unexpected throw must not swallow the minted link either.
+    let emailResult;
+    try {
+      emailResult = await sendAssessmentReportEmail({
+        type: req.params.type,
+        assessmentId: row.id,
+        to: email,
+        firstName,
+        reportUrl,
+        expiresAt,
+        recipientType: row.customer_id ? 'customer' : (row.lead_id ? 'lead' : null),
+        recipientId: row.customer_id || row.lead_id || null,
+      });
+    } catch (emailErr) {
+      logger.error(`[admin-photo-assessments] unexpected send error for ${row.id}: ${emailErr.message}`);
+      emailResult = { ok: false, error: 'Email send failed — copy the link instead.' };
+    }
 
     logger.info(`[admin-photo-assessments] ${req.params.type} ${row.id} report send → ${emailResult.ok ? 'sent' : `FAILED (${emailResult.error})`}`);
     // Email failure is a 200 with sent:false — the token is minted either

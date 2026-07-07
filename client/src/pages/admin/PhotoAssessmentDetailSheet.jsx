@@ -202,7 +202,8 @@ function LinkDialog({ open, onClose, type, id, onLinked }) {
                 onClick={() => link(r.id)}
                 className="w-full text-left px-3 py-2 text-[14px] text-zinc-900 hover:bg-zinc-50"
               >
-                {[r.first_name, r.last_name].filter(Boolean).join(" ") || r.name || r.id}
+                {/* Leads return snake_case fields; /api/admin/customers returns camelCase. */}
+                {[r.first_name || r.firstName, r.last_name || r.lastName].filter(Boolean).join(" ") || r.name || r.id}
                 <span className="text-zinc-500"> {r.phone || r.email || ""}</span>
               </button>
             ))}
@@ -440,7 +441,9 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
         onClose={() => setShowSend(false)}
         type={type}
         id={id}
-        defaultEmail={assessment?.contact?.email || ""}
+        // Snapshot email first, then the linked lead/customer — matches the
+        // server's recipient fallback, so "link a contact first" prefills.
+        defaultEmail={assessment?.contact?.email || data?.lead?.email || data?.customer?.email || ""}
         onSent={() => { load(); onChanged(); }}
       />
       <LinkDialog

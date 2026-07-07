@@ -3,6 +3,7 @@ let mockRows = { lawn_diagnostics: [], pest_identifications: [] };
 let mockPhotoRows = [];
 let mockLeadRow = null;
 let mockCustomerRow = null;
+let mockUpdateReturning = {}; // per-table rows resolved by update(...).returning(...)
 const inserts = {};
 const updates = {};
 
@@ -28,7 +29,9 @@ function builder(table) {
     },
     update: (obj) => {
       (updates[table] = updates[table] || []).push(obj);
-      return Promise.resolve(1);
+      const chain = Promise.resolve(1);
+      chain.returning = () => Promise.resolve(mockUpdateReturning[table] || []);
+      return chain;
     },
     then: (resolve, reject) => Promise.resolve(
       table === 'lawn_diagnostic_photos' || table === 'pest_identification_photos'
@@ -40,7 +43,7 @@ function builder(table) {
 }
 const mockDb = jest.fn((table) => builder(String(table).split(' ')[0]));
 mockDb.fn = { now: () => 'NOW' };
-mockDb.raw = (sql) => sql;
+mockDb.raw = (sql, bindings) => ({ __raw: sql, __bindings: bindings });
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -141,6 +144,7 @@ beforeEach(() => {
   mockPhotoRows = [];
   mockLeadRow = null;
   mockCustomerRow = null;
+  mockUpdateReturning = {};
   Object.keys(inserts).forEach((k) => delete inserts[k]);
   Object.keys(updates).forEach((k) => delete updates[k]);
   mockSendEmail.mockResolvedValue({ ok: true, messageId: 'msg-1' });
@@ -235,8 +239,10 @@ describe('POST /:type/:id/link', () => {
 });
 
 describe('POST /:type/:id/send-report', () => {
-  test('mints the token, marks sent, and emails the snapshot contact', async () => {
+  test('mints the token atomically (COALESCE keeps the first), marks sent, emails the snapshot contact', async () => {
+    const persisted = 'a'.repeat(32);
     mockRows.lawn_diagnostics = [lawnRow()];
+    mockUpdateReturning.lawn_diagnostics = [{ report_token: persisted }];
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
@@ -244,10 +250,12 @@ describe('POST /:type/:id/send-report', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.sent).toBe(true);
-      expect(body.reportUrl).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/lawn-report\/[a-f0-9]{32}$/);
+      // The URL carries the PERSISTED token (returning), never a token another
+      // concurrent send may have overwritten.
+      expect(body.reportUrl).toBe(`https://portal.wavespestcontrol.com/lawn-report/${persisted}`);
       const update = updates.lawn_diagnostics[0];
       expect(update.status).toBe('sent');
-      expect(update.report_token).toMatch(/^[a-f0-9]{32}$/);
+      expect(update.report_token.__raw).toContain('COALESCE(report_token');
       expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
         type: 'lawn',
         to: 'dana@example.com',
@@ -259,6 +267,7 @@ describe('POST /:type/:id/send-report', () => {
   test('resend keeps the existing token stable', async () => {
     const token = 'f'.repeat(32);
     mockRows.pest_identifications = [pestRow({ status: 'sent', report_token: token })];
+    mockUpdateReturning.pest_identifications = [{ report_token: token }];
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}/send-report`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
@@ -266,11 +275,23 @@ describe('POST /:type/:id/send-report', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.reportUrl).toBe(`https://portal.wavespestcontrol.com/pest-report/${token}`);
-      expect(updates.pest_identifications[0].report_token).toBe(token);
     });
   });
 
-  test('no usable email is a 400 with no send', async () => {
+  test('falls back to the linked lead email when the snapshot has none', async () => {
+    const LEAD = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+    mockRows.lawn_diagnostics = [lawnRow({ contact_snapshot: null, lead_id: LEAD })];
+    mockLeadRow = { id: LEAD, email: 'lead@example.com', first_name: 'Lee' };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'lead@example.com', firstName: 'Lee' }));
+    });
+  });
+
+  test('no usable email anywhere is a 400 with no send', async () => {
     mockRows.lawn_diagnostics = [lawnRow({ contact_snapshot: null })];
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
