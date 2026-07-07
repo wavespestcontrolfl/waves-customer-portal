@@ -501,15 +501,31 @@ router.post('/:id/send', async (req, res, next) => {
       if (scheduledTime <= new Date()) {
         return res.status(400).json({ error: 'scheduledAt must be in the future' });
       }
-      await db('estimates').where({ id: estimate.id }).update({
-        status: 'scheduled',
-        scheduled_at: scheduledTime,
-        send_method: sendMethod,
-        expires_at: estimateExpiresAt(() => scheduledTime),
-        scheduled_send_attempts: 0,
-        last_send_error: null,
-        updated_at: db.fn.now(),
-      });
+      // Atomic claim, mirroring the immediate-send path below. The
+      // assertEstimateSendable check above ran on a stale read: writing
+      // status='scheduled' unconditionally could clobber an in-flight
+      // 'sending' row (its guarded sent-write then misses and the cron
+      // re-sends — duplicate customer texts) or overwrite a concurrent
+      // accept (money-bearing state lost, and the row re-enters the send
+      // pipeline on a committed conversion).
+      const scheduledClaim = await db('estimates')
+        .where({ id: estimate.id })
+        .whereNull('price_locked_at')
+        .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        .update({
+          status: 'scheduled',
+          scheduled_at: scheduledTime,
+          send_method: sendMethod,
+          expires_at: estimateExpiresAt(() => scheduledTime),
+          scheduled_send_attempts: 0,
+          last_send_error: null,
+          updated_at: db.fn.now(),
+        });
+      if (!scheduledClaim) {
+        return res.status(409).json({
+          error: 'This estimate is mid-send, already accepted, or locked — refresh and retry.',
+        });
+      }
       return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
     }
 
