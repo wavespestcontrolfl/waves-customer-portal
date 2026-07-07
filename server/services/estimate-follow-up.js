@@ -386,10 +386,35 @@ async function checkDepositAbandoned(now = new Date()) {
           `[est-followup] estimate_followup_deposit template missing/disabled — continuing without SMS for est ${est.id}`,
         );
       }
+      // Portal-wide email opt-out for customer-linked estimates — the
+      // template library only enforces email_suppressions, not
+      // notification_prefs.email_enabled (same gate the welcome sender
+      // applies). Fails CLOSED: an unreadable pref means no email leg this
+      // tick; if that leaves zero legs the stage skips WITHOUT claiming and
+      // retries next tick.
+      let emailAllowed = !!est.customer_email;
+      if (emailAllowed && est.customer_id) {
+        try {
+          const prefs = await db("notification_prefs")
+            .where({ customer_id: est.customer_id })
+            .first("email_enabled");
+          if (prefs?.email_enabled === false) {
+            emailAllowed = false;
+            logger.info(
+              `[est-followup] Deposit-abandoned email leg skipped for est ${est.id} — email disabled in prefs`,
+            );
+          }
+        } catch (err) {
+          emailAllowed = false;
+          logger.warn(
+            `[est-followup] Deposit-abandoned email leg skipped for est ${est.id} — prefs unverifiable: ${err.message}`,
+          );
+        }
+      }
       // At least one deliverable leg or skip WITHOUT claiming — a claim with
       // zero legs would permanently mark the stage sent while sending nothing
       // (the exact silent-skip this stage used to have).
-      const emailLeg = est.customer_email
+      const emailLeg = emailAllowed
         ? {
           templateKey: "estimate.deposit_abandoned",
           stage: "deposit_abandoned",

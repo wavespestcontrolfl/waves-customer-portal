@@ -12,6 +12,8 @@ let mockPriorServiceRecord = null;
 let mockDueSequences = [];
 let mockStaleSequences = [];
 let mockSmsLogProviderRow = null;
+let mockPrefsRow = null;
+let mockPrefsError = null;
 let mockClaimResults = []; // shift()ed per sms_sequences update; empty = always 1
 let mockCustomerRow = null;
 let mockScheduledServiceRow = null;
@@ -51,6 +53,10 @@ const mockDb = jest.fn((table) => {
       }
       if (table === 'sms_log') {
         return mockSmsLogProviderRow;
+      }
+      if (table === 'notification_prefs') {
+        if (mockPrefsError) throw mockPrefsError;
+        return mockPrefsRow;
       }
       return null;
     }),
@@ -125,6 +131,8 @@ describe('new recurring welcome SMS', () => {
     mockDueSequences = [];
     mockStaleSequences = [];
     mockSmsLogProviderRow = null;
+    mockPrefsRow = null;
+    mockPrefsError = null;
     mockClaimResults = [];
     mockCustomerRow = null;
     mockScheduledServiceRow = null;
@@ -475,7 +483,7 @@ describe('new recurring welcome SMS', () => {
     }));
   });
 
-  test('phoneless customer with an email still gets the welcome email; sequence settles', async () => {
+  test('phoneless customer with an email gets the welcome email; sequence COMPLETES via email', async () => {
     mockDueSequences = [{
       id: 'seq-1',
       customer_id: 'customer-1',
@@ -487,15 +495,60 @@ describe('new recurring welcome SMS', () => {
 
     const results = await service.processDueWelcomes();
 
-    expect(results.sent).toBe(0);
+    // The email IS the welcome — the sequence settles as completed, and the
+    // run counts it as sent.
+    expect(results.sent).toBe(1);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
     expect(mockUpdates).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'sms_sequences',
-        data: expect.objectContaining({ status: 'cancelled' }),
+        data: expect.objectContaining({ status: 'completed' }),
       }),
     ]));
+  });
+
+  test('email-only transient email failure REQUEUES instead of burning the once-ever guard', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockSendTemplate.mockRejectedValueOnce(new Error('SendGrid 503'));
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    // Claim released back to active with a pushed-out next_send_at — never
+    // cancelled: that would permanently block their only welcome channel.
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
+    const requeue = statusUpdates.find((u) => u.data.status === 'active');
+    expect(requeue.data.next_send_at).toBeInstanceOf(Date);
+  });
+
+  test('unverifiable prefs fail CLOSED: email not sent, email-only row requeued', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '', email: 'ada@example.com' };
+    mockScheduledServiceRow = { status: 'pending' };
+    // notification_prefs lookup rejects — the sender exists to enforce the
+    // opt-out, so it must not send on an unverified pref.
+    mockPrefsError = new Error('db down');
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.sent).toBe(0);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    const statusUpdates = mockUpdates.filter((u) => u.table === 'sms_sequences' && 'status' in u.data);
+    expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
   });
 
   test('no email on the customer: SMS-only welcome, no sendTemplate call', async () => {

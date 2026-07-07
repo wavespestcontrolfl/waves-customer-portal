@@ -171,32 +171,44 @@ async function sendNewRecurringWelcome({
   }
 }
 
-// Deliver one due queue row. Re-reads the customer at send time (phone may
-// have changed since booking) and skips permanently when the anchoring
-// appointment was cancelled inside the delay window.
 // Direct-send the welcome.new_recurring email (library template; the row's
 // status is the kill switch — archive/pause makes sendTemplate throw
-// 'active template not found', caught by the caller). Idempotency key
+// 'active template not found', mapped to 'failed' below). Idempotency key
 // matches the once-ever-per-customer design the draft automation row
 // specified (welcome.new_recurring:{customer_id}), so retries of the SMS
 // delivery loop dedupe instead of double-sending.
+//
+// Returns { outcome } so the caller can requeue email-only rows:
+//   'sent' | 'deduped'      — the customer has/had their welcome email
+//   'skipped'               — permanent non-delivery (no email, opted out,
+//                             suppression-blocked, SendGrid unconfigured)
+//   'failed'                — transient (send threw, or the prefs opt-out
+//                             couldn't be VERIFIED — this sender exists to
+//                             enforce that opt-out, so an unreadable pref
+//                             fails closed and retries rather than sending)
 async function sendWelcomeEmail(customer) {
   const email = String(customer.email || '').trim();
-  if (!email) return;
+  if (!email) return { outcome: 'skipped' };
   const sendgrid = require('./sendgrid-mail');
   if (!sendgrid.isConfigured()) {
     logger.warn(`[new-recurring-welcome] welcome email skipped for customer ${customer.id} — SendGrid not configured`);
-    return;
+    return { outcome: 'skipped' };
   }
   // Portal-wide email opt-out — service_operational suppression groups
-  // don't cover it, so the sender checks it explicitly.
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customer.id })
-    .first('email_enabled')
-    .catch(() => null);
+  // don't cover it, so the sender checks it explicitly and fails CLOSED
+  // when the pref can't be read.
+  let prefs;
+  try {
+    prefs = await db('notification_prefs')
+      .where({ customer_id: customer.id })
+      .first('email_enabled');
+  } catch (err) {
+    logger.warn(`[new-recurring-welcome] welcome email prefs lookup failed for customer ${customer.id} — not sending unverified: ${err.message}`);
+    return { outcome: 'failed' };
+  }
   if (prefs?.email_enabled === false) {
     logger.info(`[new-recurring-welcome] welcome email skipped for customer ${customer.id} — email disabled in prefs`);
-    return;
+    return { outcome: 'skipped' };
   }
   const EmailTemplateLibrary = require('./email-template-library');
   const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -225,11 +237,14 @@ async function sendWelcomeEmail(customer) {
   });
   if (result?.blocked) {
     logger.warn(`[new-recurring-welcome] welcome email suppressed for customer ${customer.id}: ${result.reason || 'suppressed'}`);
-  } else if (result?.deduped) {
-    logger.info(`[new-recurring-welcome] welcome email deduped for customer ${customer.id}`);
-  } else {
-    logger.info(`[new-recurring-welcome] welcome email sent for customer ${customer.id}`);
+    return { outcome: 'skipped' };
   }
+  if (result?.deduped) {
+    logger.info(`[new-recurring-welcome] welcome email deduped for customer ${customer.id}`);
+    return { outcome: 'deduped' };
+  }
+  logger.info(`[new-recurring-welcome] welcome email sent for customer ${customer.id}`);
+  return { outcome: 'sent' };
 }
 
 async function deliverQueuedWelcome(row) {
@@ -265,19 +280,34 @@ async function deliverQueuedWelcome(row) {
   // Email twin of the welcome (owner go 2026-07-06) — a DIRECT sender like
   // the other lifecycle emails, NOT the automation executor (whose master
   // gate is off in prod; its draft welcome automation row is vestigial).
-  // Best-effort and idempotent per customer, so SMS retries can't double it
-  // and an email failure never blocks the text. Fires at the same +1h
-  // delivery moment as the SMS. Kill switch = the welcome.new_recurring
-  // email template row.
-  await sendWelcomeEmail(customer).catch((err) => {
+  // Idempotent per customer, so SMS retries can't double it, and an email
+  // failure never blocks the text. Fires at the same +1h delivery moment as
+  // the SMS. Kill switch = the welcome.new_recurring email template row.
+  const emailResult = await sendWelcomeEmail(customer).catch((err) => {
     const { redactEmailAddresses } = require('./email-template-library');
     logger.warn(`[new-recurring-welcome] welcome email failed for customer ${customer.id}: ${redactEmailAddresses(err.message)}`);
+    return { outcome: 'failed' };
   });
 
   if (!customer.phone) {
-    // Email-only customer: the email above is their welcome; the SMS leg
-    // settles the sequence exactly as before (the once-ever guard reads any
-    // row, so the status value carries no extra meaning).
+    // Email-only customer: the email IS their welcome. A transient failure
+    // (send threw, prefs unverifiable) releases the claim onto the bounded
+    // attempt rail — settling here would burn the once-ever guard on their
+    // only channel. Definitive outcomes settle: sent/deduped completes,
+    // permanent skips cancel as before.
+    if (emailResult.outcome === 'failed') {
+      await db('sms_sequences').where({ id: row.id }).update({
+        status: 'active',
+        next_send_at: new Date(Date.now() + 15 * 60 * 1000),
+        updated_at: new Date(),
+      });
+      logger.warn(`[new-recurring-welcome] email-only welcome requeued for customer ${customer.id} — transient email failure`);
+      return { sent: false, requeued: true };
+    }
+    if (emailResult.outcome === 'sent' || emailResult.outcome === 'deduped') {
+      await finish('completed', { delivered_via: 'email', sent_at: new Date().toISOString() });
+      return { sent: true, channel: 'email' };
+    }
     await finish('cancelled', { skip_reason: 'no_phone' });
     return { sent: false, skipped: true };
   }
