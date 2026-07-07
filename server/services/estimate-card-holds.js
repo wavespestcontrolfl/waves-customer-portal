@@ -608,19 +608,29 @@ async function releaseCardHold({ scheduledServiceId, reason = 'released' }) {
   return { released: updated > 0 };
 }
 
+// How long AFTER window_start a cancellation still counts as a late cancel.
+// serviceStart resolves to the visit's window_start, and the customer-facing
+// arrival window runs 2 hours from it — so within this grace the tech may
+// still legitimately arrive, and a cancellation (10:05 cancel of a 10–12
+// appointment) is a real late cancel, not stale-row cleanup. The churn
+// sweep's past-dated 'rescheduled' phantoms and day-later cleanups all fall
+// far outside it.
+const CARD_HOLD_POST_START_GRACE_MS = 2 * 3600000;
+
 // Whether a cancellation lands INSIDE the fee window (fee applies) vs outside
-// (free release). serviceStart is the appointment's scheduled start instant.
-// The fee applies ONLY to a still-upcoming appointment: a start already in the
-// past means the visit came and went without being delivered (stale-row
-// cleanup, churn sweep, missed dispatch), and charging the late-cancel fee
-// there bills the customer for a visit that never happened — past starts
-// always release free.
+// (free release). serviceStart is the appointment's scheduled start instant
+// (window_start). The fee window is (start − cancel_window_hours, start +
+// arrival-window grace): it opens 24h out and stays open while the tech may
+// still arrive; past the grace the visit came and went undelivered (missed
+// dispatch, stale-row cleanup, churn sweep) and charging the late-cancel fee
+// would bill the customer for a visit that never happened — those always
+// release free.
 function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   const windowHours = Number(hold?.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   const start = serviceStart instanceof Date ? serviceStart : new Date(serviceStart);
   if (Number.isNaN(start.getTime())) return false;
   const msUntilStart = start.getTime() - now.getTime();
-  return msUntilStart > 0 && msUntilStart <= windowHours * 3600000;
+  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowHours * 3600000;
 }
 
 // Single entry for the cancel path: charge the late-cancel fee if the
