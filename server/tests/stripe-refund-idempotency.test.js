@@ -342,6 +342,56 @@ describe('StripeService.refund', () => {
     expect(Date.parse(pendingMeta.pending_refund_at)).toBeGreaterThan(Date.now() - 60000);
   });
 
+  test("STALE 'rest' marker: a later dashboard PARTIAL is NOT adopted as the full refund", async () => {
+    // The original full-remaining attempt never reached Stripe; someone
+    // later issued a $25 dashboard partial. Adopting it would clear the
+    // marker and report success while the true remainder was never sent —
+    // a 'rest' attempt must only adopt a refund matching paid minus the
+    // key's prior-cents (here $100 - $0).
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_rest_0',
+      pending_refund_request: 'rest',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => ({
+      data: [{ id: 're_partial', status: 'succeeded', amount: 2500, created: Math.floor(Date.now() / 1000) - 3600 }],
+    }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', {});
+
+    // Not adopted — restarted as a fresh 'rest' attempt (safe: Stripe
+    // computes the remainder from its own ledger).
+    expect(stripeClient.refunds.create).toHaveBeenCalledTimes(1);
+    const [params] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBeUndefined();
+    const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+    expect(Date.parse(pendingMeta.pending_refund_at)).toBeGreaterThan(Date.now() - 60000);
+  });
+
+  test("STALE 'rest' marker: adopts the refund matching the attempt-time remainder", async () => {
+    // 'rest' attempt when $40 was already refunded (key suffix 4000) —
+    // the landed $60 refund is adopted; the unrelated $10 one is not.
+    paymentRow.refund_amount = '40.00';
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_rest_4000',
+      pending_refund_request: 'rest',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => ({
+      data: [
+        { id: 're_other', status: 'succeeded', amount: 1000, created: Math.floor(Date.now() / 1000) - 3600 },
+        { id: 're_rest', status: 'succeeded', amount: 6000, created: Math.floor(Date.now() / 1000) - 29 * 3600 },
+      ],
+    }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', {});
+
+    expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+    const finalArgs = updatePayments.mock.calls[0][0];
+    expect(finalArgs).toEqual(expect.objectContaining({ status: 'refunded', refund_amount: 100, stripe_refund_id: 're_rest' }));
+    expect(JSON.parse(finalArgs.metadata).pending_refund_key).toBeUndefined();
+  });
+
   test('STALE marker and the Stripe refund list is unreachable: fails CLOSED', async () => {
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_4000_0',

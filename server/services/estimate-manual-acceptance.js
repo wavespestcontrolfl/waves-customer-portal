@@ -209,8 +209,9 @@ async function markEstimateManuallyAccepted({
       decline_reason: null,
       updated_at: now,
       // Freeze the price at acceptance (atomic with the status flip; the
-      // whereIn(status) guard below stops a second accept from re-pricing).
-      price_locked_at: estimate.price_locked_at || now,
+      // whereNull(price_locked_at) guard below means a claimed row is
+      // always unlocked, and stops a second accept from re-pricing).
+      price_locked_at: now,
       price_locked_by: 'manual_accept',
       pricing_authority: 'LOCKED',
     };
@@ -219,6 +220,11 @@ async function markEstimateManuallyAccepted({
     const [updatedEstimate] = await trx('estimates')
       .where({ id: estimateId })
       .whereIn('status', Array.from(MANUAL_ACCEPTABLE_STATUSES))
+      // Same guard as the public accept claim: a locked price means a prior
+      // accept already committed money. Even if some path regressed the row
+      // back to sent/viewed, a second accept must not rerun conversion and
+      // invoicing.
+      .whereNull('price_locked_at')
       .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
       .update(updates)
       .returning('*');
@@ -227,6 +233,12 @@ async function markEstimateManuallyAccepted({
       const latest = await trx('estimates').where({ id: estimateId }).first();
       if (latest?.status === 'accepted') {
         return { acceptedEstimate: latest, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: latest };
+      }
+      if (latest?.price_locked_at) {
+        throw httpError(
+          'This estimate was already accepted and its price locked — accepting it again would duplicate the conversion and invoicing. Review the linked customer/invoices instead.',
+          409,
+        );
       }
       throw httpError('Estimate is no longer active.', 409);
     }

@@ -1494,11 +1494,25 @@ const StripeService = {
           throw new Error('Could not verify the earlier refund attempt against Stripe — check the payment in the Stripe dashboard before retrying');
         }
         // Adopt the original refund if it landed (right amount, created
-        // at/after the attempt) — record it below without re-sending.
-        adoptedRefund = (listed?.data || []).find((r) =>
+        // at/after the attempt) — record it below without re-sending. A
+        // 'rest' attempt has no explicit requestCents, but its attempt-time
+        // amount is recoverable as paid minus the key's prior-cents suffix;
+        // the match is REQUIRED, else any later refund (e.g. a dashboard
+        // partial) would be adopted as the full refund and the true
+        // remainder never sent. An unparseable key can't be reconciled —
+        // no adoption; the fresh 'rest' attempt below is still safe because
+        // Stripe computes the remainder from its own ledger.
+        let expectedCents = requestCents;
+        if (requestCents === null) {
+          const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
+          expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
+            ? paidCents - keyPriorCents
+            : NaN;
+        }
+        adoptedRefund = (Number.isFinite(expectedCents) && (listed?.data || []).find((r) =>
           ['succeeded', 'pending'].includes(r.status)
-          && (requestCents === null || r.amount === requestCents)
-          && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000)) || null;
+          && r.amount === expectedCents
+          && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
         if (!adoptedRefund) {
           // The original attempt never landed at Stripe — start over as a
           // validated fresh attempt against the CURRENT balance.
