@@ -11,8 +11,8 @@ const { normalizePublishChannels, normalizeGbpLocationIds } = social;
 
 describe('normalizePublishChannels', () => {
   test('omitted (null/undefined) defaults to all platforms', () => {
-    expect(normalizePublishChannels(undefined)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp']));
-    expect(normalizePublishChannels(null)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp']));
+    expect(normalizePublishChannels(undefined)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']));
+    expect(normalizePublishChannels(null)).toEqual(new Set(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']));
   });
 
   test('a valid array selects only those platforms', () => {
