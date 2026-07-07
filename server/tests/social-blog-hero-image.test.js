@@ -17,6 +17,16 @@ jest.mock('sharp', () => jest.fn(() => ({
   jpeg: jest.fn().mockReturnThis(),
   toBuffer: jest.fn().mockResolvedValue(Buffer.from('jpeg-bytes')),
 })));
+jest.mock('../services/linkedin', () => ({
+  configured: true,
+  companyId: '123',
+  getStatus: async () => ({ connected: true }),
+}));
+
+// FACEBOOK_PAGE_ID / INSTAGRAM_ACCOUNT_ID are read at module load — set them
+// BEFORE the require so the publishToAll platform-readiness checks pass.
+process.env.FACEBOOK_PAGE_ID = 'page-1';
+process.env.INSTAGRAM_ACCOUNT_ID = 'ig-acct';
 
 const social = require('../services/social-media');
 
@@ -99,47 +109,186 @@ describe('blogHeroSocialImageUrl', () => {
     await expect(social.blogHeroSocialImageUrl(PAGE)).resolves.toBeNull();
   });
 
-  test('BLOG_HERO_SOURCES covers exactly the blog-share lanes (poller, RSS backstop, scheduler)', () => {
-    expect(social.BLOG_HERO_SOURCES).toEqual(new Set(['autonomous_blog', 'rss', 'blog_scheduled']));
-    // newsletter/studio/manual shares keep the brand card
+  test('BLOG_HERO_SOURCES covers exactly the blog-share lanes (poller, RSS backstop, scheduler, admin share button, content agent)', () => {
+    expect(social.BLOG_HERO_SOURCES).toEqual(new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'content_agent']));
+    // newsletter/studio/manual-url shares keep the brand card
     expect(social.BLOG_HERO_SOURCES.has('newsletter')).toBe(false);
     expect(social.BLOG_HERO_SOURCES.has('scheduled')).toBe(false);
     expect(social.BLOG_HERO_SOURCES.has('manual')).toBe(false);
   });
 
-  describe('facebookWantsBlogHero (Codex round 2: FB-only deployments keep the photo attachment)', () => {
+  test("the admin BlogPage share route (source 'blog') gets the FB link-post treatment too", () => {
+    // The manual share button passes source:'blog' + an imageUrl — Facebook
+    // must still post text+link, not /photos with the raw URL in the caption.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../routes/admin-content-v2.js'), 'utf8');
+    expect(src).toContain("source: 'blog'");
+    expect(social.BLOG_HERO_SOURCES.has('blog')).toBe(true);
+  });
+
+  test("the content agent's distribute_to_social tool (source 'content_agent') is a blog lane too (Codex rounds 4+5)", () => {
+    // distribute_to_social shares live blog_posts through publishToAll — its
+    // shares must get the same blog treatment (FB /feed link post, IG caption
+    // URL, LinkedIn hero) as every other blog lane, not the brand-card format.
+    // The hero path is additionally gated on noAiImage, so the caller must
+    // pass it or LinkedIn posts pictureless and IG/GBP AI-generate an image.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/content/content-agent-tools.js'), 'utf8');
+    expect(src).toContain("source: 'content_agent'");
+    expect(src).toContain('noAiImage: true');
+    expect(social.BLOG_HERO_SOURCES.has('content_agent')).toBe(true);
+  });
+
+  test('the emoji-first article CTA is scoped to blog-share GBP copy — non-blog GBP keeps the service CTA (Codex round 5)', () => {
+    // generateContent('gbp') also serves the manual composer and studio
+    // fallbacks, whose links are service/campaign pages — forcing "point at
+    // the article" there produces wrong customer-facing copy. The blog tone
+    // must be conditional on the share's source being a blog lane.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/social-media.js'), 'utf8');
+    expect(src).toContain('const blogShare = BLOG_HERO_SOURCES.has(source)');
+    expect(src).toContain('gbp: blogShare ?');
+    // Both variants present: blog tone bans the sales CTA, generic keeps it.
+    expect(src).toContain('NEVER "Schedule an inspection"');
+    expect(src).toContain('End with a clear next step ("Schedule an inspection" or "See the full guide")');
+    // The publishToAll lanes thread source through to the prompt build.
+    expect(src).toContain("generateContent('gbp', { title, description, link, locationName: loc.name, source })");
+  });
+
+  describe('linkedinWantsBlogHero (LinkedIn cannot scrape article URLs — the hero must be uploaded as a thumbnail)', () => {
     const base = {
-      requestedPlatforms: new Set(['facebook']),
+      requestedPlatforms: new Set(['linkedin']),
       source: 'autonomous_blog',
       noAiImage: true,
       hasVideo: false,
     };
     beforeEach(() => {
-      process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
-      process.env.FACEBOOK_ACCESS_TOKEN = 'tok';
-      process.env.FACEBOOK_PAGE_ID = 'page';
+      process.env.SOCIAL_LINKEDIN_ENABLED = 'true';
+      require('../services/linkedin').configured = true;
+      require('../services/linkedin').companyId = '123';
     });
     afterEach(() => {
+      delete process.env.SOCIAL_LINKEDIN_ENABLED;
+      require('../services/linkedin').configured = true;
+      require('../services/linkedin').companyId = '123';
+    });
+
+    test('true for a LinkedIn-only blog share (no Instagram/GBP needed)', () => {
+      expect(social.linkedinWantsBlogHero(base)).toBe(true);
+    });
+
+    test('false for every non-hero condition: non-blog source, video, AI path, LinkedIn not requested/enabled/configured, no company id', () => {
+      expect(social.linkedinWantsBlogHero({ ...base, source: 'newsletter' })).toBe(false);
+      expect(social.linkedinWantsBlogHero({ ...base, hasVideo: true })).toBe(false);
+      expect(social.linkedinWantsBlogHero({ ...base, noAiImage: false })).toBe(false);
+      expect(social.linkedinWantsBlogHero({ ...base, requestedPlatforms: new Set(['facebook']) })).toBe(false);
+      process.env.SOCIAL_LINKEDIN_ENABLED = 'false';
+      expect(social.linkedinWantsBlogHero(base)).toBe(false);
+      process.env.SOCIAL_LINKEDIN_ENABLED = 'true';
+      require('../services/linkedin').configured = false;
+      expect(social.linkedinWantsBlogHero(base)).toBe(false);
+      require('../services/linkedin').configured = true;
+      require('../services/linkedin').companyId = null;
+      expect(social.linkedinWantsBlogHero(base)).toBe(false);
+    });
+  });
+
+  describe('Facebook blog shares post as /feed LINK posts, never /photos (owner directive 2026-07-06: embedded preview, no raw URL in the caption)', () => {
+    beforeEach(() => {
+      process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
+      process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
+      process.env.FACEBOOK_ACCESS_TOKEN = 'tok';
+    });
+    afterEach(() => {
+      delete process.env.SOCIAL_AUTOMATION_ENABLED;
       delete process.env.SOCIAL_FACEBOOK_ENABLED;
       delete process.env.FACEBOOK_ACCESS_TOKEN;
-      delete process.env.FACEBOOK_PAGE_ID;
     });
 
-    test('true for a Facebook-only blog share (no Instagram/GBP needed)', () => {
-      expect(social.facebookWantsBlogHero(base)).toBe(true);
+    function mockGraph() {
+      const calls = [];
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        calls.push({ url: String(url), body: opts.body ? JSON.parse(opts.body) : null });
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+      return calls;
+    }
+
+    test('blog share with an image still posts text+link to /feed — the preview card carries the hero (og:image)', async () => {
+      const calls = mockGraph();
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Lizard droppings caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toContain('/page-1/feed');
+      expect(calls[0].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE });
+      // The caption must NOT have the raw URL pasted into it.
+      expect(calls[0].body.message).not.toContain('https://');
     });
 
-    test('false for every non-hero condition: non-blog source, video, AI path, FB not requested/enabled, missing creds', () => {
-      expect(social.facebookWantsBlogHero({ ...base, source: 'newsletter' })).toBe(false);
-      expect(social.facebookWantsBlogHero({ ...base, hasVideo: true })).toBe(false);
-      expect(social.facebookWantsBlogHero({ ...base, noAiImage: false })).toBe(false);
-      expect(social.facebookWantsBlogHero({ ...base, requestedPlatforms: new Set(['gbp']) })).toBe(false);
-      process.env.SOCIAL_FACEBOOK_ENABLED = 'false';
-      expect(social.facebookWantsBlogHero(base)).toBe(false);
-      process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
-      delete process.env.FACEBOOK_PAGE_ID;
-      expect(social.facebookWantsBlogHero(base)).toBe(false);
+    test('non-blog sources with an image keep the /photos post (caption carries the link — unchanged behavior)', async () => {
+      const calls = mockGraph();
+
+      await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'studio',
+        imageUrl: 'https://cdn.example.com/social-media/campaign.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Campaign caption' },
+        noAiImage: true,
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toContain('/page-1/photos');
+      expect(calls[0].body.caption).toContain('Campaign caption');
+      expect(calls[0].body.caption).toContain(PAGE);
     });
+
+    test('Instagram blog shares get the article URL appended to the caption (owner directive 2026-07-06; plain text — IG captions are not clickable)', async () => {
+      process.env.SOCIAL_INSTAGRAM_ENABLED = 'true';
+      const calls = [];
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        const u = String(url);
+        calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
+        if (u.includes('/ig-acct/media_publish')) return { ok: true, json: async () => ({ id: 'ig-post-1' }), text: async () => '' };
+        if (u.includes('/ig-acct/media')) return { ok: true, json: async () => ({ id: 'container-1' }), text: async () => '' };
+        if (u.includes('container-1?fields=')) return { ok: true, json: async () => ({ status_code: 'FINISHED' }), text: async () => '' };
+        throw new Error(`unexpected fetch: ${u}`);
+      });
+
+      try {
+        const res = await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['instagram'], customContent: { instagram: 'IG caption\n\n#wavespestcontrol' },
+          noAiImage: true,
+        });
+
+        expect(res.platforms).toEqual([expect.objectContaining({ platform: 'instagram', success: true })]);
+        const containerCall = calls.find((c) => c.url.includes('/ig-acct/media') && !c.url.includes('media_publish'));
+        expect(containerCall.body.caption).toBe(`IG caption\n\n#wavespestcontrol\n\n${PAGE}`);
+
+        // A near-limit caption must be trimmed (caption, never the URL) so the
+        // append cannot push the publish request over Instagram's 2200 limit.
+        calls.length = 0;
+        await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['instagram'], customContent: { instagram: 'y'.repeat(2190) },
+          noAiImage: true,
+        });
+        const longCall = calls.find((c) => c.url.includes('/ig-acct/media') && !c.url.includes('media_publish'));
+        expect(longCall.body.caption.length).toBeLessThanOrEqual(2200);
+        expect(longCall.body.caption.endsWith(`\n\n${PAGE}`)).toBe(true);
+        expect(longCall.body.caption).toContain('…');
+      } finally {
+        delete process.env.SOCIAL_INSTAGRAM_ENABLED;
+      }
+    }, 30000);
   });
 
   test('scheduler blog share passes NO imageUrl — a raw .webp hero would bypass the hero branch and fail Instagram (Codex round 1)', () => {
