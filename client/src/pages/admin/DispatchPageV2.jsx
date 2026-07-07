@@ -80,6 +80,7 @@ import {
   isETToday as isETTodayStr,
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 
 const TechMatchPanel = lazy(
   () => import("../../components/dispatch/TechMatchPanelV2"),
@@ -1441,10 +1442,15 @@ export default function DispatchPageV2({
       )
     )
       return;
+    // Card-hold visits inside the late-cancel window: ask whether this is a
+    // business-initiated cancel (waive the fee) before committing.
+    const { proceed, waiveCardHoldFee } =
+      await confirmCardHoldFeeChoice(service.id);
+    if (!proceed) return;
     try {
       await adminFetch(`/admin/schedule/${service.id}/status`, {
         method: "PUT",
-        body: JSON.stringify({ status: "cancelled" }),
+        body: JSON.stringify({ status: "cancelled", waiveCardHoldFee }),
       });
       setData((prev) => {
         if (!prev) return prev;

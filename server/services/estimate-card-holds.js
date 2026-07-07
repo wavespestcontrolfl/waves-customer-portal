@@ -664,6 +664,28 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
 }
 
+// Read-only cancel preview for the admin cancel UIs: does this visit carry a
+// held card, and would cancelling RIGHT NOW charge the late-cancel fee? Lets
+// the UI ask the operator the business-initiated-waive question only when a
+// fee would actually fire (most visits have no hold — a blanket prompt would
+// be noise). Mirrors handleCardHoldCancellation's decision inputs exactly;
+// feeApplies is false when the feature flag is off because chargeNoShowFee
+// would no-op anyway.
+async function cardHoldCancelPreview(scheduledServiceId, now = new Date()) {
+  const hold = await heldCardForScheduledService(scheduledServiceId);
+  if (!hold) return { held: false, feeApplies: false };
+  let start = null;
+  try {
+    const { scheduledServiceApptTime } = require('./appointment-reminders');
+    start = await scheduledServiceApptTime(scheduledServiceId);
+  } catch (err) {
+    logger.warn('[estimate-card-holds] appt-time resolution for cancel preview failed', { error: err.message });
+  }
+  const feeApplies = isCardHoldEnabled() && !!start && isWithinCancelWindow({ hold, serviceStart: start, now });
+  const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
+  return { held: true, feeApplies, feeAmount };
+}
+
 // ── No-show fee settlement: refundable invoice + customer receipt ─────────
 // The no-show / late-cancel fee is charged face-value via a raw off-session PI
 // (chargeNoShowFee). This turns that bare charge into a first-class billing
@@ -869,6 +891,7 @@ module.exports = {
   chargeNoShowFee,
   releaseCardHold,
   handleCardHoldCancellation,
+  cardHoldCancelPreview,
   isWithinCancelWindow,
   settleNoShowFee,
   _private: {

@@ -17,6 +17,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../../lib/timezone';
+import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
@@ -218,11 +219,17 @@ export default function MobileAppointmentDetailSheet({
 
   const cancelAppointment = async () => {
     if (!window.confirm(`Cancel appointment for ${service.customerName || 'customer'}? This cannot be undone.`)) return;
+    // Busy BEFORE the async card-hold preview — a slow preview must not
+    // leave the Cancel control active for a double-tap re-entry.
     setActionBusy('cancel');
+    // Card-hold visits inside the late-cancel window: ask whether this is a
+    // business-initiated cancel (waive the fee) before committing.
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
+    if (!proceed) { setActionBusy(''); return; }
     try {
       await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: 'PUT',
-        body: JSON.stringify({ status: 'cancelled' }),
+        body: JSON.stringify({ status: 'cancelled', waiveCardHoldFee }),
       });
       onCancelled?.(service);
       onClose?.();

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
+import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import { TIMEZONE } from '../../lib/timezone';
 import CallBridgeLink from '../admin/CallBridgeLink';
 
@@ -191,7 +192,13 @@ export default function ScheduleCustomerSidebar({
     if (!service?.id || cancelling) return;
     if (!canCancelAppointment) return;
     if (cancelScope !== 'this_only' && !canCancelSeries) return;
+    // Busy BEFORE the async card-hold preview — a slow preview must not
+    // leave the cancel button active for a re-entrant click.
     setCancelling(true);
+    // Card-hold visits inside the late-cancel window: ask whether this is a
+    // business-initiated cancel (waive the fee) before committing.
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
+    if (!proceed) { setCancelling(false); return; }
     try {
       const reasonParts = [];
       if (notificationType !== 'none') reasonParts.push(`Notification requested: ${notificationType.replace('_', ' ')}`);
@@ -204,6 +211,7 @@ export default function ScheduleCustomerSidebar({
           scope: cancelScope,
           notes: reasonParts.join('\n') || 'Cancelled from appointment sidebar',
           notifyCustomer,
+          waiveCardHoldFee,
         },
       });
       if (!r.ok) {
