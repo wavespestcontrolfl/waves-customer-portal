@@ -1,5 +1,5 @@
 import React from 'react';
-import { Phone } from 'lucide-react';
+import { Phone, Globe, CircleUserRound } from 'lucide-react';
 
 const HELP_NUMBER = '(941) 297-5749';
 const HELP_TEL = 'tel:+19412975749';
@@ -52,37 +52,25 @@ export default function HelpPhoneLink({ tone = 'dark', compact, inline = false }
     );
   }
 
-  // Prominent header slot: phone link (icon + number; the number hides at
-  // compact widths via .help-phone-full) plus an icon-only email link. No
-  // text fallback — icons carry the compact layout (owner spec 2026-07-06).
+  // Prominent header slot: icon-only row — phone, email, website, portal
+  // (owner spec 2026-07-06: no phone-number text in the header). aria-labels
+  // + titles carry the accessible names.
+  // 12px padding + compensating margin = ~40px hit areas without changing
+  // the visual rhythm (touch-target audit 2026-07-06).
+  const iconLink = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color, lineHeight: 1, textDecoration: 'none', padding: 12, margin: -12 };
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 14 }}>
-      <a
-        href={HELP_TEL}
-        aria-label={`Call Waves ${HELP_NUMBER}`}
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          color,
-          fontFamily: "'Inter', system-ui, sans-serif",
-          fontSize: 'var(--text-md)',
-          fontWeight: 700,
-          textDecoration: 'none',
-          lineHeight: 1,
-        }}
-      >
+      <a href={HELP_TEL} aria-label={`Call Waves ${HELP_NUMBER}`} title={HELP_NUMBER} style={iconLink}>
         <Phone size={16} fill="currentColor" strokeWidth={0} aria-hidden="true" />
-        <span className="help-phone-full" style={compact ? { display: 'none' } : {}}>
-          {HELP_NUMBER}
-        </span>
       </a>
-      <a
-        href={HELP_MAILTO}
-        aria-label="Email Waves"
-        style={{ display: 'inline-flex', alignItems: 'center', color, lineHeight: 1 }}
-      >
+      <a href={HELP_MAILTO} aria-label="Email Waves" title="Email us" style={iconLink}>
         <MailFilledIcon />
+      </a>
+      <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" aria-label="Visit wavespestcontrol.com" title="wavespestcontrol.com" style={iconLink}>
+        <Globe size={16} strokeWidth={2.25} aria-hidden="true" />
+      </a>
+      <a href="/" aria-label="Customer portal" title="Customer portal" style={iconLink}>
+        <CircleUserRound size={17} strokeWidth={2.25} aria-hidden="true" />
       </a>
     </span>
   );

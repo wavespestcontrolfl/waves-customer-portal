@@ -18,6 +18,9 @@ export default function HeaderStoreLinks({ tone = 'dark' }) {
     color,
     textDecoration: 'none',
     lineHeight: 1,
+    // ~40px hit areas without changing visual rhythm (2026-07-06 audit).
+    padding: 11,
+    margin: -11,
   };
   return (
     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 14 }}>

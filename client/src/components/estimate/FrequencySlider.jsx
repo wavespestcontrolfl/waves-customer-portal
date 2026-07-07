@@ -11,14 +11,13 @@
  * carries the button selection for assistive tech.
  */
 import { estimateInnerBox } from './cardStyles';
+import { W } from './tokens';
 
-const W = {
-  blueDeeper: '#1B2C5B',
-  textCaption: '#64748B',
-  white: '#FFFFFF',
-};
 
-const DROPDOWN_THRESHOLD = 3;
+// Owner 2026-07-06: cadences ALWAYS render as buttons (supersedes the
+// 2026-07-04 dropdown-at-3+ directive); auto-fit grid keeps them tidy on
+// phones.
+const DROPDOWN_THRESHOLD = Infinity;
 
 // Navy chevron for the appearance-reset <select>.
 const CHEVRON = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%231B2C5B' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/%3E%3C/svg%3E")`;
@@ -35,7 +34,7 @@ export default function FrequencySlider({ frequencies, selected, onChange, disab
     <div
       role={useDropdown ? undefined : 'group'}
       aria-label={useDropdown ? undefined : 'Service frequency'}
-      style={{ padding: '0 0 6px', marginBottom: 8, opacity: disabled ? 0.68 : 1 }}
+      style={{ padding: '0 0 8px', marginBottom: 8, opacity: disabled ? 0.68 : 1 }}
     >
       <div style={{
         fontSize: 13, fontWeight: 600, color: W.textCaption,
@@ -78,7 +77,7 @@ export default function FrequencySlider({ frequencies, selected, onChange, disab
           ))}
         </select>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12 }}>
           {frequencies.map((frequency) => {
             const active = frequency.key === selected;
             return (
@@ -91,7 +90,7 @@ export default function FrequencySlider({ frequencies, selected, onChange, disab
                 onClick={() => { if (!disabled) onChange(frequency.key); }}
                 style={{
                   ...estimateInnerBox(),
-                  padding: '14px 12px',
+                  padding: '16px 12px',
                   textAlign: 'center',
                   fontSize: 15,
                   fontWeight: 700,

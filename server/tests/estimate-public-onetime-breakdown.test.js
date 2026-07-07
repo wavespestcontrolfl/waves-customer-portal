@@ -1902,7 +1902,8 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('manual-discount-row');
     expect(html).toContain('Military Discount');
-    expect(html).toContain('-$15 / quarter');
+    // Typographic minus (U+2212) — fmtMoneySigned convention (estimate audit 2026-07-07).
+    expect(html).toContain('−$15 / quarter');
   });
 
   test('public pricing bundle exposes annual prepay for lawn-only estimates', async () => {
@@ -2489,6 +2490,56 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('Quote Required');
     expect(html).toContain('Exterior yard area exceeds automatic quote threshold.');
+  });
+
+  test('server-rendered hero follows the CTA state (estimate audit 2026-07-07 #5)', () => {
+    const base = {
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 120,
+      annualTotal: 720,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    };
+    const estData = {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+      },
+    };
+
+    const accepted = renderPage('hero-accepted-token', { ...base, status: 'accepted' }, estData);
+    expect(accepted).toContain('Hello Pat, your plan is booked!');
+    expect(accepted).toContain('Your Waves plan');
+    expect(accepted).not.toContain('your estimate is ready!');
+
+    const quote = renderPage('hero-quote-token', {
+      ...base, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0,
+    }, estData);
+    expect(quote).toContain('Hello Pat, your custom quote is in the works.');
+    expect(quote).toContain('Your custom quote');
+    expect(quote).not.toContain('your estimate is ready!');
+
+    // Declined keeps the neutral headline + the standard service kicker —
+    // and outranks a lingering quoteRequired flag.
+    const declined = renderPage('hero-declined-token', {
+      ...base, status: 'declined', quoteRequired: true,
+    }, estData);
+    expect(declined).toContain('Hello Pat, here’s your Waves estimate.');
+    expect(declined).toContain('Your estimate ·');
+    expect(declined).not.toContain('your estimate is ready!');
+    expect(declined).not.toContain('custom quote is in the works');
+
+    // A commercial proposal is quote-required by design but its banner says
+    // the formal proposal is ready — the hero must agree, not say "in the
+    // works".
+    const proposal = renderPage('hero-proposal-token', {
+      ...base, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0,
+    }, { ...estData, proposal: { enabled: true } });
+    expect(proposal).toContain('Hello Pat, your formal proposal is ready.');
+    expect(proposal).toContain('Your commercial proposal');
+    expect(proposal).not.toContain('custom quote is in the works');
   });
 
   test('server-rendered termite trenching quote-required page avoids zero-price acceptance copy', () => {
@@ -5426,7 +5477,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Save 5%');
     expect(html).not.toContain('Net setup fee: $0');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
-    expect(html).not.toContain('<strong>-$99</strong>');
+    expect(html).not.toContain('<strong>−$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     // Annual plan total $660 → prepay invoice $627 (5% off the recurring annual).
     expect(html).toContain('data-prepay-discount-rate="0.05">$627</strong>');

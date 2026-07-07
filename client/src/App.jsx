@@ -115,6 +115,7 @@ import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import ProjectReportViewPage from './pages/ProjectReportViewPage';
 import RecapViewPage from './pages/RecapViewPage';
+import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
 
 function showReloadToast() {
@@ -222,7 +223,9 @@ function EstimatePublicGateway() {
   if (SERVICE_ESTIMATE_SLUGS.has(slug)) {
     return <QuotePage serviceSlug={slug} />;
   }
-  return <EstimateViewPage />;
+  // Tokened estimates get the standard shell chrome (owner 2026-07-06);
+  // the slug branch keeps the quote wizard's own hero.
+  return <WavesShell><EstimateViewPage /></WavesShell>;
 }
 
 function ProtectedRoute({ children }) {
@@ -291,10 +294,12 @@ export default function App() {
         <BiometricGate>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
-          <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
-          <Route path="/report/:token" element={<ReportViewPage />} />
-          <Route path="/recap/:token" element={<RecapViewPage />} />
+          {/* WavesShell wraps (owner 2026-07-06): every customer page gets
+              the standard top bar + trust footer. */}
+          <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
+          <Route path="/report/project/:token" element={<WavesShell><ProjectReportViewPage /></WavesShell>} />
+          <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
+          <Route path="/recap/:token" element={<WavesShell><RecapViewPage /></WavesShell>} />
           {import.meta.env.DEV && <Route path="/report-v2-preview" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportV2Preview /></Suspense>} />}
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
@@ -305,9 +310,9 @@ export default function App() {
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
           <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
-          <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportViewPage /></Suspense>} />
+          <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
-          <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ServiceOutlinePage /></Suspense>} />
+          <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><WavesShell><ServiceOutlinePage /></WavesShell></Suspense>} />
           <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />

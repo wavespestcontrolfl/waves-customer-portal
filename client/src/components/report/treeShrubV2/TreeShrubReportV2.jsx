@@ -123,8 +123,8 @@ export function StatusPill({ status, small = false }) {
 }
 
 function Card({ children, style }) {
-  // data-glass is inert without html[data-glass-theme] (?glass=1 on the live
-  // report view) — glass-theme.css supplies all material; gate-off unchanged.
+  // data-glass is inert without html[data-glass-theme] (set unconditionally on
+  // the live report view) — glass-theme.css supplies all material.
   return (
     <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
       {children}

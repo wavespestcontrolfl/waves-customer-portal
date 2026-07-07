@@ -3157,7 +3157,7 @@ function renderMembershipBlockHtml(membership) {
   // independently of this card.
   if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return '';
 
-  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+  const money = fmtMoney;
   // Only rows with a real, non-zero benefit render — the pricing engine's
   // margin guard can cap the applied discount to 0 even at Silver+, and a
   // bare "Member pricing" row with no figure is the same no-benefit card
@@ -3692,7 +3692,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
   const recurringDisplayManualDiscount = intervalPriceFromMonthly(manualDiscountMonthly, selectedRecurringFrequencyKey);
   const manualDiscountHtml = manualDiscount && recurringDisplayManualDiscount > 0
-    ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>-${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
+    ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>−${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
     : '';
 
   // WaveGuard Membership setup ($99). Applies only to recurring Pest or Mosquito
@@ -3855,7 +3855,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
     ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
     : (prepayDiscountAmount > 0
-      ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>-${fmtMoney(prepayDiscountAmount)}</strong></div>`
+      ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>−${fmtMoney(prepayDiscountAmount)}</strong></div>`
       : '');
   // Prepay body/button copy is incentive-aware: the per-service pageCopy still
   // says "waive the setup", which is only accurate for the fee services. No-fee
@@ -4089,7 +4089,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
     : 0;
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
-    ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">-${fmtMoney(manualOneTimeDiscount)}</td></tr>`
+    ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
     : '';
   const oneTimeRows = realOneTimeRows;
   const oneTimeRowsTotal = hasRealOneTime
@@ -4143,13 +4143,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${showYourWork.qualityNote ? `<p class="ai-quality-note">${escapeHtml(showYourWork.qualityNote)}</p>` : ''}
     </div>` : '';
   const showYourWorkCss = showYourWork ? `
-  .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#6B7280;line-height:1.45}
+  .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#475569;line-height:1.45}
   .ai-show-work{display:grid;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid #E7E2D7}
-  .ai-show-work-title{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .ai-show-work-title{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .ai-fact-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   @media(max-width:720px){.ai-fact-list{grid-template-columns:1fr}}
   .ai-fact{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
-  .ai-fact-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+  .ai-fact-label{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-fact-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
   .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 14px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
   .ai-parcel-line{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}
@@ -4245,6 +4245,27 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>
   </section>` : '';
 
+  // Hero follows the CTA state (estimate audit 2026-07-07, finding #5) —
+  // mirrors TERMINAL_HERO in EstimateViewPage.jsx: a terminal page must not
+  // promise "your estimate is ready!" above a booked / call-us / declined
+  // banner. Status statements only, so they're category-safe. A null eyebrow
+  // keeps the standard "Your estimate · {service}" kicker. Order matters:
+  // terminal statuses (accepted/declined) outrank the generic quoteRequired
+  // flag, and a commercial proposal outranks the generic quote copy — its
+  // banner says the formal proposal is ready, so "in the works" would
+  // contradict it.
+  const stateHero = est.status === 'accepted'
+    ? { h1: `Hello ${firstName}, your plan is booked!`, eyebrow: 'Your Waves plan' }
+    : est.status === 'declined'
+    ? { h1: `Hello ${firstName}, here’s your Waves estimate.`, eyebrow: null }
+    : quoteRequired && commercialProposal
+    ? { h1: `Hello ${firstName}, your formal proposal is ready.`, eyebrow: 'Your commercial proposal' }
+    : quoteRequired
+    ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
+    : null;
+  const heroH1 = stateHero?.h1 || `Hello ${firstName}, your estimate is ready!`;
+  const heroEyebrow = stateHero?.eyebrow || `Your estimate · ${escapeHtml(quotedServicesLabel)}`;
+
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -4265,28 +4286,28 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   h2{font-size:clamp(22px,3vw,28px);line-height:1.2}
   h3{font-size:18px;font-weight:600}
   p{margin:0 0 12px}
-  .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
+  .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
   .top-phone:hover{color:${BRAND.blueDark}}
   .top-logo{height:28px;display:block}
-  .wrap{flex:1;max-width:1040px;width:100%;margin:0 auto;padding:62px 24px 80px}
+  .wrap{flex:1;max-width:720px;width:100%;margin:0 auto;padding:32px 20px 110px}
   .hero{padding:10px 0 28px;max-width:900px}
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
-  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
+  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
   .service-price-card{padding:18px 20px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06);display:flex;flex-direction:column}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px;min-height:18px}
+  .service-price-detail{font-size:12px;color:#475569;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
   .service-big-price{margin-top:14px;gap:8px 12px;align-content:flex-start}
-  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
-  .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(62px,8vw,84px);line-height:.92;color:#1B2C5B}
-  .service-big-price .anchor{font-size:22px;flex-basis:100%}
-  .service-big-price .num{font-size:clamp(44px,5vw,58px)}
-  .big-price .per{font-size:24px;color:#6B7280}
-  .service-big-price .per{font-size:18px}
+  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:15px;color:#9CA3AF;text-decoration:line-through}
+  .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(24px,10.5vw,40px);line-height:.92;color:#1B2C5B}
+  .service-big-price .anchor{font-size:15px;flex-basis:100%}
+  .service-big-price .num{font-size:clamp(24px,10.5vw,40px)}
+  .big-price .per{font-size:14px;color:#475569}
+  .service-big-price .per{font-size:14px}
   .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
   .save-row{margin-top:10px;min-height:20px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
@@ -4294,20 +4315,20 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .supplemental-service-list{display:grid;gap:8px;max-width:720px;margin:18px auto 0}
   .supplemental-service-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;text-align:left}
   .supplemental-service-name{font-size:14px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .supplemental-service-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .supplemental-service-detail{font-size:12px;color:#475569;line-height:1.45;margin-top:2px}
   .supplemental-service-row strong{font-size:14px;line-height:1.25;color:#1B2C5B;white-space:nowrap}
-  .day-price{margin-top:8px;font-size:14px;color:#6B7280}
+  .day-price{margin-top:8px;font-size:14px;color:#475569}
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
-  .setup-fee-sub{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.45}
+  .setup-fee-sub{font-size:12px;color:#475569;margin-top:2px;line-height:1.45}
   .per-treatment{margin-top:14px;max-width:520px;padding:14px 16px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
   .per-treatment-title{font-size:12px;font-weight:700;color:#1B2C5B;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
   .per-treatment-rows{display:grid;gap:8px}
   .pt-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline}
   .pt-label{font-size:14px;color:#1B2C5B;line-height:1.35}
-  .pt-cadence{font-size:12px;color:#6B7280;margin-left:2px}
+  .pt-cadence{font-size:12px;color:#475569;margin-left:2px}
   .pt-price{font-size:14px;font-weight:700;color:#1B2C5B;white-space:nowrap}
-  .pt-price span,.pt-suffix{font-weight:500;color:#6B7280}
+  .pt-price span,.pt-suffix{font-weight:500;color:#475569}
   .pt-total{border-top:1px solid #E7E2D7;padding-top:8px;margin-top:2px}
   .pt-total .pt-label{font-weight:700}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
@@ -4318,7 +4339,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .choice-treatment{padding:14px 0 8px;max-width:720px}
   .choice-treatment-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .choice-treatment-detail{font-size:13px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .choice-treatment-detail{font-size:13px;color:#475569;line-height:1.45;margin-top:2px}
   .choice-treatment-price{margin-top:14px}
   .choice-treatment .save-row{margin-top:8px}
   .choice-treatment .day-price{margin-top:8px}
@@ -4327,7 +4348,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .card{background:#F2EEE0;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #D9D3C4;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
-  .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
+  .card-sub{color:#475569;font-size:14px;margin:0 0 14px}
   .ai-card{background:#F2EEE0}
   .waveguard-ai-card{display:grid;gap:14px}
   .intelligence-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
@@ -4338,7 +4359,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .ai-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
   @media(max-width:720px){.ai-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .ai-metric{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
-  .ai-metric-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+  .ai-metric-label{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-metric-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
   .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
   @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
@@ -4354,7 +4375,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .wg-tier-platinum{background:#EDEFF2;color:#2B3340}
   .wg-upgrade{background:#fff;border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:15px;line-height:1.5}
   .wg-section{display:grid;gap:8px}
-  .wg-section-title{font-size:13px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .wg-section-title{font-size:13px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .wg-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .wg-row-label{color:#1B2C5B;font-weight:600;font-size:15px}
   .wg-row-val{color:#1F7A4D;font-size:14px;font-weight:600;text-align:right}
@@ -4382,12 +4403,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:800;letter-spacing:0;margin:0;color:#1B2C5B}
   .payment-choice-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#F8FCFE;border:1px solid #CFE7F5;color:#1B2C5B;padding:5px 9px;font:800 11px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
   .payment-choice-badge.primary{background:#ECFDF5;border-color:#BBF7D0;color:#166534}
-  .payment-choice p{margin:0;color:#6B7280;font-size:13px;line-height:1.5}
+  .payment-choice p{margin:0;color:#475569;font-size:13px;line-height:1.5}
   .payment-choice-body{min-height:39px}
   .payment-summary-list{display:grid;border-top:1px solid #E7E2D7;border-bottom:1px solid #E7E2D7;margin:2px 0}
   .payment-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;border-top:1px solid #F0ECE2}
   .payment-summary-row:first-child{border-top:0}
-  .payment-summary-row span{font-size:12px;color:#6B7280;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
+  .payment-summary-row span{font-size:12px;color:#475569;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
   .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
   .payment-summary-row strong s{color:#9CA3AF;text-decoration-color:${BRAND.red};text-decoration-thickness:2px;margin-right:6px}
@@ -4410,12 +4431,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .billing-line{padding-top:8px;border-top:1px solid #F0ECE2;color:#1B2C5B;font-size:13px;font-weight:700;line-height:1.45}
   .billing-line.discount{color:${BRAND.green}}
   .billing-total-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:10px;border-top:1px solid #E7E2D7}
-  .billing-total-row span{font-size:13px;color:#6B7280;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+  .billing-total-row span{font-size:13px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
   .billing-total-row strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;white-space:nowrap}
-  .billing-small{font-size:12px!important;color:#6B7280!important;line-height:1.5!important}
+  .billing-small{font-size:12px!important;color:#475569!important;line-height:1.5!important}
   .payment-setup-summary{border:1px solid #D8E7F0;border-radius:12px;background:#F8FCFE;padding:14px 16px;margin:0 0 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
   .payment-setup-summary-main{min-width:0}
-  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#6B7280;margin-bottom:5px}
+  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#475569;margin-bottom:5px}
   .payment-setup-summary-title{font-size:16px;font-weight:800;color:#1B2C5B;line-height:1.25;margin-bottom:4px}
   .payment-setup-summary-body{font-size:13px;color:#3F4A65;line-height:1.5}
   .payment-setup-summary-change{border:1px solid #CFE7F5;background:#fff;color:#1B2C5B;border-radius:8px;padding:8px 10px;font:800 12px/1 Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
@@ -4427,7 +4448,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pref-row.off{background:#F7F5EE;border-color:#D4CBB8}
   .pref-row .pref-label{flex:1;min-width:0}
   .pref-row .pref-title{font-weight:600;font-size:14px;color:#1B2C5B}
-  .pref-row .pref-desc{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.5}
+  .pref-row .pref-desc{font-size:12px;color:#475569;margin-top:2px;line-height:1.5}
   .pref-row .pref-savings{font-size:12px;color:${BRAND.green};font-weight:600;margin-top:4px}
   .pref-row .pref-savings.none{color:#9CA3AF;font-weight:500}
   .switch{position:relative;display:inline-block;width:42px;height:24px;flex-shrink:0;margin-top:2px}
@@ -4438,12 +4459,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .switch input:checked+.slider::before{transform:translateX(18px)}
   .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
   .booking-card h2{font-family:Inter,system-ui,sans-serif;font-size:22px;font-weight:600;letter-spacing:0;color:#1B2C5B;margin:0 0 8px;line-height:1.2}
-  .booking-card .card-sub{font-size:14px;color:#6B7280;margin:0 0 20px;line-height:1.55}
+  .booking-card .card-sub{font-size:14px;color:#475569;margin:0 0 20px;line-height:1.55}
   .existing-appt-card{border:1px solid #E2E8F0;border-radius:12px;background:#fff;padding:14px 16px;margin-bottom:18px}
-  .existing-appt-kicker{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6B7280;margin-bottom:6px}
+  .existing-appt-kicker{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#475569;margin-bottom:6px}
   .existing-appt-title{font-size:18px;font-weight:800;color:#1B2C5B;line-height:1.3}
   .existing-appt-sub{font-size:14px;color:#3F4A65;margin-top:4px;line-height:1.4}
-  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
+  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#475569;text-align:center}
   .slot-list{display:grid;gap:10px}
   .date-finder{margin:0 0 16px;display:grid;gap:10px;padding:16px;border:1px solid #CFE7F5;border-radius:12px;background:#fff}
   .date-finder-eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
@@ -4459,15 +4480,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .slot-more{margin-top:10px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;overflow:hidden}
   .slot-more summary{list-style:none;cursor:pointer;padding:12px 14px;color:#1B2C5B;font-size:14px;font-weight:700}
   .slot-more summary::-webkit-details-marker{display:none}
-  .slot-more summary::after{content:'+';float:right;font-size:18px;line-height:1;color:#6B7280}
+  .slot-more summary::after{content:'+';float:right;font-size:18px;line-height:1;color:#475569}
   .slot-more[open] summary::after{content:'–'}
   .slot-more-list{display:grid;gap:10px;padding:0 12px 12px}
   .slot-btn{width:100%;padding:14px 16px;border-radius:12px;cursor:pointer;background:#fff;color:#1B2C5B;border:1.5px solid #E2E8F0;text-align:left;transition:background-color .15s,border-color .15s,color .15s;font-family:Inter,system-ui,sans-serif}
   .slot-btn:hover:not([disabled]){border-color:${ESTIMATE_BUTTON_BLUE}}
   .slot-btn.selected{border-color:${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff}
-  .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#6B7280;margin-bottom:5px;line-height:1.25}
+  .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#475569;margin-bottom:5px;line-height:1.25}
   .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
-  .slot-btn .slot-reason{display:block;font-size:14px;color:#6B7280;line-height:1.35}
+  .slot-btn .slot-reason{display:block;font-size:14px;color:#475569;line-height:1.35}
   .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
   .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
@@ -4478,14 +4499,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
   .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
   .pay-pref-btn .pay-pref-title{font-size:14px;font-weight:600;color:#1B2C5B}
-  .pay-pref-note{font-size:13px;color:#6B7280;line-height:1.45;padding:0 2px;text-align:center}
+  .pay-pref-note{font-size:13px;color:#475569;line-height:1.45;padding:0 2px;text-align:center}
   .pay-pref-choice[hidden]{display:none}
   .pay-pref-btn[hidden]+.pay-pref-note{display:none}
   #deposit-overlay{position:fixed;inset:0;background:rgba(27,44,91,.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
   #deposit-overlay .deposit-card{background:#fff;border:1px solid #E7E2D7;border-radius:14px;max-width:440px;width:100%;padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.25);max-height:90vh;overflow:auto}
   #deposit-overlay .deposit-error{color:#C8312F;font-size:14px;line-height:1.45;margin-top:10px}
   .pay-pref-btn[aria-pressed="true"]{box-shadow:0 0 0 3px rgba(27,44,91,.16)}
-  .pay-pref-btn .pay-pref-sub{font-size:12px;color:#6B7280;line-height:1.45}
+  .pay-pref-btn .pay-pref-sub{font-size:12px;color:#475569;line-height:1.45}
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .pay-pref-btn.primary .pay-pref-title{color:#fff}
   .pay-pref-btn.primary .pay-pref-sub{color:rgba(255,255,255,.8)}
@@ -4499,7 +4520,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   td{padding:10px 0;border-bottom:1px solid #E7E2D7;vertical-align:top;font-size:14px}
   tr:last-child td{border-bottom:0}
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
-  .sub{font-size:12px;color:#6B7280;margin-top:2px}
+  .sub{font-size:12px;color:#475569;margin-top:2px}
   .cta{display:block;width:100%;padding:14px 22px;background:#1B2C5B;color:#fff;border:none;border-radius:10px;font-family:Inter,system-ui,sans-serif;font-weight:500;font-size:16px;cursor:pointer;transition:all .15s;text-align:center;text-decoration:none}
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
@@ -4551,7 +4572,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .review-card .stars{color:${BRAND.yellow};font-size:14px;margin-bottom:8px;letter-spacing:1px}
   .review-card p{font-size:13px;margin:0 0 12px;font-style:italic;line-height:1.55;color:#3F4A65;flex:1}
   .review-card.review-profile-card p{font-style:normal}
-  .rev-meta{font-size:12px;color:#6B7280}
+  .rev-meta{font-size:12px;color:#475569}
   .review-link{display:inline-flex;margin-top:10px;color:#1B2C5B;font-size:13px;font-weight:800;text-decoration:none}
   .review-link:hover{text-decoration:underline}
   .review-dots{display:flex;justify-content:center;gap:6px;margin-top:14px}
@@ -4576,7 +4597,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .final p{color:rgba(255,255,255,.8);font-size:14px}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .quote-required-banner{background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
-  .site-footer{text-align:center;padding:40px 20px 32px;color:#6B7280;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
+  .site-footer{text-align:center;padding:40px 20px 32px;color:#475569;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
   .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
   .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
   .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
@@ -4584,7 +4605,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500;white-space:nowrap}
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
-  .site-footer-legal{font-size:11px;color:#6B7280}
+  .site-footer-legal{font-size:11px;color:#475569}
   #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
   .q-bar{display:none}
@@ -4600,6 +4621,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
   }
   @media(max-width:480px){.q-bar .q-btn{font-size:13px;padding:10px}}
+  /* Tabular digits at the money sites (estimate audit 2026-07-07, finding #8)
+     so amount columns, totals, and discounts align — same sites the React
+     page covers via fontVariantNumeric. */
+  .big-price .num,.big-price .anchor,.pt-price,.payment-summary-row strong,.supplemental-service-row strong,td.val,.wg-row-val,.manual-discount-row strong,.billing-total-row{font-variant-numeric:tabular-nums}
+  /* Print parity with the React estimate (estimate audit 2026-07-07): no
+     fixed chrome over the pages, solid white background, cards kept whole. */
+  @media print{
+    .q-bar,#toast,#deposit-overlay,.top-bar{display:none!important}
+    body{background:#fff;padding-bottom:0}
+    .card,.service-price-card,.supplemental-service-row{break-inside:avoid;box-shadow:none}
+  }
 </style>
 </head><body>
 
@@ -4619,8 +4651,8 @@ ${shellTopBar()}
     : `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>`) : ''}
 
   <div class="hero">
-    <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hello ${firstName}, your estimate is ready!</h1>
+    <div class="eyebrow">${heroEyebrow}</div>
+    <h1>${heroH1}</h1>
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}

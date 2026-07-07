@@ -1,6 +1,6 @@
 /**
  * Glass slot-picker helpers (docs/design/estimate-glass-plan.md, PR C) —
- * pure functions behind the ?glass=1 components: slot freshness, the
+ * pure functions behind the glass components: slot freshness, the
  * real-data scarcity badge, and the slot-aware CTA metadata.
  *
  * All calendar math is ET wall-clock (lib/timezone.js — scheduling is ET,

@@ -28,6 +28,7 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
+import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import ActivityCard from '../components/ActivityCard';
@@ -4461,8 +4462,13 @@ function NotFoundState() {
 function LegacyReport({ data, token }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
+  // sticky header replaces this page-local top bar — rendering both stacked
+  // two headers (codex P2, PR #2439). Kept for any standalone render.
+  const { inShell } = useWavesShell();
   return (
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, fontFamily: FONT_BODY, color: ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+      {!inShell ? (
       <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
@@ -4479,6 +4485,7 @@ function LegacyReport({ data, token }) {
           <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
         </div>
       </header>
+      ) : null}
       <main style={{ flex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
@@ -7376,13 +7383,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
       `}</style>
 
-      <header data-glass="soft" className="sr-top">
-        <div className="sr-top-inner">
-          <a className="sr-top-phone" href={`tel:${WAVES_PHONE_TEL}`}>{WAVES_PHONE_DISPLAY}</a>
-          <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
-        </div>
-      </header>
-
+      {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
+          route wrap, owner 2026-07-06) provides the standard chrome. */}
       <main className="sr-shell">
         {mode === 'live' && (data.internalOnly
           ? <InternalReviewBar />

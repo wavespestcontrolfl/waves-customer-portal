@@ -28,16 +28,15 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
-import FrequencySlider from '../components/estimate/FrequencySlider';
 import PriceCard from '../components/estimate/PriceCard';
-import IncludedChecklist from '../components/estimate/IncludedChecklist';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
-import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
+import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
+import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
@@ -62,9 +61,13 @@ import {
   GlassSectionCta,
   GlassStickyBookBar,
   useFeaturedReviews,
+  GlassFrequencyPills,
 } from '../components/estimate/glass/GlassEstimateExtras';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
+import { fmtMoney, fmtMoneySigned } from '../lib/money';
+import { formatETDate } from '../lib/timezone';
+import { PRICE_FONT } from '../components/estimate/tokens';
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -86,6 +89,18 @@ const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
 // never invite a "choose your option" on an estimate with nothing to choose.
 const UNIVERSAL_HEADLINE = 'Hello {first}, your estimate is ready!';
 
+// Hero follows the CTA state (estimate audit 2026-07-07, finding #5): a
+// terminal page must not promise "your plan is ready!" above a call-us /
+// booked / declined card. Status statements only — no service claims, so
+// they're category-safe without per-pack copy. A null eyebrow falls back
+// to the standard "Your estimate · {service}" kicker.
+const TERMINAL_HERO = {
+  accepted: { h1: 'Hello {first}, your plan is booked!', eyebrow: 'Your Waves plan' },
+  quote_required: { h1: 'Hello {first}, your custom quote is in the works.', eyebrow: 'Your custom quote' },
+  declined: { h1: "Hello {first}, here's your Waves estimate.", eyebrow: null },
+  expired: { h1: "Hello {first}, here's your Waves estimate.", eyebrow: null },
+};
+
 // Small uppercase section kicker — same treatment as "How often?" /
 // "Customize your visit" so every card opens with a matching subheader.
 const SECTION_KICKER_STYLE = {
@@ -94,7 +109,7 @@ const SECTION_KICKER_STYLE = {
   color: ESTIMATE_MUTED,
   textTransform: 'uppercase',
   letterSpacing: '0.12em',
-  marginBottom: 6,
+  marginBottom: 8,
 };
 
 const BOOKING_SECTION_ID = 'estimate-booking-section';
@@ -127,7 +142,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
         style={{
           minHeight: 44,
           minWidth: 220,
-          padding: '0 28px',
+          padding: '0 24px',
           background: ESTIMATE_BUTTON_BG,
           color: COLORS.white,
           border: 'none',
@@ -149,7 +164,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
           contract/callback/guarantee terms, one-time projects carry the
           license + satisfaction-guarantee line instead. */}
       {glass && showGuaranteeMicro ? (
-        <div style={{ marginTop: 10, fontSize: 12.5, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
+        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
       ) : null}
@@ -157,11 +172,6 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
   );
 }
 
-function fmtMoney(n) {
-  if (n == null) return '—';
-  const v = Math.round(Number(n) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
-}
 
 function pricingServices(pricing = {}) {
   if (Array.isArray(pricing?.services) && pricing.services.length > 0) return pricing.services;
@@ -435,43 +445,44 @@ function Page({ children }) {
       display: 'flex', flexDirection: 'column',
     }}>
       <EstimateGlassTheme active />
-      <header style={{ background: COLORS.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
-        <div style={{
-          maxWidth: 960,
-          margin: '0 auto',
-          padding: '16px 24px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 16,
-        }}>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-            color: ESTIMATE_TEXT,
-            fontSize: 15,
-            fontWeight: 600,
-            textDecoration: 'none',
-          }}>
-            {WAVES_PHONE_DISPLAY}
-          </a>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
-        </div>
-      </header>
-      <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
+          gateway wrap, owner 2026-07-06) provides the standard chrome. */}
+      <div style={{ flex: 1, padding: '32px 20px 110px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
-      {/* Estimate pages get the quiet contact footer — no newsletter signup
-          in the middle of a quote (matches the server-rendered estimate). */}
-      <BrandFooter variant="contact" />
+      {/* Standard footer on estimates too (owner 2026-07-06) — same identity/
+          contact/socials/app-badge stack as every other customer page. */}
+      <BrandFooter />
     </div>
   );
 }
 
-function SkeletonBlock() {
+function SkeletonBlock({ minHeight = null }) {
   return (
-    <div style={estimateCard()}>
+    <div style={estimateCard(minHeight ? { minHeight } : {})}>
       <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 4 }} />
-      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 14 }} />
-      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 10 }} />
+      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 16 }} />
+      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 12 }} />
+    </div>
+  );
+}
+
+// Loading-state stand-in for the hero's data-dependent tail (subline, four
+// contact lines, estimate#/dates) — without it the loaded hero grows ~200px
+// when /data lands and everything below jumps (CLS 0.259, estimate audit
+// 2026-07-07). Bar sizes approximate the real line boxes; the goal is that
+// the swap moves content by pixels, not viewports.
+function HeaderTailSkeleton() {
+  return (
+    <div aria-hidden="true" style={{ padding: '0 0 24px' }}>
+      <div style={{ height: 16, width: '90%', maxWidth: 480, background: ESTIMATE_CHROME, borderRadius: 4 }} />
+      <div style={{ height: 16, width: '72%', maxWidth: 400, background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 8 }} />
+      <div style={{ marginTop: 16, display: 'grid', gap: 8 }}>
+        {[120, 180, 140, 220].map((w) => (
+          <div key={w} style={{ height: 13, width: w, background: ESTIMATE_CHROME, borderRadius: 4 }} />
+        ))}
+      </div>
+      <div style={{ height: 15, width: 260, maxWidth: '85%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 12 }} />
     </div>
   );
 }
@@ -509,7 +520,7 @@ const HEADER_EYEBROW_STYLE = {
   fontWeight: 700,
 };
 
-function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null }) {
+function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null, createdAt = null, expiresAt = null, slug = null }) {
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
@@ -519,16 +530,33 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
     phoneDisplay,
     address,
   ].map((line) => String(line || '').trim()).filter(Boolean);
+  // Estimate issue + expiration dates (owner ask 2026-07-06). Invalid or
+  // absent timestamps render nothing rather than "Invalid Date". ET-pinned:
+  // SMS/email/PDF and the server-rendered page all stamp these dates in
+  // Eastern time, so a browser in another timezone must not show a
+  // different calendar day (codex P1, PR #2439).
+  const fmtDate = (value) => {
+    if (!value) return null;
+    const d = new Date(value);
+    return Number.isNaN(d.getTime())
+      ? null
+      : formatETDate(d, { month: 'long', day: 'numeric', year: 'numeric' });
+  };
+  const issuedDisplay = fmtDate(createdAt);
+  const expiresDisplay = fmtDate(expiresAt);
+  const dateLine = [
+    issuedDisplay ? `Estimate issued ${issuedDisplay}` : null,
+    expiresDisplay ? `Valid through ${expiresDisplay}` : null,
+  ].filter(Boolean).join(' · ');
   return (
     <div style={{ padding: '8px 0 24px' }}>
-      <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 6 }}>
+      <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 8 }}>
         {/* The glass eyebrow carries the plan framing itself, so it drops the
             "· {service}" suffix instead of stacking both. */}
         {eyebrowOverride || `Your estimate${serviceLabel ? ` · ${serviceLabel}` : ''}`}
       </div>
       <h1 style={{
-        fontFamily: FONTS.serif,
-        fontSize: 'clamp(34px, 5vw, 48px)',
+                fontSize: 'clamp(34px, 5vw, 48px)',
         fontWeight: 500,
         letterSpacing: '-0.01em',
         lineHeight: 1.1,
@@ -538,15 +566,25 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         {headlineText}
       </h1>
       {subline ? (
-        <p style={{ margin: '14px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.55, maxWidth: '62ch' }}>
+        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.55, maxWidth: '62ch' }}>
           {subline}
         </p>
       ) : null}
       {contactLines.length ? (
-        <div style={{ marginTop: 14, display: 'grid', gap: 4 }}>
+        <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
           {contactLines.map((line) => (
             <div key={line} style={{ ...HEADER_EYEBROW_STYLE, lineHeight: 1.5 }}>{line}</div>
           ))}
+        </div>
+      ) : null}
+      {(slug || dateLine) ? (
+        /* Estimate # + dates at body size (design audit 2026-07-06): the
+           expiry is action-relevant — it should not carry the page's lowest
+           emphasis, and the quote number was not shown anywhere. */
+        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+          {slug ? <strong style={{ color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong> : null}
+          {slug && dateLine ? <span aria-hidden="true"> · </span> : null}
+          {dateLine}
         </div>
       ) : null}
     </div>
@@ -564,13 +602,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 
   return (
     <section style={estimateCard()}>
-      <div style={{ marginBottom: 10 }}>
+      <div style={{ marginBottom: 12 }}>
         <div style={SECTION_KICKER_STYLE}>
           {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
         </div>
         <h2 style={{
-          fontFamily: FONTS.serif,
-          fontSize: 24,
+                    fontSize: 24,
           fontWeight: 500,
           lineHeight: 1.18,
           color: ESTIMATE_TEXT,
@@ -608,7 +645,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {showYourWork?.overlaySatelliteUrl ? (
-        <div style={{ marginTop: 6, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.45 }}>
+        <div style={{ marginTop: 8, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.45 }}>
           Red outline: your property boundary from county records.
         </div>
       ) : null}
@@ -617,13 +654,13 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))',
-          gap: 10,
-          marginTop: 14,
+          gap: 12,
+          marginTop: 16,
         }}>
           {metrics.map((metric) => (
             <div
               key={`${metric.label}-${metric.value}`}
-              style={estimateInnerBox({ padding: '10px 12px' })}
+              style={estimateInnerBox({ padding: '12px 12px' })}
             >
               <div style={{
                 fontSize: 14,
@@ -635,8 +672,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                 {metric.label}
               </div>
               <div style={{
-                fontFamily: FONTS.serif,
-                fontSize: 18,
+                                fontSize: 18,
                 fontWeight: 500,
                 color: ESTIMATE_TEXT,
               }}>
@@ -653,9 +689,9 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       {showYourWork ? (
         <div style={{
           display: 'grid',
-          gap: 10,
-          marginTop: 14,
-          paddingTop: 14,
+          gap: 12,
+          marginTop: 16,
+          paddingTop: 16,
           borderTop: `1px solid ${ESTIMATE_BORDER}`,
         }}>
           <div style={{
@@ -684,7 +720,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                     background: COLORS.white,
                     border: `1px solid ${ESTIMATE_BORDER}`,
                     borderRadius: 10,
-                    padding: '10px 12px',
+                    padding: '12px 12px',
                   }}
                 >
                   <div style={{ minWidth: 0 }}>
@@ -698,8 +734,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                       {fact.label}
                     </div>
                     <div style={{
-                      fontFamily: FONTS.serif,
-                      fontSize: 18,
+                                            fontSize: 18,
                       fontWeight: 500,
                       color: ESTIMATE_TEXT,
                     }}>
@@ -742,8 +777,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-          gap: 10,
-          marginTop: 14,
+          gap: 12,
+          marginTop: 16,
         }}>
           {signals.map((signal) => (
             <div
@@ -753,7 +788,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                 borderLeft: `4px solid ${COLORS.blueBright}`,
                 borderRadius: 10,
                 background: COLORS.white,
-                padding: '10px 12px',
+                padding: '12px 12px',
                 color: '#3F4A65',
                 fontSize: 16,
                 lineHeight: 1.45,
@@ -775,7 +810,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 // Display/transparency only — warm tone, matches the customer-facing brief.
 function MembershipCard({ membership }) {
   if (!membership || !membership.isExistingCustomer) return null;
-  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+  const money = fmtMoney; // shared formatter (audit 2026-07-06)
   const TIER_COLORS = {
     bronze: { bg: '#F3E7D8', fg: '#8A5A21' },
     silver: { bg: '#ECEEF1', fg: '#525B66' },
@@ -802,7 +837,7 @@ function MembershipCard({ membership }) {
 
   const rowStyle = {
     display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12,
-    background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '10px 12px',
+    background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '12px 12px',
   };
   const sectionTitle = {
     fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
@@ -811,18 +846,18 @@ function MembershipCard({ membership }) {
   const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
 
   return (
-    <section style={{ ...estimateCard(), display: 'grid', gap: 14 }}>
+    <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
           <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
             {hello}
           </h2>
-          <p style={{ margin: '6px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
+          <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
             Here&rsquo;s what your WaveGuard membership saves you on this estimate.
           </p>
         </div>
         <span style={{
-          flex: 'none', alignSelf: 'flex-start', padding: '6px 12px', borderRadius: 999,
+          flex: 'none', alignSelf: 'flex-start', padding: '8px 12px', borderRadius: 999,
           background: tc.bg, color: tc.fg, fontSize: 14, fontWeight: 800, lineHeight: 1,
           letterSpacing: '0.04em', textTransform: 'uppercase', whiteSpace: 'nowrap',
           border: `1px solid ${ESTIMATE_BORDER}`,
@@ -834,7 +869,7 @@ function MembershipCard({ membership }) {
       {membership.upgrade ? (
         <div style={{
           background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`,
-          borderLeft: `4px solid ${COLORS.blueBright}`, borderRadius: 10, padding: '12px 14px',
+          borderLeft: `4px solid ${COLORS.blueBright}`, borderRadius: 10, padding: '12px 16px',
           color: ESTIMATE_TEXT, fontSize: 15, lineHeight: 1.5,
         }}>
           Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}
@@ -937,13 +972,12 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           letterSpacing: '0.12em',
           textTransform: 'uppercase',
           fontWeight: 700,
-          marginBottom: 6,
+          marginBottom: 8,
         }}>
           Ask Waves
         </div>
         <h2 style={{
-          fontFamily: FONTS.serif,
-          fontSize: 24,
+                    fontSize: 24,
           fontWeight: 500,
           lineHeight: 1.18,
           color: ESTIMATE_TEXT,
@@ -953,7 +987,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           {glassCopyActive() ? GLASS_COPY.askTitle : 'Ask Waves'}
         </h2>
         {glassCopyActive() ? (
-          <p style={{ margin: '6px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          <p style={{ margin: '8px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
             {GLASS_COPY.askExcerpt}
           </p>
         ) : null}
@@ -964,7 +998,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           event.preventDefault();
           ask();
         }}
-        style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 10, alignItems: 'center' }}
+        style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 12, alignItems: 'center' }}
       >
         <input
           value={question}
@@ -977,12 +1011,11 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             minHeight: 48,
             border: '1px solid #CFE7F5',
             borderRadius: 10,
-            padding: '12px 14px',
+            padding: '12px 16px',
             font: `500 15px/1.35 ${FONT_BODY}`,
             color: ESTIMATE_TEXT,
             background: '#F8FCFE',
-            outline: 'none',
-            boxSizing: 'border-box',
+                        boxSizing: 'border-box',
           }}
         />
         <button
@@ -992,7 +1025,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             minHeight: 48,
             border: 0,
             borderRadius: 10,
-            padding: '0 18px',
+            padding: '0 20px',
             background: ESTIMATE_BUTTON_BG,
             color: COLORS.white,
             fontSize: 15,
@@ -1017,12 +1050,9 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
               ask(prompt);
             }}
             disabled={asking}
+            className="gc-section-cta"
             style={{
-              border: `1px solid ${ESTIMATE_BORDER}`,
-              background: ESTIMATE_BUTTON_BG,
-              color: COLORS.white,
-              borderRadius: 999,
-              padding: '8px 12px',
+              padding: '11px 16px', // >=40px hit height (touch audit 2026-07-06)
               fontSize: 12,
               fontWeight: 700,
               cursor: asking ? 'not-allowed' : 'pointer',
@@ -1041,7 +1071,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             borderLeft: `4px solid ${failed ? COLORS.red : ESTIMATE_BUTTON_BG}`,
             background: failed ? '#FFF5F5' : '#F8FCFE',
             borderRadius: 10,
-            padding: '12px 14px',
+            padding: '12px 16px',
             color: ESTIMATE_TEXT,
             fontSize: 14,
             lineHeight: 1.55,
@@ -1220,8 +1250,8 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
   return (
     <div style={{
       marginTop: 12,
-      marginBottom: 18,
-      padding: '14px 16px',
+      marginBottom: 20,
+      padding: '16px 16px',
       border: '1px solid #D4CBB8',
       borderRadius: 10,
       background: COLORS.white,
@@ -1245,14 +1275,14 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
 // price card content).
 function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   const pillBase = {
-    padding: '10px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
+    padding: '12px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
     cursor: 'pointer', border: 'none', textAlign: 'center', flex: 1,
     transition: 'all 150ms ease',
   };
   return (
     <div style={{
       background: ESTIMATE_CHROME, borderRadius: 999, padding: 4,
-      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 18,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 20,
       display: 'flex', gap: 4,
       boxShadow: '0 1px 4px rgba(15,23,42,.04)',
     }}>
@@ -1286,20 +1316,8 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
   const isError = status === 'error';
   return (
     <section style={estimateCard({ padding: 16 })}>
+      {/* Icon chip removed (owner 2026-07-06) — copy carries the offer. */}
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <div style={{
-          width: 36,
-          height: 36,
-          borderRadius: 10,
-          background: '#ECFDF5',
-          color: '#166534',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}>
-          <Icon name={offer.icon || 'plus'} size={19} strokeWidth={2.1} />
-        </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 16, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
             {offer.title}
@@ -1337,12 +1355,12 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
           </button>
           {isReceived ? (
             <div role="status" style={{
-              marginTop: 10,
+              marginTop: 12,
               background: '#ECFDF5',
               border: '1px solid #86EFAC',
               color: '#14532D',
               borderRadius: 10,
-              padding: '10px 12px',
+              padding: '12px 12px',
               fontSize: 14,
               lineHeight: 1.45,
             }}>
@@ -1352,12 +1370,12 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
           ) : null}
           {isError ? (
             <div role="alert" style={{
-              marginTop: 10,
+              marginTop: 12,
               background: '#FEF2F2',
               border: `1px solid ${COLORS.red}`,
               color: COLORS.red,
               borderRadius: 10,
-              padding: '10px 12px',
+              padding: '12px 12px',
               fontSize: 14,
               lineHeight: 1.45,
             }}>
@@ -1373,13 +1391,13 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
 function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={estimateCard()}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
         {fmtMoney(oneTimePrice)}
         </span>
         <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
-      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 14, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.55 }}>
         {oneTimePriceCopy(breakdown)}
       </div>
     </div>
@@ -1398,11 +1416,11 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
 
   return (
-    <div style={estimateCard({ padding: 18 })}>
-      <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 10 }}>
+    <div style={estimateCard({ padding: 16 })}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
         One-time services
       </div>
-      <div style={{ display: 'grid', gap: 10 }}>
+      <div style={{ display: 'grid', gap: 12 }}>
         {items.map((item, i) => {
           const isQuoteRequired = item.quoteRequired === true || item.kind === 'quote_required';
           const amount = Number(item.amount) || 0;
@@ -1433,9 +1451,9 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
               <div style={{
                 fontSize: 14, fontWeight: 700,
                 color: isQuoteRequired ? COLORS.red : (isDiscount || isIncluded ? COLORS.green : COLORS.navy),
-                whiteSpace: 'nowrap',
+                whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
               }}>
-                {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : `${isDiscount ? '-' : ''}${fmtMoney(Math.abs(amount))}`)}
+                {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
               </div>
             </div>
           );
@@ -1444,7 +1462,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
       <div style={{
         display: 'flex', justifyContent: 'space-between', gap: 12,
         borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
-        fontSize: 15, fontWeight: 700, color: COLORS.navy,
+        fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
       }}>
         <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
         <span style={totalIsQuoteRequired ? { color: COLORS.red } : null}>
@@ -1512,7 +1530,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
-        gap: 18,
+        gap: 20,
         alignItems: 'flex-start',
         flexWrap: 'wrap',
       }}>
@@ -1523,7 +1541,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             color: ESTIMATE_MUTED,
             textTransform: 'uppercase',
             letterSpacing: 0.5,
-            marginBottom: 6,
+            marginBottom: 8,
           }}>
             Recurring total
           </div>
@@ -1533,11 +1551,11 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{
-            fontFamily: FONTS.serif,
-            fontSize: quoteRequired ? 34 : showLowConfidenceRange ? 34 : 46,
+                        fontSize: quoteRequired || showLowConfidenceRange ? 32 : PRICE_FONT,
             lineHeight: 1,
             color: ESTIMATE_TEXT,
             fontWeight: 500,
+            fontVariantNumeric: 'tabular-nums',
           }}>
             {quoteRequired
               ? 'Quote required'
@@ -1547,7 +1565,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             {!quoteRequired ? <span style={{ fontFamily: FONT_BODY, fontSize: 20, color: ESTIMATE_MUTED }}> /mo</span> : null}
           </div>
           {!quoteRequired && annual ? (
-            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8 }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
               {showLowConfidenceRange
                 ? `${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`
                 : `${fmtMoney(annual)} / year`}
@@ -1559,14 +1577,14 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             </div>
           ) : null}
           {quoteRequired && quoteReason ? (
-            <div style={{ fontSize: 14, color: '#92400E', marginTop: 10, lineHeight: 1.4, fontWeight: 700, maxWidth: 320 }}>
+            <div style={{ fontSize: 14, color: '#92400E', marginTop: 12, lineHeight: 1.4, fontWeight: 700, maxWidth: 320 }}>
               {quoteReason}
             </div>
           ) : null}
           {waveGuardTier ? (
             <div style={{
               display: 'inline-block',
-              marginTop: 10,
+              marginTop: 12,
               padding: '5px 11px',
               background: '#EEF2FF',
               color: ESTIMATE_TEXT,
@@ -1586,7 +1604,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           gap: 12,
           alignItems: 'center',
           marginTop: 16,
-          padding: '10px 12px',
+          padding: '12px 12px',
           border: '1px solid #DCFCE7',
           borderRadius: 10,
           background: '#F0FDF4',
@@ -1596,7 +1614,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
-          <strong style={{ whiteSpace: 'nowrap' }}>-{fmtMoney(manualDiscountMonthly)} /mo</strong>
+          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountMonthly)} /mo</strong>
         </div>
       ) : null}
     </section>
@@ -1724,18 +1742,24 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
   }, [intent, onSuccess]);
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Secure payment"
+      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
-        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to {creditTarget}.
           {Number(intent.receivedTotal) > 0 ? ` (${fmtMoney(intent.receivedTotal)} already received.)` : ''}
         </div>
         <div ref={mountRef} />
         {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 10 }}>{error}</div>
+          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 12 }}>{error}</div>
         ) : null}
-        <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+        <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
           <button
             type="button"
             onClick={handlePay}
@@ -1835,19 +1859,25 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   }, [intent, onSuccess]);
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Secure payment"
+      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Hold your appointment</div>
-        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
           A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
           {' '}Credit cards add a small processing fee; debit and bank cards don&rsquo;t.
         </div>
         <div ref={mountRef} />
         {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 10 }}>{error}</div>
+          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 12 }}>{error}</div>
         ) : null}
-        <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+        <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
           <button
             type="button"
             onClick={handleSave}
@@ -1924,7 +1954,7 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
             ? 'Confirm your approval'
             : usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
       </div>
-      <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 12, lineHeight: 1.5 }}>
         {heldForSiteConfirmation ? 'Payment: ' : usingExistingAppointment ? 'Selected invoice option: ' : 'Pay option: '}
         <strong>{paymentLabel}</strong>{usingExistingAppointment ? '.' : null}
       </div>
@@ -1938,7 +1968,7 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
               : `Slot: ${slotId}`}
       </div>
       {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
-      <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
+      <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
           onClick={onConfirm}
@@ -1998,11 +2028,11 @@ function SuccessCard({ acceptResult }) {
       ? `${serviceProgressLabel} is not held up by payment, and you can use the invoice link later.`
       : `${serviceProgressLabel} is not held up by payment.`;
     return (
-      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
           {invoicePayUrl
             ? (isOneTimeInvoice
                 ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
@@ -2015,7 +2045,7 @@ function SuccessCard({ acceptResult }) {
           <a
             href={invoicePayUrl}
             style={{
-              display: 'inline-block', marginTop: 16, padding: '14px 20px',
+              display: 'inline-block', marginTop: 16, padding: '16px 20px',
               background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
               borderRadius: 12, fontWeight: 600, fontSize: 15,
             }}
@@ -2030,11 +2060,11 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'prepay_invoice') {
     return (
-      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Your annual prepay is approved.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
           Your annual prepay{prepayAmountText} is approved. Our team will follow up with the invoice details and confirm the schedule.
         </div>
       </div>
@@ -2045,11 +2075,11 @@ function SuccessCard({ acceptResult }) {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
     return (
-      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved — no payment needed yet.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
           Your Waves account manager will confirm the exact price on a quick site visit, then send your first
           invoice. Nothing is charged until that's done.
         </div>
@@ -2059,11 +2089,11 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'book_one_time') {
     return (
-      <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved for a one-time service.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
           {bookingUrl
             ? 'Check your phone for the booking link, or pick your appointment now.'
             : 'Our team will follow up to help schedule your appointment.'}
@@ -2072,7 +2102,7 @@ function SuccessCard({ acceptResult }) {
           <a
             href={bookingUrl}
             style={{
-              display: 'inline-block', marginTop: 16, padding: '14px 20px',
+              display: 'inline-block', marginTop: 16, padding: '16px 20px',
               background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
               borderRadius: 12, fontWeight: 600, fontSize: 15,
             }}
@@ -2083,12 +2113,12 @@ function SuccessCard({ acceptResult }) {
   }
 
   return (
-    <div style={{ ...estimateCard({ padding: 28, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
+    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
       <div style={{ fontSize: 40 }}></div>
       <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
         Check your phone for the confirmation text. Our team will confirm the schedule.
       </div>
     </div>
@@ -2102,7 +2132,7 @@ function SuccessCard({ acceptResult }) {
 export function DraftPreviewBanner() {
   return (
     <div style={{
-      background: '#fff4e5', borderRadius: 12, padding: 14,
+      background: '#fff4e5', borderRadius: 12, padding: 16,
       border: '1px solid #f5bb5c', marginBottom: 16,
     }}>
       <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.navy }}>
@@ -2120,7 +2150,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
   const expired = kind === 'expired';
   return (
     <div style={{
-      background: '#fff4e5', borderRadius: 12, padding: 14,
+      background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
@@ -2133,7 +2163,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
           type="button"
           onClick={onRetry}
           style={{
-            marginTop: 10, padding: '8px 14px',
+            marginTop: 12, padding: '8px 16px',
             background: ESTIMATE_BUTTON_BG, color: COLORS.white, border: 'none',
             borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600,
           }}
@@ -2199,8 +2229,8 @@ function AcceptanceModeCard({ acceptance }) {
       <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>{body}</div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={{
         display: 'inline-block',
-        marginTop: 14,
-        padding: '12px 18px',
+        marginTop: 16,
+        padding: '12px 20px',
         background: ESTIMATE_BUTTON_BG,
         color: COLORS.white,
         borderRadius: 10,
@@ -2241,8 +2271,8 @@ function ReviewBeforeBookingCard({ reason }) {
       </div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={{
         display: 'inline-block',
-        marginTop: 14,
-        padding: '12px 18px',
+        marginTop: 16,
+        padding: '12px 20px',
         background: ESTIMATE_BUTTON_BG,
         color: COLORS.white,
         borderRadius: 10,
@@ -2304,9 +2334,6 @@ export function ServiceSection({
   // when the list actually adds information (lawn/tree/mosquito programs
   // describe their applications here and nowhere else). Bundle boxes stay
   // checklist-free (owner directive), so single-service layouts only.
-  const includedItems = Array.isArray(current?.included) ? current.included : [];
-  const showIncludedChecklist = servicesLength === 1
-    && (includedItems.length > 1 || includedItems.some((item) => item?.detail));
 
   return (
     <section>
@@ -2318,7 +2345,7 @@ export function ServiceSection({
           <h3 style={{
             fontSize: 18,
             color: ESTIMATE_TEXT,
-            margin: '0 0 14px',
+            margin: '0 0 16px',
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
@@ -2326,12 +2353,27 @@ export function ServiceSection({
         ) : null}
 
         {showSlider ? (
-          <FrequencySlider
-            frequencies={frequencies}
-            selected={selectedFrequencyKey}
-            onChange={(next) => onFrequencyChange(section.key, next)}
-            disabled={disabled}
-          />
+          <div>
+            {/* Section header for the cadence choice (owner 2026-07-06). */}
+            <div style={{
+              fontSize: 12, fontWeight: 700, color: '#475569',
+              textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
+            }}>
+              How often?
+            </div>
+            <h2 style={{
+                            fontSize: 20, fontWeight: 500, lineHeight: 1.25,
+              color: '#1B2C5B', margin: '0 0 4px',
+            }}>
+              Same protection — pick the rhythm that fits your home.
+            </h2>
+            <GlassFrequencyPills
+              frequencies={frequencies}
+              selected={selectedFrequencyKey}
+              onChange={(next) => onFrequencyChange(section.key, next)}
+              disabled={disabled}
+            />
+          </div>
         ) : null}
 
         {current ? (
@@ -2366,7 +2408,8 @@ export function ServiceSection({
 
       {afterPrice}
 
-      {showIncludedChecklist ? <IncludedChecklist included={includedItems} /> : null}
+      {/* "What's included" checklist removed (owner 2026-07-06) — the plan
+          card's inclusions already carry this. */}
 
       {showAddOns ? (
         <AddOnsBlock
@@ -2402,6 +2445,8 @@ export default function EstimateViewPage() {
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // First open slot ymd, reported up by SlotPicker for the hero {date} token.
+  const [firstSlotDate, setFirstSlotDate] = useState(null);
   // Slot metadata for the glass slot-aware CTAs/tech chip ("Approve — Tue
   // 9:00 AM") — SlotPicker reports it alongside the id; cleared with it.
   const [selectedSlotMeta, setSelectedSlotMeta] = useState(null);
@@ -2567,8 +2612,8 @@ export default function EstimateViewPage() {
     const body = await r.json();
     // Glass COPY default: set the module state BEFORE setData so every
     // glassCopyActive() consumer sees it on the render that paints the loaded
-    // page. The marketing copy stays category-scoped; ?glass=1/?glass=0 still
-    // override the copy default. (The glass THEME itself is now unconditional.)
+    // page. The marketing copy stays category-scoped server-side; the old
+    // ?glass URL override is retired. (The glass THEME itself is unconditional.)
     setGlassDefault(body.glassDefault === true);
     setData(body);
     setLoading(false);
@@ -3035,7 +3080,15 @@ export default function EstimateViewPage() {
   }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
   if (loading) {
-    return <Page><Header customerFirstName={null} address={null} /><SkeletonBlock /><SkeletonBlock /></Page>;
+    return (
+      <Page>
+        <Header customerFirstName={null} address={null} />
+        <HeaderTailSkeleton />
+        {/* First card ≈ the price card's real height at mobile widths. */}
+        <SkeletonBlock minHeight={320} />
+        <SkeletonBlock minHeight={200} />
+      </Page>
+    );
   }
   if (notFound || !data) {
     return <Page><NotFoundCard /></Page>;
@@ -3056,12 +3109,34 @@ export default function EstimateViewPage() {
   // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
   const glassPack = glassEstimateCopyFor(serviceCategory);
-  const headline = glassPack?.heroH1 || UNIVERSAL_HEADLINE;
+  // Personalization tokens (owner 2026-07-06): {city} from the service
+  // address, {date} from the first open slot (SlotPicker reports it up via
+  // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
+  const estimateCity = (() => {
+    const m = /,\s*([^,]+),\s*FL\b/i.exec(String(estimate.address || ''));
+    return m ? m[1].trim() : 'your city';
+  })();
+  const soonestSlotLabel = firstSlotDate
+    ? new Date(`${firstSlotDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })
+    : null;
+  // Until a REAL first slot is known (still loading, request failed, or no
+  // openings), the "as soon as {date}" clause is dropped rather than guessed
+  // — a "tomorrow" placeholder can contradict the slot picker below (codex
+  // P2, PR #2439). The residual-token replace guards any future pack string
+  // that uses {date} outside that phrase.
+  const fillGlassTokens = (str) => {
+    if (!str) return str;
+    const withCity = String(str).replace(/\{city\}/g, estimateCity);
+    return soonestSlotLabel
+      ? withCity.replace(/\{date\}/g, soonestSlotLabel)
+      : withCity.replace(/\s*as soon as \{date\}/gi, '').replace(/\{date\}/g, 'soon');
+  };
+  const headline = fillGlassTokens(glassPack?.heroH1) || UNIVERSAL_HEADLINE;
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
   const intelligenceDisplay = glassPack && estimate.intelligence
-    ? { ...estimate.intelligence, title: glassPack.aiTitle, body: glassPack.aiBody }
+    ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
   const askChips = glassPack?.askChips || pricing.askChips;
   const headerContactProps = {
@@ -3070,6 +3145,9 @@ export default function EstimateViewPage() {
     customerEmail: estimate.customerEmail,
     customerPhone: estimate.customerPhone,
     address: estimate.address,
+    createdAt: estimate.createdAt,
+    expiresAt: estimate.expiresAt,
+    slug: estimate.slug,
   };
   const renderFlags = pricing?.renderFlags || {};
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
@@ -3219,7 +3297,7 @@ export default function EstimateViewPage() {
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
-            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 10, lineHeight: 1.5 }}>
+            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 12, lineHeight: 1.5 }}>
               Try us risk-free — 90-day money-back guarantee.
             </div>
           ) : null}
@@ -3280,6 +3358,12 @@ export default function EstimateViewPage() {
     // than a wrong recap. (New accepts always persist it.) Declined/expired
     // keep just the terminal card too.
     const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
+    // A commercial proposal is quote_required by design but its terminal card
+    // says "Your formal proposal is ready." — the generic "in the works" hero
+    // would contradict it, so proposals get their own status statement.
+    const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
+      ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
+      : TERMINAL_HERO[cta.terminalState] || null;
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
@@ -3291,8 +3375,8 @@ export default function EstimateViewPage() {
             pricing,
             cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
           )}
-          headline={headline}
-          eyebrowOverride={glassPack?.eyebrow || null}
+          headline={stateHero?.h1 || headline}
+          eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
@@ -3320,8 +3404,9 @@ export default function EstimateViewPage() {
         />
         {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
         <AppShowcaseCard />
+        <ReportShowcaseCard />
         <CustomerReviews />
-        <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+        <GoogleProfilesCard />
       </Page>
     );
   }
@@ -3332,11 +3417,11 @@ export default function EstimateViewPage() {
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
-          headline={headline}
-          eyebrowOverride={glassPack?.eyebrow || null}
+          // Just accepted — the booked hero, not the sales pitch.
+          headline={TERMINAL_HERO.accepted.h1}
+          eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
         <SuccessCard acceptResult={acceptResult} />
-        <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );
   }
@@ -3379,14 +3464,15 @@ export default function EstimateViewPage() {
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={headline}
           eyebrowOverride={glassPack?.eyebrow || null}
-          subline={glassPack?.heroSub || null}
+          subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
         <AppShowcaseCard />
+        <ReportShowcaseCard />
         <CustomerReviews />
-        <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
+        <GoogleProfilesCard />
       </Page>
     );
   }
@@ -3401,7 +3487,7 @@ export default function EstimateViewPage() {
         eyebrowOverride={glassPack?.eyebrow || null}
         // The booking-forward subline only belongs where booking is still on
         // the table — terminal and success states keep the plain hero.
-        subline={glassPack?.heroSub || null}
+        subline={fillGlassTokens(glassPack?.heroSub) || null}
       />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
@@ -3501,7 +3587,7 @@ export default function EstimateViewPage() {
           {/* Glass (PR C): proof before price — continuous five-star ticker. */}
           {glassContent ? <GlassProofStrip reviews={featuredReviews} /> : null}
 
-          <div id={PRICE_SECTION_ID}>
+          <div id={PRICE_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {renderQuoteDetailCards()}
           </div>
 
@@ -3513,7 +3599,7 @@ export default function EstimateViewPage() {
               below) — only the membership card keeps this spot. */}
           {glassContent ? <MembershipCard membership={estimate.membership} /> : aiPanelBlock}
 
-          <div id={BOOKING_SECTION_ID}>
+          <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {canShowSlotPicker ? (
               <SlotPicker
                 token={token}
@@ -3526,6 +3612,8 @@ export default function EstimateViewPage() {
                 refreshSignal={slotsRefreshSignal}
                 serviceMode={serviceMode}
                 selectedFrequency={selectedFrequency}
+                onFirstSlotDate={setFirstSlotDate}
+                cityLabel={estimateCity}
               />
             ) : (
               <AcceptanceModeCard acceptance={acceptance} />
@@ -3602,11 +3690,17 @@ export default function EstimateViewPage() {
                 copy={copy}
                 showYourWork={data.showYourWork || null}
                 lockInCta={canShowSlotPicker
-                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} />
+                  ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
                   : null}
               />
+              {/* GBP proof directly after the review quotes; the report
+                  showcase directly after the app card it extends. This
+                  branch's approved reviews-before-app order is preserved. */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
+              <ReportShowcaseCard />
+              {/* GBP proof directly above Ask Waves (owner 2026-07-06). */}
+              <GoogleProfilesCard />
               <EstimateAskBar
                 token={token}
                 askToken={estimate.askToken}
@@ -3631,11 +3725,12 @@ export default function EstimateViewPage() {
       {glassContent && !(ctaPhase === 'review' && reservation) ? null : (
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
+          <ReportShowcaseCard />
           <CustomerReviews />
+          <GoogleProfilesCard />
         </>
       )}
       <QuestionsEscapeHatch estimateSlug={estimate.slug} />
-      <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
 
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
           slot-aware approve. Configure phase only — during slot review it

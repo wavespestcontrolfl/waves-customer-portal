@@ -5,11 +5,8 @@
  * text button sends an SMS on mobile and falls back to email on desktop.
  */
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
+import { W } from './tokens';
 
-const W = {
-  navy: '#1B2C5B', white: '#FFFFFF',
-  warmBg: '#F7F5EE', warmBorder: '#E7E2D7',
-};
 
 const BUSINESS_LINE = '+19412975749';
 const BUSINESS_EMAIL = 'contact@wavespestcontrol.com';
@@ -21,7 +18,7 @@ function isLikelyMobile() {
 
 const BTN_BASE = {
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-  minHeight: 48, padding: '10px 16px', borderRadius: 10,
+  minHeight: 48, padding: '12px 16px', borderRadius: 10,
   fontSize: 14, fontWeight: 600, textDecoration: 'none', lineHeight: 1.2,
 };
 
@@ -42,7 +39,7 @@ function ChatIcon() {
 }
 
 export default function QuestionsEscapeHatch({ estimateSlug }) {
-  // Glass copy pack (?glass=1, PR B) — person-first button labels.
+  // Glass copy pack (PR B) — person-first button labels.
   const glass = glassCopyActive();
   const slugStr = estimateSlug ? `%23${estimateSlug}` : 'my%20estimate';
   const smsBody = `Hi, I have a question about quote ${slugStr}`;
@@ -52,13 +49,17 @@ export default function QuestionsEscapeHatch({ estimateSlug }) {
 
   return (
     <div style={{
-      display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: 10,
+      display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: 12,
       marginTop: 24, marginBottom: 8,
     }}>
+      {/* Under glass both buttons render as the standard gold section-CTA
+          pill (owner 2026-07-06: "render like the rest"); the legacy
+          navy/warm pair only survives on non-glass renders. */}
       <a
         href={`tel:${BUSINESS_LINE}`}
         aria-label="Call Waves at (941) 297-5749"
-        style={{ ...BTN_BASE, background: W.navy, color: W.white }}
+        className={glass ? 'gc-section-cta' : undefined}
+        style={glass ? { ...BTN_BASE, background: undefined } : { ...BTN_BASE, background: W.blueDeeper, color: W.white }}
       >
         <PhoneIcon />
         {glass ? GLASS_COPY.callButton : 'Questions? Call Waves'}
@@ -66,7 +67,8 @@ export default function QuestionsEscapeHatch({ estimateSlug }) {
       <a
         href={textHref}
         aria-label="Text Waves at (941) 297-5749"
-        style={{ ...BTN_BASE, background: W.warmBg, color: W.navy, border: `1px solid ${W.warmBorder}` }}
+        className={glass ? 'gc-section-cta' : undefined}
+        style={glass ? { ...BTN_BASE, background: undefined } : { ...BTN_BASE, background: W.warmBg, color: W.blueDeeper, border: `1px solid ${W.warmBorder}` }}
       >
         <ChatIcon />
         {glass ? GLASS_COPY.textButton : 'Questions? Text Waves!'}
