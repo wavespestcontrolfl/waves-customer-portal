@@ -29,6 +29,13 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 
+// The refusal fallback reuses the caller's client, whose `timeout` applies
+// per request — so a refusal + retry could run ~2× the caller's budget (the
+// fact-check gate bounds the publish lock at one FACTCHECK_TIMEOUT_MS total).
+// Both calls share one deadline: the retry gets only the time left on the
+// client's configured timeout, and below this floor it isn't attempted.
+const FALLBACK_MIN_MS = 5000;
+
 // Drop thinking blocks so content[0] is the first text block again. Blocks
 // without a type (test fixtures) and all other block types pass through.
 function stripThinkingBlocks(response) {
@@ -42,6 +49,7 @@ function stripThinkingBlocks(response) {
 
 async function createDeepMessage(client, params = {}) {
   const model = params.model || MODELS.DEEP;
+  const startedAt = Date.now();
   const response = await client.messages.create({ ...params, model });
 
   if (response && response.stop_reason === 'max_tokens') {
@@ -52,6 +60,18 @@ async function createDeepMessage(client, params = {}) {
   }
 
   const category = response.stop_details?.category || 'uncategorized';
+  const budgetMs = Number.isFinite(client.timeout) ? client.timeout : null;
+  if (budgetMs !== null) {
+    const remainingMs = budgetMs - (Date.now() - startedAt);
+    if (remainingMs < FALLBACK_MIN_MS) {
+      logger.warn(`[llm-deep] ${model} refused (${category}) — skipping ${MODELS.FLAGSHIP} fallback, only ${Math.max(0, remainingMs)}ms left of the client's ${budgetMs}ms timeout`);
+      return stripThinkingBlocks(response);
+    }
+    logger.warn(`[llm-deep] ${model} refused (${category}) — retrying on ${MODELS.FLAGSHIP} with ${remainingMs}ms of the timeout remaining`);
+    const retry = await client.messages.create({ ...params, model: MODELS.FLAGSHIP }, { timeout: remainingMs });
+    return stripThinkingBlocks(retry);
+  }
+
   logger.warn(`[llm-deep] ${model} refused (${category}) — retrying on ${MODELS.FLAGSHIP}`);
   const retry = await client.messages.create({ ...params, model: MODELS.FLAGSHIP });
   return stripThinkingBlocks(retry);

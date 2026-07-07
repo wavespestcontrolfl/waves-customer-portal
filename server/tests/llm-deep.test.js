@@ -6,6 +6,10 @@
  * call site relies on this helper to hide both, so the contract is:
  *   - thinking blocks never reach the caller (content[0].text stays valid)
  *   - a refusal retries once on FLAGSHIP with the identical request
+ *   - both calls share ONE deadline: when the client has a configured
+ *     timeout, the retry only gets the time remaining on it (and is skipped
+ *     entirely near the deadline) — a refusal can never hold a caller like
+ *     the fact-check publish lock for ~2× its timeout
  *   - API errors throw exactly like client.messages.create
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -76,6 +80,44 @@ describe('createDeepMessage', () => {
     const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
     expect(client.messages.create).toHaveBeenCalledTimes(2);
     expect(resp.stop_reason).toBe('refusal');
+  });
+
+  describe('refusal fallback shares the client timeout budget', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    test('retry gets only the time remaining on the client timeout', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(10000);
+      const client = clientReturning(
+        { stop_reason: 'refusal', content: [] },
+        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'fallback answer' }] },
+      );
+      client.timeout = 60000;
+      const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
+      expect(client.messages.create).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ model: 'flagship-model' }),
+        { timeout: 50000 },
+      );
+      expect(resp.content[0].text).toBe('fallback answer');
+    });
+
+    test('near the deadline the fallback is skipped and the refusal is returned', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(58000);
+      const client = clientReturning({ stop_reason: 'refusal', content: [] });
+      client.timeout = 60000;
+      const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
+      expect(client.messages.create).toHaveBeenCalledTimes(1);
+      expect(resp.stop_reason).toBe('refusal');
+    });
+
+    test('a client with no configured timeout retries without a per-request override', async () => {
+      const client = clientReturning(
+        { stop_reason: 'refusal', content: [] },
+        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] },
+      );
+      await createDeepMessage(client, { max_tokens: 100, messages: [] });
+      expect(client.messages.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ model: 'flagship-model' }));
+    });
   });
 
   test('API errors throw exactly like client.messages.create (callers keep their catch paths)', async () => {
