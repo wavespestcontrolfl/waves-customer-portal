@@ -2556,11 +2556,16 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
             await voidOpenInvoicesForCancelledService(id);
             // One-time card-on-file hold: charge in-window late-cancel fee or
-            // release outside it — same as the single-cancel paths. Dark until
-            // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort.
+            // release outside it — same as the single-cancel paths.
+            // payload.waiveCardHoldFee = business-initiated cancel, release
+            // free. Dark until ONE_TIME_CARD_HOLD; no-op when no hold exists.
+            // Best-effort.
             try {
               const CardHolds = require('../services/estimate-card-holds');
-              await CardHolds.handleCardHoldCancellation({ scheduledServiceId: id });
+              await CardHolds.handleCardHoldCancellation({
+                scheduledServiceId: id,
+                waiveFee: payload?.waiveCardHoldFee === true,
+              });
             } catch (e) { logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`); }
             break;
           }
@@ -4476,11 +4481,17 @@ router.put('/:id/status', async (req, res, next) => {
       // One-time card-on-file hold: charge the in-window late-cancel fee or
       // release outside it. This route (the V2 dispatch delete/cancel action)
       // is a separate cancel path from PUT /admin/dispatch/:id/status, so the
-      // hook must be mirrored here. Dark until ONE_TIME_CARD_HOLD; no-op when no
-      // hold exists. Best-effort — never block the committed cancel.
+      // hook must be mirrored here. waiveCardHoldFee (body) = business-
+      // initiated cancel, release free — admin-only (route is technician-
+      // reachable and a fee waiver is a billing decision). Dark until
+      // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort — never
+      // block the committed cancel.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+        await CardHolds.handleCardHoldCancellation({
+          scheduledServiceId: svc.id,
+          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+        });
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 
