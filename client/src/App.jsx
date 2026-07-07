@@ -95,6 +95,15 @@ function ReviewLinkRedirect() {
   return <Navigate to={`/rate/${token}${location.search}`} replace />;
 }
 
+// Legacy linked-estimate booking page: its estimate fetch expected JSON from
+// an endpoint that serves the estimate HTML page, so it never loaded (and
+// every hit inflated view_count). Nothing mints these links anymore — send
+// them to the canonical estimate view, which books the same visit.
+function BookEstimateRedirect() {
+  const { estimateToken } = useParams();
+  return <Navigate to={`/estimate/${estimateToken}`} replace />;
+}
+
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
@@ -208,7 +217,6 @@ const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignS
 const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
-import BookingPage from './pages/BookingPage';
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
 const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareIncludedPage'));
@@ -320,7 +328,7 @@ export default function App() {
           <Route path="/newsletter" element={<Suspense fallback={<div style={{background:'#1B2C5B',minHeight:'100vh'}}/>}><NewsletterLandingPage /></Suspense>} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
-          <Route path="/book/:estimateToken" element={<BookingPage />} />
+          <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
           <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
             <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />

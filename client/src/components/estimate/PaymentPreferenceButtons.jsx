@@ -84,6 +84,10 @@ export default function PaymentPreferenceButtons({
   selectedFrequency = null,
   cardHold = null,
   siteConfirmationHold = false,
+  // Total of one-time services on the estimate that are NOT part of the
+  // setup + first-application invoice (they're billed after completion).
+  // Without this note, the invoice preview reads as the whole cost.
+  oneTimeExtrasTotal = 0,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -281,6 +285,9 @@ export default function PaymentPreferenceButtons({
               <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 12 }}>
                 No payment is charged on this page. After confirmation, we open the invoice
                 {invoiceTotal > 0 ? ` for ${fmtMoney(invoiceTotal)}` : ''} so you can pay in-flow.
+                {Number(oneTimeExtrasTotal) > 0
+                  ? ` One-time services on this estimate (${fmtMoney(oneTimeExtrasTotal)}) are billed separately after they're completed.`
+                  : ''}
               </div>
             </div>
           ) : null}
