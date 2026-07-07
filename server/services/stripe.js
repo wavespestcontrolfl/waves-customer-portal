@@ -1464,10 +1464,11 @@ const StripeService = {
       }
     };
     let idempotencyKey;
+    const attemptReason = reason || 'requested_by_customer';
     const persistPendingAttempt = async () => {
       idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
       await db('payments').where({ id: paymentId }).update({
-        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_at: new Date().toISOString() }),
+        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_reason: attemptReason, pending_refund_at: new Date().toISOString() }),
       });
     };
 
@@ -1478,10 +1479,16 @@ const StripeService = {
     // the attempt is reconciled against Stripe's actual refund list.
     const REPLAY_SAFE_WINDOW_MS = 20 * 60 * 60 * 1000;
     let adoptedRefund = null;
+    // A key replay must resend the ORIGINAL request verbatim — Stripe
+    // rejects a reused key whose parameters differ, so a retry that only
+    // changes the reason would wedge on an idempotency error. Legacy
+    // markers without a persisted reason fall through to the incoming one.
+    let replayReason = null;
     if (isReplay) {
       const pendingAtMs = Date.parse(meta.pending_refund_at || '') || 0;
       if (pendingAtMs && (Date.now() - pendingAtMs) <= REPLAY_SAFE_WINDOW_MS) {
         idempotencyKey = meta.pending_refund_key;
+        replayReason = meta.pending_refund_reason || null;
       } else {
         let listed;
         try {
@@ -1527,13 +1534,15 @@ const StripeService = {
     const clearedMeta = { ...meta };
     delete clearedMeta.pending_refund_key;
     delete clearedMeta.pending_refund_request;
+    delete clearedMeta.pending_refund_reason;
+    delete clearedMeta.pending_refund_at;
 
     let refund = adoptedRefund;
     try {
       if (!refund) {
         const refundParams = {
           payment_intent: payment.stripe_payment_intent_id,
-          reason: reason || 'requested_by_customer',
+          reason: replayReason || attemptReason,
         };
         if (requestCents !== null) {
           refundParams.amount = requestCents;

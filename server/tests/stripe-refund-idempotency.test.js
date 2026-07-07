@@ -104,6 +104,7 @@ describe('StripeService.refund', () => {
     const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
     expect(pendingMeta.pending_refund_key).toBe('refund_pay_pay-1_4000_0');
     expect(pendingMeta.pending_refund_request).toBe('4000');
+    expect(pendingMeta.pending_refund_reason).toBe('requested_by_customer');
 
     // Final update records the refund and clears the pending marker.
     const finalArgs = updatePayments.mock.calls[1][0];
@@ -133,6 +134,25 @@ describe('StripeService.refund', () => {
     expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4000_0');
     // No pending re-persist — the only update is the final record+clear.
     expect(updatePayments).toHaveBeenCalledTimes(1);
+  });
+
+  test('replay with a CHANGED reason resends the original persisted reason (reused key = same params)', async () => {
+    // Stripe rejects a reused idempotency key whose parameters differ, so
+    // a retry that only edits the reason must replay the ORIGINAL one —
+    // otherwise the safe-retry path wedges on an idempotency error until
+    // the operator guesses the first attempt's reason.
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_reason: 'duplicate',
+      pending_refund_at: new Date().toISOString(),
+    });
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40, reason: 'fraudulent' });
+
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4000_0');
+    expect(params.reason).toBe('duplicate');
   });
 
   test('replay bypasses the remaining-balance check (repaired $60-of-$100 retry is not wedged)', async () => {
