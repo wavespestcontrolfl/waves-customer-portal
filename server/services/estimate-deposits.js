@@ -425,8 +425,12 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
   const wantSms = estimate.customer_id
     ? (channel === 'sms' || channel === 'both')
     : true;
+  // email_enabled === false is the portal-wide email opt-out — the
+  // transactional_required stream bypasses suppression-group filtering, so
+  // it must be honored here (same check the no-show fee receipt does).
+  const emailOptOut = prefs?.email_enabled === false;
   const wantEmail = estimate.customer_id
-    ? (!receiptOptOut && (channel === 'email' || channel === 'both' || (wantSms && !phone)))
+    ? (!receiptOptOut && !emailOptOut && (channel === 'email' || channel === 'both' || (wantSms && !phone)))
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {
@@ -588,6 +592,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   const estimateUrl = `${publicPortalUrl()}/estimate/${estimate.token}`;
 
   const EmailTemplateLibrary = require('./email-template-library');
+  const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'deposit.receipt',
@@ -596,12 +601,16 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
         first_name: firstName,
         amount,
         estimate_url: estimateUrl,
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
       recipientType: customer ? 'customer' : 'lead',
       recipientId: estimate.customer_id || null,
       triggerEventId: `deposit_receipt:${paymentIntentId}`,
       idempotencyKey: `deposit_receipt:${paymentIntentId}`,
       categories: ['deposit_receipt'],
+      // SendGrid rejection bodies can echo the recipient address — keep them
+      // out of the provider log (redaction below covers this catch).
+      suppressProviderErrorLog: true,
     });
     if (result?.blocked) {
       logger.warn(`[estimate-deposits] deposit receipt email suppressed for estimate ${estimateId}: ${result.reason || 'suppressed'}`);
@@ -613,7 +622,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
     }
     logger.info(`[estimate-deposits] deposit receipt email sent for estimate ${estimateId}`);
   } catch (err) {
-    logger.error(`[estimate-deposits] deposit receipt email send failed for estimate ${estimateId}: ${err.message}`);
+    logger.error(`[estimate-deposits] deposit receipt email send failed for estimate ${estimateId}: ${EmailTemplateLibrary.redactEmailAddresses(err.message)}`);
   }
 }
 

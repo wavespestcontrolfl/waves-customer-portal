@@ -808,12 +808,36 @@ describe('webhook + invoice credit', () => {
       recipientId: 'cust-1',
       idempotencyKey: 'deposit_receipt:pi_1',
       triggerEventId: 'deposit_receipt:pi_1',
+      // Provider rejection bodies can echo the address — never log raw.
+      suppressProviderErrorLog: true,
       payload: expect.objectContaining({
         first_name: 'Sam',
         amount: '$70',
         estimate_url: expect.stringContaining('/estimate/tok-1'),
+        // The template's "call us" line renders this — an empty payload
+        // value would produce "call  — a real person answers".
+        company_phone: '(941) 297-5749',
       }),
     }));
+  });
+
+  it('portal-wide email opt-out (email_enabled=false) suppresses the receipt email', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      // transactional_required bypasses suppression groups, so the sender
+      // itself must honor the portal-wide opt-out.
+      prefsRow: { payment_receipt_channel: 'email', email_enabled: false },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
   it('receipt channel "both" sends the SMS and the email', async () => {

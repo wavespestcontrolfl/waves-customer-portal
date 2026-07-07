@@ -36,12 +36,16 @@ const TEMPLATE = {
   stream: 'transactional_required',
   description: 'Sent once when an estimate deposit payment lands: confirms the amount, explains that it credits toward the first invoice, and links to the estimate. Email twin of the deposit_receipt SMS; sends when the customer’s receipt channel is email or both (and to email-only leads).',
   required: ['first_name', 'amount', 'estimate_url'],
-  optional: ['paid_at_line'],
+  optional: [],
   subject: 'Deposit received — {{amount}}, thank you {{first_name}}',
   preview: 'We received your {{amount}} deposit. It credits toward your first invoice.',
+  // Copy never claims a reservation or a booked visit: recurring estimates
+  // can pay the deposit BEFORE an appointment is selected or the accept
+  // transaction lands, so the receipt only asserts what is always true —
+  // payment received, credited toward the first invoice.
   blocks: [
-    { type: 'paragraph', content: 'Hi {{first_name}}, we received your {{amount}} deposit — thank you. {{paid_at_line}}Your spot is reserved.' },
-    { type: 'paragraph', content: 'This deposit is credited toward your first invoice, so it comes right off what you owe after your first visit. Nothing else to do right now.' },
+    { type: 'paragraph', content: 'Hi {{first_name}}, we received your {{amount}} deposit — thank you.' },
+    { type: 'paragraph', content: 'It’s credited toward your first invoice, so it comes right off what you owe after your first visit. Your estimate below has the details and any remaining steps.' },
     { type: 'small_note', content: 'Keep this email for your records. Questions? Reply to this email or call {{company_phone}} — a real person answers.' },
     { type: 'cta', label: 'View my estimate', url_variable: 'estimate_url' },
     { type: 'signature', content: 'We look forward to servicing your home. — The Waves Team' },
@@ -49,7 +53,6 @@ const TEMPLATE = {
   fixture: {
     first_name: 'Taylor',
     amount: '$49',
-    paid_at_line: 'Paid July 6, 2026. ',
     estimate_url: 'https://portal.wavespestcontrol.com/estimate/example-token',
   },
 };
