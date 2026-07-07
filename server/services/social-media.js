@@ -531,7 +531,7 @@ Format:
 - 2-3 sentences of genuinely useful content
 - End with a conversation starter ("What's your lawn doing this week?" or "Tag someone whose lanai has this problem")
 - 200-400 characters before hashtags
-- Do NOT include any URL
+- Do NOT include any URL — the blog link is appended to the caption automatically
 
 After the caption, add a blank line then 3-5 hashtags:
 - Always include: #wavespestcontrol
@@ -584,16 +584,19 @@ Write a Google Business Profile post for Waves Pest Control ${safeLocation}.
 This post appears on Google Search and Maps for local customers.
 
 Format:
+- The VERY FIRST character must be a single emoji that matches the topic (🦎 🍄 🐜 🌱 ☔ — pick what fits), then the text
 - Mention ${safeLocation || 'the local area'} naturally in the first sentence
 - Lead with a useful seasonal or practical tip
-- Sound like a local expert sharing advice, not an ad
-- End with a clear next step ("Schedule an inspection" or "See the full guide")
+- Sound like a local expert sharing advice, not an ad — never salesy
+- End by pointing at the article ("Full breakdown on the blog" or "See the full guide") — NEVER "Schedule an inspection", "book", "call us", or any sales pitch; a Learn More button linking to the article is attached automatically
 - 150-250 characters total — tight and scannable
 - Do NOT include any URL or phone number — a button will be attached
 - Do NOT use hashtags
 
 GOOD example:
-"Seeing crispy St. Augustine in Lakewood Ranch? It may not be drought. Chinch bugs feed near the blade base and spread fast in hot spots. Schedule a lawn inspection before the patch grows."
+"🌱 Seeing crispy St. Augustine in Lakewood Ranch? It may not be drought. Chinch bugs feed near the blade base and spread fast in hot spots. Full breakdown on the blog."
+
+BAD ending (do NOT write like this): "...Schedule a lawn inspection before the patch grows."
 
 Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
@@ -846,18 +849,20 @@ async function blogHeroSocialImageUrl(link) {
   }
 }
 
-// Facebook alone never justifies AI image generation or a brand-card render
-// (FB link posts preview og:image on their own), but a blog HERO is the
-// post's actual image at the cost of one fetch+rehost — a Facebook-only
-// deployment (Instagram/GBP disabled or unconfigured) should still attach it
-// as a photo rather than silently downgrading to a text/link post. Sync env
-// check mirroring publishToAll's fbReady predicate.
-function facebookWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo }) {
+// Facebook never justifies the blog-hero fetch+rehost: blog shares go out as
+// /feed link posts whose preview card already renders the post's og:image
+// (the hero) — attaching the hero as a /photos post instead would force the
+// raw URL into the caption text, since the photo endpoint can't carry a link
+// (owner-rejected format, 2026-07-06). LinkedIn is the opposite: its Posts
+// API does NOT scrape article URLs, so without an uploaded thumbnail the
+// share renders with no picture at all — a LinkedIn deployment justifies the
+// hero even when Instagram can't consume it. Sync env check; the async
+// connected-probe still gates the actual post.
+function linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo }) {
   return !!noAiImage && !hasVideo && BLOG_HERO_SOURCES.has(source)
-    && requestedPlatforms.has('facebook')
-    && SOCIAL_FLAGS.facebookEnabled
-    && !!process.env.FACEBOOK_ACCESS_TOKEN
-    && !!process.env.FACEBOOK_PAGE_ID;
+    && requestedPlatforms.has('linkedin')
+    && SOCIAL_FLAGS.linkedinEnabled
+    && require('./linkedin').configured;
 }
 
 // Render a deterministic brand card (SVG -> JPEG) and host it on S3/CDN, so
@@ -1073,9 +1078,9 @@ async function postToFacebookVideo(message, link, videoUrl) {
 // stored company-page tokens + the versioned Posts API (/rest/posts). The legacy
 // env-token ugcPosts path is retired. imageUrl is accepted for call-site
 // compatibility but unused (LinkedIn image posts need the Images API — deferred).
-async function postToLinkedIn(text, link, title, description, imageUrl) { // eslint-disable-line no-unused-vars
+async function postToLinkedIn(text, link, title, description, imageUrl) {
   const linkedin = require('./linkedin');
-  return linkedin.createPost({ text, link, title, description });
+  return linkedin.createPost({ text, link, title, description, imageUrl });
 }
 
 async function postToTwitter(text, link) {
@@ -1400,7 +1405,7 @@ const SocialMediaService = {
     // on a dry run, when one already exists, or when hosting is unconfigured.
     let metaWantsImage = false;
     let gbpWantsImage = false;
-    let fbWantsHero = false;
+    let linkedinWantsHero = false;
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
@@ -1417,20 +1422,20 @@ const SocialMediaService = {
       // With a video, FB/IG post the MP4 — don't render/generate a 1:1 image
       // nobody consumes (GBP's 4:3 want below is independent: it never takes
       // the video, so it may still render its card).
-      metaWantsImage = instagramCanConsume && !hasVideo; // FB/IG consume the 1:1 image
-      // Facebook alone never justifies AI generation or a card render (its
-      // link posts preview og:image on their own), but a blog HERO is the
-      // post's actual image at the cost of a fetch+rehost — so a Facebook-only
-      // deployment still attaches it instead of silently dropping the photo
-      // the old direct-imageUrl callers provided (Codex round 2).
-      fbWantsHero = facebookWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo });
+      metaWantsImage = instagramCanConsume && !hasVideo; // IG consumes the 1:1 image
+      // Facebook never triggers the fetch: blog shares post as /feed link
+      // posts whose preview card renders the og:image hero on its own.
+      // LinkedIn does — its Posts API won't scrape the article URL, so the
+      // hero must be uploaded as the article thumbnail or the share has no
+      // picture at all.
+      linkedinWantsHero = linkedinWantsBlogHero({ requestedPlatforms, source, noAiImage, hasVideo });
       if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
         gbpWantsImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
       }
     }
-    if (metaWantsImage || gbpWantsImage || fbWantsHero) {
+    if (metaWantsImage || gbpWantsImage || linkedinWantsHero) {
       if (noAiImage) {
         // Autonomous callers (RSS cron blog shares, studio campaigns, scheduled
         // blog/newsletter shares) NEVER use the AI image generator — it produces
@@ -1441,12 +1446,12 @@ const SocialMediaService = {
         // the logo/CTA). Text-only if a card can't be rendered.
         const heroUrl = BLOG_HERO_SOURCES.has(source) ? await blogHeroSocialImageUrl(link) : null;
         if (heroUrl) {
-          if (metaWantsImage || fbWantsHero) generatedImageUrl = heroUrl;
+          if (metaWantsImage || linkedinWantsHero) generatedImageUrl = heroUrl;
           if (gbpWantsImage && !resolvedGbpImageUrl) resolvedGbpImageUrl = heroUrl;
         } else {
           const eyebrow = source === 'newsletter' ? 'Waves newsletter' : 'From the Waves blog';
           const card = { variant: 'blog', title, excerpt: description, cta: 'Learn more', eyebrow };
-          if (metaWantsImage) {
+          if (metaWantsImage || linkedinWantsHero) {
             const u = await renderBrandCardUrl(card, 'square');
             if (u) generatedImageUrl = u;
           }
@@ -1545,6 +1550,14 @@ const SocialMediaService = {
         }
 
         if (p.key === 'facebook') {
+          // Blog shares go out as text+link /feed posts: the link preview card
+          // already renders the hero (the post's og:image) and the whole card
+          // clicks through to the article. Attaching an image would route the
+          // post through /photos, which can't carry a link — the URL would be
+          // pasted raw into the caption text instead of embedded (owner-
+          // rejected format, 2026-07-06). The copy prompt matches: "Do NOT
+          // include the URL — it will be attached as a link preview".
+          const fbImageUrl = (link && BLOG_HERO_SOURCES.has(source)) ? null : generatedImageUrl;
           // The image is OPTIONAL for Facebook (text+link /feed posts fine). If
           // the photo path fails — Meta rejected or couldn't fetch the image —
           // fall back to a text/link /feed post instead of dropping a post that
@@ -1564,9 +1577,9 @@ const SocialMediaService = {
               // FB partial failure, and the approval's channel-narrowed retry
               // re-attempts only Facebook.
               ? await postToFacebookVideo(content, link, videoUrl)
-              : await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
+              : await withRetry(() => postToFacebook(content, link, fbImageUrl), { label: 'facebook' });
           } catch (fbErr) {
-            if (!hasVideo && generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
+            if (!hasVideo && fbImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
               logger.warn(`[social] Facebook photo post failed (${fbErr.message}); retrying text-only`);
               r = await withRetry(() => postToFacebook(content, link, null), { label: 'facebook' });
             } else {
@@ -1583,14 +1596,20 @@ const SocialMediaService = {
             const r = await postToInstagramReel(content, videoUrl);
             platformResults.push({ ...r, content });
           } else if (imgUrl) {
+            // Blog shares carry the article URL in the caption (owner
+            // directive 2026-07-06). Instagram captions are plain text — the
+            // URL isn't tappable (platform limitation, no link attachment on
+            // feed posts) — but it's visible and copyable. The copy prompt
+            // generates the caption WITHOUT a URL; it's appended here.
+            const igCaption = (link && BLOG_HERO_SOURCES.has(source)) ? `${content}\n\n${link}` : content;
             // NOT wrapped in withRetry: postToInstagram already polls Meta for
             // media ingestion (bounded ~45s). Retrying the whole call would
             // redo that wait (blocking the request for minutes) and create a
             // fresh, duplicate media container each attempt. A transient
             // failure here surfaces as an IG partial failure; FB/GBP are
             // unaffected and IG can be retried on its own.
-            const r = await postToInstagram(content, imgUrl);
-            platformResults.push({ ...r, content });
+            const r = await postToInstagram(igCaption, imgUrl);
+            platformResults.push({ ...r, content: igCaption });
           } else {
             platformResults.push({ platform: 'instagram', skipped: 'No public image URL' });
           }
@@ -1857,4 +1876,4 @@ module.exports.blogHeroSocialImageUrl = blogHeroSocialImageUrl;
 module.exports.BLOG_HERO_SOURCES = BLOG_HERO_SOURCES;
 module.exports.PUBLISH_PLATFORMS = PUBLISH_PLATFORMS;
 module.exports.DEFAULT_PUBLISH_PLATFORMS = DEFAULT_PUBLISH_PLATFORMS;
-module.exports.facebookWantsBlogHero = facebookWantsBlogHero;
+module.exports.linkedinWantsBlogHero = linkedinWantsBlogHero;

@@ -32,6 +32,7 @@ const TOKEN_KEY = 'linkedin.oauth_tokens';
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2/authorization';
 const TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
 const POSTS_URL = 'https://api.linkedin.com/rest/posts';
+const IMAGES_URL = 'https://api.linkedin.com/rest/images';
 const ORG_ACLS_URL = 'https://api.linkedin.com/rest/organizationAcls';
 
 // LinkedIn-API specifics — confirmed against Microsoft Learn Posts API docs
@@ -332,11 +333,61 @@ class LinkedInService {
     return { adminedOrganizations: orgs, raw: data.elements || [] };
   }
 
+  // ── Images API: rehost a public image as a LinkedIn image URN ─────────────
+  // initializeUpload → PUT the binary → urn:li:image:… . LinkedIn does NOT
+  // scrape article URLs, so without this the article card renders with no
+  // picture at all. Throws on any failure — the createPost call site treats
+  // the thumbnail as best-effort and never lets it block the post.
+  async _uploadImageFromUrl(imageUrl, token) {
+    const owner = `urn:li:organization:${this.companyId}`;
+    const initRes = await fetch(`${IMAGES_URL}?action=initializeUpload`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'LinkedIn-Version': API_VERSION,
+        'X-Restli-Protocol-Version': '2.0.0',
+      },
+      body: JSON.stringify({ initializeUploadRequest: { owner } }),
+    });
+    if (!initRes.ok) {
+      throw new Error(`LinkedIn images initializeUpload ${initRes.status}: ${(await initRes.text()).slice(0, 300)}`);
+    }
+    const { value } = await initRes.json();
+    if (!value?.uploadUrl || !value?.image) {
+      throw new Error('LinkedIn initializeUpload returned no uploadUrl/image URN');
+    }
+
+    // Fetch the hosted image (our CDN-rehosted JPEG hero) with a bounded wait —
+    // a hung fetch here must not stall the whole publish loop.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let imgRes;
+    try {
+      imgRes = await fetch(imageUrl, { signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status} for ${imageUrl}`);
+    const bytes = Buffer.from(await imgRes.arrayBuffer());
+    if (!bytes.length) throw new Error(`thumbnail image fetch returned empty body for ${imageUrl}`);
+
+    const putRes = await fetch(value.uploadUrl, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      body: bytes,
+    });
+    if (!putRes.ok) {
+      throw new Error(`LinkedIn image upload ${putRes.status}: ${(await putRes.text()).slice(0, 300)}`);
+    }
+    return value.image;
+  }
+
   // ── Publish a post to the company page (Posts API) ────────────────────────
-  // Image/thumbnail upload is deferred (needs the Images API → image URN); text +
-  // optional article link only. LinkedIn does NOT scrape article URLs, so we must
-  // set title/description on the article ourselves (per the Posts API docs).
-  async createPost({ text, link, title, description } = {}) {
+  // LinkedIn does NOT scrape article URLs, so we must set title/description on
+  // the article ourselves (per the Posts API docs) — and upload the image as
+  // the article thumbnail via the Images API, or the share has no picture.
+  async createPost({ text, link, title, description, imageUrl } = {}) {
     if (!this.companyId) throw new Error('LINKEDIN_COMPANY_ID not configured');
     const commentary = String(text || '').trim();
     if (!commentary) throw new Error('LinkedIn post requires text');
@@ -354,6 +405,15 @@ class LinkedInService {
       const article = { source: link, title: String(title || '').slice(0, 200) || link };
       const desc = String(description || '').trim();
       if (desc) article.description = desc.slice(0, 300);
+      // Best-effort thumbnail: a failed upload logs and posts without a
+      // picture rather than dropping the share entirely.
+      if (imageUrl) {
+        try {
+          article.thumbnail = await this._uploadImageFromUrl(imageUrl, token);
+        } catch (err) {
+          logger.warn(`[linkedin] article thumbnail upload failed (posting without image): ${err.message}`);
+        }
+      }
       body.content = { article };
     }
 
