@@ -145,7 +145,7 @@ async function runBondRenewalSweep() {
       continue;
     }
     try {
-      await EmailTemplateLibrary.sendTemplate({
+      const sendResult = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'termite.bond_renewal',
         to: email,
         payload: {
@@ -158,7 +158,13 @@ async function runBondRenewalSweep() {
         },
         recipientType: 'customer',
         recipientId: bond.customer_id,
-        idempotencyKey: `termite.bond_renewal:${bond.id}:${String(bond.renews_at).slice(0, 10)}`,
+        // renewal_notified_at (stamped only on a REAL send below) is the
+        // cross-day duplicate guard. The key's date component exists because
+        // blocked email_messages rows dedupe FOREVER under a fixed key —
+        // without it, one suppression-blocked attempt killed the once-ever
+        // notice even after the suppression cleared. Same-day re-runs still
+        // dedupe on the key.
+        idempotencyKey: `termite.bond_renewal:${bond.id}:${String(bond.renews_at).slice(0, 10)}:${etDateString()}`,
         triggerEventId: `termite.bond_renewal:${bond.id}`,
         categories: ['termite_bond_renewal'],
         // This loop iterates real recipient addresses — SendGrid 4xx bodies
@@ -166,6 +172,14 @@ async function runBondRenewalSweep() {
         // logs and log a redacted reason ourselves below.
         suppressProviderErrorLog: true,
       });
+      if (!sendResult?.sent) {
+        // Suppression blocks (and inactive templates) return {sent:false}
+        // WITHOUT throwing. Stamping here would permanently record the
+        // once-ever notice as delivered when nothing went out — leave the
+        // bond due so tomorrow's sweep retries (bounded by GRACE_DAYS).
+        logger.warn(`[lifecycle-sweeps] bond ${bond.id} (customer ${bond.customer_id}): renewal notice NOT sent (${sendResult?.blocked ? 'suppression-blocked' : (sendResult?.reason || 'unsent')}); left un-notified for retry`);
+        continue;
+      }
       await db('termite_bonds').where({ id: bond.id }).update({
         renewal_notified_at: new Date(),
         updated_at: new Date(),

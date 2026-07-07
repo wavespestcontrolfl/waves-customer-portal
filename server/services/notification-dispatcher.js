@@ -121,19 +121,15 @@ const NotificationDispatcher = {
       }
     }
 
-    // Send email
+    // Email channel: NOT implemented. A generic subject/body send here
+    // would bypass the template library's suppression ledger, and a real
+    // template needs owner copy — until that exists this leg must report
+    // failure honestly. It used to set sent=true after only logging, so
+    // callers stamped "notified" while email-preferring customers got
+    // nothing. sent stays false unless the SMS leg above delivered.
     if ((channel === 'email' || channel === 'both') && emailSubject && emailBody && customer.email) {
-      try {
-        // Use SendGrid / nodemailer if available — for now log intent
-        // Future: const EmailService = require('./email');
-        // await EmailService.send(customer.email, emailSubject, emailBody);
-        logger.info(`[notify] Email would be sent to ${customer.email}: ${emailSubject}`);
-        results.email = 'logged'; // change to 'sent' when email service is wired
-        sent = true;
-      } catch (err) {
-        logger.error(`[notify] Email failed for ${customerId}: ${err.message}`);
-        results.email = `error: ${err.message}`;
-      }
+      logger.warn(`[notify] email channel not implemented — ${notificationType} for customer ${customerId} NOT emailed (subject: ${emailSubject})`);
+      results.email = 'unavailable: email channel not implemented';
     }
 
     return { sent, channel, results };
