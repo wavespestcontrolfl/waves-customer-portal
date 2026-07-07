@@ -78,6 +78,10 @@ export default function RecapViewPage() {
             autoPlay
             muted
             playsInline
+            // ready:true only reflects the DB row — the video read can still
+            // 404/5xx, which used to strand a dead black player. Fall to the
+            // same not-ready state, which links the full report.
+            onError={() => setStatus('error')}
             style={{ width: '100%', maxWidth: 360, maxHeight: '74vh', borderRadius: 18, background: '#000', boxShadow: '0 20px 60px rgba(0,0,0,.45)' }}
           />
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>

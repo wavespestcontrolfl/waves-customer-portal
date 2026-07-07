@@ -81,12 +81,14 @@ export default function NewsletterSignup({
         body: JSON.stringify({ email: trimmed, source }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error('signup_failed');
       if (data.alreadySubscribed) setState('already');
       else if (data.resent) setState('resent');
       else setState('pending');
-    } catch (err) {
-      setError(err.message || 'Something went wrong. Try again in a moment.');
+    } catch {
+      // Server codes / proxy bodies ('HTTP 502', raw HTML) are not customer
+      // copy — always show the curated message.
+      setError('Something went wrong. Please try again in a moment.');
       setState('error');
     }
   };
