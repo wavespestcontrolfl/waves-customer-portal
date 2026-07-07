@@ -175,11 +175,8 @@ class RescheduleSMS {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
-      // Confirmation copy is inlined — the editable reschedule_confirmed_sms_reply
-      // template was retired, but the customer must still get a confirmation the
-      // moment their 1/2 reply lands (the appointment has already moved).
-      //
-      // The closing line must only promise what the reminder cron will actually
+      // The copy varies by how far out the confirmed slot is, because the
+      // closing line must only promise what the reminder cron will actually
       // do: the day-before (24h) reminder only fires for appointments at least
       // two days out, so for a same-day or next-day slot "we'll remind you the
       // day before" is a promise that is already impossible to keep.
@@ -191,7 +188,21 @@ class RescheduleSMS {
         : optDate === tomorrowEt
           ? 'See you tomorrow.'
           : "We'll remind you the day before.";
-      const confirmedBody = `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}`;
+      const templateKey = optDate === todayEt
+        ? 'reschedule_confirmed_today'
+        : optDate === tomorrowEt
+          ? 'reschedule_confirmed_tomorrow'
+          : 'reschedule_confirmed_future';
+
+      // Admin-editable template first (sms_templates, appointments category);
+      // the inlined copy is the fail-safe. This confirmation is transactional —
+      // the visit has already moved when the reply lands — so a missing or
+      // disabled template must revert to stock copy, never silence the send.
+      const confirmedBody = (await renderSmsTemplate(
+        templateKey,
+        { date: displayDate, time: selectedOption.window.display },
+        { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
+      )) || `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}\n\nReply STOP to opt out.`;
       await sendAppointmentSms({
         to: customer.phone,
         body: confirmedBody,
@@ -214,9 +225,13 @@ class RescheduleSMS {
     // closed the pending offer.
     if (responseType === 'call_requested' || responseType === 'option_expired') {
       const customer = await db('customers').where({ id: customerId }).first();
-      // Inlined retired reschedule_call_requested copy so the customer still
-      // gets an acknowledgement that we'll call them.
-      const callBody = "No problem. We'll give you a call shortly.";
+      // Admin-editable template first; inlined copy is the fail-safe so the
+      // customer always gets an acknowledgement that we'll call them.
+      const callBody = (await renderSmsTemplate(
+        'reschedule_call_requested',
+        {},
+        { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
+      )) || "No problem. We'll give you a call shortly.\n\nReply STOP to opt out.";
       await sendAppointmentSms({
         to: customer.phone,
         body: callBody,
