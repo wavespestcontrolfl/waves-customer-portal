@@ -3547,7 +3547,10 @@ export default function EstimateViewPage() {
                 onSelect={handlePaymentChoice}
                 disabled={adminDraftPreview}
                 serviceMode={serviceMode}
-                oneTimeExtrasTotal={serviceMode !== 'one_time' ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
+                // With showOneTimeOption the breakdown is the ALTERNATE
+                // one-time price (either/or), not extras billed on top —
+                // same gate OneTimeBreakdownCard uses.
+                oneTimeExtrasTotal={serviceMode !== 'one_time' && !estimate.showOneTimeOption ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
@@ -3700,7 +3703,9 @@ export default function EstimateViewPage() {
               // "expired" card and destroy the preview's purpose.
               disabled={adminDraftPreview || ctaPhase === 'submitting'}
               serviceMode={serviceMode}
-              oneTimeExtrasTotal={serviceMode !== 'one_time' ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
+              // showOneTimeOption = the breakdown is the alternate one-time
+              // price, not extras on top (mirrors OneTimeBreakdownCard).
+              oneTimeExtrasTotal={serviceMode !== 'one_time' && !estimate.showOneTimeOption ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
               setupFee={pricing.setupFee || null}
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
