@@ -65,7 +65,12 @@ class ApiClient {
           // over. Force logout, preserving the return path so re-login
           // lands back on this page (mirrors ProtectedRoute).
           this.clearTokens();
-          const next = `${window.location.pathname}${window.location.search}`;
+          // Never carry /login itself as the return target — LoginPage
+          // honors `next` after verification, and bouncing back to /login
+          // (which renders null once authenticated) strands the customer
+          // on a blank page.
+          const path = window.location.pathname;
+          const next = path.startsWith('/login') ? '' : `${path}${window.location.search}`;
           window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
           const sessionErr = new Error('Session expired. Please sign in again.');
           sessionErr.status = 401;
