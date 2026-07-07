@@ -90,6 +90,12 @@ const DEFAULT_WORDING = {
   guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
+// The glass day-lines anchor on concrete cheap items ("less than a
+// gas-station drink"), which becomes a false claim at high per-day prices.
+// Above this cap the neutral default line renders instead — conservative on
+// purpose: the comparison is a nice-to-have, a false claim is not.
+const DAY_LINE_COMPARISON_MAX = 4;
+
 // Pre-discount anchor for a frequency entry, expressed in the displayed
 // billing period. Pest entries carry a per-visit anchor (pest bills one visit
 // per interval, so per-visit == per-interval); non-pest entries (own-cadence
@@ -334,7 +340,10 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
 
       {dayPrice && !showLowConfidenceRange ? (
         <div style={{ fontSize: 15, color: CUSTOMER_SURFACE.muted, marginTop: 8, lineHeight: 1.5 }}>
-          {(wording?.dayLineByKey?.[billingKey] || wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
+          {(dayPrice > DAY_LINE_COMPARISON_MAX
+            ? DEFAULT_WORDING.dayLine
+            : (wording?.dayLineByKey?.[billingKey] || wording?.dayLine || DEFAULT_WORDING.dayLine)
+          ).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}
 

@@ -860,7 +860,7 @@ export default function PublicBookingPage() {
                 Your selected time
               </div>
               <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
-                {selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate} · {selectedSlot?.start_label}
+                {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
               </div>
               <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
@@ -1010,7 +1010,7 @@ export default function PublicBookingPage() {
               </div>
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
-                <div>{selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate}</div>
+                <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>

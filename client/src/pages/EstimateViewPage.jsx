@@ -1903,7 +1903,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -1965,7 +1965,11 @@ export function ReviewPhase({ slotId, existingAppointment, paymentPreference, se
             ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
             : manualScheduling
               ? 'Scheduling: a Waves team member will reach out to set up your visit.'
-              : `Slot: ${slotId}`}
+              : slotMeta?.date
+                // Human-readable date/time; the raw internal slot id only
+                // appears when the slot metadata is missing.
+                ? `Visit: ${new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${slotMeta.time ? ` · ${slotMeta.time}` : ''}`
+                : `Slot: ${slotId}`}
       </div>
       {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
@@ -2587,8 +2591,11 @@ export default function EstimateViewPage() {
   }, [token, addServiceOffer?.serviceKey]);
 
   const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
-    setLoading(true);
     const isRefresh = initialViewCountedRef.current;
+    // Refreshes keep the loaded UI on screen instead of dropping back to the
+    // skeleton — a failed refresh used to leave the skeleton up forever
+    // because nothing on the error path reset `loading`.
+    if (!isRefresh) setLoading(true);
     const params = [];
     if (isRefresh) params.push('refresh=1');
     let fetchOpts;
@@ -2607,7 +2614,10 @@ export default function EstimateViewPage() {
       setLoading(false);
       return;
     }
-    if (!r.ok) throw new Error(`estimate fetch failed: ${r.status}`);
+    if (!r.ok) {
+      setLoading(false);
+      throw new Error(`estimate fetch failed: ${r.status}`);
+    }
     initialViewCountedRef.current = true;
     const body = await r.json();
     // Glass COPY default: set the module state BEFORE setData so every
@@ -2917,6 +2927,18 @@ export default function EstimateViewPage() {
             await loadEstimate();
             return;
           }
+          if (/existing appointment is no longer available/i.test(body.error || '')) {
+            // Not a slot conflict: the customer's already-scheduled visit
+            // changed underneath them — there's no slot picker to "pick
+            // another" from. Reload so acceptance mode re-derives.
+            setCtaPhase('configure');
+            setReservation(null);
+            setSelectedSlotId(null);
+            setSelectedSlotMeta(null);
+            setPaymentPreference(null);
+            await loadEstimate();
+            return;
+          }
           const expired = /expired|no active reservation/i.test(body.error || '');
           setCtaPhase(expired ? 'reservation_expired' : 'slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
@@ -3114,7 +3136,7 @@ export default function EstimateViewPage() {
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
   const estimateCity = (() => {
     const m = /,\s*([^,]+),\s*FL\b/i.exec(String(estimate.address || ''));
-    return m ? m[1].trim() : 'your city';
+    return m ? m[1].trim() : null;
   })();
   const soonestSlotLabel = firstSlotDate
     ? new Date(`${firstSlotDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })
@@ -3123,10 +3145,19 @@ export default function EstimateViewPage() {
   // openings), the "as soon as {date}" clause is dropped rather than guessed
   // — a "tomorrow" placeholder can contradict the slot picker below (codex
   // P2, PR #2439). The residual-token replace guards any future pack string
-  // that uses {date} outside that phrase.
+  // that uses {date} outside that phrase. {city} gets the same treatment:
+  // when the address doesn't parse, strip the clause position-safely — a
+  // literal 'your city' substitution rendered "your pest-free your city
+  // plan is ready!".
   const fillGlassTokens = (str) => {
     if (!str) return str;
-    const withCity = String(str).replace(/\{city\}/g, estimateCity);
+    const withCity = estimateCity
+      ? String(str).replace(/\{city\}/g, estimateCity)
+      : String(str)
+        .replace(/\s+in \{city\}/gi, '')
+        .replace(/\{city\}\s+home/gi, 'home')
+        .replace(/\s*\{city\}\s*/g, ' ')
+        .replace(/ {2,}/g, ' ');
     return soonestSlotLabel
       ? withCity.replace(/\{date\}/g, soonestSlotLabel)
       : withCity.replace(/\s*as soon as \{date\}/gi, '').replace(/\{date\}/g, 'soon');
@@ -3251,7 +3282,13 @@ export default function EstimateViewPage() {
                 {!estimate.showOneTimeOption ? (
                   <OneTimeBreakdownCard
                     breakdown={pricing.oneTimeBreakdown}
-                    excludeServices={setupFees.map((fee) => fee.service)}
+                    // Only exclude fees that actually render their own
+                    // SetupFeeCard — a glass-suppressed card must stay in
+                    // this list or the one-time total understates itself
+                    // and stops reconciling with the surcharge line.
+                    excludeServices={setupFees
+                      .filter((fee) => !(glassContent && fee.waivedWithPrepay && section.isPest === true))
+                      .map((fee) => fee.service)}
                   />
                 ) : null}
               </>
@@ -3314,7 +3351,11 @@ export default function EstimateViewPage() {
           {services.length > 1 && !estimate.showOneTimeOption ? (
             <OneTimeBreakdownCard
               breakdown={pricing.oneTimeBreakdown}
-              excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
+              // Mirror of the single-service path: keep glass-suppressed
+              // setup fees in the breakdown so the total stays honest.
+              excludeServices={(pricing.firstVisitFees || [])
+                .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
+                .map((fee) => fee.service)}
             />
           ) : null}
 
@@ -3506,6 +3547,7 @@ export default function EstimateViewPage() {
                 onSelect={handlePaymentChoice}
                 disabled={adminDraftPreview}
                 serviceMode={serviceMode}
+                oneTimeExtrasTotal={serviceMode !== 'one_time' ? Number(pricing.oneTimeBreakdown?.total) || 0 : 0}
                 setupFee={pricing.setupFee || null}
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
@@ -3517,6 +3559,7 @@ export default function EstimateViewPage() {
           ) : null}
           <ReviewPhase
             slotId={selectedSlotId}
+            slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}
             paymentPreference={paymentPreference}
             secondsRemaining={countdownSeconds}
