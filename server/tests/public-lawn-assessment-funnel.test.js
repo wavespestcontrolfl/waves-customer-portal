@@ -319,6 +319,36 @@ describe('POST /:id/claim', () => {
     });
   });
 
+  test('first-touch attribution rides the claim onto the lead and the funnel row', async () => {
+    mockDiagnosticRow = analyzedRow();
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/public/lawn-assessment/${ROW_ID}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(claimBody({
+          attribution: {
+            utm: { source: 'gbp', medium: 'organic', campaign: 'venice-profile', term: null, content: null },
+            gclid: 'test-gclid',
+            referrer: 'https://www.google.com/',
+            landing_url: 'https://wavespestcontrol.com/lawn-assessment/?utm_source=gbp',
+            junk_key: 'dropped',
+          },
+        })),
+      });
+      expect(res.status).toBe(201);
+      const stored = JSON.parse(inserts.leads[0].extracted_data);
+      expect(stored.attribution.gclid).toBe('test-gclid');
+      expect(stored.attribution.utm.campaign).toBe('venice-profile');
+      expect(stored.attribution.junk_key).toBeUndefined();
+      const attribution = inserts.ad_service_attribution[0];
+      expect(attribution.gclid).toBe('test-gclid');
+      expect(attribution.utm_campaign).toBe('venice-profile');
+      // Evidence only — the magnet stays its own organic channel.
+      expect(attribution.lead_source).toBe('lawn_assessment');
+      expect(attribution.is_paid).toBe(false);
+    });
+  });
+
   test('accepts the camelCase claimToken field the analyze response returned', async () => {
     mockDiagnosticRow = analyzedRow();
     await withServer(async (base) => {

@@ -231,6 +231,11 @@ app.use('/api/public/lawn-assessment', (req, res, next) => {
   next();
 });
 app.use('/api/public/pest-identifier', (req, res, next) => {
+  // Tokenized report READS stay available while the funnel is dark — sent
+  // reports are owner-initiated communications (admin manual send), and an
+  // invalid token 404s exactly like the dark surface (see the matching
+  // carve-out in routes/public-pest-identifier.js).
+  if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
   // eslint-disable-next-line global-require
   if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
     return res.status(404).json({ error: 'Not found' });

@@ -342,7 +342,9 @@ finding and warns on P1. Reviewers must return JSON matching
   the claim commits it best-effort inserts ONE ad_service_attribution funnel
   row (lead_source=lawn_assessment, is_paid=false, idempotent on the unique
   lead_id index) so the magnet reports in funnel-by-source like every other
-  channel.)
+  channel. Optional `attribution` body is sanitized/allowlisted
+  (sanitizeAttribution) into leads.extracted_data + the row's click-id/utm
+  columns — first-touch evidence only, never a channel/is_paid reassignment.)
   `/api/public/pest-identifier/analyze` (write; prospect pest-photo upload —
   exact mirror of `/api/public/lawn-assessment/analyze` behind
   GATE_PEST_IDENTIFIER, writing `pest_identifications`. Customer-visible copy
@@ -359,7 +361,10 @@ finding and warns on P1. Reviewers must return JSON matching
   same contract as `/api/public/lawn-diagnostic/:token` — 32-hex format gate,
   60 req/min, privacy headers, only sent/unexpired rows, strictly allowlisted
   payload via buildPublicPestReport, generic 404, plus a set-once
-  `report_first_viewed_at` funnel stamp.)
+  `report_first_viewed_at` funnel stamp. Deliberately NOT behind
+  GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
+  (admin manual send works pre-launch), and an invalid token 404s exactly
+  like the dark surface — only analyze/claim are gated.)
   `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
   no auth, no DB writes, no PII — returns a deterministic Florida
   pest-pressure model keyed only on a curated city slug / FL ZIP plus

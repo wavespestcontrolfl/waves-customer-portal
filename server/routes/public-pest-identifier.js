@@ -32,6 +32,7 @@ const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
+const { sanitizeAttribution } = require('./public-lawn-assessment');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
@@ -68,12 +69,17 @@ const readLimiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
-// Dark until Adam flips GATE_PEST_IDENTIFIER — 404 so the surface is
-// unobservable while off (payer-statement gate contract).
-router.use((req, res, next) => {
+// Dark until Adam flips GATE_PEST_IDENTIFIER — 404 so the FUNNEL surface
+// (analyze + claim) is unobservable while off (payer-statement gate
+// contract). The tokenized report READ below deliberately stays outside the
+// gate: sent reports are owner-initiated communications (admin "Send report"
+// on admin-created assessments works pre-launch), and an ungated invalid
+// token reads 404 exactly like the dark surface, so nothing becomes
+// observable. index.js's pre-limiter dark guard mirrors this same carve-out.
+const requirePestGate = (req, res, next) => {
   if (!isEnabled('pestIdentifier')) return res.status(404).json({ error: 'Not found' });
   return next();
-});
+};
 
 function cleanString(value, max = 200) {
   if (typeof value !== 'string') return null;
@@ -150,7 +156,7 @@ async function buildPestPricingSnapshot(serviceKey) {
 }
 
 // POST /api/public/pest-identifier/analyze
-router.post('/analyze', analyzeLimiter, async (req, res, next) => {
+router.post('/analyze', requirePestGate, analyzeLimiter, async (req, res, next) => {
   try {
     setPublicPrivacyHeaders(res);
     const body = req.body || {};
@@ -275,7 +281,7 @@ function validateClaim(body = {}) {
 }
 
 // POST /api/public/pest-identifier/:id/claim
-router.post('/:id/claim', claimLimiter, async (req, res, next) => {
+router.post('/:id/claim', requirePestGate, claimLimiter, async (req, res, next) => {
   try {
     setPublicPrivacyHeaders(res);
     if (!UUID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Not found' });
@@ -313,6 +319,7 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
     };
     const addressSnapshot = Object.values(claim.address).some(Boolean) ? claim.address : null;
 
+    const attribution = sanitizeAttribution(req.body.attribution);
     let createdLeadId = null;
     try {
       await db.transaction(async (trx) => {
@@ -334,6 +341,7 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
             species_slug: row.species_slug,
             category: row.category,
             urgency: row.urgency,
+            ...(attribution ? { attribution } : {}),
           }),
         }).returning(['id']);
 
@@ -385,6 +393,16 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
           lead_source: 'pest_identifier',
           lead_source_detail: 'wavespestcontrol.com/pest-identifier',
           funnel_stage: 'lead',
+          // First-touch evidence only — the channel stays the magnet
+          // (see sanitizeAttribution in routes/public-lawn-assessment.js).
+          gclid: attribution?.gclid || null,
+          wbraid: attribution?.wbraid || null,
+          gbraid: attribution?.gbraid || null,
+          fbclid: attribution?.fbclid || null,
+          fbc: attribution?.fbc || null,
+          fbp: attribution?.fbp || null,
+          utm_campaign: attribution?.utm?.campaign || null,
+          utm_term: attribution?.utm?.term || null,
           is_paid: false,
         }).onConflict('lead_id').ignore();
       } catch (attrErr) {

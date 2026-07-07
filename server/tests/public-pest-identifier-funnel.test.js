@@ -138,7 +138,7 @@ beforeEach(() => {
 });
 
 describe('gate contract', () => {
-  test('the whole surface 404s while GATE_PEST_IDENTIFIER is off', async () => {
+  test('the funnel surface (analyze + claim) 404s while GATE_PEST_IDENTIFIER is off', async () => {
     mockGateState.pestIdentifier = false;
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/public/pest-identifier/analyze`, {
@@ -146,6 +146,23 @@ describe('gate contract', () => {
       });
       expect(res.status).toBe(404);
       expect(mockIdentifyPest).not.toHaveBeenCalled();
+      const claim = await fetch(`${base}/api/public/pest-identifier/${ROW_ID}/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(claimBody()),
+      });
+      expect(claim.status).toBe(404);
+    });
+  });
+
+  test('tokenized report READS stay available while the gate is dark (admin-sent reports)', async () => {
+    mockGateState.pestIdentifier = false;
+    mockIdentificationRow = analyzedRow({
+      status: 'sent',
+      report_token: 'e'.repeat(32),
+      report_expires_at: new Date(Date.now() + 86400000).toISOString(),
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/public/pest-identifier/${'e'.repeat(32)}`);
+      expect(res.status).toBe(200);
     });
   });
 });

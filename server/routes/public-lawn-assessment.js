@@ -303,6 +303,44 @@ function validateClaim(body = {}) {
   };
 }
 
+/**
+ * Sanitized first-touch attribution passthrough from the marketing-site
+ * island (captureAttribution()): persisted on the lead's extracted_data and
+ * stamped onto the funnel row's click-id/utm columns so a tagged ad/GBP
+ * visitor who converts through the magnet keeps their campaign linkage. The
+ * magnet deliberately remains its OWN funnel-by-source channel
+ * (lead_source lawn_assessment / pest_identifier, is_paid false) — click ids
+ * are evidence, not a channel reassignment. Everything is length-capped and
+ * allowlisted; unknown keys are dropped.
+ */
+function sanitizeAttribution(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const str = (value, max = 200) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null);
+  const utmRaw = raw.utm && typeof raw.utm === 'object' && !Array.isArray(raw.utm) ? raw.utm : {};
+  const utm = {
+    source: str(utmRaw.source, 100),
+    medium: str(utmRaw.medium, 100),
+    campaign: str(utmRaw.campaign, 200),
+    term: str(utmRaw.term, 200),
+    content: str(utmRaw.content, 200),
+  };
+  const out = {
+    referrer: str(raw.referrer, 500),
+    landing_url: str(raw.landing_url, 500),
+    domain: str(raw.domain, 100),
+    utm,
+    gclid: str(raw.gclid),
+    wbraid: str(raw.wbraid),
+    gbraid: str(raw.gbraid),
+    fbclid: str(raw.fbclid),
+    fbc: str(raw.fbc),
+    fbp: str(raw.fbp),
+  };
+  const hasSignal = out.referrer || out.landing_url || out.gclid || out.wbraid || out.gbraid
+    || out.fbclid || Object.values(utm).some(Boolean);
+  return hasSignal ? out : null;
+}
+
 // POST /api/public/lawn-assessment/:id/claim
 router.post('/:id/claim', claimLimiter, async (req, res, next) => {
   try {
@@ -342,6 +380,7 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
     };
     const addressSnapshot = Object.values(claim.address).some(Boolean) ? claim.address : null;
 
+    const attribution = sanitizeAttribution(req.body.attribution);
     let createdLeadId = null;
     try {
       await db.transaction(async (trx) => {
@@ -361,6 +400,7 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
             diagnostic_id: row.id,
             source: 'lawn_assessment_funnel',
             lawn_size_band: claim.sizeBand,
+            ...(attribution ? { attribution } : {}),
           }),
         }).returning(['id']);
 
@@ -415,6 +455,16 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
           lead_source: 'lawn_assessment',
           lead_source_detail: 'wavespestcontrol.com/lawn-assessment',
           funnel_stage: 'lead',
+          // Click ids/UTMs are stored as first-touch EVIDENCE; the channel
+          // stays the magnet itself (is_paid false — see sanitizeAttribution).
+          gclid: attribution?.gclid || null,
+          wbraid: attribution?.wbraid || null,
+          gbraid: attribution?.gbraid || null,
+          fbclid: attribution?.fbclid || null,
+          fbc: attribution?.fbc || null,
+          fbp: attribution?.fbp || null,
+          utm_campaign: attribution?.utm?.campaign || null,
+          utm_term: attribution?.utm?.term || null,
           is_paid: false,
         }).onConflict('lead_id').ignore();
       } catch (attrErr) {
@@ -455,6 +505,8 @@ function isPlausibleAnalyzeBody(body) {
 
 module.exports = router;
 module.exports.isPlausibleAnalyzeBody = isPlausibleAnalyzeBody;
+// Shared with routes/public-pest-identifier.js (same claim contract).
+module.exports.sanitizeAttribution = sanitizeAttribution;
 module.exports._test = {
   validateClaim,
   buildTeaser,
@@ -462,4 +514,5 @@ module.exports._test = {
   LAWN_SIZE_BANDS,
   normalizePhotos,
   isPlausibleAnalyzeBody,
+  sanitizeAttribution,
 };
