@@ -17,6 +17,13 @@ async function authenticateCore(req, res, next, { allowInactive = false } = {}) 
   try {
     const decoded = jwt.verify(token, config.jwt.secret);
 
+    // Refresh tokens are exchange-only (POST /auth/refresh). They're minted
+    // with a longer TTL, so accepting one here would let a leaked refresh
+    // token act as a long-lived access token.
+    if (decoded.type === 'refresh') {
+      return res.status(401).json({ error: 'Invalid token type' });
+    }
+
     const query = db('customers')
       .where({ id: decoded.customerId })
       .whereNull('deleted_at');

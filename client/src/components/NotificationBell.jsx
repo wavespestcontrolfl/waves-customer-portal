@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -19,6 +20,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [pushOn, setPushOn] = useState(false);
   const [pushEnabling, setPushEnabling] = useState(false);
   const [pushError, setPushError] = useState(null);
+  const bellRef = useRef(null);
   const panelRef = useRef(null);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
@@ -43,10 +45,13 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     return () => clearInterval(iv);
   }, []);
 
-  // Close on click outside
+  // Close on click outside. The panel is portaled to document.body, so it
+  // is NOT a DOM descendant of the bell wrapper — check both refs.
   useEffect(() => {
     const handler = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false);
+      if (bellRef.current && bellRef.current.contains(e.target)) return;
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      setOpen(false);
     };
     if (open) document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -171,7 +176,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     : { bg: '#FFFFFF', border: '#CBD5E1', text: '#1B2C5B', muted: '#64748B', teal: '#009CDE', unreadBg: '#E3F5FD', white: '#FFFFFF', badge: '#C8102E' };
 
   return (
-    <div ref={panelRef} style={{ position: 'relative' }}>
+    <div ref={bellRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
       <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
         background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
@@ -194,10 +199,14 @@ export default function NotificationBell({ type = 'admin', customerId }) {
         )}
       </button>
 
-      {/* Panel — IMG_3718 style on mobile (full-screen, pill tabs, blue-dot rows); dropdown on desktop */}
-      {open && (
+      {/* Panel — IMG_3718 style on mobile (full-screen, pill tabs, blue-dot rows); dropdown on desktop.
+          Portaled to <body>: the customer portal header is a glass surface
+          (backdrop-filter), which makes it the containing block for fixed
+          descendants — rendered in place, the panel would collapse to the
+          header's box instead of covering the viewport. */}
+      {open && createPortal(
         isMobile ? (
-          <div style={{
+          <div ref={panelRef} style={{
             position: 'fixed', top: isDark ? 56 : 0, left: 0, right: 0, bottom: 56,
             background: '#FFFFFF', zIndex: 9999,
             display: 'flex', flexDirection: 'column', overflow: 'hidden',
@@ -316,7 +325,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             </div>
           </div>
         ) : (
-          <div style={{
+          <div ref={panelRef} style={{
             position: 'fixed', top: isDark ? 56 : 0, right: 0, bottom: 0,
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,
@@ -417,7 +426,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               ))}
             </div>
           </div>
-        )
+        ),
+        document.body
       )}
     </div>
   );

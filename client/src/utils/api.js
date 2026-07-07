@@ -56,15 +56,33 @@ class ApiClient {
 
       // Handle token expiry — attempt refresh
       if (response.status === 401 && this.refreshToken) {
-        const refreshed = await this.attemptRefresh();
-        if (refreshed) {
+        const outcome = await this.attemptRefresh();
+        if (outcome === 'refreshed') {
           headers.Authorization = `Bearer ${this.token}`;
           response = await fetch(url, { ...options, headers });
-        } else {
-          // Refresh failed — force logout
+        } else if (outcome === 'rejected') {
+          // The server refused the refresh token — the session is really
+          // over. Force logout, preserving the return path so re-login
+          // lands back on this page (mirrors ProtectedRoute).
           this.clearTokens();
-          window.location.href = '/login';
-          return;
+          // Never carry /login itself as the return target — LoginPage
+          // honors `next` after verification, and bouncing back to /login
+          // (which renders null once authenticated) strands the customer
+          // on a blank page.
+          const path = window.location.pathname;
+          const next = path.startsWith('/login') ? '' : `${path}${window.location.search}`;
+          window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
+          const sessionErr = new Error('Session expired. Please sign in again.');
+          sessionErr.status = 401;
+          sessionErr.sessionExpired = true;
+          throw sessionErr;
+        } else {
+          // Transient refresh failure (offline, 5xx, 429): the 30-day
+          // refresh token may still be perfectly valid — keep the tokens
+          // and surface a retryable error. Deliberately NOT status 401 /
+          // sessionExpired, so useAuth's pending/retry path preserves the
+          // session instead of treating it as an auth rejection.
+          throw new Error('Unable to reach the server. Check your connection and try again.');
         }
       }
 
@@ -79,7 +97,9 @@ class ApiClient {
           message = (await response.text().catch(() => '')).trim();
         }
 
-        throw new Error(message || `Request failed (${response.status})`);
+        const requestErr = new Error(message || `Request failed (${response.status})`);
+        requestErr.status = response.status;
+        throw requestErr;
       }
 
       const data = await response.json();
@@ -109,6 +129,10 @@ class ApiClient {
     return this.refreshPromise;
   }
 
+  // Resolves to 'refreshed' | 'rejected' | 'transient'. Only 'rejected'
+  // (the server explicitly refusing the refresh token) may destroy the
+  // session — a network drop or /auth/refresh 5xx/429 says nothing about
+  // whether the 30-day refresh token is still valid.
   async _doRefresh() {
     try {
       const res = await fetch(`${API_BASE}/auth/refresh`, {
@@ -117,14 +141,15 @@ class ApiClient {
         body: JSON.stringify({ refreshToken: this.refreshToken }),
       });
 
-      if (!res.ok) return false;
+      if (res.status === 401 || res.status === 403) return 'rejected';
+      if (!res.ok) return 'transient';
 
       const data = await res.json();
       // Server now rotates refresh tokens — use the new one if provided.
       this.setTokens(data.token, data.refreshToken || this.refreshToken);
-      return true;
+      return 'refreshed';
     } catch {
-      return false;
+      return 'transient';
     }
   }
 

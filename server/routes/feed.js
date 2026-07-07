@@ -125,6 +125,58 @@ function parseItems(channel) {
   return items;
 }
 
+// The Astro hub's feed.xml carries no media:content/media:thumbnail/enclosure
+// and its <description> has no inline <img>, so extractImage() misses on every
+// blog item and the portal rendered icon placeholders instead of post heroes.
+// The blog layout stamps each post's hero as og:image on the live page — the
+// same source social-media.js resolves blog-share heroes from — so fill the
+// gap from there. The UF/IFAS and MySuncoast feeds get the same fallback for
+// their image-less items. Results (including misses) are cached per link, so
+// a feed refresh costs at most one page fetch per post every 30 minutes.
+// Callers only pass links that already passed safeLink (trusted hosts only).
+const ogImageCache = {};
+
+// Follow redirects manually so every hop stays on the safeLink allowlist —
+// a trusted publisher must not be able to bounce the server to an arbitrary
+// (or internal) host via a redirect. Off-allowlist hops resolve to null.
+const MAX_OG_REDIRECTS = 5;
+async function fetchTrustedHtml(startUrl) {
+  let url = startUrl;
+  for (let hop = 0; hop <= MAX_OG_REDIRECTS; hop++) {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      const next = location ? safeLink(new URL(location, url).toString()) : null;
+      if (!next) return null;
+      url = next;
+      continue;
+    }
+    if (!res.ok) return null;
+    return res.text();
+  }
+  return null;
+}
+
+async function resolveOgImage(link) {
+  if (!link) return null;
+  const now = Date.now();
+  const hit = ogImageCache[link];
+  if (hit && (now - hit.ts) < CACHE_TTL) return hit.image;
+  let image = null;
+  try {
+    const html = await fetchTrustedHtml(link);
+    if (html) {
+      const match = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+        || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+      if (match) image = safeImage(new URL(match[1], link).toString());
+    }
+  } catch (err) {
+    logger.warn(`[feed] og:image fetch failed for ${link}: ${err.message}`);
+  }
+  ogImageCache[link] = { image, ts: now };
+  return image;
+}
+
 // =========================================================================
 // Keyword filter for relevance
 // =========================================================================
@@ -143,15 +195,20 @@ router.get('/blog', async (req, res, next) => {
     const data = await fetchWithCache('blog', 'https://www.wavespestcontrol.com/feed.xml');
     const items = parseItems(data?.rss?.channel);
 
-    const posts = items.slice(0, 6).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 200),
-      image: extractImage(item),
-      category: Array.isArray(item.category) ? item.category[0] : (item.category || 'Blog'),
-      source: 'blog',
-      sourceName: 'Waves Blog',
+    const posts = await Promise.all(items.slice(0, 6).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 200),
+        // Hub RSS items carry no image fields — fall back to the live page's
+        // og:image (safeLink already restricts fetches to trusted hosts).
+        image: extractImage(item) || await resolveOgImage(link),
+        category: Array.isArray(item.category) ? item.category[0] : (item.category || 'Blog'),
+        source: 'blog',
+        sourceName: 'Waves Blog',
+      };
     }));
 
     res.json({ posts });
@@ -193,14 +250,17 @@ router.get('/experts', async (req, res, next) => {
     // Sort by date desc
     relevant.sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
 
-    const posts = relevant.slice(0, 4).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 180),
-      image: extractImage(item),
-      source: 'ifas',
-      sourceName: item._source,
+    const posts = await Promise.all(relevant.slice(0, 4).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 180),
+        image: extractImage(item) || await resolveOgImage(link),
+        source: 'ifas',
+        sourceName: item._source,
+      };
     }));
 
     res.json({ posts });
@@ -220,14 +280,17 @@ router.get('/local', async (req, res, next) => {
       return RELEVANT_KEYWORDS.test(text) && !EXCLUDE_KEYWORDS.test(text);
     });
 
-    const posts = relevant.slice(0, 3).map(item => ({
-      title: item.title || '',
-      link: safeLink(item.link) || '',
-      pubDate: item.pubDate || '',
-      description: stripHtml(item.description || '').slice(0, 150),
-      image: extractImage(item),
-      source: 'local',
-      sourceName: 'MySuncoast',
+    const posts = await Promise.all(relevant.slice(0, 3).map(async item => {
+      const link = safeLink(item.link) || '';
+      return {
+        title: item.title || '',
+        link,
+        pubDate: item.pubDate || '',
+        description: stripHtml(item.description || '').slice(0, 150),
+        image: extractImage(item) || await resolveOgImage(link),
+        source: 'local',
+        sourceName: 'MySuncoast',
+      };
     }));
 
     res.json({ posts });

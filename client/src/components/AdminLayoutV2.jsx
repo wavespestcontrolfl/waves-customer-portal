@@ -213,6 +213,16 @@ export default function AdminLayoutV2() {
     if (isMobile) setSidebarOpen(false);
   }, [location.pathname, isMobile]);
 
+  // .admin-main is the scroll container (the window never scrolls in this
+  // shell), so the browser's scroll restoration can't reach it. Snap to the
+  // top on navigation so pages don't open at the previous page's scroll
+  // position. "instant" opts out of the shell's smooth scroll-behavior —
+  // animating across a route change is disorienting.
+  const mainRef = useRef(null);
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0, behavior: "instant" });
+  }, [location.pathname]);
+
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
@@ -611,6 +621,7 @@ export default function AdminLayoutV2() {
           background: "var(--surface-page)",
         }}
         className="admin-main"
+        ref={mainRef}
       >
         <Outlet />
       </div>

@@ -30,6 +30,26 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 
+// Authenticated fetch → blob download for Bearer-only report endpoints. A
+// bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
+// auth) — same path DocumentsTab's handleDownload uses.
+async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
+  const token = localStorage.getItem('waves_token');
+  let abs = url;
+  try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // The arrival window quoted to customers is ALWAYS window_start + 2 hours
 // (owner directive — see server/utils/sms-time-format.js). window_end is the
 // internal job-duration block and must never render on customer surfaces.
@@ -1090,6 +1110,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
@@ -1506,14 +1527,23 @@ function DashboardTab({ customer, onSwitchTab }) {
           {nextService ? (
             <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
-                <button type="button" onClick={() => {
-                  api.confirmAppointment(nextService.id).then(() => {
+                <button type="button" disabled={confirmingVisit} onClick={async () => {
+                  if (confirmingVisit) return;
+                  setConfirmingVisit(true);
+                  try {
+                    await api.confirmAppointment(nextService.id);
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
-                  });
+                  } catch (err) {
+                    console.error(err);
+                    alert('Could not confirm this visit. Please try again.');
+                  } finally {
+                    setConfirmingVisit(false);
+                  }
                 }} data-glass-accent="" style={{
                   ...dashboardPrimaryButton,
+                  ...(confirmingVisit ? { opacity: 0.6, cursor: 'default' } : {}),
                 }}>
-                  Confirm Visit
+                  {confirmingVisit ? 'Confirming…' : 'Confirm Visit'}
                 </button>
               ) : (
                 <span style={{
@@ -2218,18 +2248,39 @@ function ServicesTab() {
                             {/* reportAvailable === false → no button at all: the
                                 fallback generator 404s for internal-only records. */}
                             {(s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false) && (
-                              <a
-                                href={s.reportUrl || api.getServiceReportUrl(s.id)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                data-glass-accent="" style={{
-                                  ...primaryButton, padding: '7px 12px', fontSize: 12,
-                                  textDecoration: 'none',
-                                  borderRadius: 8,
-                                }}
-                              >
-                                <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : s.reportUrl ? 'View report' : 'Download PDF'}
-                              </a>
+                              s.reportUrl ? (
+                                <a
+                                  href={s.reportUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  data-glass-accent="" style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    textDecoration: 'none',
+                                    borderRadius: 8,
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                </a>
+                              ) : (
+                                // No public reportUrl — the fallback endpoint is
+                                // Bearer-only, so a bare anchor opened a raw 401
+                                // JSON page. Download through authed fetch instead.
+                                <button
+                                  type="button"
+                                  data-glass-accent=""
+                                  onClick={() => {
+                                    downloadAuthedPdf(api.getServiceReportUrl(s.id)).catch(() => {
+                                      alert('Could not download this report. Please try again.');
+                                    });
+                                  }}
+                                  style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    borderRadius: 8, cursor: 'pointer',
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
+                                </button>
+                              )
                             )}
                             <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
@@ -3280,6 +3331,7 @@ function BillingTab({ customer }) {
   const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
+  const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
 
   // Stripe card management state
@@ -3705,13 +3757,22 @@ function BillingTab({ customer }) {
 
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
+    setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
     })
-      .then(() => setBillingPrefsSaving(false))
-      .catch(() => setBillingPrefsSaving(false));
+      .then(() => {
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('saved');
+        setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
+      })
+      .catch(() => {
+        // A silent failure here left the customer believing prefs were saved.
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('error');
+      });
   };
 
   return (
@@ -4225,13 +4286,18 @@ function BillingTab({ customer }) {
           </button>
         </div>
 
+        {billingPrefsStatus === 'error' && (
+          <div style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
+            Couldn&rsquo;t save your billing preferences. Please try again.
+          </div>
+        )}
         <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} data-glass-accent="" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
           cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
-          {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
+          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save Billing Preferences'}
         </button>
       </div>
     </div>
@@ -7480,30 +7546,37 @@ function MyPlanTab({ customer }) {
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
-            <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
+            <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {includedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
-                  <div key={svc.id}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 850, marginBottom: 8 }}>
-                      <Icon name={iconName(svc.icon)} size={14} strokeWidth={1.8} />
+                  <div key={svc.id} style={{
+                    background: subtle,
+                    border: '1px solid rgba(255,255,255,0.65)',
+                    borderRadius: 14,
+                    padding: '12px 12px 10px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 700, marginBottom: 10 }}>
+                      <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
-                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#D8D0C0' : 'transparent';
-                        const border = isScheduled ? fill : '#E7E2D7';
+                        const isFilled = isCompleted || isOverdue || (isCurrentMonth && isScheduled);
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
+                        const border = isFilled ? 'rgba(255,255,255,0.55)' : isScheduled ? 'rgba(27,44,91,0.35)' : 'rgba(27,44,91,0.14)';
                         const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
+                        const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 0 }}>
+                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -7513,17 +7586,34 @@ function MyPlanTab({ customer }) {
                               onBlur={() => setHoveredCalendarItem(null)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 999,
-                              background: fill,
-                              border: `1px solid ${border}`,
-                              opacity: isScheduled ? 1 : 0.45,
-                              boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
-                              padding: 0,
-                              cursor: isScheduled ? 'pointer' : 'default',
-                            }}
-                            />
+                                width: '100%',
+                                height: 26,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                background: 'transparent',
+                                border: 'none',
+                                padding: 0,
+                                cursor: isScheduled ? 'pointer' : 'default',
+                              }}
+                            >
+                              <span aria-hidden="true" style={{
+                                display: 'block',
+                                boxSizing: 'border-box',
+                                width: 15,
+                                height: 15,
+                                borderRadius: 999,
+                                background: fill,
+                                border: `1.5px solid ${border}`,
+                                boxShadow: isFilled
+                                  ? `inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 6px rgba(4,57,94,0.22)${isCurrentMonth ? `, 0 0 0 3px ${B.wavesBlue}2E` : ''}`
+                                  : isScheduled
+                                    ? 'inset 0 1px 0 rgba(255,255,255,0.8), 0 1px 3px rgba(4,57,94,0.12)'
+                                    : 'none',
+                                transform: isHovered ? 'scale(1.35)' : 'scale(1)',
+                                transition: 'transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 200ms ease',
+                              }} />
+                            </button>
                             {isScheduled && hoveredCalendarItem === tooltipKey && (
                               <div role="tooltip" style={{
                                 position: 'absolute',
@@ -7549,7 +7639,12 @@ function MyPlanTab({ customer }) {
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
+                            <div style={{
+                              fontSize: 10,
+                              fontWeight: isCurrentMonth ? 800 : 600,
+                              letterSpacing: '0.02em',
+                              color: isCurrentMonth ? B.wavesBlue : 'rgba(27,44,91,0.5)',
+                            }}>{month[0]}</div>
                           </div>
                         );
                       })}

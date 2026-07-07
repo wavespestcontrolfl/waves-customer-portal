@@ -142,8 +142,13 @@ export default function SlotPicker({
   // load it stays silent so the page's neutral copy holds.
   useEffect(() => {
     if (!onFirstSlotDate || !data) return;
-    onFirstSlotDate(data?.primary?.[0]?.date || data?.expander?.[0]?.date || null);
-  }, [data, onFirstSlotDate]);
+    // Apply the same staleness filter the pills use — otherwise the hero
+    // promises a day whose slots render disabled. freshnessTick keeps the
+    // claim honest while the page sits open.
+    const slots = [...(data?.primary || []), ...(data?.expander || [])];
+    const firstOpen = glass ? slots.find((s) => !glassSlotIsStale(s)) : slots[0];
+    onFirstSlotDate(firstOpen?.date || null);
+  }, [data, onFirstSlotDate, glass, freshnessTick]);
 
   const selectSlot = (slot) => {
     onSelect(slot ? slot.slotId : null);
@@ -437,7 +442,9 @@ export default function SlotPicker({
   // slot; owner 2026-07-06: name the actual date + city ("...as soon as
   // Tuesday, July 7 in Venice"). Falls back to the qualifier form, then the
   // standard heading, rather than overpromise.
-  const firstYmd = allSlots[0]?.date || null;
+  // First BOOKABLE slot — stale slots render as disabled pills, so the
+  // heading must skip them or it promises a day the customer can't tap.
+  const firstYmd = (glass ? allSlots.find((s) => !glassSlotIsStale(s)) : allSlots[0])?.date || null;
   const firstDateLabel = firstYmd
     ? new Date(`${firstYmd}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })
     : null;

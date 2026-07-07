@@ -1,6 +1,51 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric } from '../native/biometric';
+import { COLORS, FONTS } from '../theme-brand';
+import '../glass/glass-theme.css';
+
+// The lock overlay is a liquid-glass surface, but it deliberately does NOT call
+// useGlassSurface: the shared scene mounts BEHIND #root, and a privacy overlay
+// must be opaque (it hides account content from the iOS app-switcher snapshot).
+// It also must not own the scene lifecycle — unlocking over a page that runs its
+// own useGlassSurface would tear that page's scene down. So the overlay paints
+// its own copy of the applyGlassScene('full') mesh + orbs (glass-engine.js —
+// keep the two in sync), and the native launch image mirrors the same scene:
+// client/resources/splash-2732x2732.png + capacitor.config.json backgroundColor.
+const GLASS_SCENE_BG = [
+  'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
+  'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
+  'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
+  'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
+  'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
+  'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
+].join(',');
+
+// Same orb spec as applyGlassScene('full').
+const GLASS_ORBS = [
+  ['10%', '6%', 380, 'rgba(10,126,194,.36)'],
+  ['62%', '22%', 460, 'rgba(56,170,225,.34)'],
+  ['22%', '62%', 420, 'rgba(240,165,0,.18)'],
+  ['72%', '74%', 340, 'rgba(4,57,94,.28)'],
+];
+
+const LOCK_KEYFRAMES = `
+@keyframes wavesLockLogoIn {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes wavesLockFloat {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-8px); }
+}
+@keyframes wavesLockRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .waves-lock-anim { animation: none !important; }
+}
+`;
 
 /**
  * Face ID / Touch ID app-lock for the native shell.
@@ -123,6 +168,18 @@ export default function BiometricGate({ children }) {
     return undefined;
   }, [locked]);
 
+  // Activate the shared glass theme (glass-theme.css) so the overlay's
+  // data-glass surfaces render. Attribute-only, and only when no page has
+  // already mounted a scene — the pages own their scene lifecycle, we must
+  // never remove an attribute a page set (see the header comment).
+  useEffect(() => {
+    if (!locked) return undefined;
+    const html = document.documentElement;
+    if (html.hasAttribute('data-glass-theme')) return undefined;
+    html.setAttribute('data-glass-theme', 'full');
+    return () => html.removeAttribute('data-glass-theme');
+  }, [locked]);
+
   // Children stay mounted (route state preserved); the lock is an overlay on top.
   // The container is made inert while locked (see effect above) so the hidden
   // content is non-interactive and invisible to assistive tech, not just covered.
@@ -132,34 +189,83 @@ export default function BiometricGate({ children }) {
         {children}
       </div>
       {locked && (
-        <div style={{
-          position: 'fixed', inset: 0, background: '#0f1923', color: '#e2e8f0',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          padding: 24, textAlign: 'center', zIndex: 99999,
-        }}>
-          <div style={{
-            width: 64, height: 64, borderRadius: 16, marginBottom: 20,
-            background: 'linear-gradient(135deg,#0ea5e9,#38bdf8)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontWeight: 800, fontSize: 30, color: '#fff',
-          }}>W</div>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Waves is locked</div>
-          <div style={{ fontSize: 13, color: '#94a3b8', maxWidth: 300, lineHeight: 1.5, marginBottom: 22 }}>
-            Unlock with Face ID to view your account.
-          </div>
-          <button
-            type="button"
-            ref={unlockBtnRef}
-            onClick={attempt}
-            disabled={checking}
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Waves is locked. Unlock with Face ID to view your account."
+          style={{
+            position: 'fixed', inset: 0, zIndex: 99999, overflow: 'hidden',
+            background: GLASS_SCENE_BG,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            padding: 24, textAlign: 'center', fontFamily: FONTS.ui,
+          }}
+        >
+          <style>{LOCK_KEYFRAMES}</style>
+          {/* overlay-local copy of the glass scene orbs (the shared ones live
+              behind #root and can't show through an opaque privacy overlay) */}
+          {GLASS_ORBS.map(([left, top, size, color]) => (
+            <div
+              key={`${left}-${top}`}
+              aria-hidden="true"
+              style={{
+                position: 'absolute', left, top, width: size, height: size,
+                borderRadius: '50%', background: color, filter: 'blur(70px)',
+                pointerEvents: 'none',
+              }}
+            />
+          ))}
+          <div
+            className="waves-lock-anim"
+            data-glass="modal"
             style={{
-              padding: '11px 26px', background: '#0ea5e9', color: '#fff', border: 0,
-              borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
-              opacity: checking ? 0.6 : 1,
+              position: 'relative',
+              width: 'min(340px, 100%)',
+              padding: '36px 28px 32px',
+              borderRadius: 24,
+              background: 'rgba(255,255,255,0.5)',
+              border: '1px solid rgba(255,255,255,0.75)',
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              animation: 'wavesLockLogoIn 0.5s ease-out both',
             }}
           >
-            {checking ? 'Unlocking…' : 'Unlock'}
-          </button>
+            <img
+              src="/waves-logo.png"
+              alt=""
+              width={230}
+              height={230}
+              className="waves-lock-anim"
+              style={{
+                display: 'block', marginBottom: 20,
+                filter: 'drop-shadow(0 16px 28px rgba(4, 57, 94, 0.28))',
+                animation: 'wavesLockFloat 6s ease-in-out 0.5s infinite',
+              }}
+            />
+            {/* entrance animation lives on the wrapper so its fill-mode can't
+                override the button's own checking-state opacity */}
+            <div
+              className="waves-lock-anim"
+              style={{ animation: 'wavesLockRise 0.5s ease-out 0.5s both', alignSelf: 'stretch' }}
+            >
+              <button
+                type="button"
+                ref={unlockBtnRef}
+                onClick={attempt}
+                disabled={checking}
+                data-glass-accent=""
+                style={{
+                  position: 'relative', width: '100%', minHeight: 52,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  borderRadius: 999, border: 'none', cursor: 'pointer',
+                  fontFamily: FONTS.ui, fontSize: 17, fontWeight: 600,
+                  // fallbacks only — the data-glass-accent rules repaint these
+                  background: COLORS.yellow, color: COLORS.blueDeeper,
+                  opacity: checking ? 0.65 : 1,
+                }}
+              >
+                {checking ? 'Unlocking…' : 'Unlock'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </>

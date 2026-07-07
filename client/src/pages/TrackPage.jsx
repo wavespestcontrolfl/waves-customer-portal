@@ -645,6 +645,37 @@ function NotFoundCard() {
   );
 }
 
+// A valid token that hit a server hiccup (500/502/429) is NOT an expired
+// link — telling the customer their link is invalid during an outage sends
+// them to the phone line for nothing. Offer a retry instead.
+function TransientErrorCard({ onRetry }) {
+  return (
+    <Card>
+      <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
+        We couldn&rsquo;t load your tracker
+      </div>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
+        Something went wrong on our end — your tracking link is still good.
+        Try again in a moment, or call us at{' '}
+        <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>.
+      </div>
+      <div style={{ textAlign: 'center', marginTop: 16 }}>
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            minHeight: 44, padding: '0 24px', borderRadius: 10, border: 'none',
+            background: TRACK_SURFACE.text, color: '#fff',
+            fontSize: 15, fontWeight: 700, cursor: 'pointer',
+          }}
+        >
+          Try again
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
   useGlassSurface(true, 'full');
@@ -653,6 +684,9 @@ export default function TrackPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // React reuses this page instance across /track/:token navigations —
+  // responses for a previous token must never land in the new token's state.
+  const tokenRef = useRef(token);
 
   // Refetch the public track endpoint. Used both for the initial mount
   // and as the wake-up handler when a customer:job_update broadcast
@@ -665,27 +699,39 @@ export default function TrackPage() {
   const fetchTrack = useCallback(async () => {
     try {
       const r = await fetch(`${API_BASE}/public/track/${token}`);
+      if (tokenRef.current !== token) return; // stale response for a prior token
       if (r.status === 404) {
         setNotFound(true);
         return;
       }
+      // Non-OK bodies (500s, expired-token JSON errors) must never become
+      // tracker state — that blanked the page and could clobber a live
+      // en-route render. Only accept payloads with a recognized state.
+      if (!r.ok) return;
       const body = await r.json();
-      if (body) setData(body);
+      if (tokenRef.current !== token) return;
+      if (body?.state) setData(body);
     } catch {
       // Don't clobber an existing render on a transient network blip;
       // the next broadcast (or page refresh) will recover.
     }
   }, [token]);
 
-  // Initial fetch on mount.
+  // Initial fetch on mount and on every token change — the previous
+  // token's data/notFound must not render (or suppress the retry card)
+  // under the new URL.
   useEffect(() => {
     let cancelled = false;
+    tokenRef.current = token;
+    setData(null);
+    setNotFound(false);
+    setLoading(true);
     (async () => {
       await fetchTrack();
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [fetchTrack]);
+  }, [token, fetchTrack]);
 
   // Live socket subscription. Authenticates with the public track
   // token (PR adding socket auth's trackToken path); server resolves
@@ -732,7 +778,22 @@ export default function TrackPage() {
   }, [data?.meta?.pollIntervalSeconds, fetchTrack, notFound]);
 
   if (loading) return <Page><SkeletonCard /></Page>;
-  if (notFound || !data) return <Page><NotFoundCard /></Page>;
+  if (notFound) return <Page><NotFoundCard /></Page>;
+  if (!data) {
+    // No 404 and no data: either a transient failure (retryable) or an
+    // unrecognized payload — only a real 404 earns the "expired" card.
+    return (
+      <Page>
+        <TransientErrorCard
+          onRetry={async () => {
+            setLoading(true);
+            await fetchTrack();
+            setLoading(false);
+          }}
+        />
+      </Page>
+    );
+  }
 
   return (
     <Page>
