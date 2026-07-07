@@ -174,6 +174,13 @@ describe('isWithinCancelWindow', () => {
   it('false on an unparseable start (fail toward free release)', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: 'not-a-date', now })).toBe(false);
   });
+  it('false when the visit start is already past — stale-row cleanup must not charge (P0: past-visit $49)', () => {
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T11:59:59Z'), now })).toBe(false);
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-19T08:00:00Z'), now })).toBe(false);
+  });
+  it('true at the exact start instant (cancelling as the tech arrives is still a late cancel)', () => {
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T12:00:00Z'), now })).toBe(true);
+  });
 });
 
 describe('verifyCardHoldIntent — accept gate', () => {

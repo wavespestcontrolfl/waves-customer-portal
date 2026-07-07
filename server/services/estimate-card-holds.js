@@ -610,11 +610,18 @@ async function releaseCardHold({ scheduledServiceId, reason = 'released' }) {
 
 // Whether a cancellation lands INSIDE the fee window (fee applies) vs outside
 // (free release). serviceStart is the appointment's scheduled start instant.
+// The window is [start - windowHours, start]: a visit whose start has already
+// passed is NOT a late cancel — past-dated cancellations are stale-row cleanup
+// (admin bulk-cancel, dispatch cancels, churn sweeps) and charging them bills
+// the customer for a visit that was never delivered. A genuine missed visit is
+// charged deliberately via chargeNoShowFee(reason:'no_show') from dispatch.
 function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   const windowHours = Number(hold?.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   const start = serviceStart instanceof Date ? serviceStart : new Date(serviceStart);
   if (Number.isNaN(start.getTime())) return false;
-  return (start.getTime() - now.getTime()) <= windowHours * 3600000;
+  const msUntilStart = start.getTime() - now.getTime();
+  if (msUntilStart < 0) return false;
+  return msUntilStart <= windowHours * 3600000;
 }
 
 // Single entry for the cancel path: charge the late-cancel fee if the
