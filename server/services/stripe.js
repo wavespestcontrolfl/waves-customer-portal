@@ -1492,14 +1492,36 @@ const StripeService = {
       throw new Error('Refund processing failed');
     }
 
-    // From here the money HAS moved. An omitted-amount refund refunds the
-    // ENTIRE remaining balance at Stripe — including out-of-band partials
-    // this table never recorded — so the charge is fully refunded by
-    // definition. Explicit partials accumulate against the local ledger
-    // (the charge.refunded webhook writes Stripe's cumulative
-    // amount_refunded, converging any residual drift).
+    // From here the money HAS moved. The cumulative refunded total comes
+    // from Stripe's charge (amount_refunded — the same ground truth the
+    // charge.refunded webhook writes): local math alone DOUBLE-COUNTS when
+    // the webhook repaired refund_amount before an idempotent replay of
+    // this same attempt ($40 refund, webhook wrote 40, replay would record
+    // prior 40 + 40 = 80), and misses dashboard-side partials this table
+    // never saw.
     const refundAmountDollars = refund.amount / 100;
-    const totalRefundedCents = requestCents === null ? paidCents : priorCents + refund.amount;
+    let totalRefundedCents;
+    if (requestCents === null) {
+      // Omitted amount empties the remaining balance — fully refunded by
+      // definition.
+      totalRefundedCents = paidCents;
+    } else if (payment.stripe_refund_id === refund.id) {
+      // Idempotent replay of a refund the webhook already recorded —
+      // prior INCLUDES this refund; adding it again would double-count.
+      totalRefundedCents = priorCents;
+    } else {
+      totalRefundedCents = priorCents + refund.amount;
+    }
+    try {
+      if (refund.charge) {
+        const charge = await stripe.charges.retrieve(refund.charge);
+        if (Number.isFinite(Number(charge?.amount_refunded))) {
+          totalRefundedCents = Number(charge.amount_refunded);
+        }
+      }
+    } catch (chargeErr) {
+      logger.warn(`[stripe] refund cumulative lookup failed for payment ${paymentId} (falling back to local accumulation): ${chargeErr.message}`);
+    }
     const isFullRefund = totalRefundedCents >= paidCents;
 
     try {

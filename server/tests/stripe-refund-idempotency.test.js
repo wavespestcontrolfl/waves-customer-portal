@@ -134,6 +134,43 @@ describe('StripeService.refund', () => {
     expect(updatePayments).toHaveBeenCalledTimes(1);
   });
 
+  test('webhook-repaired replay does NOT double-count the same refund in the ledger', async () => {
+    // Same scenario, focused on the amount: webhook wrote refund_amount=40
+    // and stripe_refund_id=re_1 from THIS refund. The replay returns the
+    // original re_1 — prior already includes it, so the ledger must stay
+    // at $40, not 40 + 40 = 80.
+    paymentRow.refund_amount = '40.00';
+    paymentRow.stripe_refund_id = 're_1';
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+    });
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    expect(updatePayments).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'paid',
+      refund_amount: 40,
+    }));
+  });
+
+  test("Stripe's cumulative amount_refunded overrides local math when the charge is retrievable", async () => {
+    // Ledger saw nothing, but the charge already carries a $30 dashboard
+    // partial; this $40 refund brings Stripe's cumulative to 70.
+    stripeClient.refunds.create.mockResolvedValueOnce({
+      id: 're_2', status: 'succeeded', amount: 4000, created: 1780000000, charge: 'ch_1',
+    });
+    stripeClient.charges = { retrieve: jest.fn(async () => ({ id: 'ch_1', amount_refunded: 7000 })) };
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    expect(stripeClient.charges.retrieve).toHaveBeenCalledWith('ch_1');
+    expect(updatePayments).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'paid',
+      refund_amount: 70,
+    }));
+  });
+
   test('a DIFFERENT amount while an attempt is unresolved is rejected', async () => {
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_4000_0',
