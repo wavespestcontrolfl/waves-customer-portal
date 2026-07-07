@@ -18,6 +18,7 @@
  *
  * The web push path (lib/push-subscribe.js + /admin/push/subscribe) is untouched.
  */
+import api from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 
 export { isNativeApp };
@@ -136,16 +137,24 @@ export function flushNativePushToken() {
 }
 
 /**
- * Deactivate this customer's native push registration. Call from logout
- * BEFORE tokens are cleared (it needs the JWT) so the device stops
- * receiving the previous account's service/billing pushes. Best-effort;
- * no-op on web. Re-arms pendingToken so a later login on this device
- * re-subscribes (the registration event won't re-fire this session).
+ * Deactivate this customer's native push registration. AWAIT from logout
+ * BEFORE clearTokens — it may need the api client's 401→refresh retry,
+ * which needs live tokens — so the device stops receiving the previous
+ * account's service/billing pushes. Best-effort; no-op on web. Re-arms
+ * pendingToken so a later login on this device re-subscribes (the
+ * registration event won't re-fire this session).
  */
 export async function deactivateNativePushToken() {
   if (!isNativeApp()) return;
-  const jwt = authToken();
-  if (!jwt) return;
+  // The access JWT can be expired at logout while the 30-day refresh token
+  // is still valid (7d vs 30d defaults) — so this goes through the api
+  // client, whose 401→refresh→retry path recovers that case. A raw fetch
+  // with the stale Bearer just 401s and leaves this device receiving the
+  // old account's pushes. Requires logout to await this BEFORE clearTokens
+  // (the refresh path dies once tokens are cleared).
+  let refreshJwt = null;
+  try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
+  if (!authToken() && !refreshJwt) return;
   const token = rememberedToken();
   // Never unsubscribe without the device token: the server route deactivates
   // EVERY native subscription for the customer when token is omitted, which
@@ -159,9 +168,11 @@ export async function deactivateNativePushToken() {
   pendingToken = token;
   const request = (async () => {
     try {
-      await fetch('/api/push/native-unsubscribe', {
+      // api.request throws on non-OK, so a failed unsubscribe lands in the
+      // catch — pendingToken stays armed and the next login's flush re-points
+      // the subscription (which supersedes the old row server-side).
+      await api.request('/push/native-unsubscribe', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
         body: JSON.stringify({ token }),
       });
     } catch (err) {

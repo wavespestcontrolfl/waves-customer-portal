@@ -67,11 +67,18 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     // Deactivate this device's push registration BEFORE dropping the JWT —
     // otherwise the device keeps receiving the previous account's pushes.
-    // Fire-and-forget: the fetch captures the JWT before clearTokens runs.
-    deactivateNativePushToken();
+    // Awaited (with a cap) because the unsubscribe may need the api client's
+    // 401→refresh retry, which dies the moment clearTokens runs; the timeout
+    // keeps a dead network from wedging logout. No-op (instant) on web.
+    try {
+      await Promise.race([
+        deactivateNativePushToken(),
+        new Promise((resolve) => { setTimeout(resolve, 4000); }),
+      ]);
+    } catch { /* best-effort */ }
     api.clearTokens();
     setCustomer(null);
     setProperties([]);
