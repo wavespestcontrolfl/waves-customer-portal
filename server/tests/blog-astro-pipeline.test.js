@@ -2605,14 +2605,25 @@ describe('frontmatter date stamping (ET)', () => {
     expect(data.published).toBe(etDateString());
   });
 
-  test('a valid past publish_date is kept and rendered in ET, not UTC', async () => {
-    // UTC midnight is still the prior evening in America/New_York.
-    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: new Date('2026-05-01T00:00:00.000Z') });
-    expect(data.published).toBe('2026-04-30');
+  test('a stored DATE-column value keeps its calendar day (pg returns midnight Date objects)', async () => {
+    // pg parses DATE columns to local-midnight Dates — the stored calendar
+    // day is read directly, never shifted through a timezone conversion.
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: new Date(2026, 4, 8) });
+    expect(data.published).toBe('2026-05-08');
   });
 
-  test('an epoch-zero review stamp is dropped instead of rendering 1970', async () => {
+  test('a date-only string publish_date passes through unshifted', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, publish_date: '2026-05-08' });
+    expect(data.published).toBe('2026-05-08');
+  });
+
+  test('an epoch-zero review stamp heals to today ET (schema-required field — dropping it would block publish)', async () => {
     const data = await AstroPublisher.buildFrontmatter({ ...base, fact_checked_at: new Date(0) });
+    expect(data.fact_checked).toBe(etDateString());
+  });
+
+  test('an absent review stamp stays absent (unchanged behavior)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base });
     expect(data.fact_checked).toBeUndefined();
   });
 });

@@ -216,7 +216,7 @@ async function buildFrontmatter(post) {
   const author = post.author_slug ? await authorService.getAuthor(post.author_slug) : null;
   const reviewer = post.reviewer_slug ? await authorService.getAuthor(post.reviewer_slug) : null;
 
-  const today = etDateOnly(post.publish_date) || etDateString();
+  const today = calendarDateOnly(post.publish_date) || etDateString();
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const canonical = `${hub}/${slug}/`;
 
@@ -225,8 +225,15 @@ async function buildFrontmatter(post) {
         ? post.featured_image_url
         : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${post.hero_image_ext || imageExtFromSource(post.featured_image_url)}`)
     : null;
-  const technicallyReviewedDate = etDateOnly(post.technically_reviewed_at);
-  const factCheckedDate = etDateOnly(post.fact_checked_at);
+  // technically_reviewed / fact_checked are schema-REQUIRED: a present-but-
+  // corrupt stamp heals to today ET (matching publish_date's fallback) rather
+  // than dropping to undefined, which would fail assertValidBlogFrontmatter
+  // and strand the row before a PR ever opens. An absent stamp stays absent
+  // (unchanged behavior).
+  const technicallyReviewedDate = calendarDateOnly(post.technically_reviewed_at)
+    || (post.technically_reviewed_at ? etDateString() : null);
+  const factCheckedDate = calendarDateOnly(post.fact_checked_at)
+    || (post.fact_checked_at ? etDateString() : null);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
@@ -510,18 +517,30 @@ function estimateReadingTime(text) {
   return Math.max(1, Math.round(words / 220));
 }
 
-// Publish-facing frontmatter dates are stamped in America/New_York, never
-// UTC — UTC stamping put "tomorrow's" date on posts opened in the ET evening,
-// and a corrupt epoch-zero publish_date shipped a live post dated 1970-01-01
-// (both Codex-flagged on real PRs). Dates before the company existed (2024)
-// are treated as corrupt rows, and no post may claim a future publish date.
+// Calendar-date normalization for STORED blog dates (publish_date /
+// technically_reviewed_at / fact_checked_at are DATE columns). pg/Knex
+// returns DATE columns as midnight Date objects, so the stored calendar day
+// is read directly (local date fields / date-string prefix) — round-tripping
+// it through a timezone conversion shifts every persisted date to the
+// previous ET day. Timezone (ET, via etDateString) only applies to "now"
+// stamps. Sanity rails: dates before the company existed (2024) are corrupt
+// rows → null, caller falls back (a live post shipped dated 1970-01-01 from
+// exactly this); no post may claim a future publish date (clamped to today
+// ET — the UTC version of this bug stamped "tomorrow" on ET-evening PRs).
 const EARLIEST_VALID_CONTENT_DATE = '2024-01-01';
 
-function etDateOnly(value) {
+function calendarDateOnly(value) {
   if (!value) return null;
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  const s = etDateString(d);
+  let s = null;
+  if (typeof value === 'string') {
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[T ]|$)/.exec(value.trim());
+    if (m) s = m[1];
+  }
+  if (!s) {
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    s = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
   if (s < EARLIEST_VALID_CONTENT_DATE) return null;
   const today = etDateString();
   return s > today ? today : s;
