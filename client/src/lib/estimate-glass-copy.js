@@ -72,7 +72,7 @@ export const GLASS_FOOTER_CITY_LINKS = [
 // or numbers are introduced here.
 const GLASS_PEST = {
   heroH1: 'Hello {first}, your pest-free {city} plan is ready!',
-  heroSub: 'We can start protecting your home as soon as {date}. Your plan includes quarterly exterior barrier service, interior treatment when needed, unlimited free callbacks, and a 90-day money-back guarantee \u2014 so you\u2019re not paying and praying the bugs stay gone in {city}.',
+  heroSub: 'We can start protecting your home as soon as {date}. Your plan includes exterior/interior pest protection, unlimited free callbacks, and a 90-day money-back guarantee \u2014 so you\u2019re not paying and praying the bugs stay gone in {city}.',
   eyebrow: 'Your pest-free home plan',
   aiTitle: 'Your price was built from your {city} home — not somebody else’s.',
   aiBody: 'We didn’t guess. We measured your home, lot, roofline, and access points so your plan fits your actual property — not a generic average.',

@@ -6,21 +6,23 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
-const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const {
   buildDiagnosticReportContract,
   classifyReleaseMode,
   applyAutoReleaseRepair,
 } = require('../services/lawn-diagnostic-report');
 const {
-  runPerception,
-  runChallenge,
-  runWriter,
-  runNarrative,
   buildNarrativeContext,
-  symptomFindingsFromObservations,
   PROMPT_VERSION,
 } = require('../services/lawn-diagnostic-prompt');
+// Shared analysis ladder — one implementation for the tech flow and the public
+// lawn-assessment funnel (see services/lawn-diagnostic-analyze.js).
+const {
+  buildFindingsFromVision,
+  runFindingsLadder,
+  applyWriterSummary,
+  deriveOverallScore,
+} = require('../services/lawn-diagnostic-analyze');
 const { etParts } = require('../utils/datetime-et');
 
 const MAX_ANALYZE_PHOTOS = 5;
@@ -171,135 +173,6 @@ function normalizePhoto(photo = {}, index = 0) {
   };
 }
 
-function scoreSeverity(score) {
-  const n = Number(score);
-  if (!Number.isFinite(n)) return 'moderate';
-  if (n < 45) return 'severe';
-  if (n < 70) return 'moderate';
-  return 'mild';
-}
-
-// The public report turns overall_score into Healthy / Keep an eye on it / Needs
-// attention. Derive that score SERVER-SIDE from the rebuilt contract's worst finding
-// severity and never let a client-supplied score exceed the severity-implied ceiling,
-// so a stale/buggy client can't publish a "Healthy" banner over severe findings.
-function severityCeiling(diagnosis = {}) {
-  const severities = (Array.isArray(diagnosis.findings) ? diagnosis.findings : [])
-    .map((f) => String((f && f.severity) || '').toLowerCase());
-  if (!severities.length) severities.push(String(diagnosis.severity || '').toLowerCase());
-  if (severities.includes('severe')) return { ceiling: 39, fallback: 25 };
-  if (severities.includes('moderate')) return { ceiling: 69, fallback: 55 };
-  return { ceiling: 100, fallback: 85 };
-}
-
-function deriveOverallScore(contract = {}, clientScore = null) {
-  const diagnosis = contract.diagnosis || {};
-  // Minimal / no-defensible-finding reports stay UNSCORED so the public label reads
-  // "Reviewed", not a default-severity "Keep an eye on it".
-  if (!Array.isArray(diagnosis.findings) || !diagnosis.findings.length) return null;
-  const { ceiling, fallback } = severityCeiling(diagnosis);
-  const base = Number.isFinite(Number(clientScore)) ? Math.round(Number(clientScore)) : fallback;
-  return Math.max(0, Math.min(ceiling, base));
-}
-
-function confidenceFromDivergence(validResults = [], divergenceFlags = []) {
-  if (!validResults.length) return 'low';
-  if (divergenceFlags.length > 1) return 'low';
-  if (validResults.length > 1 && divergenceFlags.length === 0) return 'moderate';
-  return 'moderate';
-}
-
-function buildFindingsFromVision({ composite = {}, adjustedScores = {}, divergenceFlags = [] } = {}) {
-  const findings = [];
-  const evidence = [composite.observations].filter(Boolean);
-  const confidence = confidenceFromDivergence([composite].filter(Boolean), divergenceFlags);
-
-  if (Number(adjustedScores.weed_suppression) < 75) {
-    findings.push({
-      finding_id: 'F1',
-      name: 'Visible weed pressure',
-      confidence,
-      severity: scoreSeverity(adjustedScores.weed_suppression),
-      urgency: Number(adjustedScores.weed_suppression) < 45 ? 'follow_up' : 'monitor',
-      observed_evidence: evidence,
-      negative_evidence: [],
-      confirmation_step: 'Confirm weed type at the plant level before naming specific weeds in customer copy.',
-    });
-  }
-
-  if (composite.fungal_activity && composite.fungal_activity !== 'none') {
-    findings.push({
-      finding_id: `F${findings.length + 1}`,
-      name: 'Possible fungal activity',
-      // Photo-only disease never clears the v0.4 naming gate (needs a blade/margin
-      // close-up), so cap this deterministic-fallback finding at low confidence —
-      // the egress label then downgrades it to a generic symptom.
-      confidence: 'low',
-      severity: composite.fungal_activity === 'severe' ? 'severe' : composite.fungal_activity === 'moderate' ? 'moderate' : 'mild',
-      urgency: composite.fungal_activity === 'severe' ? 'follow_up' : 'monitor',
-      observed_evidence: evidence,
-      negative_evidence: ['Photo review does not replace blade-level disease confirmation.'],
-      confirmation_step: 'Confirm with close-up blade and patch-margin inspection before calling disease active.',
-    });
-  }
-
-  if (Number(adjustedScores.turf_density) < 75) {
-    findings.push({
-      finding_id: `F${findings.length + 1}`,
-      name: 'Thin turf density',
-      confidence,
-      severity: scoreSeverity(adjustedScores.turf_density),
-      urgency: Number(adjustedScores.turf_density) < 45 ? 'follow_up' : 'monitor',
-      observed_evidence: evidence,
-      negative_evidence: [],
-      confirmation_step: 'Confirm whether thinning is from shade, mowing height, irrigation coverage, pest pressure, or prior damage.',
-    });
-  }
-
-  if (Number(adjustedScores.color_health) < 75) {
-    findings.push({
-      finding_id: `F${findings.length + 1}`,
-      name: 'Turf color stress',
-      confidence,
-      severity: scoreSeverity(adjustedScores.color_health),
-      urgency: 'monitor',
-      observed_evidence: evidence,
-      negative_evidence: [],
-      confirmation_step: 'Confirm likely cause with irrigation, nutrient, soil, and recent weather context.',
-    });
-  }
-
-  if (composite.overwatering_signal === true) {
-    findings.push({
-      finding_id: `F${findings.length + 1}`,
-      name: 'Overwatering signal',
-      confidence,
-      severity: 'moderate',
-      urgency: 'monitor',
-      observed_evidence: evidence,
-      negative_evidence: [],
-      confirmation_step: 'Confirm irrigation schedule, rainfall, and soil moisture before recommending more water.',
-    });
-  }
-
-  if (!findings.length) {
-    findings.push({
-      finding_id: 'F1',
-      name: 'No major visible lawn stress signal',
-      confidence,
-      severity: 'mild',
-      urgency: 'monitor',
-      observed_evidence: evidence,
-      negative_evidence: [
-        'No strong weed, disease, thinning, or color-stress signal was derived from the submitted photos.',
-      ],
-      confirmation_step: 'Continue routine monitoring and field verification.',
-    });
-  }
-
-  return findings;
-}
-
 async function productCatalogColumns() {
   return db('products_catalog').columnInfo().catch(() => ({}));
 }
@@ -439,50 +312,6 @@ async function enrichAppliedProducts(inputProducts = []) {
   }
 }
 
-async function analyzePhotos(photos = []) {
-  const analyzablePhotos = photos.filter((photo) => photo.data);
-  if (!analyzablePhotos.length) {
-    return {
-      validResults: [],
-      composite: null,
-      adjustedScores: null,
-      divergenceFlags: [],
-      aiAvailable: false,
-    };
-  }
-
-  const photoResults = await withConcurrency(analyzablePhotos, 3, (photo) =>
-    lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg'),
-  );
-  const validResults = photoResults.filter(Boolean);
-  if (!validResults.length) {
-    return {
-      validResults,
-      composite: null,
-      adjustedScores: null,
-      divergenceFlags: [],
-      aiAvailable: false,
-    };
-  }
-
-  const composite = mergePhotoComposites(validResults);
-  const displayScores = lawnAssessment.mapToDisplayScores(composite);
-  const month = etParts(new Date()).month;
-  const season = lawnAssessment.getSeason(month);
-  const adjustedScores = lawnAssessment.applySeasonalAdjustment(displayScores, month);
-  const divergenceFlags = validResults.flatMap((result) => result.divergenceFlags || []);
-
-  return {
-    validResults,
-    composite,
-    displayScores,
-    adjustedScores,
-    divergenceFlags,
-    season,
-    aiAvailable: true,
-  };
-}
-
 router.post('/analyze', async (req, res, next) => {
   try {
     const photos = asArray(req.body.photos).map(normalizePhoto);
@@ -503,64 +332,22 @@ router.post('/analyze', async (req, res, next) => {
     const products = await enrichAppliedProducts(appliedProducts);
     const season = lawnAssessment.getSeason(etParts(new Date()).month);
 
-    // Findings ladder — NEVER BLOCKS, but never publishes an UN-CHALLENGED diagnosis.
-    //   manual ............... tech-supplied findings win.
-    //   multimodel (L1) ...... Gemini perceive + Opus 4.8 challenge → diagnosis-level.
-    //   challenge_degraded (L2) perception ok but challenge unavailable → SYMPTOM-only
-    //                          (deterministic downgrade; names no cause, field-check copy).
-    //   deterministic (L4) ... perception unusable → Claude+Gemini composite findings.
-    //   minimal .............. nothing usable → no-diagnosis report.
-    // The Claude+Gemini composite is the fallback only (analyzePhotos runs lazily), so
-    // the happy path uses Gemini for vision and never touches Claude vision.
+    // Findings ladder (manual short-circuits; everything else runs the shared
+    // ladder in services/lawn-diagnostic-analyze.js — the same pipeline the
+    // public lawn-assessment funnel uses).
     let findings;
     let findingsSource;
     let fallbackReason = null;
     let photoAnalysis = null;
-    const provenance = { challenge: null, perceptionModel: null, challengeModel: null, writerModel: null };
+    let provenance = { challenge: null, perceptionModel: null, challengeModel: null, writerModel: null };
 
     if (suppliedFindings.length) {
       findings = suppliedFindings;
       findingsSource = 'manual';
     } else {
-      const perception = await runPerception({ photos, season, products, compliance });
-      if (perception.ok) provenance.perceptionModel = perception.model;
-      const challenge = perception.ok
-        ? await runChallenge(perception, { products, compliance, season })
-        : { ok: false, reason: `no_perception:${perception.reason || 'unknown'}`, findings: [], challenge: null };
-      provenance.challenge = challenge.challenge || null;
-
-      if (challenge.ok && challenge.findings.length) {
-        findings = challenge.findings;
-        findingsSource = 'multimodel';
-        provenance.challengeModel = challenge.challenge?.model || null;
-      } else if (perception.ok) {
-        // Observations exist but the adversarial layer didn't pass — downgrade to
-        // symptom-only deterministically (no model, no cause names).
-        const symptom = symptomFindingsFromObservations(perception.observations);
-        if (symptom.length) {
-          findings = symptom;
-          findingsSource = 'challenge_degraded';
-          fallbackReason = challenge.challenge?.failureType || challenge.reason || null;
-        }
-      }
-
-      if (!findings) {
-        // Perception/observations unusable: deterministic composite, then minimal-safe.
-        photoAnalysis = await analyzePhotos(photos);
-        if (photoAnalysis.composite) {
-          findings = buildFindingsFromVision({
-            composite: photoAnalysis.composite,
-            adjustedScores: photoAnalysis.adjustedScores,
-            divergenceFlags: photoAnalysis.divergenceFlags,
-          });
-          findingsSource = 'deterministic_fallback';
-          fallbackReason = fallbackReason || (perception.ok ? 'observations_unusable' : perception.reason);
-        } else {
-          findings = [];
-          findingsSource = 'minimal_fallback';
-          fallbackReason = fallbackReason || perception.reason || 'vision_unavailable';
-        }
-      }
+      ({ findings, findingsSource, fallbackReason, photoAnalysis, provenance } = await runFindingsLadder({
+        photos, season, products, compliance,
+      }));
     }
 
     const inputPhotos = photos.map((photo) => ({
@@ -576,24 +363,11 @@ router.post('/analyze', async (req, res, next) => {
       seasonal_context: req.body.seasonalContext || req.body.seasonal_context || '',
     });
 
-    // Auto-release: classify, then write the summary. The polished LLM writer (GPT-5.5)
-    // runs ONLY for the fully-challenged multimodel path; every degraded/fallback path
-    // keeps the deterministic, symptom-only summary so an un-challenged report never
-    // gets a confident customer voice. Then repair/degrade unsafe copy.
+    // Auto-release: classify, then write the summary (shared writer step — LLM
+    // writer only for the fully-challenged multimodel path). Then repair/degrade
+    // unsafe copy.
     const releaseMode = classifyReleaseMode(reportContract);
-    if (findingsSource === 'multimodel' && releaseMode !== 'minimal') {
-      const writer = await runWriter(reportContract, { season });
-      if (writer.ok) {
-        reportContract.customer_summary = writer.customer_summary;
-        provenance.writerModel = writer.model;
-      } else {
-        const narrative = await runNarrative(reportContract, { season });
-        if (narrative.ok) {
-          reportContract.customer_summary = narrative.customer_summary;
-          provenance.writerModel = narrative.model || 'anthropic-fallback';
-        }
-      }
-    }
+    await applyWriterSummary(reportContract, { season, findingsSource, releaseMode, provenance });
     const finalContract = applyAutoReleaseRepair(reportContract, releaseMode);
 
     // Durable, server-authored provenance: one run record per analysis. Persist later

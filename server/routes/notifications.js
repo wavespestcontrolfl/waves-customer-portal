@@ -60,15 +60,23 @@ function normalizeContactInput(contact = {}) {
 // Delivery-channel options for per-notification channel selection.
 const CHANNEL_VALUES = ['sms', 'email', 'both'];
 
-// Appointment delivery channels are an account-level "how to reach me"
-// preference, stored on the account's primary profile so they are consistent
-// across every property. The billing channels are NOT listed here — billing
-// sends target the charged customer row, so billing_channel /
-// payment_receipt_channel (migration-104 columns, also read by the
-// estimate-deposits / estimate-card-holds receipt senders and the messaging
-// consent gate) stay per-row next to the billing_reminder /
+// Delivery channels for appointment notifications are an account-level "how
+// to reach me" preference, stored on the account's primary profile so they are
+// consistent across every property. en_route_channel reuses the migration-104
+// column; tech_arrived_channel is added by 20260707000050. Both are honored by
+// the tech-tracking senders in services/twilio.js. The billing channels are
+// NOT listed here — billing sends target the charged customer row, so
+// billing_channel / payment_receipt_channel (migration-104 columns, also read
+// by the estimate-deposits / estimate-card-holds receipt senders and the
+// messaging consent gate) stay per-row next to the billing_reminder /
 // payment_confirmation_sms toggles and billing_email they modify.
-const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
+const CHANNEL_DB_COLUMNS = [
+  'appointment_confirmation_channel',
+  'service_reminder_72h_channel',
+  'service_reminder_24h_channel',
+  'en_route_channel',
+  'tech_arrived_channel',
+];
 
 const PREF_SELECT = [
   'appointment_confirmation',
@@ -90,6 +98,8 @@ const PREF_SELECT = [
   'appointment_confirmation_channel',
   'service_reminder_72h_channel',
   'service_reminder_24h_channel',
+  'en_route_channel',
+  'tech_arrived_channel',
   'billing_channel',
   'payment_receipt_channel',
 ];
@@ -126,6 +136,8 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
       serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
       serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+      enRouteChannel: channelValue(prefs.en_route_channel),
+      techArrivedChannel: channelValue(prefs.tech_arrived_channel),
       // Billing delivery channels reuse the migration-104 columns so the
       // portal, the consent gate, and the channel-aware receipt senders
       // (estimate-deposits / estimate-card-holds) all read ONE preference.
@@ -173,6 +185,8 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
   if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
+  if (updates.enRouteChannel !== undefined) dbUpdates.en_route_channel = channelValue(updates.enRouteChannel);
+  if (updates.techArrivedChannel !== undefined) dbUpdates.tech_arrived_channel = channelValue(updates.techArrivedChannel);
   if (updates.billingReminderChannel !== undefined) dbUpdates.billing_channel = channelValue(updates.billingReminderChannel);
   if (updates.paymentConfirmationChannel !== undefined) dbUpdates.payment_receipt_channel = channelValue(updates.paymentConfirmationChannel);
   return dbUpdates;
@@ -198,6 +212,8 @@ const ACCOUNT_PREF_LABELS = {
   appointmentConfirmationChannel: 'New Appointment Confirmation — Delivery',
   serviceReminder72hChannel: '72-Hour Appointment Reminder — Delivery',
   serviceReminder24hChannel: '24-Hour Service Reminder — Delivery',
+  enRouteChannel: 'Tech En Route Alert — Delivery',
+  techArrivedChannel: 'Tech Arrived Alert — Delivery',
   billingReminderChannel: 'Billing Reminder — Delivery',
   paymentConfirmationChannel: 'Payment Confirmation — Delivery',
 };
@@ -208,6 +224,8 @@ const CHANNEL_PREF_KEYS = new Set([
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
+  'enRouteChannel',
+  'techArrivedChannel',
   'billingReminderChannel',
   'paymentConfirmationChannel',
 ]);
@@ -234,6 +252,8 @@ const DB_FIELD_BY_PREF = {
   appointmentConfirmationChannel: 'appointment_confirmation_channel',
   serviceReminder72hChannel: 'service_reminder_72h_channel',
   serviceReminder24hChannel: 'service_reminder_24h_channel',
+  enRouteChannel: 'en_route_channel',
+  techArrivedChannel: 'tech_arrived_channel',
   billingReminderChannel: 'billing_channel',
   paymentConfirmationChannel: 'payment_receipt_channel',
 };
@@ -353,6 +373,8 @@ async function loadPreferencePayload(req) {
     appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
     service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
     service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
+    en_route_channel: channelPrefs.en_route_channel,
+    tech_arrived_channel: channelPrefs.tech_arrived_channel,
   });
 }
 
@@ -439,6 +461,8 @@ router.put('/preferences', async (req, res, next) => {
       appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
       serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
+      enRouteChannel: Joi.string().valid(...CHANNEL_VALUES),
+      techArrivedChannel: Joi.string().valid(...CHANNEL_VALUES),
       billingReminderChannel: Joi.string().valid(...CHANNEL_VALUES),
       paymentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
     }).min(1);

@@ -4,6 +4,22 @@ import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken 
 
 const AuthContext = createContext(null);
 
+// Server auth routes send intentional customer copy in the JSON `error`
+// field ("Invalid code", rate-limit sentences) — show those verbatim. But
+// api.js also throws raw non-JSON bodies (proxy HTML error pages) and
+// "Request failed (502)" fallbacks, which are not customer copy (F-059).
+function authErrorCopy(err) {
+  const msg = String(err?.message || '').trim();
+  const looksCurated = msg
+    && msg.length <= 140
+    && !/[<>]/.test(msg)
+    && !/^Request failed \(/i.test(msg)
+    && !/^HTTP\s*\d{3}/i.test(msg);
+  if (looksCurated) return msg;
+  if (err?.status === 429) return 'Too many attempts. Please wait a few minutes and try again.';
+  return 'Something went wrong. Please try again in a moment.';
+}
+
 export function AuthProvider({ children }) {
   const [customer, setCustomer] = useState(null);
   const [properties, setProperties] = useState([]);
@@ -86,7 +102,7 @@ export function AuthProvider({ children }) {
       await api.sendCode(phone);
       return true;
     } catch (err) {
-      setError(err.message);
+      setError(authErrorCopy(err));
       return false;
     }
   };
@@ -100,7 +116,7 @@ export function AuthProvider({ children }) {
       await loadCustomer();
       return true;
     } catch (err) {
-      setError(err.message);
+      setError(authErrorCopy(err));
       return false;
     }
   };

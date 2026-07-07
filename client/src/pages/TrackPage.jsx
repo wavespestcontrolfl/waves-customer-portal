@@ -687,6 +687,12 @@ export default function TrackPage() {
   // React reuses this page instance across /track/:token navigations —
   // responses for a previous token must never land in the new token's state.
   const tokenRef = useRef(token);
+  // fetchTrack fires concurrently from the 30s en-route poll AND the socket
+  // job_update handler. Only the latest-issued request may write state — a
+  // pre-transition poll response that resolves AFTER the broadcast-triggered
+  // refetch would otherwise revert a completed visit to "arrives in N min"
+  // until the next tick (F-037).
+  const fetchSeqRef = useRef(0);
 
   // Refetch the public track endpoint. Used both for the initial mount
   // and as the wake-up handler when a customer:job_update broadcast
@@ -697,9 +703,11 @@ export default function TrackPage() {
   // cancellation, etc.). Refetching gives us the full state without
   // having to merge a narrow payload into a rich UI.
   const fetchTrack = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
+    const stale = () => tokenRef.current !== token || fetchSeqRef.current !== seq;
     try {
       const r = await fetch(`${API_BASE}/public/track/${token}`);
-      if (tokenRef.current !== token) return; // stale response for a prior token
+      if (stale()) return; // superseded by a newer request or a token change
       if (r.status === 404) {
         setNotFound(true);
         return;
@@ -709,7 +717,7 @@ export default function TrackPage() {
       // en-route render. Only accept payloads with a recognized state.
       if (!r.ok) return;
       const body = await r.json();
-      if (tokenRef.current !== token) return;
+      if (stale()) return;
       if (body?.state) setData(body);
     } catch {
       // Don't clobber an existing render on a transient network blip;

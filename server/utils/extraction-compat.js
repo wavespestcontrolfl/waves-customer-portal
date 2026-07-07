@@ -41,6 +41,9 @@ function flatView(extraction) {
     matched_service: mapServiceCategoryToLegacy(svc.primary_service_category),
     specific_service_name: svc.specific_service_name || null,
     quoted_price: typeof svc.quoted_price_usd === 'number' ? svc.quoted_price_usd : null,
+    quote_requested: svc.quote_requested === true,
+    quote_promised: svc.quote_promised === true,
+    additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -57,6 +60,26 @@ function flatView(extraction) {
 
     _v2: extraction,
   };
+}
+
+// V2 property.additional_properties entries → the legacy flat shape the
+// processor's multi-property persistence expects (same keys as the V1
+// extraction's additional_properties). Entries without a street are dropped —
+// there is nothing to record or dedup against without one.
+function mapAdditionalPropertiesToLegacy(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries
+    .filter((p) => p && typeof p === 'object' && String(p.street_line_1 || '').trim())
+    .map((p) => ({
+      address_line1: p.street_line_1,
+      address_line2: p.street_line_2 || null,
+      city: p.city || null,
+      state: p.state || null,
+      zip: p.postal_code || null,
+      is_rental: p.occupancy === 'rental_investment',
+      property_type: p.property_type || null,
+      notes: p.notes || null,
+    }));
 }
 
 function mapServiceCategoryToLegacy(category) {
@@ -96,4 +119,5 @@ module.exports = {
   flatView,
   mapServiceCategoryToLegacy,
   mapLeadQualityToLegacy,
+  mapAdditionalPropertiesToLegacy,
 };

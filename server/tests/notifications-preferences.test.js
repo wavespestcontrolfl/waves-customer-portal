@@ -112,6 +112,8 @@ describe('notification preference updates', () => {
         appointmentConfirmationChannel: 'email',
         serviceReminder72hChannel: 'both',
         serviceReminder24hChannel: 'sms',
+        enRouteChannel: 'email',
+        techArrivedChannel: 'both',
       },
       {},
     );
@@ -120,16 +122,54 @@ describe('notification preference updates', () => {
       appointment_confirmation_channel: 'email',
       service_reminder_72h_channel: 'both',
       service_reminder_24h_channel: 'sms',
+      en_route_channel: 'email',
+      tech_arrived_channel: 'both',
     });
   });
 
   test('coerces an unrecognized channel value to sms', () => {
     const updates = notificationPrefsDbUpdates(
-      { serviceReminder24hChannel: 'pigeon' },
+      { serviceReminder24hChannel: 'pigeon', enRouteChannel: 'fax', techArrivedChannel: 'carrier' },
       {},
     );
 
-    expect(updates).toEqual({ service_reminder_24h_channel: 'sms' });
+    expect(updates).toEqual({
+      service_reminder_24h_channel: 'sms',
+      en_route_channel: 'sms',
+      tech_arrived_channel: 'sms',
+    });
+  });
+
+  test('exposes the tech-tracking delivery channels with sms defaults', () => {
+    expect(preferencePayload({})).toMatchObject({ enRouteChannel: 'sms', techArrivedChannel: 'sms' });
+    expect(preferencePayload({ en_route_channel: 'email', tech_arrived_channel: 'both' }))
+      .toMatchObject({ enRouteChannel: 'email', techArrivedChannel: 'both' });
+  });
+
+  test('labels a tech-tracking delivery-channel change with its from/to channel names', () => {
+    const items = preferenceChangeItems(
+      { enRouteChannel: 'email', techArrivedChannel: 'both' },
+      { en_route_channel: 'sms', tech_arrived_channel: 'sms' },
+      { enRouteChannel: 'email', techArrivedChannel: 'both' },
+      { scope: 'Account' },
+    );
+
+    expect(items).toEqual([
+      {
+        key: 'enRouteChannel',
+        label: 'Tech En Route Alert — Delivery',
+        oldValue: 'Text',
+        newValue: 'Email',
+        scope: 'Account',
+      },
+      {
+        key: 'techArrivedChannel',
+        label: 'Tech Arrived Alert — Delivery',
+        oldValue: 'Text',
+        newValue: 'Text & Email',
+        scope: 'Account',
+      },
+    ]);
   });
 
   test('labels a delivery-channel change with its from/to channel names', () => {
@@ -185,11 +225,13 @@ describe('account-level channel routing', () => {
     expect(id).toBe('solo-1');
   });
 
-  test('CHANNEL_DB_COLUMNS lists the three appointment channel columns', () => {
+  test('CHANNEL_DB_COLUMNS lists the account-level channel columns', () => {
     expect(CHANNEL_DB_COLUMNS).toEqual([
       'appointment_confirmation_channel',
       'service_reminder_72h_channel',
       'service_reminder_24h_channel',
+      'en_route_channel',
+      'tech_arrived_channel',
     ]);
   });
 });

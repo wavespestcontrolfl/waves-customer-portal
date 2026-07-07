@@ -582,11 +582,15 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
       {(slug || dateLine) ? (
         /* Estimate # + dates at body size (design audit 2026-07-06): the
            expiry is action-relevant — it should not carry the page's lowest
-           emphasis, and the quote number was not shown anywhere. */
-        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-          {slug ? <strong style={{ color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong> : null}
-          {slug && dateLine ? <span aria-hidden="true"> · </span> : null}
-          {dateLine}
+           emphasis, and the quote number was not shown anywhere. Dates sit on
+           their own line under the number, same weight (owner ask 07-07). */
+        <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.5 }}>
+          {slug ? (
+            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong>
+          ) : null}
+          {dateLine ? (
+            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>{dateLine}</strong>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -787,7 +791,9 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
               key={signal}
               style={{
                 border: `1px solid ${ESTIMATE_BORDER}`,
-                borderLeft: `4px solid ${COLORS.blueBright}`,
+                /* glass accent blue — the walker recolors text but never
+                   border-left, so the old #009CDE survived under glass */
+                borderLeft: '4px solid #0A7EC2',
                 borderRadius: 10,
                 background: COLORS.white,
                 padding: '12px 12px',
@@ -871,7 +877,8 @@ function MembershipCard({ membership }) {
       {membership.upgrade ? (
         <div style={{
           background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`,
-          borderLeft: `4px solid ${COLORS.blueBright}`, borderRadius: 10, padding: '12px 16px',
+          /* glass accent blue — walker doesn't repaint border-left */
+          borderLeft: '4px solid #0A7EC2', borderRadius: 10, padding: '12px 16px',
           color: ESTIMATE_TEXT, fontSize: 15, lineHeight: 1.5,
         }}>
           Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}

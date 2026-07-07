@@ -2409,6 +2409,7 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
         <h2>{copy.title}</h2>
       </div>
       <a
+        data-glass-accent=""
         className="review-cta"
         href={location.reviewUrl}
         target="_blank"
@@ -4448,33 +4449,58 @@ function SmsReportPreview({ data }) {
   );
 }
 
-function LoadingState() {
+// Both interstitial states render glass-native while the theme is mounted
+// (the page-level useGlassSurface has already set html[data-glass-theme]
+// before first paint) and keep the warm legacy tokens for the pdf / static
+// print renders, which never mount the scene.
+function LoadingState({ glass = false }) {
+  const skeleton = glass ? 'rgba(4, 57, 94, 0.10)' : '#F7F5EE';
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: ESTIMATE_BG, fontFamily: FONT_BODY, padding: 20 }}>
-      <div style={{ background: '#fff', borderRadius: 16, border: `1px solid ${ESTIMATE_BORDER}`, padding: 24, width: 'min(420px, 100%)', boxSizing: 'border-box' }}>
-        <div style={{ height: 12, width: 120, background: '#F7F5EE', borderRadius: 4 }} />
-        <div style={{ height: 32, width: '70%', background: '#F7F5EE', borderRadius: 4, marginTop: 14 }} />
-        <div style={{ height: 14, width: '50%', background: '#F7F5EE', borderRadius: 4, marginTop: 10 }} />
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, padding: 20 }}>
+      <div
+        data-glass={glass ? 'card' : undefined}
+        style={{
+          background: glass ? undefined : '#fff',
+          border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`,
+          borderRadius: 16,
+          padding: 24,
+          width: 'min(420px, 100%)',
+          boxSizing: 'border-box',
+        }}
+      >
+        <div style={{ height: 12, width: 120, background: skeleton, borderRadius: 4 }} />
+        <div style={{ height: 32, width: '70%', background: skeleton, borderRadius: 4, marginTop: 14 }} />
+        <div style={{ height: 14, width: '50%', background: skeleton, borderRadius: 4, marginTop: 10 }} />
       </div>
     </div>
   );
 }
 
-function NotFoundState() {
+function NotFoundState({ glass = false }) {
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ background: '#fff', borderRadius: 16, border: `1px solid ${ESTIMATE_BORDER}`, padding: 32, maxWidth: 420, textAlign: 'center' }}>
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glass ? 'transparent' : ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
+      <div
+        data-glass={glass ? 'card' : undefined}
+        style={{
+          background: glass ? undefined : '#fff',
+          border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`,
+          borderRadius: 16,
+          padding: 32,
+          maxWidth: 420,
+          textAlign: 'center',
+        }}
+      >
+        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
+        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
+        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
       </div>
     </div>
   );
 }
 
-function LegacyReport({ data, token }) {
+function LegacyReport({ data, token, glass = false }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
@@ -4482,7 +4508,7 @@ function LegacyReport({ data, token }) {
   // two headers (codex P2, PR #2439). Kept for any standalone render.
   const { inShell } = useWavesShell();
   return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, fontFamily: FONT_BODY, color: ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100vh', background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
       {!inShell ? (
       <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
@@ -4511,15 +4537,15 @@ function LegacyReport({ data, token }) {
           </h1>
           {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
         </div>
-        <section style={{ background: '#fff', borderRadius: 16, padding: 24, border: `1px solid ${ESTIMATE_BORDER}` }}>
+        <section data-glass={glass ? 'card' : undefined} style={{ background: glass ? undefined : '#fff', borderRadius: 16, padding: 24, border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}` }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: ESTIMATE_TEXT }}>{data.serviceType}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
           {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
-          <a href={pdfUrl} download style={{ ...actionButtonStyle('primary'), marginTop: 18 }}><Download size={16} /> Download PDF</a>
+          <a href={pdfUrl} download data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}><Download size={16} /> Download PDF</a>
         </section>
-        <div style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: '#fff' }}>
-          <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none' }} title="Service report PDF" />
+        <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
+          <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </main>
       <BrandFooter />
@@ -4594,12 +4620,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
   const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
-
-  // Liquid-glass theme — live view only: PDF / static / sms_preview renders
-  // never mount the scene, so the Playwright print pipeline and cached
-  // artifacts stay byte-identical.
-  const glassActive = mode === 'live';
-  useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
     if (mode !== 'live') return;
@@ -7363,6 +7383,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: rgba(255, 255, 255, 0.42) !important;
           border-color: rgba(255, 255, 255, 0.65) !important;
         }
+        /* photo-strip arrows + photo score badges carry the old marketing
+           navy #1B2C5B inline — remap to the glass navy while the theme is
+           mounted (inert in the legacy / pdf render) */
+        html[data-glass-theme] .service-report-v1 .lawn-photo-arrow {
+          background: rgba(4, 57, 94, 0.85) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-photo-score {
+          background: rgba(4, 57, 94, 0.88) !important;
+        }
         /* chip CTAs sit on translucent glass — their inline white text would wash out */
         html[data-glass-theme] .service-report-v1 [data-glass="chip"],
         html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
@@ -7719,6 +7748,15 @@ export default function ReportViewPage() {
     return ['pdf', 'static', 'sms_preview'].includes(requestedMode) ? requestedMode : 'live';
   }, []);
 
+  // Liquid-glass theme — live view only, mounted at the PAGE level so the
+  // scene is up from the very first paint (loading skeleton included), not
+  // only after /data resolves — mounting it inside ServiceReportV1 made the
+  // legacy warm theme flash for the whole fetch. PDF / static / sms_preview
+  // renders never mount the scene, so the Playwright print pipeline and
+  // cached artifacts stay byte-identical.
+  const glassActive = mode === 'live';
+  useGlassSurface(glassActive, 'full');
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -7754,8 +7792,8 @@ export default function ReportViewPage() {
     applyReportDocumentMetadata(data);
   }, [data]);
 
-  if (loading) return <LoadingState />;
-  if (!data || data.error) return <NotFoundState />;
+  if (loading) return <LoadingState glass={glassActive} />;
+  if (!data || data.error) return <NotFoundState glass={glassActive} />;
   if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
-  return <LegacyReport data={data} token={token} />;
+  return <LegacyReport data={data} token={token} glass={glassActive} />;
 }

@@ -3,7 +3,11 @@ const addFormats = require('ajv-formats');
 const modelOutputSchema = require('./call-extraction.model-output.schema.json');
 const persistedSchema = require('./call-extraction.persisted.schema.json');
 
-const SCHEMA_VERSION = '1.0.0';
+// 1.1.0: additive — property.additional_properties (multi-property calls),
+// service_request.quote_requested / quote_promised, triage flags
+// multi_property_call + quote_promised. All optional: 1.0.0 payloads
+// still validate.
+const SCHEMA_VERSION = '1.1.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

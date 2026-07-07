@@ -272,6 +272,7 @@ function SliderArrow({ dir, onClick, disabled }) {
   return (
     <button
       type="button" aria-label={dir === 'prev' ? 'Previous photo' : 'Next photo'} onClick={onClick} disabled={disabled}
+      className="lawn-photo-arrow"
       style={{
         position: 'absolute', top: '42%', [dir === 'prev' ? 'left' : 'right']: 8, transform: 'translateY(-50%)',
         width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(27,44,91,0.82)', color: '#fff',
@@ -785,7 +786,7 @@ export function LawnVisitTimeline({ timeline = {} }) {
 function ScoreBadge({ score, side }) {
   if (!Number.isFinite(toScore(score))) return null;
   return (
-    <div style={{
+    <div className="lawn-photo-score" style={{
       position: 'absolute', bottom: 10, [side]: 10, zIndex: 3,
       background: 'rgba(27,44,91,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
       fontFamily: FONTS.heading, fontWeight: 800, fontSize: 13, lineHeight: 1,

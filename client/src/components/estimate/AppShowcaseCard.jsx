@@ -176,7 +176,8 @@ export default function AppShowcaseCard({ onBookToday = null }) {
               ))}
             </div>
             {native ? null : (
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
+            /* Badges centered under the copy column (owner ask 07-07). */
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
               {(APP_STORE_URL || !PLAY_STORE_URL) ? (
                 <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
               ) : null}
@@ -184,7 +185,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
                 <StoreBadge url={PLAY_STORE_URL} label="Get Waves on Google Play"><GooglePlayBadge /></StoreBadge>
               ) : null}
               {!anyStoreLive ? (
-                <span style={{ flexBasis: '100%', marginTop: -2, fontSize: 12, fontWeight: 600, color: W.blueDark, letterSpacing: '0.02em' }}>
+                <span style={{ flexBasis: '100%', marginTop: -2, fontSize: 12, fontWeight: 600, color: W.blueDark, letterSpacing: '0.02em', textAlign: 'center' }}>
                   Coming soon to iPhone &amp; Android
                 </span>
               ) : null}
