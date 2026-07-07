@@ -121,11 +121,20 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             <div className="gc-av-glow" aria-hidden="true" />
             <img
               className="gc-av-phone"
-              src="/images/app/app-tracking.webp"
-              width="760"
-              height="1647"
+              src="/images/app/app-dashboard-glass.webp"
+              width="500"
+              height="844"
               loading="lazy"
-              alt="Waves app live technician tracking"
+              alt="Waves app home screen with your plan, balance, and next visit"
+              style={{ height: 'auto' }}
+            />
+            <img
+              className="gc-av-phone gc-av-phone--b"
+              src="/images/app/app-visits-glass.webp"
+              width="500"
+              height="844"
+              loading="lazy"
+              alt="Waves app Visits screen with upcoming appointments and completed service reports"
               style={{ height: 'auto' }}
             />
           </div>

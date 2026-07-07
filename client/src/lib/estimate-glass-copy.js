@@ -40,7 +40,6 @@ export const GLASS_COPY = {
   appHouseholdLine: 'One login for the whole household — everyone in the loop, nobody playing messenger.',
   reviewsTitle: 'See why your neighbors switched to Waves',
   reviewsExcerpt: 'Real Google reviews — unedited, unfiltered, from people whose backyards look like yours.',
-  callButton: 'Call us — talk to a real person',
   textButton: 'Text us — fast answers',
   setupWaivedNote: 'Pay the year up front and we waive it — instantly.',
   lawnOfferTitle: 'Add Lawn Care — save on both services',
@@ -101,7 +100,7 @@ const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No p
 const GLASS_PACKS = {
   pest_control: GLASS_PEST,
   lawn_care: {
-    heroH1: '{first}, your greener-lawn game plan is ready.',
+    heroH1: 'Hello {first}, your greener-lawn game plan is ready!',
     heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by a 90-day money-back guarantee.',
     eyebrow: 'Your custom lawn program',
     aiTitle: 'Your price was built from your lawn — not somebody else’s average',
@@ -114,7 +113,7 @@ const GLASS_PACKS = {
     ],
   },
   mosquito: {
-    heroH1: '{first}, your mosquito-free backyard plan is ready.',
+    heroH1: 'Hello {first}, your mosquito-free backyard plan is ready!',
     heroSub: 'Targeted barrier protection where mosquitoes actually breed and rest — so evenings outside belong to you again, not the bugs.',
     eyebrow: 'Your mosquito protection plan',
     aiTitle: 'Priced from your actual lot — not a guess',
@@ -127,7 +126,7 @@ const GLASS_PACKS = {
     ],
   },
   tree_shrub: {
-    heroH1: '{first}, your landscape protection plan is ready.',
+    heroH1: 'Hello {first}, your landscape protection plan is ready!',
     heroSub: 'Professional care for the palms, trees, and shrubs you’ve invested in — insects, mites, disease, and nutrition handled before problems cost you a plant.',
     eyebrow: 'Your tree & shrub program',
     aiTitle: 'Priced from your actual landscape — bed by bed',
@@ -140,7 +139,7 @@ const GLASS_PACKS = {
     ],
   },
   termite_bait: {
-    heroH1: '{first}, your termite defense plan is ready.',
+    heroH1: 'Hello {first}, your termite defense plan is ready!',
     heroSub: 'Bait stations standing guard around your home’s perimeter, monitored and documented — protection that’s working while you’re not thinking about it.',
     eyebrow: 'Your termite defense plan',
     aiTitle: 'Your price was built from your home’s actual perimeter',
@@ -153,7 +152,7 @@ const GLASS_PACKS = {
     ],
   },
   foam_recurring: {
-    heroH1: '{first}, your recurring foam treatment plan is ready.',
+    heroH1: 'Hello {first}, your recurring foam treatment plan is ready!',
     heroSub: 'Targeted drill-and-foam treatment at the points that matter, on a schedule that keeps the pressure down — documented every visit.',
     eyebrow: 'Your foam treatment plan',
     aiTitle: 'Scoped from your actual treatment points',
@@ -166,7 +165,7 @@ const GLASS_PACKS = {
     ],
   },
   termite_trenching: {
-    heroH1: '{first}, your termite barrier quote is ready.',
+    heroH1: 'Hello {first}, your termite barrier quote is ready!',
     heroSub: 'A full liquid barrier around your home — measured from your actual linear footage, applied by licensed pros, documented when it’s done.',
     eyebrow: 'Your termite barrier quote',
     aiTitle: 'Measured from your home — not a ballpark',
@@ -180,7 +179,7 @@ const GLASS_PACKS = {
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
   pre_slab_termiticide: {
-    heroH1: '{first}, your pre-slab termite treatment quote is ready.',
+    heroH1: 'Hello {first}, your pre-slab termite treatment quote is ready!',
     heroSub: 'Treat the soil right before the slab pours — measured area, professional product, and documentation for your records.',
     eyebrow: 'Your pre-slab treatment quote',
     aiTitle: 'Priced from the measured slab area',
@@ -194,7 +193,7 @@ const GLASS_PACKS = {
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
   bora_care: {
-    heroH1: '{first}, your Bora-Care wood treatment quote is ready.',
+    heroH1: 'Hello {first}, your Bora-Care wood treatment quote is ready!',
     heroSub: 'Borate protection for the wood itself — measured from your actual treatment areas, applied once, defending long after we leave.',
     eyebrow: 'Your wood treatment quote',
     aiTitle: 'Priced from your measured treatment areas',
@@ -212,7 +211,7 @@ const GLASS_PACKS = {
   // remediation, so the hero must not promise removal or exclusion work —
   // the priced line items state what's actually included.
   rodent: {
-    heroH1: '{first}, your rodent defense plan is ready.',
+    heroH1: 'Hello {first}, your rodent defense plan is ready!',
     heroSub: 'Built for YOUR rodent situation — priced from your property’s actual conditions, with every visit documented, not a one-size-fits-all box of traps.',
     eyebrow: 'Your rodent defense plan',
     aiTitle: 'Built from your home’s actual entry risks',
@@ -226,7 +225,7 @@ const GLASS_PACKS = {
     ctaMicro: NEUTRAL_CTA_MICRO,
   },
   bundle: {
-    heroH1: '{first}, your complete home protection plan is ready.',
+    heroH1: 'Hello {first}, your complete home protection plan is ready!',
     heroSub: 'Every service on this plan was priced from your actual property — one plan, one team accountable for all of it.',
     eyebrow: 'Your custom Waves plan',
     aiTitle: 'Your price was built from your property — not somebody else’s average',
