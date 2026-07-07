@@ -77,9 +77,26 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     const service = await PaymentRouter.getServiceForCustomer(customerId);
     const desc = description || `Manual charge — WaveGuard ${customer.waveguard_tier || ''}`.trim();
 
+    // No explicit amount = "collect this month's monthly rate now" (the
+    // Customer 360 button always posts {}). Stamp the month of obligation
+    // so billing-cron's dedupe and the retry sweep's already-collected
+    // guard both see this collection — an unstamped manual charge was
+    // invisible to both (no 'WaveGuard Monthly' marker), so the cron
+    // charged the month AGAIN and any armed retry rung fired on top:
+    // double-collection on both legs.
+    const isMonthlyCollection = amount == null;
+
     let payment;
     try {
-      payment = await service.chargeOneTime(customerId, chargeAmount, desc);
+      if (isMonthlyCollection) {
+        payment = await service.charge(customerId, chargeAmount, desc, {
+          type: 'manual_charge',
+          tier: customer.waveguard_tier || '',
+          billed_month: etDateString().slice(0, 7),
+        });
+      } else {
+        payment = await service.chargeOneTime(customerId, chargeAmount, desc);
+      }
     } catch (err) {
       // Stripe ACCEPTED the charge but the ledger write failed — the
       // customer WAS billed (orphan row recorded by the service). This
