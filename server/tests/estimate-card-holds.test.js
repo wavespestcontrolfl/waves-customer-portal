@@ -455,6 +455,18 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
   });
 
+  it('receipt-texts opt-out on the sms channel: the SMS leg is doomed at the consent gate, so the email carries the fee receipt', async () => {
+    // payment_confirmation_sms=false (or a STOP sms_enabled=false) blocks the
+    // receipt SMS at the messaging policy — NOT the full kill switch, so the
+    // charged fee must still leave a receipt via the email leg (Codex P2 on
+    // 4263af95; estimate-deposits twin).
+    stubDb([null, { payment_receipt_channel: 'sms', payment_confirmation_sms: false, email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceipt.mockResolvedValueOnce({ sent: false, reason: 'receipt_texts_opted_out' });
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+  });
+
   it('honors a payment_receipt opt-out — neither channel, just the office notify', async () => {
     stubDb([null, { payment_receipt: false, payment_receipt_channel: 'both' }, { first_name: 'Sam' }]);
     const r = await settleNoShowFee(pi());

@@ -837,16 +837,24 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
   const receiptOptOut = prefs?.payment_receipt === false;
   const channel = prefs?.payment_receipt_channel || 'sms';
+  // The receipt-texts opt-outs (the portal "Payment confirmation texts"
+  // toggle, and the STOP/sms_enabled master switch) block the SMS leg at the
+  // consent gate — for a Text-channel customer the email is then the only
+  // receipt left for the charged fee, so it falls back like the
+  // estimate-deposits twin. payment_receipt=false stays the full
+  // every-channel kill switch.
+  const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
+  const smsChannel = channel === 'sms' || channel === 'both';
 
   // SMS receipt — sendReceipt stamps receipt_sent_at + routes through the
   // payment_receipt template/policy (kill switch, per-location number, opt-out).
-  if (!receiptOptOut && (channel === 'sms' || channel === 'both')) {
+  if (!receiptOptOut && smsChannel) {
     try {
       await require('./invoice').sendReceipt(invoice.id);
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
   }
   // Emailed PDF receipt.
-  if (!receiptOptOut && (channel === 'email' || channel === 'both') && prefs?.email_enabled !== false) {
+  if (!receiptOptOut && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut)) && prefs?.email_enabled !== false) {
     try {
       const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
       // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
