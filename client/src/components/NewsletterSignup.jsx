@@ -86,7 +86,16 @@ export default function NewsletterSignup({
       else if (data.resent) setState('resent');
       else setState('pending');
     } catch (err) {
-      setError(err.message || 'Something went wrong. Try again in a moment.');
+      // Translate known machine codes; pass through only sentence-shaped
+      // curated messages (e.g. the rate-limit copy). 'subscribe failed',
+      // 'HTTP 502', and proxy HTML must not reach the customer verbatim.
+      const msg = String(err.message || '');
+      const KNOWN = {
+        'valid email required': 'Please enter a valid email address.',
+        'email required': 'Please enter your email address.',
+      };
+      const looksCurated = /^[A-Z]/.test(msg) && /\s/.test(msg) && !/^HTTP /.test(msg) && !msg.includes('<');
+      setError(KNOWN[msg] || (looksCurated ? msg : 'Something went wrong. Try again in a moment.'));
       setState('error');
     }
   };

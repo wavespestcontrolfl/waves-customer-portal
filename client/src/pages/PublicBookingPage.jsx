@@ -904,8 +904,9 @@ export default function PublicBookingPage() {
 
             <div style={{ display: 'grid', gap: 14, marginBottom: 20 }}>
               {!existingCustomerId && <div>
-                <label style={labelStyle}>Phone number</label>
+                <label htmlFor="book-phone" style={labelStyle}>Phone number</label>
                 <input
+                  id="book-phone"
                   type="tel" autoFocus
                   placeholder="(941) 555-1234"
                   value={contact.phone}
@@ -917,8 +918,9 @@ export default function PublicBookingPage() {
               </div>}
               {!existingCustomerId && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div>
-                  <label style={labelStyle}>First name</label>
+                  <label htmlFor="book-first-name" style={labelStyle}>First name</label>
                   <input
+                    id="book-first-name"
                     type="text"
                     value={contact.firstName}
                     onChange={e => setContact(c => ({ ...c, firstName: e.target.value }))}
@@ -926,8 +928,9 @@ export default function PublicBookingPage() {
                   />
                 </div>
                 <div>
-                  <label style={labelStyle}>Last name</label>
+                  <label htmlFor="book-last-name" style={labelStyle}>Last name</label>
                   <input
+                    id="book-last-name"
                     type="text"
                     value={contact.lastName}
                     onChange={e => setContact(c => ({ ...c, lastName: e.target.value }))}
@@ -936,8 +939,9 @@ export default function PublicBookingPage() {
                 </div>
               </div>}
               {!existingCustomerId && <div>
-                <label style={labelStyle}>Email (optional)</label>
+                <label htmlFor="book-email" style={labelStyle}>Email (optional)</label>
                 <input
+                  id="book-email"
                   type="email"
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
@@ -946,8 +950,9 @@ export default function PublicBookingPage() {
                 />
               </div>}
               <div>
-                <label style={labelStyle}>Notes for the tech (optional)</label>
+                <label htmlFor="book-notes" style={labelStyle}>Notes for the tech (optional)</label>
                 <textarea
+                  id="book-notes"
                   rows={3}
                   placeholder="Gate code, pets, access instructions…"
                   value={notes}

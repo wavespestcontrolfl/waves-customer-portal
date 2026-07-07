@@ -126,7 +126,14 @@ function QuoteRequestForm({ token, firstName }) {
       if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
       setStatus('success');
     } catch (err) {
-      setError(err.message || 'Something went wrong. Please try again.');
+      // The server replies with machine codes (contact_required, name_required,
+      // invalid_body) — translate instead of echoing them at the customer.
+      const FRIENDLY = {
+        name_required: 'Please add your name.',
+        contact_required: 'Please add a valid phone number (10 digits) or an email so we can reach you.',
+        invalid_body: 'Something looks off with that info — double-check it and try again.',
+      };
+      setError(FRIENDLY[err.message] || 'Something went wrong sending your request. Please try again, or call us at (941) 297-5749.');
       setStatus('error');
     }
   };
@@ -277,7 +284,7 @@ export default function LawnReportViewPage() {
       </SectionCard>
 
       <GuaranteeStrip />
-      <QuestionsEscapeHatch estimateSlug={token} />
+      <QuestionsEscapeHatch context="lawn-report" />
     </Page>
   );
 }

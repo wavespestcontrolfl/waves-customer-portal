@@ -108,6 +108,7 @@ function StatusPill({ tone = 'neutral', children }) {
     processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
     refunded: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
     partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
+    unpaid: { bg: '#FFF7ED', color: '#9A3412', border: '#FED7AA' },
     neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
   };
   const t = tones[tone] || tones.neutral;
@@ -294,6 +295,10 @@ export default function ReceiptPage() {
   // so the download link must show for both — else a refund hides the PDF button.
   const hasReceiptPdf = paid || invoice.status === 'refunded';
   const processing = invoice.status === 'processing' || payment?.state === 'processing';
+  // An unpaid invoice reaches this page honestly: PayPageV2 hands out the
+  // receipt URL while an ACH debit is still processing, and a later failure
+  // reverts the invoice to unpaid — never present that as a receipt.
+  const unpaid = !paid && !processing && !refundState && invoice.status !== 'refunded';
   const paidAt = invoice.paidAt || payment?.paymentDate;
   const invoiceMethod = String(invoice.paymentMethod || '').toLowerCase();
   const methodDisplay = payment?.cardBrand && payment?.cardLastFour
@@ -306,32 +311,40 @@ export default function ReceiptPage() {
   const serviceLabel = invoice.title || service.type || 'Service';
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
-  const statusTone = refundState === 'fully_refunded'
-    ? 'refunded'
-    : refundState === 'partially_refunded'
-      ? 'partial'
-      : processing
-        ? 'processing'
-        : paid
-          ? 'paid'
-          : 'neutral';
-  const statusLabel = refundState === 'fully_refunded'
-    ? 'Refunded'
-    : refundState === 'partially_refunded'
-      ? 'Partial refund'
-      : processing
-        ? 'Processing'
-        : paid
-          ? 'Paid'
-          : 'Receipt';
-  const heading = processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt';
-  const statusDetail = processing
-    ? 'Bank payments usually take 3-5 business days to clear. We will send the final receipt after the payment settles.'
+  const statusTone = unpaid
+    ? 'unpaid'
     : refundState === 'fully_refunded'
-      ? 'This payment has been fully refunded.'
+      ? 'refunded'
       : refundState === 'partially_refunded'
-        ? `${fmtCurrency(payment.refundAmount)} has been refunded. Net paid: ${fmtCurrency(payment.remainingPaid)}.`
-        : 'Keep this receipt for your records.';
+        ? 'partial'
+        : processing
+          ? 'processing'
+          : paid
+            ? 'paid'
+            : 'neutral';
+  const statusLabel = unpaid
+    ? 'Not paid'
+    : refundState === 'fully_refunded'
+      ? 'Refunded'
+      : refundState === 'partially_refunded'
+        ? 'Partial refund'
+        : processing
+          ? 'Processing'
+          : paid
+            ? 'Paid'
+            : 'Receipt';
+  const heading = unpaid
+    ? 'This invoice has not been paid'
+    : processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt';
+  const statusDetail = unpaid
+    ? 'If you tried to pay, the payment did not complete and nothing was charged. You can pay this invoice below.'
+    : processing
+      ? 'Bank payments usually take 3-5 business days to clear. We will send the final receipt after the payment settles.'
+      : refundState === 'fully_refunded'
+        ? 'This payment has been fully refunded.'
+        : refundState === 'partially_refunded'
+          ? `${fmtCurrency(payment.refundAmount)} has been refunded. Net paid: ${fmtCurrency(payment.remainingPaid)}.`
+          : 'Keep this receipt for your records.';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -484,15 +497,15 @@ export default function ReceiptPage() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                background: statusTone === 'refunded' ? 'rgba(200,16,46,0.08)' : (statusTone === 'processing' || statusTone === 'partial') ? '#EEF6FF' : '#F0FDF4',
-                color: statusTone === 'refunded' ? 'var(--danger)' : (statusTone === 'processing' || statusTone === 'partial') ? '#065A8C' : 'var(--success)',
-                border: `1px solid ${statusTone === 'refunded' ? 'rgba(200,16,46,0.22)' : (statusTone === 'processing' || statusTone === 'partial') ? '#BFE4F8' : '#BBF7D0'}`,
+                background: statusTone === 'unpaid' ? '#FFF7ED' : statusTone === 'refunded' ? 'rgba(200,16,46,0.08)' : (statusTone === 'processing' || statusTone === 'partial') ? '#EEF6FF' : '#F0FDF4',
+                color: statusTone === 'unpaid' ? '#9A3412' : statusTone === 'refunded' ? 'var(--danger)' : (statusTone === 'processing' || statusTone === 'partial') ? '#065A8C' : 'var(--success)',
+                border: `1px solid ${statusTone === 'unpaid' ? '#FED7AA' : statusTone === 'refunded' ? 'rgba(200,16,46,0.22)' : (statusTone === 'processing' || statusTone === 'partial') ? '#BFE4F8' : '#BBF7D0'}`,
               }}>
-                <Icon name={statusTone === 'processing' ? 'clock' : (statusTone === 'refunded' || statusTone === 'partial') ? 'refresh' : 'check'} size={22} strokeWidth={2.4} />
+                <Icon name={(statusTone === 'processing' || statusTone === 'unpaid') ? 'clock' : (statusTone === 'refunded' || statusTone === 'partial') ? 'refresh' : 'check'} size={22} strokeWidth={2.4} />
               </span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ ...eyebrow, marginBottom: 8 }}>
-                  {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
+                  {processing ? 'Payment pending' : unpaid ? 'Unpaid' : 'Receipt'} · Invoice {invoice.invoiceNumber}
                 </div>
                 <SerifHeading style={{ marginBottom: 8 }}>{heading}</SerifHeading>
                 <p style={{ margin: 0, fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
@@ -514,7 +527,7 @@ export default function ReceiptPage() {
             alignItems: 'center',
           }}>
             <div>
-              <div style={eyebrow}>{processing ? 'Submitted amount' : 'Receipt total'}</div>
+              <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
               <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
                 {fmtCurrency(chargedTotal)}
               </div>
@@ -570,14 +583,16 @@ export default function ReceiptPage() {
               </DetailBlock>
             )}
 
-            <DetailBlock label="Payment details">
+            <DetailBlock label={unpaid ? 'Invoice details' : 'Payment details'}>
               {paidAt && (
                 <div>
                   <span style={{ color: 'var(--text-muted)' }}>{processing ? 'Submitted: ' : 'Paid: '}</span>
                   {fmtDate(paidAt)}
                 </div>
               )}
-              {methodDisplay && (
+              {/* No completed payment on an unpaid invoice — a "Method" row
+                  from the card-on-file columns would imply one. */}
+              {methodDisplay && !unpaid && (
                 <div>
                   <span style={{ color: 'var(--text-muted)' }}>Method: </span>
                   {methodDisplay}
@@ -590,7 +605,7 @@ export default function ReceiptPage() {
                 </div>
               )}
               <div>
-                <span style={{ color: 'var(--text-muted)' }}>Receipt #: </span>
+                <span style={{ color: 'var(--text-muted)' }}>{unpaid ? 'Invoice #: ' : 'Receipt #: '}</span>
                 <span style={{ fontFamily: FONTS.mono, fontSize: 14 }}>{invoice.invoiceNumber}</span>
               </div>
             </DetailBlock>
@@ -598,7 +613,7 @@ export default function ReceiptPage() {
 
           {visibleLineItems.length > 0 && (
             <div style={{ marginBottom: 20 }}>
-              <div style={{ ...eyebrow, marginBottom: 8 }}>Receipt items</div>
+              <div style={{ ...eyebrow, marginBottom: 8 }}>{unpaid ? 'Invoice items' : 'Receipt items'}</div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
                 <div data-glass-clear="" style={{
                   display: 'grid',
@@ -661,7 +676,7 @@ export default function ReceiptPage() {
             {invoice.creditApplied > 0 && (
               <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
             )}
-            <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
+            <SummaryRow label={unpaid ? 'Amount due' : processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
 
             {refundState && payment?.refundAmount > 0 && (
               <>
@@ -685,6 +700,28 @@ export default function ReceiptPage() {
           )}
 
           <div className="waves-no-print" style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
+            {unpaid && (
+              <a
+                href={`/pay/${token}`}
+                data-glass-accent=""
+                style={{
+                  minHeight: 40,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '0 14px',
+                  borderRadius: 8,
+                  border: '1px solid var(--border-strong)',
+                  color: '#FFFFFF',
+                  textDecoration: 'none',
+                  fontSize: 14,
+                  fontWeight: 800,
+                  background: 'var(--brand)',
+                }}
+              >
+                Pay this invoice
+              </a>
+            )}
             {hasReceiptPdf ? (
               <a
                 href={`${API_BASE}/receipt/${token}/pdf`}
@@ -739,7 +776,7 @@ export default function ReceiptPage() {
         </BrandCard>
 
         <div className="waves-no-print waves-customer-help">
-          Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
+          Questions about this {unpaid ? 'invoice' : 'receipt'}? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
       </div>
     </WavesShell>

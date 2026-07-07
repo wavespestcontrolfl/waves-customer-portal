@@ -1773,7 +1773,11 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
 // approved clip exists, so this self-gates everywhere else (pdf/static/
 // sms_preview and visits without a recap).
 function RecapVideoCard({ recap, token }) {
-  if (!recap?.ready || !token) return null;
+  // ready:true only proves the DB row; the video endpoint can still 404
+  // (pruned/unreadable clip) — hide the section instead of showing a dead
+  // black "Unable to play media" player.
+  const [videoFailed, setVideoFailed] = useState(false);
+  if (!recap?.ready || !token || videoFailed) return null;
   return (
     <section data-glass="card" className="sr-section recap-video-section" id="visit-recap">
       <div className="section-eyebrow">Your visit, in motion</div>
@@ -1784,6 +1788,7 @@ function RecapVideoCard({ recap, token }) {
         controls
         preload="metadata"
         playsInline
+        onError={() => setVideoFailed(true)}
         style={{ width: '100%', maxWidth: 420, borderRadius: 14, background: '#000', display: 'block', margin: '12px auto 0' }}
       />
     </section>
@@ -1941,7 +1946,8 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'question_failed');
       setAnswer(data.answer || 'I could not answer that from this report.');
-      trackReportEvent(token, 'report_question_asked');
+      // The /ask route already records report_question_asked server-side;
+      // posting it here too double-counted the first question per session.
     } catch {
       setAnswer('I could not answer that right now. Reply to the text message or call Waves for help.');
     } finally {

@@ -121,7 +121,7 @@ export default function WavesAIScheduleSearch({
               onClick={() => { setQuery(chip); run(chip); }}
               style={{
                 border: 0, background: t.accent, color: t.accentText,
-                borderRadius: 999, padding: '8px 14px', fontSize: 13, fontWeight: 700,
+                borderRadius: 999, padding: '8px 14px', fontSize: 14, fontWeight: 700,
                 cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.8 : 1,
               }}
             >

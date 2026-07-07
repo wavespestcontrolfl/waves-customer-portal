@@ -3038,7 +3038,17 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     );
                   })()}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
-                    <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
+                    <div
+                      role="switch"
+                      aria-checked={isOn}
+                      aria-label={p.label}
+                      aria-disabled={p.locked || undefined}
+                      tabIndex={p.locked ? -1 : 0}
+                      onClick={p.locked ? undefined : () => handleToggle(p.key)}
+                      onKeyDown={p.locked ? undefined : (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleToggle(p.key); }
+                      }}
+                      style={{
                       width: 44, height: 24, borderRadius: 12,
                       cursor: p.locked ? 'default' : 'pointer',
                       // Gold = on, light blue = off (owner directive 2026-07-06)
@@ -7063,19 +7073,8 @@ function MyPlanTab({ customer }) {
       }
     });
   }
-  // If no activity log, construct from tier
-  if (planTimeline.length === 1 && tierIdx > 0) {
-    const startDate = parseDate(customer.memberSince);
-    const upgradeDate = new Date(startDate);
-    upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
-    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: 'upgrade' });
-  }
-  if (activeTierName && numServices >= 3 && planTimeline.length <= 2) {
-    const startDate = parseDate(customer.memberSince);
-    const addDate = new Date(startDate);
-    addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
-    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: 'bug' });
-  }
+  // Only real events: the plan start plus whatever activity_log provides.
+  // Never synthesize upgrades/service-adds the account may not have had.
   planTimeline.sort((a, b) => a.date - b.date);
 
   // Current month for calendar

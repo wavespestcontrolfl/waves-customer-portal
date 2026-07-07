@@ -78,6 +78,10 @@ export default function RecapViewPage() {
             autoPlay
             muted
             playsInline
+            // ready:true only proves the DB row — a pruned/unreadable clip
+            // 404s here; fall through to the "isn't ready" state instead of
+            // a dead black "Unable to play media" player.
+            onError={() => setStatus('error')}
             style={{ width: '100%', maxWidth: 360, maxHeight: '74vh', borderRadius: 18, background: '#000', boxShadow: '0 20px 60px rgba(0,0,0,.45)' }}
           />
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>

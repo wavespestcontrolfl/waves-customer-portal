@@ -31,6 +31,12 @@ function normalizeAuthError(error) {
   if (error === 'Failed to fetch' || error === 'Network request failed') {
     return "We cannot reach the server right now. Check your connection and try again.";
   }
+  // Curated server messages read like sentences (capitalized, multi-word).
+  // Anything else — 'HTTP 502', a machine code, or a proxy's raw HTML error
+  // page — must not render verbatim.
+  if (!/^[A-Z]/.test(error) || !/\s/.test(error) || /^HTTP /.test(error) || error.includes('<')) {
+    return "Something went wrong on our end. Try again in a moment, or call Waves at (941) 297-5749.";
+  }
   return error;
 }
 

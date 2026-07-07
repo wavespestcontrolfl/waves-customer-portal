@@ -26,6 +26,7 @@ const SCAN_DIRS = [
   path.join(ROOT, 'client/src/components/billing'),
   path.join(ROOT, 'client/src/components/customer'),
   path.join(ROOT, 'client/src/components/brand'),
+  path.join(ROOT, 'client/src/components/booking'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
