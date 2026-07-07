@@ -695,21 +695,31 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       if (!(visitSlice > 0)) continue;
       const marker = `term ${term.id}, visit ${row.id}`;
       try {
-        const dup = await conn('customer_credit_ledger')
-          .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
-          .where('note', 'like', `%${marker}%`)
-          .first('id');
-        if (dup) continue;
-        const { postCreditMovement } = require('./customer-credit');
-        await postCreditMovement({
-          customerId: term.customer_id,
-          delta: visitSlice,
-          source: 'adjustment',
-          invoiceId: invoice.id,
-          note: `Annual prepay paid after this visit already billed — the visit's prepay share returned as account credit (${marker})`,
-          createdBy: PENDING_COMPLETION_CREDIT_BY,
-        }, conn === db ? null : conn);
-        summary.credited += 1;
+        // Atomic once-only credit: take the SAME customer row lock
+        // postCreditMovement writes under BEFORE the marker lookup, so two
+        // concurrent payment syncs serialize here — the second waits on the
+        // lock, then sees the first's ledger row and skips. A dedupe check
+        // outside the lock could pass on both and double-credit.
+        const creditOnce = async (t) => {
+          await t('customers').where({ id: term.customer_id }).forUpdate().first('id');
+          const dup = await t('customer_credit_ledger')
+            .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+            .where('note', 'like', `%${marker}%`)
+            .first('id');
+          if (dup) return false;
+          const { postCreditMovement } = require('./customer-credit');
+          await postCreditMovement({
+            customerId: term.customer_id,
+            delta: visitSlice,
+            source: 'adjustment',
+            invoiceId: invoice.id,
+            note: `Annual prepay paid after this visit already billed — the visit's prepay share returned as account credit (${marker})`,
+            createdBy: PENDING_COMPLETION_CREDIT_BY,
+          }, t);
+          return true;
+        };
+        const credited = conn === db ? await db.transaction(creditOnce) : await creditOnce(conn);
+        if (credited) summary.credited += 1;
       } catch (err) {
         logger.warn(`[annual-prepay] pending-completion credit skipped for visit ${row.id}: ${err.message}`);
       }

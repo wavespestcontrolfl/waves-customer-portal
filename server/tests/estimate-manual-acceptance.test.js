@@ -1269,6 +1269,30 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     expect(r.reason).toBe('one_time_items');
   });
 
+  test('a residual one-time charge masked by a nonbillable raw row still blocks (normalized breakdown)', async () => {
+    // acceptanceServiceLists returns the raw rows whenever ANY exist, so the
+    // synthetic positive one_time_adjustment (oneTime.total − rows) only
+    // surfaces through normalizeOneTimeBreakdown — the gate must check both.
+    const pest = { service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' };
+    const r = await prepayBookingEligibility({
+      status: 'sent',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '150.00',
+      estimate_data: {
+        recurring: { services: [pest] },
+        result: {
+          recurring: { services: [pest] },
+          // Raw list = one nonbillable discount row; explicit total leaves a
+          // +170 residual that only the normalized breakdown synthesizes.
+          oneTime: { total: 150, items: [{ service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -20 }] },
+        },
+      },
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('one_time_items');
+  });
+
   test('a positive onetime_total with NO parseable one-time rows fails closed (legacy/malformed shape)', async () => {
     // The rows are what prove a one-time total non-billable; absent rows +
     // positive total could be sold work the accept would silently drop.

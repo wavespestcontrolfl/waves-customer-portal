@@ -183,10 +183,21 @@ async function prepayBookingEligibility(estimate = {}) {
   // positive onetime_total whose rows can't be parsed at all is likewise not
   // proven non-billable — legacy/malformed shapes fail closed too (money).
   try {
-    const { acceptanceServiceLists, isNonBillableOneTimeRow } = require('../routes/estimate-public');
+    const {
+      acceptanceServiceLists,
+      isNonBillableOneTimeRow,
+      normalizeOneTimeBreakdown,
+    } = require('../routes/estimate-public');
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
     if (oneTimeRows.some((row) => !isNonBillableOneTimeRow(row))) return ineligible('one_time_items');
-    if (!oneTimeRows.length && asMoneyOrNull(estimate.onetime_total)) return ineligible('one_time_items');
+    // The raw-rows list masks the residual: when ANY raw one-time row exists,
+    // acceptanceServiceLists never consults normalizeOneTimeBreakdown, which
+    // is what synthesizes the positive one_time_adjustment for
+    // oneTime.total − rows. A nonbillable raw row plus a positive residual
+    // would pass the check above — re-check the normalized breakdown too.
+    const normalizedRows = normalizeOneTimeBreakdown(data)?.items || [];
+    if (normalizedRows.some((row) => !isNonBillableOneTimeRow(row))) return ineligible('one_time_items');
+    if (!oneTimeRows.length && !normalizedRows.length && asMoneyOrNull(estimate.onetime_total)) return ineligible('one_time_items');
   } catch {
     return ineligible('one_time_items');
   }

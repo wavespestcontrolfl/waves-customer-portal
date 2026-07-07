@@ -40,6 +40,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'whereNotIn',
     'orderBy',
     'select',
+    'forUpdate',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -877,6 +878,9 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
   beforeEach(() => {
     InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockReset();
     postCreditMovement.mockReset();
+    // The credit path opens its own transaction when running on the global
+    // pool (conn === db) so the dedupe check shares the ledger write's lock.
+    db.transaction = jest.fn(async (cb) => cb(db));
   });
 
   test('settles a still-open completion invoice as coverage (the paid annual IS that visit\'s payment)', async () => {
@@ -897,6 +901,7 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     setDbQueues({
       scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
       invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: undefined })],
     });
 
@@ -904,19 +909,23 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
 
     expect(result).toEqual({ settled: 0, credited: 1 });
     expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+    // The dedupe check + ledger write run inside ONE transaction under the
+    // customer row lock (race-safe idempotency).
+    expect(db.transaction).toHaveBeenCalled();
     expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
       delta: 100, // 400 / 4 covered visits — the completed visit's slice
       source: 'adjustment',
       invoiceId: 'inv-visit',
       createdBy: 'system:annual_prepay_pending_completion',
-    }), null);
+    }), db);
   });
 
   test('an existing ledger entry for the term+visit blocks a second credit (idempotent on retried webhooks)', async () => {
     setDbQueues({
       scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
       invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      customers: [query({ first: { id: 'customer-1' } })],
       customer_credit_ledger: [query({ first: { id: 'ledger-1' } })],
     });
 
