@@ -2230,6 +2230,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // warning, rather than failing the request. Skipped if the attach above lost
     // a race — accepting would convert the quote against the wrong customer.
     if (acceptEstimateOnBook && !estimateAttachRaceLost) {
+      // Link the just-created rows to the estimate once it's a recorded win —
+      // shared by the prepay path and the overlap-race standard fallback.
+      const linkCreatedRowsToEstimate = async () => {
+        if (!(cols.source_estimate_id && createdAppointments.length)) return;
+        try {
+          await db('scheduled_services')
+            .whereIn('id', createdAppointments.map((a) => a.id))
+            .update({ source_estimate_id: linkedEstimateId });
+        } catch (e) {
+          logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
+        }
+      };
       try {
         const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
         const acceptResult = await markEstimateManuallyAccepted({
@@ -2267,25 +2279,44 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // double-texted.
         if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
         // Link the just-created rows now that the estimate is a recorded win.
-        if (cols.source_estimate_id && createdAppointments.length) {
-          try {
-            await db('scheduled_services')
-              .whereIn('id', createdAppointments.map((a) => a.id))
-              .update({ source_estimate_id: linkedEstimateId });
-          } catch (e) {
-            logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
-          }
-        }
+        await linkCreatedRowsToEstimate();
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
-        if (bookingBillingTermEffective === 'prepay_annual') {
-          // The accept + prepay invoice/term are one transaction, so a failure
-          // (e.g. an overlap raced in between the preflight and the lock) leaves
-          // the estimate un-accepted and NO invoice/term behind — the booking
-          // stands, nothing is half-applied.
-          bookingWarnings.push(`Appointment booked, but the annual-prepay acceptance failed (${err.message}). The estimate was NOT marked accepted and no prepay invoice/term was created — use the estimate’s Annual Prepay action or Mark Won.`);
-        } else {
-          bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+        // An overlap that RACED in between the preflight check and the atomic
+        // lock must not strand the phone-accepted quote unaccepted/unlinked
+        // (the appointment rows are already committed) — mirror the preflight
+        // overlap branch: record the win as a STANDARD accept (no invoice/
+        // term) and link, then warn. The prepay attempt rolled back whole, so
+        // the estimate is still open for this retry.
+        let downgradedAfterOverlapRace = false;
+        if (bookingBillingTermEffective === 'prepay_annual' && err.annualPrepayOverlap) {
+          try {
+            const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+            const retryResult = await markEstimateManuallyAccepted({
+              estimateId: linkedEstimateId,
+              adminUserId: req.technicianId || null,
+              source: 'verbal_yes_booking',
+              billingTerm: 'standard',
+            });
+            estimateAutoAccepted = true;
+            downgradedAfterOverlapRace = true;
+            if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
+            await linkCreatedRowsToEstimate();
+            bookingWarnings.push('Appointment booked and the estimate was marked accepted as standard — an annual prepay term covering this date already exists (it landed during booking), so no new prepay invoice/term was created. Manage prepay from Customer 360.');
+          } catch (retryErr) {
+            logger.warn(`[schedule] standard-accept fallback after prepay overlap failed for estimate ${linkedEstimateId}: ${retryErr.message}`);
+          }
+        }
+        if (!downgradedAfterOverlapRace) {
+          if (bookingBillingTermEffective === 'prepay_annual') {
+            // The accept + prepay invoice/term are one transaction, so a failure
+            // (e.g. an overlap raced in between the preflight and the lock) leaves
+            // the estimate un-accepted and NO invoice/term behind — the booking
+            // stands, nothing is half-applied.
+            bookingWarnings.push(`Appointment booked, but the annual-prepay acceptance failed (${err.message}). The estimate was NOT marked accepted and no prepay invoice/term was created — use the estimate’s Annual Prepay action or Mark Won.`);
+          } else {
+            bookingWarnings.push(`Appointment booked, but the estimate could not be marked accepted automatically (${err.message}). Mark it accepted from the Estimates page to record the win.`);
+          }
         }
       }
     }
