@@ -284,7 +284,12 @@ function glassFinePrint(T, extra = '') {
           <div style="margin:12px 0 0 0;text-align:center;"><img src="${GLASS_LOGO_IMG}" alt="${WAVES_BUSINESS_NAME}" width="44" height="44" style="width:44px;height:44px;border:0;" /></div>`;
 }
 
-function glassPage(T, { preheader, title, contentHtml }) {
+// Trailing filler after the preheader text: without it, clients that build
+// the inbox preview from the first visible characters (Gmail, Apple Mail)
+// run past a short preheader into the pill header's phone number.
+const PREHEADER_PAD = '&nbsp;&zwnj;'.repeat(80);
+
+function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   // The <style> block is a safety net for operator/DB-authored body HTML
   // that carries bare headings: without it they'd inherit the body grey.
   // Inline styles always beat these rules, so themed markup is unaffected;
@@ -302,10 +307,12 @@ function glassPage(T, { preheader, title, contentHtml }) {
 </style>
 </head>
 <body style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
-  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}</div>` : ''}
+  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}${PREHEADER_PAD}</div>` : ''}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
     <tr><td align="center" style="padding:26px 18px 44px 18px;">
+      <!--[if mso]><table role="presentation" width="${msoWidth}" align="center" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
       ${contentHtml}
+      <!--[if mso]></td></tr></table><![endif]-->
     </td></tr>
   </table>
 </body>
@@ -348,7 +355,10 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         </td></tr>
       </table>`;
 
-  return glassPage(T, { preheader, contentHtml });
+  // msoWidth mirrors each variant's max-width: Outlook's Word engine ignores
+  // max-width entirely, so without the glassPage ghost table the email
+  // stretches to the full window width.
+  return glassPage(T, { preheader, contentHtml, msoWidth: 560 });
 }
 
 function glassServiceEmail({ preheader, body, footerNote } = {}) {
@@ -368,7 +378,7 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
           ${glassFinePrint(T, appFooterHtml(T))}
         </td></tr>
       </table>`;
-  return glassPage(T, { preheader, contentHtml });
+  return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
 }
 
 function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType, preferredSourcesCta } = {}) {
@@ -413,6 +423,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, newslett
     preheader,
     title: isLocalGuide ? 'Fresh This Week — Waves' : 'Waves Pest Control',
     contentHtml,
+    msoWidth: 640,
   });
 }
 

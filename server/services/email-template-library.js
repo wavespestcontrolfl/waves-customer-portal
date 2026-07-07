@@ -11,6 +11,8 @@ const {
   stripeFooterLine,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
+const logger = require('./logger');
+const NotificationService = require('./notification-service');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -464,6 +466,38 @@ async function activeSuppressionFor(template, email, suppressionGroupKey) {
   )) || null;
 }
 
+// A suppressed recipient blocks the send BEFORE SendGrid (correct — never
+// bypass bounce management), but until now the blocked email_messages row was
+// the only trace: an invoice, payment-failure, or appointment email for a
+// bounce-suppressed customer silently went nowhere. Surface every blocked
+// operational send to the admin notification feed, deduped per address so a
+// dunning series doesn't stack alerts. Marketing-stream blocks stay silent —
+// an unsubscribe doing its job is not an incident.
+// Best-effort: an alert failure must never fail (or retry-loop) the send path.
+async function alertBlockedOperationalSend({ template, suppressionGroupKey, to, suppression }) {
+  try {
+    if (isMarketingSend(template, suppressionGroupKey)) return;
+    const email = String(to || '').trim().toLowerCase();
+    if (!email) return;
+    const dedupeKey = `email-send-blocked:${email}`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '168 hours'"))
+      .first('id');
+    if (existing) return;
+    const suppressionType = String(suppression?.suppression_type || 'unknown');
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Email blocked by suppression',
+      `${template.template_key} to ${email} was not sent — address is suppressed (${suppressionType}). The customer is not receiving operational email; collect a working address.`,
+      { link: '/admin/communications', metadata: { dedupeKey, template_key: template.template_key, suppression_type: suppressionType } },
+    );
+  } catch (err) {
+    logger.warn(`[email-template-library] blocked-send alert failed: ${err.message}`);
+  }
+}
+
 async function loadTemplateByKey(templateKey) {
   const template = await db('email_templates').where({ template_key: templateKey }).first();
   if (!template) return null;
@@ -484,9 +518,20 @@ async function loadVersion(versionId) {
   return version;
 }
 
-function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
+// A NULL/blank first_name (phone-captured leads, business accounts) would
+// render the greeting as "Hi ," — first_name is not a validated-required
+// variable, and ~20 send sites pass it through bare. Defaulting here covers
+// every template at once. Applied AFTER requiredPayloadMissing so templates
+// that DO declare first_name as required still fail closed on a missing value.
+function payloadWithNameFallback(payload = {}) {
+  if (String(payload.first_name ?? '').trim()) return payload;
+  return { ...payload, first_name: 'there' };
+}
+
+function renderTemplate({ template, version, payload: rawPayload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
   if (!template || !version) throw new Error('template and version required');
-  const missingPayload = requiredPayloadMissing(template, payload);
+  const missingPayload = requiredPayloadMissing(template, rawPayload);
+  const payload = payloadWithNameFallback(rawPayload);
   const subject = renderInline(version.subject || template.name, payload, { html: false }).trim();
   const previewText = renderInline(version.preview_text || '', payload, { html: false }).trim();
   let { bodyHtml, bodyText } = renderBlocks(version.blocks, payload);
@@ -946,6 +991,12 @@ async function sendTemplate({
           return await resolveIdempotencyCollision(err, idempotencyKey);
         }
       }
+      await alertBlockedOperationalSend({
+        template,
+        suppressionGroupKey: effectiveSuppressionGroupKey,
+        to,
+        suppression,
+      });
       return { sent: false, blocked: true, reason, message: blocked, rendered };
     }
   }
