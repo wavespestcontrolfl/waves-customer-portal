@@ -55,4 +55,21 @@ describe('receipt delivery queue retry policy', () => {
       emailResult: { ok: false, error: 'No receipt recipient email' },
     })).toBe(false);
   });
+
+  test('does not retry an email-only receipt preference — the email leg IS the receipt', () => {
+    // payment_receipt_channel='email' makes InvoiceService.sendReceipt skip
+    // the SMS leg with 'channel_email_only'. With the email delivered the job
+    // must complete (and stamp receipt_sent_at), not spin the retry ladder.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'channel_email_only' },
+      emailResult: { ok: true },
+    })).toBe(false);
+
+    // But an email-preferring customer whose email leg FAILED is actionable —
+    // nothing was delivered.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'channel_email_only' },
+      emailResult: { ok: false, error: 'SendGrid unavailable' },
+    })).toBe(true);
+  });
 });

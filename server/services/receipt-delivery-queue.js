@@ -97,7 +97,9 @@ function actionableSmsFailure(result) {
   // 'payer_billed' is an intentional suppression (third-party Bill-To invoices
   // never text the homeowner a receipt), not a delivery failure — treat it like
   // the other expected skips so the queue doesn't retry/fail the job forever.
-  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed'].includes(result.reason);
+  // 'channel_email_only' is the customer's payment_receipt_channel='email'
+  // preference: the email leg below carries the receipt.
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only'].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {
@@ -184,8 +186,10 @@ async function processReceiptDeliveryJob(job) {
     // (InvoiceService.sendReceipt returns `payer_billed` before it stamps
     // receipt_sent_at), so stamp it here when the payer AP email delivered.
     // Otherwise the invoice stays in the `needs_receipt` filter forever and a
-    // batch/manual resend texts/emails the AP a duplicate receipt.
-    if (smsResult?.reason === 'payer_billed' && emailResult?.ok && !invoice.receipt_sent_at) {
+    // batch/manual resend texts/emails the AP a duplicate receipt. Same for a
+    // customer whose payment_receipt_channel is email-only — the delivered
+    // email receipt IS the receipt.
+    if (['payer_billed', 'channel_email_only'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
       await db('invoices')
         .where({ id: invoice.id })
         .whereNull('receipt_sent_at')

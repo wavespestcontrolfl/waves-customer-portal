@@ -63,8 +63,10 @@ const CHANNEL_VALUES = ['sms', 'email', 'both'];
 // Appointment delivery channels are an account-level "how to reach me"
 // preference, stored on the account's primary profile so they are consistent
 // across every property. The billing channels are NOT listed here — billing
-// sends target the charged customer row, so billing_reminder_channel /
-// payment_confirmation_channel live per-row next to the billing_reminder /
+// sends target the charged customer row, so billing_channel /
+// payment_receipt_channel (migration-104 columns, also read by the
+// estimate-deposits / estimate-card-holds receipt senders and the messaging
+// consent gate) stay per-row next to the billing_reminder /
 // payment_confirmation_sms toggles and billing_email they modify.
 const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
 
@@ -88,8 +90,8 @@ const PREF_SELECT = [
   'appointment_confirmation_channel',
   'service_reminder_72h_channel',
   'service_reminder_24h_channel',
-  'billing_reminder_channel',
-  'payment_confirmation_channel',
+  'billing_channel',
+  'payment_receipt_channel',
 ];
 
 function channelValue(value) {
@@ -124,8 +126,11 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
       serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
       serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
-      billingReminderChannel: channelValue(prefs.billing_reminder_channel),
-      paymentConfirmationChannel: channelValue(prefs.payment_confirmation_channel),
+      // Billing delivery channels reuse the migration-104 columns so the
+      // portal, the consent gate, and the channel-aware receipt senders
+      // (estimate-deposits / estimate-card-holds) all read ONE preference.
+      billingReminderChannel: channelValue(prefs.billing_channel),
+      paymentConfirmationChannel: channelValue(prefs.payment_receipt_channel),
     } : {}),
   };
 }
@@ -168,8 +173,8 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
   if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
-  if (updates.billingReminderChannel !== undefined) dbUpdates.billing_reminder_channel = channelValue(updates.billingReminderChannel);
-  if (updates.paymentConfirmationChannel !== undefined) dbUpdates.payment_confirmation_channel = channelValue(updates.paymentConfirmationChannel);
+  if (updates.billingReminderChannel !== undefined) dbUpdates.billing_channel = channelValue(updates.billingReminderChannel);
+  if (updates.paymentConfirmationChannel !== undefined) dbUpdates.payment_receipt_channel = channelValue(updates.paymentConfirmationChannel);
   return dbUpdates;
 }
 
@@ -229,8 +234,8 @@ const DB_FIELD_BY_PREF = {
   appointmentConfirmationChannel: 'appointment_confirmation_channel',
   serviceReminder72hChannel: 'service_reminder_72h_channel',
   serviceReminder24hChannel: 'service_reminder_24h_channel',
-  billingReminderChannel: 'billing_reminder_channel',
-  paymentConfirmationChannel: 'payment_confirmation_channel',
+  billingReminderChannel: 'billing_channel',
+  paymentConfirmationChannel: 'payment_receipt_channel',
 };
 
 function prefDisplayValue(key, value) {

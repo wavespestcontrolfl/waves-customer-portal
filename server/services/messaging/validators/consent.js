@@ -86,14 +86,15 @@ async function checkConsentForPurpose(input, policy, contactState) {
     };
   }
 
-  // Per-purpose pref column (e.g. billing_reminder, service_reminder_24h).
-  if (policy.prefsColumn) {
-    const allowed = prefs[policy.prefsColumn];
-    if (allowed === false) {
+  // Per-purpose pref column(s) (e.g. billing_reminder, service_reminder_24h).
+  // A policy may name several (payment_receipt honors both the legacy
+  // receipt kill switch and the portal texts toggle) — ALL must be non-false.
+  for (const prefsColumn of [].concat(policy.prefsColumn || [])) {
+    if (prefs[prefsColumn] === false) {
       return {
         ok: false,
         code: 'PURPOSE_OPTED_OUT',
-        reason: `Recipient has disabled the "${policy.prefsColumn}" notification type`,
+        reason: `Recipient has disabled the "${prefsColumn}" notification type`,
       };
     }
   }

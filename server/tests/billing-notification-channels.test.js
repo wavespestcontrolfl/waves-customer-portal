@@ -27,12 +27,21 @@ const smsInput = (purpose) => ({
 const contactState = (prefs, customer = { id: 'c1' }) => ({ prefs, customer, lookupFailed: false });
 
 describe('billing / payment-confirmation delivery channel (SMS leg gating)', () => {
+  test('the channel gate reads the SAME migration-104 columns the channel-aware receipt senders use', () => {
+    // estimate-deposits / estimate-card-holds branch their email legs off
+    // payment_receipt_channel — the consent gate must not read a parallel
+    // column or a portal email-only choice suppresses their SMS while their
+    // email branch never fires (Codex P1 on d9029cb).
+    expect(resolvePolicy('customer', 'billing').channelColumn).toBe('billing_channel');
+    expect(resolvePolicy('customer', 'payment_receipt').channelColumn).toBe('payment_receipt_channel');
+  });
+
   test("purpose 'billing': channel 'email' suppresses the SMS leg (billing email on file)", async () => {
     const policy = resolvePolicy('customer', 'billing');
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_reminder_channel: 'email', billing_email: 'ap@example.com' }),
+      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
@@ -43,7 +52,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_reminder_channel: channel }),
+      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: channel }),
     );
     expect(res.ok).toBe(true);
   });
@@ -54,7 +63,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
       smsInput('payment_receipt'),
       policy,
       contactState(
-        { sms_enabled: true, payment_confirmation_sms: true, payment_confirmation_channel: 'email' },
+        { sms_enabled: true, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
         { id: 'c1', email: 'adam@example.com' },
       ),
     );
@@ -71,7 +80,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
       smsInput('payment_receipt'),
       policy,
       contactState(
-        { sms_enabled: true, payment_confirmation_sms: true, payment_confirmation_channel: 'email' },
+        { sms_enabled: true, payment_confirmation_sms: true, payment_receipt_channel: 'email' },
         { id: 'c1', email: null },
       ),
     );
@@ -83,28 +92,38 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     const res = await checkConsentForPurpose(
       { ...smsInput('payment_receipt'), channel: 'email' },
       policy,
-      contactState({ sms_enabled: true, payment_confirmation_channel: 'email' }),
+      contactState({ sms_enabled: true, payment_receipt_channel: 'email', billing_email: 'ap@example.com' }),
     );
     expect(res.ok).toBe(true);
   });
 
-  test("purpose 'payment_receipt' now enforces the payment_confirmation_sms toggle", async () => {
-    // The policy row used to point at a 'payment_receipt' column that never
-    // existed on notification_prefs, so the portal toggle was stored but
-    // never honored.
+  test("purpose 'payment_receipt' honors BOTH the legacy receipt opt-out and the portal texts toggle", async () => {
     const policy = resolvePolicy('customer', 'payment_receipt');
-    expect(policy.prefsColumn).toBe('payment_confirmation_sms');
+    expect(policy.prefsColumn).toEqual(['payment_receipt', 'payment_confirmation_sms']);
 
-    const res = await checkConsentForPurpose(
+    // Legacy kill switch (migration 104, also honored by the deposit /
+    // no-show-fee receipt flows) still blocks — Codex P1 on d9029cb caught
+    // this being dropped.
+    const legacy = await checkConsentForPurpose(
       smsInput('payment_receipt'),
       policy,
-      contactState({ sms_enabled: true, payment_confirmation_sms: false }),
+      contactState({ sms_enabled: true, payment_receipt: false, payment_confirmation_sms: true }),
     );
-    expect(res.ok).toBe(false);
-    expect(res.code).toBe('PURPOSE_OPTED_OUT');
+    expect(legacy.ok).toBe(false);
+    expect(legacy.code).toBe('PURPOSE_OPTED_OUT');
+
+    // Portal "Payment confirmation texts" toggle — stored-but-unenforced
+    // before this PR — now blocks too.
+    const portal = await checkConsentForPurpose(
+      smsInput('payment_receipt'),
+      policy,
+      contactState({ sms_enabled: true, payment_receipt: true, payment_confirmation_sms: false }),
+    );
+    expect(portal.ok).toBe(false);
+    expect(portal.code).toBe('PURPOSE_OPTED_OUT');
   });
 
-  test('default-on customer (no channel columns yet) is unaffected', async () => {
+  test('default-on customer (no channel/toggle columns set) is unaffected', async () => {
     const policy = resolvePolicy('customer', 'payment_receipt');
     const res = await checkConsentForPurpose(
       smsInput('payment_receipt'),
@@ -116,27 +135,27 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
 });
 
 describe('notifications route mapping for the billing channels', () => {
-  test('accepts and normalizes the two channel keys', () => {
+  test('accepts the two portal keys and writes the migration-104 columns', () => {
     expect(notificationPrefsDbUpdates({
       billingReminderChannel: 'email',
       paymentConfirmationChannel: 'both',
     }, {})).toEqual({
-      billing_reminder_channel: 'email',
-      payment_confirmation_channel: 'both',
+      billing_channel: 'email',
+      payment_receipt_channel: 'both',
     });
 
     // Unknown values normalize to sms (channelValue guard).
     expect(notificationPrefsDbUpdates({
       billingReminderChannel: 'carrier-pigeon',
-    }, {})).toEqual({ billing_reminder_channel: 'sms' });
+    }, {})).toEqual({ billing_channel: 'sms' });
   });
 
   test('payload exposes the channels (defaulting to sms) and omits them from property payloads', () => {
-    const full = preferencePayload({ billing_reminder_channel: 'email' });
+    const full = preferencePayload({ billing_channel: 'email' });
     expect(full.billingReminderChannel).toBe('email');
     expect(full.paymentConfirmationChannel).toBe('sms');
 
-    const property = preferencePayload({ billing_reminder_channel: 'email' }, { includeChannels: false });
+    const property = preferencePayload({ billing_channel: 'email' }, { includeChannels: false });
     expect(property.billingReminderChannel).toBeUndefined();
     expect(property.paymentConfirmationChannel).toBeUndefined();
   });
@@ -145,7 +164,7 @@ describe('notifications route mapping for the billing channels', () => {
     // Billing sends target the charged customer row, so these live next to
     // the billing_reminder / payment_confirmation_sms toggles rather than on
     // the primary profile like the appointment channels.
-    expect(CHANNEL_DB_COLUMNS).not.toContain('billing_reminder_channel');
-    expect(CHANNEL_DB_COLUMNS).not.toContain('payment_confirmation_channel');
+    expect(CHANNEL_DB_COLUMNS).not.toContain('billing_channel');
+    expect(CHANNEL_DB_COLUMNS).not.toContain('payment_receipt_channel');
   });
 });

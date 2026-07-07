@@ -135,14 +135,19 @@ const TRUST_RANK = {
  *                               'marketing'     — sms_enabled true AND
  *                                                 a consent capture record
  *                               'none'          — purpose bypasses consent
- *   - prefsColumn             Optional notification_prefs column that must be
- *                             true (in addition to sms_enabled) for a send to fire.
+ *   - prefsColumn             Optional notification_prefs column (or array of
+ *                             columns, ALL of which must be non-false) that
+ *                             must be true (in addition to sms_enabled) for a
+ *                             send to fire.
  *   - channelColumn           Optional notification_prefs column holding the
  *                             customer's delivery-channel choice for this
  *                             purpose (sms | email | both). 'email' suppresses
  *                             the SMS leg — the email version of these notices
  *                             is delivered by its own lane (receipt / billing
- *                             emails to the billing address).
+ *                             emails to the billing address). Reuses the
+ *                             migration-104 channel columns so channel-aware
+ *                             senders (estimate-deposits, estimate-card-holds)
+ *                             and this gate read the SAME preference.
  *   - minIdentityTrust        Minimum identityTrustLevel required to send.
  *   - requireIds              Field names on the input that must be present.
  *
@@ -238,7 +243,7 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'billing_reminder',
-    channelColumn: 'billing_reminder_channel',
+    channelColumn: 'billing_channel',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
@@ -247,13 +252,15 @@ const PURPOSE_POLICY = {
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
-    // Was 'payment_receipt' — a column that has never existed on
-    // notification_prefs, so the portal's "Payment confirmation texts"
-    // toggle was stored but never enforced. The real column is
-    // payment_confirmation_sms (defaults true, so default-on customers
-    // are unaffected).
-    prefsColumn: 'payment_confirmation_sms',
-    channelColumn: 'payment_confirmation_channel',
+    // Two opt-outs, both honored: payment_receipt is the long-standing
+    // receipt kill switch (migration 104, also honored by the
+    // estimate-deposits / estimate-card-holds email legs);
+    // payment_confirmation_sms is the portal Billing card's "Payment
+    // confirmation texts" toggle, which was stored but never enforced at
+    // send time before this. Both default true, so default-on customers
+    // are unaffected.
+    prefsColumn: ['payment_receipt', 'payment_confirmation_sms'],
+    channelColumn: 'payment_receipt_channel',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },

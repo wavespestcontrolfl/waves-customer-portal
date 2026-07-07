@@ -2457,6 +2457,16 @@ const InvoiceService = {
       metadata: { original_message_type: "receipt" },
     });
     if (sendResult.blocked || sendResult.sent === false) {
+      // Email-only delivery preference is an intentional suppression, not a
+      // failure — return a skip (like payer_billed above) so callers such as
+      // the receipt-delivery queue don't retry/fail a receipt whose email leg
+      // delivered fine.
+      if (sendResult.code === "CHANNEL_EMAIL_ONLY") {
+        logger.info(
+          `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — customer prefers email-only receipts`,
+        );
+        return { sent: false, reason: "channel_email_only" };
+      }
       const err = new Error(
         `receipt SMS blocked: ${sendResult.code || sendResult.reason || "unknown"}`,
       );
