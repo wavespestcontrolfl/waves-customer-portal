@@ -171,18 +171,48 @@ function markImageTaintedContent(content, imageTainted) {
   return `${content}\n${IMAGE_TAINT_MARKER}`;
 }
 
-// Build the current-turn user message. Plain string when no images so the
-// common path is unchanged; an [image, …, text] block array when images are
-// attached (Anthropic vision format).
-function buildUserMessageContent(prompt, images) {
-  if (!images.length) return prompt;
+// Build the current-turn user message. Plain string when no images and no
+// page data so the common path is unchanged; a block array otherwise
+// ([image, …, page-state, text] — Anthropic vision format). Page state rides
+// on the user turn instead of the system prompt so the system prompt stays
+// byte-stable per (context, gate) and the prompt cache can hit (see
+// withCacheBreakpoint below).
+function buildUserMessageContent(prompt, images, pageData) {
+  if (!images.length && !pageData) return prompt;
   return [
     ...images.map((img) => ({
       type: 'image',
       source: { type: 'base64', media_type: img.mediaType, data: img.data },
     })),
+    ...(pageData
+      ? [{ type: 'text', text: `CURRENT PAGE STATE:\n${JSON.stringify(pageData, null, 2)}` }]
+      : []),
     { type: 'text', text: prompt },
   ];
+}
+
+// Prompt caching (cost-audit 2026-07-04 #1). Two ephemeral breakpoints per
+// request: one on the system prompt — the API renders tools before system, so
+// this one marker caches the ~20K-token tool schemas + system prompt together
+// and is reused across separate queries — and one on the last content block
+// of the last message, so the growing conversation is reused across the
+// up-to-MAX_TOOL_ROUNDS rounds of a single query. The message marker is
+// applied to a shallow copy at call time (never to currentMessages itself) so
+// markers don't accumulate across rounds past the API's 4-breakpoint limit.
+const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
+
+function withCacheBreakpoint(messages) {
+  if (!messages.length) return messages;
+  const last = messages[messages.length - 1];
+  let content = last.content;
+  if (typeof content === 'string') {
+    content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
+  } else if (Array.isArray(content) && content.length) {
+    content = [...content.slice(0, -1), { ...content[content.length - 1], ...EPHEMERAL_CACHE }];
+  } else {
+    return messages;
+  }
+  return [...messages.slice(0, -1), { ...last, content }];
 }
 
 // UI-backed write confirmation (issue #1568). Dark until the Railway env
@@ -890,10 +920,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         : `\n\nWRITE CONFIRMATION (conversational mode):
 For create_customer, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
     }
-    // Inject live page data (current date, schedule stats, etc.)
-    if (pageData) {
-      systemPrompt += `\n\nCURRENT PAGE STATE:\n${JSON.stringify(pageData, null, 2)}`;
-    }
+    // Live page data (current date, schedule stats, etc.) is injected on the
+    // current user turn by buildUserMessageContent, NOT here — appending it to
+    // the system prompt made the prefix unique per request and defeated
+    // prompt caching.
 
     // Build tech context for tech portal calls
     const techContext = context === 'tech' ? {
@@ -911,7 +941,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // ride on the current user turn as vision blocks.
     const messages = [
       ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
-      { role: 'user', content: buildUserMessageContent(prompt, images) },
+      { role: 'user', content: buildUserMessageContent(prompt, images, pageData) },
     ];
 
     let currentMessages = messages;
@@ -926,10 +956,20 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       const response = await anthropic.messages.create({
         model: model,
         max_tokens: context === 'tech' ? 1024 : 4096,
-        system: systemPrompt,
+        system: [{ type: 'text', text: systemPrompt, ...EPHEMERAL_CACHE }],
         tools,
-        messages: currentMessages,
+        messages: withCacheBreakpoint(currentMessages),
       });
+
+      // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
+      // is the prod verification signal; all-zero across repeats means a
+      // silent invalidator crept back into the prefix.
+      const usage = response.usage || {};
+      logger.info(
+        `[intelligence-bar] usage round=${round} in=${usage.input_tokens ?? 0} ` +
+        `cache_write=${usage.cache_creation_input_tokens ?? 0} ` +
+        `cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens ?? 0}`
+      );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
       const textBlocks = response.content.filter(c => c.type === 'text');
