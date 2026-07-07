@@ -73,8 +73,10 @@ function finiteNumber(value) {
 // cadence produce the same coverage count.
 function visitsPerYearForCadence(cadence) {
   switch (String(cadence || '').trim().toLowerCase()) {
-    // monthly_nth_weekday pins the visit to e.g. "3rd Tuesday" but is still a
-    // 1-month interval (see nextRecurringDate), so it covers 12 visits/year.
+    // monthly_nth_weekday is a 1-month interval (12/year) — kept here so the
+    // preflight reaches the SPECIFIC unsupported-cadence downgrade for it
+    // (prepayCoverageCadenceForPattern rejects it) instead of the generic
+    // unknown-cadence message.
     case 'monthly': case 'monthly_nth_weekday': return 12;
     case 'every_6_weeks': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
@@ -87,17 +89,22 @@ function visitsPerYearForCadence(cadence) {
 }
 
 // The COVERAGE cadence stored on an annual-prepay term for a booked recurring
-// pattern. MUST be a value annual-prepay-renewals' normalizeCoverageCadence
-// accepts — an unsupported value normalizes to null there and the term's
-// renewal/stamping math silently falls back to a visit-count-derived schedule,
-// seeding wrong dates so paid covered visits can complete-bill again.
-// monthly_nth_weekday books on a 1-month interval, so its coverage IS monthly.
-// Patterns with no supported mapping (custom, weekly, biweekly, daily) return
-// null and the prepay-on-book preflight downgrades to a standard accept —
-// fail closed, even when the operator supplied an explicit visit count.
+// pattern (also normalizes a QUOTE row's frequency label for the cadence-match
+// guard, hence the separator normalization). MUST be a value
+// annual-prepay-renewals' normalizeCoverageCadence accepts — an unsupported
+// value normalizes to null there and the term's renewal/stamping math silently
+// falls back to a visit-count-derived schedule, seeding wrong dates so paid
+// covered visits can complete-bill again. Patterns with no supported mapping
+// return null and the prepay-on-book preflight downgrades to a standard
+// accept — fail closed, even when the operator supplied an explicit visit
+// count. monthly_nth_weekday is deliberately UNSUPPORTED: an ongoing booking
+// pre-seeds only the first visits, and the coverage seeder fills the rest
+// from the stored cadence with same-day-of-month math and no nth/weekday
+// context — a "3rd Tuesday" route would get its remaining prepaid visits on
+// arbitrary dates.
 function prepayCoverageCadenceForPattern(cadence) {
-  switch (String(cadence || '').trim().toLowerCase()) {
-    case 'monthly': case 'monthly_nth_weekday': return 'monthly';
+  switch (String(cadence || '').trim().toLowerCase().replace(/[\s-]+/g, '_')) {
+    case 'monthly': return 'monthly';
     case 'every_6_weeks': return 'every_6_weeks';
     case 'bimonthly': case 'bi_monthly': return 'bimonthly';
     case 'quarterly': return 'quarterly';
@@ -1799,17 +1806,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const prepayCoverageCadence = prepayCoverageCadenceForPattern(recurringPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
-      // The quote's (single) recurring service name — sourced through the same
-      // acceptanceServiceLists extractor the eligibility check and converter
-      // use, so engine-backed estimates (quote wizard / IB drafts, whose
-      // recurring rows live only under estimate_data.engineResult.lineItems)
-      // resolve a name too instead of silently skipping the mismatch guard.
-      // Used to reject booking a DIFFERENT service as prepay against this
-      // quote: coverage stamps the BOOKED series, so a mismatched booking
-      // would cover the wrong visits while the quoted service billed normally.
-      // Fuzzy (canonical-key) match tolerates label drift like "Pest Control"
-      // vs "Quarterly Pest Control Service".
-      const quoteRecurringName = (() => {
+      // The quote's (single) recurring service name + cadence — sourced
+      // through the same acceptanceServiceLists extractor the eligibility
+      // check and converter use, so engine-backed estimates (quote wizard /
+      // IB drafts, whose recurring rows live only under
+      // estimate_data.engineResult.lineItems) resolve too instead of silently
+      // skipping the mismatch guards. Both guard the same invariant: the
+      // prepay invoice prices the QUOTED plan, so coverage must stamp that
+      // plan — a different booked service would cover the wrong visits while
+      // the quoted service billed normally, and a different booked cadence
+      // (quoted quarterly, booked monthly) would stamp 12 visits as covered
+      // for a 4-visit annual price. Fuzzy (canonical-key) name match
+      // tolerates label drift like "Pest Control" vs "Quarterly Pest Control
+      // Service".
+      const { quoteRecurringName, quoteRecurringCadence } = (() => {
         try {
           const data = typeof linkedEstimate?.estimate_data === 'string'
             ? JSON.parse(linkedEstimate.estimate_data)
@@ -1817,10 +1827,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const { acceptanceServiceLists } = require('./estimate-public');
           const list = acceptanceServiceLists(data).recurringSvcList || [];
           const svc = list[0] || {};
-          // Engine lineItems rows carry `service` (canonical key) / `label`
-          // rather than the manual rows' name fields — accept either shape.
-          return svc.name || svc.serviceName || svc.service_name || svc.service || svc.label || null;
-        } catch { return null; }
+          return {
+            // Engine lineItems rows carry `service` (canonical key) / `label`
+            // rather than the manual rows' name fields — accept either shape.
+            quoteRecurringName: svc.name || svc.serviceName || svc.service_name || svc.service || svc.label || null,
+            // Normalized through the same mapper as the booked pattern so the
+            // comparison is apples-to-apples; null when the quote row has no
+            // resolvable frequency (the guard then skips — can't compare).
+            quoteRecurringCadence: prepayCoverageCadenceForPattern(
+              svc.frequency || svc.cadence || svc.recurringPattern || null
+            ),
+          };
+        } catch { return { quoteRecurringName: null, quoteRecurringCadence: null }; }
       })();
       const { serviceMatchesCoverage } = require('../services/annual-prepay-renewals');
       if (!linkedEstimate || !acceptEstimateOnBook) {
@@ -1833,6 +1851,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
+      } else if (visitOverride.visitCount && visitsPerYearForCadence(recurringPattern)
+        && visitOverride.visitCount > visitsPerYearForCadence(recurringPattern)) {
+        // More covered visits than the cadence can produce inside the 12-month
+        // term: the coverage seeder stops at term_end, so only the in-term
+        // rows would attach while splitCoverageAmount divides the prepaid
+        // total by the FULL override — the excess prepaid value never stamps
+        // and later visits bill again. Fail closed.
+        downgrade(`Appointment booked as standard — ${visitOverride.visitCount} covered visits exceed what a ${recurringPattern} cadence produces in a 12-month term (${visitsPerYearForCadence(recurringPattern)}). Lower the covered-visit count or leave it at the cadence default.`);
+      } else if (quoteRecurringCadence && quoteRecurringCadence !== prepayCoverageCadence) {
+        // The prepay invoice prices the QUOTED cadence's annual — booking a
+        // different cadence would stamp a different number of visits as
+        // covered for that price (quoted quarterly → booked monthly = 12
+        // covered visits for a 4-visit annual). Fail closed.
+        downgrade(`Appointment booked as standard — annual prepay must be booked on the quoted cadence (${quoteRecurringCadence}), not ${prepayCoverageCadence}: the prepay invoice prices the quoted plan. Re-quote or set up prepay from Customer 360.`);
       } else if (hasAddons) {
         downgrade('Appointment booked as standard — annual prepay can’t be combined with add-on lines (coverage would suppress their billing at completion). Book the add-ons as a separate appointment or bill standard.');
       } else if (hasBoosters) {

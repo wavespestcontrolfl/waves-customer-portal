@@ -10,9 +10,11 @@ jest.mock('../services/estimate-converter', () => ({
   resolveCommercialPrepayBaseRate: jest.fn(async () => 0.07),
   resolveCommercialPrepayTaxRate: jest.fn(() => 0.07),
   // Mirror the real unit-count shape closely enough for the eligibility gate:
-  // count the recurring service lines (companion-absorption specifics are
-  // covered by the converter's own tests).
-  annualPrepayRecurringUnitCount: jest.fn((data) => (data?.recurring?.services || []).length),
+  // count the recurring service lines — explicit or engine-backed (companion-
+  // absorption specifics are covered by the converter's own tests).
+  annualPrepayRecurringUnitCount: jest.fn((data) => (
+    (data?.recurring?.services || data?.engineResult?.lineItems || []).length
+  )),
 }));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
 // Deposit-credit netting in the prepay invoiceTotal preview: default = no
@@ -1115,6 +1117,20 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     const r = await prepayBookingEligibility(recurring([{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }]));
     expect(r.eligible).toBe(true);
     expect(r.invoiceTotal).toBe(627); // from the mocked resolveAnnualPrepayInvoiceTotal
+  });
+
+  test('an engine-backed quote (recurring rows only under engineResult.lineItems) is eligible', async () => {
+    const r = await prepayBookingEligibility({
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', monthly: 55, annual: 660 }],
+        },
+      },
+    });
+    expect(r.eligible).toBe(true);
+    expect(r.invoiceTotal).toBe(627);
   });
 
   test('a pending deposit credit nets against the previewed invoice total', async () => {

@@ -51,8 +51,20 @@ function hasManualAnnualPrepayRecurringRows(estimate = {}) {
   if (explicitRecurringLists.some((list) => Array.isArray(list) && list.length > 0)) {
     return true;
   }
-  return Array.isArray(data.services)
-    && data.services.some((svc) => svc?.recurring || svc?.frequency);
+  if (Array.isArray(data.services)
+    && data.services.some((svc) => svc?.recurring || svc?.frequency)) {
+    return true;
+  }
+  // Engine-backed estimates (quote wizard / IB drafts) persist recurring rows
+  // only under estimate_data.engineResult.lineItems — the converter accepts
+  // them (via the same engine-aware extractor), so the prepay gates must not
+  // reject them on the legacy shapes above.
+  try {
+    const { acceptanceServiceLists } = require('../routes/estimate-public');
+    return (acceptanceServiceLists(data).recurringSvcList || []).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function isManualAnnualPrepayEligibleServiceMix(estimate = {}) {

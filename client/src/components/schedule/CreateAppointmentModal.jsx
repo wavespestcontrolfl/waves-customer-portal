@@ -238,8 +238,10 @@ function formatMoney(value) {
 // cadence when no override is sent.
 function visitsPerYearForCadence(cadence) {
   switch (String(cadence || '').trim().toLowerCase()) {
-    // monthly_nth_weekday is a 1-month interval pinned to an nth weekday.
-    case 'monthly': case 'monthly_nth_weekday': return 12;
+    // NO monthly_nth_weekday case: one-step prepay doesn't support it (the
+    // server's coverage seeder can't reproduce an nth-weekday schedule), and
+    // a null here is what disables the prepay choice for that cadence.
+    case 'monthly': return 12;
     case 'every_6_weeks': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
     case 'quarterly': return 4;
@@ -1655,7 +1657,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                                   <input
                                     type="number"
                                     min="1"
-                                    max="24"
+                                    max={defaultVisits || 24}
                                     value={prepayVisitCount}
                                     onChange={(e) => setPrepayVisitCount(e.target.value)}
                                     placeholder={defaultVisits ? String(defaultVisits) : '—'}
