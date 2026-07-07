@@ -55,13 +55,17 @@ const CLAIM_TOKEN_RE = /^[a-f0-9]{32}$/;
 
 // Paid dual-model vision per analyze — same aggressive posture as the paid
 // property lookup (5/hr lets a real prospect retake photos; blocks scripts).
+// Junk the route drops without a model call (honeypot trips, malformed or
+// oversized batches) must not spend the shared bucket — same plausibility
+// predicate as the mount-level daily cap in index.js, so five bot posts from
+// a NAT'd IP can't 429 the next real prospect.
 const analyzeLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many analysis requests. Please try again in an hour or call (941) 297-5749.' },
-  skip: () => process.env.NODE_ENV !== 'production',
+  skip: (req) => process.env.NODE_ENV !== 'production' || !isPlausibleAnalyzeBody(req.body),
 });
 
 const claimLimiter = rateLimit({
@@ -492,10 +496,11 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
 });
 
 /**
- * Cheap plausibility check for the mount-level paid daily limiter (index.js).
- * Only requests that could actually reach a paid vision call count against
- * the shared 40/day budget — malformed floods, empty posts, and honeypot
- * trips are rejected by the routes without a model call and must not burn
+ * Cheap plausibility check shared by the mount-level paid daily limiter
+ * (index.js) and both routes' hourly analyzeLimiter. Only requests that could
+ * actually reach a paid vision call count against the shared budgets —
+ * malformed floods, empty posts, oversized batches, and honeypot trips are
+ * rejected by the routes without a model call and must not burn
  * the budget for a shared/NAT'd IP. (A verified-failed Turnstile still
  * counts: that check is async and can't run in a limiter predicate.)
  * Shape rules mirror the analyze validators in BOTH funnel routes.
@@ -507,6 +512,11 @@ function isPlausibleAnalyzeBody(body) {
   if (isHoneypotTripped(body)) return false;
   const photos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
   if (!photos.length || photos.length > MAX_PHOTOS) return false;
+  // The routes 413 the WHOLE batch when any photo is oversized — before any
+  // model call — so a mixed batch (one small valid photo + one oversized)
+  // must not count against the budget either.
+  if (photos.some((photo) => photo && typeof photo.data === 'string'
+    && photo.data.length > MAX_PHOTO_CHARS)) return false;
   return photos.some((photo) => photo && typeof photo.data === 'string'
     && photo.data.length > 0 && photo.data.length <= MAX_PHOTO_CHARS);
 }

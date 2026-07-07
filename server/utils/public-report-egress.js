@@ -64,14 +64,19 @@ function overallStatusLabel(score) {
  */
 function sanitizePricingSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.tiers)) return null;
+  // Number(null) === 0, so absent fields must be dropped BEFORE coercion —
+  // otherwise a one-time-only tier would render "monthly: $0".
+  const cleanNumber = (value) => (value != null && Number.isFinite(Number(value)) ? Number(value) : null);
   const tiers = snapshot.tiers.slice(0, 4).map((tier) => ({
     label: typeof tier.label === 'string' ? tier.label.slice(0, 60) : null,
-    visits: Number.isFinite(Number(tier.visits)) ? Number(tier.visits) : null,
-    monthly: Number.isFinite(Number(tier.monthly)) ? Number(tier.monthly) : null,
-    annual: Number.isFinite(Number(tier.annual)) ? Number(tier.annual) : null,
-    per_visit: Number.isFinite(Number(tier.per_visit)) ? Number(tier.per_visit) : null,
+    visits: cleanNumber(tier.visits),
+    monthly: cleanNumber(tier.monthly),
+    annual: cleanNumber(tier.annual),
+    // One-time packages (flea, one-time lawn pest) price as a single amount.
+    one_time: cleanNumber(tier.one_time),
+    per_visit: cleanNumber(tier.per_visit),
     recommended: tier.recommended === true,
-  })).filter((tier) => tier.label && (tier.monthly != null || tier.annual != null));
+  })).filter((tier) => tier.label && (tier.monthly != null || tier.annual != null || tier.one_time != null));
   if (!tiers.length) return null;
   return {
     service_label: typeof snapshot.service_label === 'string' ? snapshot.service_label.slice(0, 80) : null,

@@ -294,6 +294,60 @@ describe('POST /:id/claim', () => {
     });
   });
 
+  test('one-time package pricing (flea total shape) survives to the claim payload', async () => {
+    const entry = libraryEntry('flea');
+    const { generateEstimate } = require('../services/pricing-engine');
+    generateEstimate.mockReturnValueOnce({
+      lineItems: [{ service: 'flea_package', billingCadence: 'one_time', visits: 2, initial: 225, followUp: 125, total: 350 }],
+    });
+    mockIdentificationRow = analyzedRow({
+      species_slug: 'flea',
+      report_contract: {
+        identification: { slug: entry.slug, label: entry.label, group: entry.group, category: 'insect', confidence: 'high', contested: false },
+        service: { line: entry.service_line, key: entry.service_key, label: entry.service_label, inspection_required: entry.inspection_required },
+        urgency: entry.urgency,
+      },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/public/pest-identifier/${ROW_ID}/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(claimBody()),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      const tier = body.pricing.tiers[0];
+      expect(tier.one_time).toBe(350);
+      expect(tier.monthly).toBeNull();
+      expect(tier.annual).toBeNull();
+      expect(tier.visits).toBe(2);
+    });
+  });
+
+  test('one-time lawn pest pricing (price shape) survives to the claim payload', async () => {
+    const entry = libraryEntry('chinch-bug');
+    const { generateEstimate } = require('../services/pricing-engine');
+    generateEstimate.mockReturnValueOnce({
+      lineItems: [{ service: 'one_time_lawn', treatmentType: 'pest', price: 150, basePrice: 115 }],
+    });
+    mockIdentificationRow = analyzedRow({
+      species_slug: entry.slug,
+      report_contract: {
+        identification: { slug: entry.slug, label: entry.label, group: entry.group, category: 'insect', confidence: 'high', contested: false },
+        service: { line: entry.service_line, key: entry.service_key, label: entry.service_label, inspection_required: entry.inspection_required },
+        urgency: entry.urgency,
+      },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/public/pest-identifier/${ROW_ID}/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(claimBody()),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      const tier = body.pricing.tiers[0];
+      expect(tier.one_time).toBe(150);
+      expect(tier.monthly).toBeNull();
+    });
+  });
+
   test('replayed claim returns 409', async () => {
     mockIdentificationRow = analyzedRow();
     mockUpdateResult = 0;

@@ -32,7 +32,7 @@ const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
-const { sanitizeAttribution } = require('./public-lawn-assessment');
+const { sanitizeAttribution, isPlausibleAnalyzeBody } = require('./public-lawn-assessment');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
@@ -42,13 +42,17 @@ const REPORT_TTL_DAYS = 30;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN_RE = /^[a-f0-9]{32}$/;
 
+// Junk the route drops without a model call (honeypot trips, malformed or
+// oversized batches) must not spend the shared hourly bucket — same
+// plausibility predicate as the mount-level daily cap in index.js (shape
+// rules are identical across both funnel routes).
 const analyzeLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many analysis requests. Please try again in an hour or call (941) 297-5749.' },
-  skip: () => process.env.NODE_ENV !== 'production',
+  skip: (req) => process.env.NODE_ENV !== 'production' || !isPlausibleAnalyzeBody(req.body),
 });
 
 const claimLimiter = rateLimit({
@@ -135,15 +139,23 @@ async function buildPestPricingSnapshot(serviceKey) {
     if (!line) return null;
     const monthly = Number.isFinite(Number(line.monthly)) ? Number(line.monthly) : null;
     const annual = Number.isFinite(Number(line.annual)) ? Number(line.annual) : null;
-    if (monthly == null && annual == null) return null;
+    // One-time packages carry total (priceFlea) or price (priceOneTimeLawn)
+    // instead of monthly/annual — recurring lines carry neither field, so
+    // only read them when the recurring shape is absent.
+    const oneTimeRaw = line.total ?? line.price;
+    const oneTime = monthly == null && annual == null && Number.isFinite(Number(oneTimeRaw))
+      ? Number(oneTimeRaw) : null;
+    if (monthly == null && annual == null && oneTime == null) return null;
+    const visitsRaw = line.visitsPerYear ?? line.visits;
     return {
       service_label: config.label,
       basis_note: 'Pricing shown for a typical Southwest Florida home. Your exact quote takes about a minute and reflects your actual property.',
       tiers: [{
         label: config.tierLabel,
-        visits: Number.isFinite(Number(line.visitsPerYear)) ? Number(line.visitsPerYear) : null,
+        visits: Number.isFinite(Number(visitsRaw)) ? Number(visitsRaw) : null,
         monthly,
         annual,
+        one_time: oneTime,
         per_visit: Number.isFinite(Number(line.perApp)) ? Number(line.perApp) : null,
         recommended: true,
       }],
