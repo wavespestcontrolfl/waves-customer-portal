@@ -2367,7 +2367,14 @@ export function ServiceSection({
                             fontSize: 20, fontWeight: 500, lineHeight: 1.25,
               color: '#1B2C5B', margin: '0 0 4px',
             }}>
-              Pest Protection by Waves — ride the wave that fits your home.
+              {/* The pest-branded line is pest-only — a lawn/mosquito/termite
+                  cadence selector labeled "Pest Protection" reads like the
+                  wrong quote, so every other section (incl. the synthetic
+                  'bundle' key, slug null) keeps the generic wording (codex
+                  rd3). */}
+              {sectionSlug === 'pest_control'
+                ? 'Pest Protection by Waves — ride the wave that fits your home.'
+                : 'Same protection — pick the rhythm that fits your home.'}
             </h2>
             <GlassFrequencyPills
               frequencies={frequencies}

@@ -355,7 +355,10 @@
 }
 [data-glass-theme] .gc-av-left {
   position: relative;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  /* Never wider than the card's content box — on narrow phones the pair
+     shrinks to fit instead of protruding / forcing horizontal scroll. */
+  max-width: 100%;
   margin: 8px auto;
   display: flex;
   align-items: flex-start;
@@ -370,6 +373,10 @@
 }
 [data-glass-theme] .gc-phone {
   position: relative;
+  /* Bezel borders count toward the declared width, and min-width lets the
+     flex pair shrink below it when .gc-av-left hits max-width. */
+  box-sizing: border-box;
+  min-width: 0;
   margin: 0;
   overflow: hidden;
   background: #12264a;
