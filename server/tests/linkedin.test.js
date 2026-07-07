@@ -156,6 +156,31 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(postBody.content.article.thumbnail).toBeUndefined();
   });
 
+  test('a streamed body that omits Content-Length is capped MID-READ (aborts past 10MB, posts without a thumbnail)', async () => {
+    const calls = mockRoutes();
+    // Override the image route with a body stream that never declares a
+    // length and keeps producing 1MB chunks — the cap must fire during the
+    // read, not after buffering completes (the stream would never end).
+    const inner = global.fetch;
+    global.fetch = jest.fn(async (url, opts) => {
+      if (String(url) === IMG) {
+        const chunk = new Uint8Array(1024 * 1024);
+        return {
+          ok: true,
+          headers: { get: () => null }, // no content-length
+          body: { getReader: () => ({ read: async () => ({ done: false, value: chunk }) }) },
+        };
+      }
+      return inner(url, opts);
+    });
+
+    const res = await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
+    expect(postBody.content.article.thumbnail).toBeUndefined();
+  });
+
   test('_isTrustedImageUrl allows only https on the CDN or wavespestcontrol.com hosts', () => {
     expect(linkedin._isTrustedImageUrl('https://cdn.example.com/x.jpg')).toBe(true);
     expect(linkedin._isTrustedImageUrl('https://www.wavespestcontrol.com/images/hero.webp')).toBe(true);

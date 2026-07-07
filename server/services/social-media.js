@@ -826,7 +826,11 @@ async function uploadVideoToS3(buffer, filename) {
 // accepts JPEG, so the convert+CDN hop is required, not an optimization.
 // Hub posts only (the blog is hub-consolidated); returns null on any miss so
 // callers fall back to the brand card.
-const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled']);
+// Every lane that shares a BLOG POST: the autonomous poller, the RSS
+// backstop, the scheduler — and 'blog', the admin BlogPage share button
+// (admin-content-v2 /blog/:id/share-social). Gates the og:image hero fetch,
+// the Facebook /feed link-post format, and the IG caption URL append.
+const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog']);
 async function blogHeroSocialImageUrl(link) {
   try {
     const pageUrl = new URL(String(link || ''));

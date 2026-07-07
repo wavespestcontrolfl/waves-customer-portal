@@ -109,12 +109,21 @@ describe('blogHeroSocialImageUrl', () => {
     await expect(social.blogHeroSocialImageUrl(PAGE)).resolves.toBeNull();
   });
 
-  test('BLOG_HERO_SOURCES covers exactly the blog-share lanes (poller, RSS backstop, scheduler)', () => {
-    expect(social.BLOG_HERO_SOURCES).toEqual(new Set(['autonomous_blog', 'rss', 'blog_scheduled']));
-    // newsletter/studio/manual shares keep the brand card
+  test('BLOG_HERO_SOURCES covers exactly the blog-share lanes (poller, RSS backstop, scheduler, admin share button)', () => {
+    expect(social.BLOG_HERO_SOURCES).toEqual(new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog']));
+    // newsletter/studio/manual-url shares keep the brand card
     expect(social.BLOG_HERO_SOURCES.has('newsletter')).toBe(false);
     expect(social.BLOG_HERO_SOURCES.has('scheduled')).toBe(false);
     expect(social.BLOG_HERO_SOURCES.has('manual')).toBe(false);
+  });
+
+  test("the admin BlogPage share route (source 'blog') gets the FB link-post treatment too", () => {
+    // The manual share button passes source:'blog' + an imageUrl — Facebook
+    // must still post text+link, not /photos with the raw URL in the caption.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../routes/admin-content-v2.js'), 'utf8');
+    expect(src).toContain("source: 'blog'");
+    expect(social.BLOG_HERO_SOURCES.has('blog')).toBe(true);
   });
 
   describe('linkedinWantsBlogHero (LinkedIn cannot scrape article URLs — the hero must be uploaded as a thumbnail)', () => {

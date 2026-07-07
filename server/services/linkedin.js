@@ -401,7 +401,29 @@ class LinkedInService {
       if (declared > MAX_THUMBNAIL_BYTES) {
         throw new Error(`thumbnail too large (${declared} bytes declared) for ${imageUrl}`);
       }
-      bytes = Buffer.from(await imgRes.arrayBuffer());
+      // Enforce the byte cap DURING the read — a body that omits or
+      // underreports Content-Length must not buffer past the cap before the
+      // check fires. Abort the connection the moment the cap is crossed.
+      if (imgRes.body?.getReader) {
+        const reader = imgRes.body.getReader();
+        const chunks = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.length;
+          if (total > MAX_THUMBNAIL_BYTES) {
+            controller.abort();
+            throw new Error(`thumbnail exceeds ${MAX_THUMBNAIL_BYTES} bytes mid-read for ${imageUrl}`);
+          }
+          chunks.push(Buffer.from(value));
+        }
+        bytes = Buffer.concat(chunks);
+      } else {
+        // No readable stream (empty bodies / non-stream responses): buffered
+        // read, still capped below.
+        bytes = Buffer.from(await imgRes.arrayBuffer());
+      }
     } finally {
       clearTimeout(timeout);
     }
