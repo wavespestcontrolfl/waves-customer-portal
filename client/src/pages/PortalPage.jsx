@@ -1272,9 +1272,6 @@ function DashboardTab({ customer, onSwitchTab }) {
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
-  const renewalCredit = customer.memberSince
-    ? Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25))
-    : 0;
   const referralReward = Number(referralStats?.rewardPerReferral) || 25;
   // Server-authoritative earned dollars — not an estimate off referrals *sent*.
   const referralCredits = Math.round(Number(referralStats?.totalEarned || 0));
@@ -1289,8 +1286,10 @@ function DashboardTab({ customer, onSwitchTab }) {
     {
       icon: 'coins',
       label: 'WaveGuard Rewards',
-      value: `$${renewalCredit + referralCredits}`,
-      sub: `$${renewalCredit} renewal credit · $${referralCredits} referral credits`,
+      // Server-backed dollars only — the old card summed in a client-invented,
+      // tenure-prorated "renewal credit" no system ever grants.
+      value: `$${referralCredits}`,
+      sub: `$${referralCredits} referral credits earned`,
       actionLabel: null,
     },
     {
@@ -3038,20 +3037,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     );
                   })()}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
-                    <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
-                      width: 44, height: 24, borderRadius: 12,
-                      cursor: p.locked ? 'default' : 'pointer',
-                      // Gold = on, light blue = off (owner directive 2026-07-06)
-                      background: isOn ? B.yellow : `${B.wavesBlue}55`,
-                      position: 'relative', transition: 'background 0.3s',
-                      opacity: p.locked ? 0.85 : 1,
-                    }}>
-                      <div style={{
+                    {/* Real switch semantics: the old plain div was invisible
+                        to keyboards and screen readers. */}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isOn}
+                      aria-label={p.label}
+                      disabled={p.locked}
+                      onClick={p.locked ? undefined : () => handleToggle(p.key)}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12, border: 'none', padding: 0,
+                        cursor: p.locked ? 'default' : 'pointer',
+                        // Gold = on, light blue = off (owner directive 2026-07-06)
+                        background: isOn ? B.yellow : `${B.wavesBlue}55`,
+                        position: 'relative', transition: 'background 0.3s',
+                        opacity: p.locked ? 0.85 : 1,
+                      }}
+                    >
+                      <span style={{
                         position: 'absolute', top: 2, width: 20, height: 20,
                         borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
                         left: isOn ? 22 : 2, transition: 'left 0.3s',
                       }} />
-                    </div>
+                    </button>
                     {p.locked && (
                       <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
@@ -7063,19 +7072,11 @@ function MyPlanTab({ customer }) {
       }
     });
   }
-  // If no activity log, construct from tier
-  if (planTimeline.length === 1 && tierIdx > 0) {
-    const startDate = parseDate(customer.memberSince);
-    const upgradeDate = new Date(startDate);
-    upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
-    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: 'upgrade' });
-  }
-  if (activeTierName && numServices >= 3 && planTimeline.length <= 2) {
-    const startDate = parseDate(customer.memberSince);
-    const addDate = new Date(startDate);
-    addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
-    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: 'bug' });
-  }
+  // No activity log = show only what we actually know (the start entry).
+  // The old fallback FABRICATED account events — an invented "Upgraded to
+  // <tier>" at 40% of tenure (even for customers who started on that tier)
+  // and a hardcoded "Added mosquito service" at 60% (even with no mosquito
+  // service) — real-looking history the customer never lived.
   planTimeline.sort((a, b) => a.date - b.date);
 
   // Current month for calendar
@@ -7205,7 +7206,6 @@ function MyPlanTab({ customer }) {
     ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : 'Not set';
   const currentAnnual = totalFullPrice - annualSavings;
-  const renewalCredit = Math.min(75, Math.round(memberMonths * 6.25));
 
   const card = {
     background: B.white,
@@ -7318,7 +7318,6 @@ function MyPlanTab({ customer }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: `${money(annualSavings)}/yr saved` },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
-            { label: 'Renewal credit', value: money(renewalCredit, 0), sub: 'Month 13' },
           ].map((item) => (
             <div key={item.label} style={{
               border: '1px solid #E7E2D7',
@@ -7576,7 +7575,8 @@ function MyPlanTab({ customer }) {
               <div style={sectionTitle}>Loyalty</div>
               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                 {[
-                  { text: `${money(renewalCredit, 0)} annual renewal credit`, icon: 'money' },
+                  // Renewal-credit bullet removed: it promised a tenure-
+                  // prorated dollar figure no server system grants (F-015).
                   tierIdx < TIER_ORDER.length - 1 && {
                     text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25, 0)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
                     icon: 'upgrade',

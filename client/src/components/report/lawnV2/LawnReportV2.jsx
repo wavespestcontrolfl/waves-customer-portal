@@ -738,6 +738,10 @@ const TIMELINE_ICON = {
 export function LawnVisitTimeline({ timeline = {} }) {
   const mounted = useMounted();
   const events = timeline && Array.isArray(timeline.events) ? timeline.events.filter(Boolean) : [];
+  // Honor the admin timeline config like the standard layout's
+  // ServiceTimelineSection does — the server still ships populated events[]
+  // when the config disables the timeline; `enabled` carries the gate.
+  if (timeline?.enabled === false) return null;
   if (!events.length) return null;
   return (
     <Card>
