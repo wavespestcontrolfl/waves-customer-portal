@@ -3,7 +3,7 @@ const SmartRebooker = require('./rebooker');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { etDateString, etParts } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 async function sendAppointmentSms({ to, body, customerId, messageType }) {
@@ -148,6 +148,27 @@ class RescheduleSMS {
           throw err;
         }
       }
+
+      // SmartRebooker moves the visit but never touches appointment_reminders,
+      // so without this sync the reminder row keeps the OLD slot's time and the
+      // day-before reminder for the new date never fires (the dispatch rain-out
+      // route does the same sync after its own moves — see
+      // syncRescheduleReminder in routes/admin-dispatch.js). sendNotification
+      // false: the confirmation SMS below is the customer notice;
+      // coverDueWindows keeps the 15-min cron from firing a duplicate
+      // day-before text for a window that notice already covers.
+      if (selectedOption) {
+        try {
+          const AppointmentReminders = require('./appointment-reminders');
+          await AppointmentReminders.handleReschedule(
+            pending.scheduled_service_id,
+            `${selectedOption.date}T${selectedOption.window?.start || '08:00'}`,
+            { sendNotification: false, coverDueWindows: true },
+          );
+        } catch (err) {
+          logger.warn(`[reschedule-sms] Reminder sync failed for ${pending.scheduled_service_id}: ${err.message}`);
+        }
+      }
     }
 
     if (selectedOption) {
@@ -157,7 +178,20 @@ class RescheduleSMS {
       // Confirmation copy is inlined — the editable reschedule_confirmed_sms_reply
       // template was retired, but the customer must still get a confirmation the
       // moment their 1/2 reply lands (the appointment has already moved).
-      const confirmedBody = `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\nWe'll remind you the day before.`;
+      //
+      // The closing line must only promise what the reminder cron will actually
+      // do: the day-before (24h) reminder only fires for appointments at least
+      // two days out, so for a same-day or next-day slot "we'll remind you the
+      // day before" is a promise that is already impossible to keep.
+      const todayEt = etDateString();
+      const tomorrowEt = etDateString(addETDays(new Date(), 1));
+      const optDate = String(selectedOption.date);
+      const closingLine = optDate === todayEt
+        ? 'See you today.'
+        : optDate === tomorrowEt
+          ? 'See you tomorrow.'
+          : "We'll remind you the day before.";
+      const confirmedBody = `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}`;
       await sendAppointmentSms({
         to: customer.phone,
         body: confirmedBody,
