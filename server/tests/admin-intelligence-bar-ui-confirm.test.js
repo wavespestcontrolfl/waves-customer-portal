@@ -223,7 +223,8 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     await withServer(async (baseUrl) => {
       await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
     });
-    const onPrompt = mockMessagesCreate.mock.calls[0][0].system;
+    // system is a cache_control block array (prompt caching) — unwrap the text.
+    const onPrompt = mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
     expect(onPrompt).toContain('WRITE CONFIRMATION (UI mode)');
     expect(onPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
 
@@ -232,9 +233,46 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     await withServer(async (baseUrl) => {
       await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
     });
-    const offPrompt = mockMessagesCreate.mock.calls[0][0].system;
+    const offPrompt = mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
     expect(offPrompt).toContain('WRITE CONFIRMATION (conversational mode)');
     expect(offPrompt).not.toContain('WRITE CONFIRMATION (UI mode)');
+  });
+
+  test('prompt caching: system block breakpoint, one message breakpoint per round (no accumulation), pageData on the user turn not the system prompt', async () => {
+    mockExecuteTool.mockResolvedValue({ preview: true });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_customer', input: { first_name: 'Jeff' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, {
+        prompt: 'add Jeff',
+        context: 'customers',
+        pageData: { current_date: '2026-07-07', open_jobs: 3 },
+      });
+    });
+    expect(mockMessagesCreate).toHaveBeenCalledTimes(2);
+
+    for (const [call] of mockMessagesCreate.mock.calls) {
+      // system: single text block carrying the ephemeral breakpoint, no pageData.
+      expect(call.system).toHaveLength(1);
+      expect(call.system[0].cache_control).toEqual({ type: 'ephemeral' });
+      expect(call.system[0].text).not.toContain('CURRENT PAGE STATE');
+
+      // messages: exactly one breakpoint, on the last block of the last message.
+      const markers = call.messages.flatMap((m) => (
+        Array.isArray(m.content) ? m.content.filter((b) => b.cache_control) : []
+      ));
+      expect(markers).toHaveLength(1);
+      const lastMsg = call.messages[call.messages.length - 1];
+      expect(lastMsg.content[lastMsg.content.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+    }
+
+    // pageData rides on the current user turn (first call's last message).
+    const firstUserTurn = mockMessagesCreate.mock.calls[0][0].messages.at(-1);
+    expect(JSON.stringify(firstUserTurn.content)).toContain('CURRENT PAGE STATE');
+    expect(JSON.stringify(firstUserTurn.content)).toContain('open_jobs');
   });
 
   test('gate off: legacy behavior unchanged, no pendingActions field', async () => {
@@ -279,7 +317,8 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
           type: 'image',
           source: { type: 'base64', media_type: 'image/png', data: validImageData },
         },
-        { type: 'text', text: prompt },
+        // Last block of the last message carries the per-round cache breakpoint.
+        { type: 'text', text: prompt, cache_control: { type: 'ephemeral' } },
       ]);
 
       expect(body.conversationHistory[0].content).toBe(

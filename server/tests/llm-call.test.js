@@ -1,6 +1,11 @@
 // Guards the shared cross-provider LLM dispatch (server/services/llm/call.js):
 // the extracted parsers + the fail-closed (no-network) behavior when a key is
 // missing, and that dispatch routes by provider. No live API calls.
+const mockAnthropicCreate = jest.fn();
+jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
+  messages: { create: (...args) => mockAnthropicCreate(...args) },
+})));
+
 const {
   callOpenAI,
   callGemini,
@@ -73,6 +78,36 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
   test('dispatch rejects a missing/invalid route', async () => {
     expect(await dispatch(null)).toEqual({ ok: false, reason: 'no_route' });
     expect(await dispatch({ provider: 'nope', model: 'x' })).toEqual({ ok: false, reason: 'unknown_provider_nope' });
+  });
+});
+
+// Prompt caching: callAnthropic sends system as a single text block carrying
+// an ephemeral cache_control breakpoint (tools render before system, so the
+// one marker caches both for every dispatch() caller).
+describe('callAnthropic prompt caching', () => {
+  let saved;
+  beforeEach(() => {
+    mockAnthropicCreate.mockReset();
+    saved = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = saved;
+  });
+
+  test('system goes out as one text block with an ephemeral breakpoint', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    const r = await callAnthropic({ model: FLAGSHIP, system: 'You are a test.', text: 'hi' });
+    expect(r.ok).toBe(true);
+    expect(mockAnthropicCreate).toHaveBeenCalledWith(expect.objectContaining({
+      system: [{ type: 'text', text: 'You are a test.', cache_control: { type: 'ephemeral' } }],
+    }));
+  });
+
+  test('no system → no system field on the request', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, text: 'hi' });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system).toBeUndefined();
   });
 });
 
