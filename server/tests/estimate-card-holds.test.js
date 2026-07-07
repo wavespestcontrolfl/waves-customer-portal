@@ -55,6 +55,7 @@ const {
   resolveCardHoldPolicy,
   verifyCardHoldIntent,
   isWithinCancelWindow,
+  handleCardHoldCancellation,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -173,6 +174,39 @@ describe('isWithinCancelWindow', () => {
   });
   it('false on an unparseable start (fail toward free release)', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: 'not-a-date', now })).toBe(false);
+  });
+  it('false for a PAST start — stale-row cleanup is never a late cancel', () => {
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-20T12:00:00Z'), now })).toBe(false);
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T11:59:59Z'), now })).toBe(false);
+  });
+  it('false at exactly the start instant (fee needs a still-upcoming visit)', () => {
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T12:00:00Z'), now })).toBe(false);
+  });
+});
+
+describe('handleCardHoldCancellation — fee guardrails', () => {
+  const now = new Date('2026-07-06T12:00:00Z');
+  const holdRow = { id: 'h1', cancel_window_hours: 24 };
+  it('releases free (never charges) when the visit start already passed', async () => {
+    stubDb(holdRow);
+    const r = await handleCardHoldCancellation({
+      scheduledServiceId: 'svc1',
+      serviceStart: new Date('2026-07-01T12:00:00Z'),
+      now,
+    });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+  it('waiveFee releases free even inside the window (business-initiated cancel)', async () => {
+    stubDb(holdRow);
+    const r = await handleCardHoldCancellation({
+      scheduledServiceId: 'svc1',
+      serviceStart: new Date('2026-07-06T18:00:00Z'),
+      now,
+      waiveFee: true,
+    });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 });
 

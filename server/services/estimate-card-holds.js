@@ -610,21 +610,33 @@ async function releaseCardHold({ scheduledServiceId, reason = 'released' }) {
 
 // Whether a cancellation lands INSIDE the fee window (fee applies) vs outside
 // (free release). serviceStart is the appointment's scheduled start instant.
+// The fee applies ONLY to a still-upcoming appointment: a start already in the
+// past means the visit came and went without being delivered (stale-row
+// cleanup, churn sweep, missed dispatch), and charging the late-cancel fee
+// there bills the customer for a visit that never happened — past starts
+// always release free.
 function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   const windowHours = Number(hold?.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   const start = serviceStart instanceof Date ? serviceStart : new Date(serviceStart);
   if (Number.isNaN(start.getTime())) return false;
-  return (start.getTime() - now.getTime()) <= windowHours * 3600000;
+  const msUntilStart = start.getTime() - now.getTime();
+  return msUntilStart > 0 && msUntilStart <= windowHours * 3600000;
 }
 
 // Single entry for the cancel path: charge the late-cancel fee if the
 // cancellation lands inside the window, otherwise release the hold free. The
 // appointment's ET start instant is resolved from the trusted shared helper
 // when not supplied; if it can't be resolved we fail toward RELEASE (never
-// charge a fee we can't justify against a real cutoff).
-async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = null, now = new Date() }) {
+// charge a fee we can't justify against a real cutoff). waiveFee is the
+// business-initiated escape hatch (WE cancelled — sick day, rain-out — not the
+// customer): the module policy charges the fee ONLY for customer-initiated
+// late cancels, so a waived cancel releases the hold unconditionally.
+async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = null, now = new Date(), waiveFee = false }) {
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { handled: false, reason: 'no_hold' };
+  if (waiveFee) {
+    return releaseCardHold({ scheduledServiceId, reason: 'admin_waive' });
+  }
   let start = serviceStart;
   if (!start) {
     try {
@@ -637,7 +649,9 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   if (start && isWithinCancelWindow({ hold, serviceStart: start, now })) {
     return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel' });
   }
-  return releaseCardHold({ scheduledServiceId, reason: 'cancel_outside_window' });
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
+  return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
 }
 
 // ── No-show fee settlement: refundable invoice + customer receipt ─────────

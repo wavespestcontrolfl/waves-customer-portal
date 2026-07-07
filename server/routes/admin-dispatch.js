@@ -1857,11 +1857,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
       // One-time card-on-file hold: a cancellation inside the window charges the
       // flat late-cancel fee against the saved card; outside it the hold is
-      // released free. Dark until ONE_TIME_CARD_HOLD; no-op when no hold exists.
-      // Best-effort — never block the committed status change.
+      // released free. waiveCardHoldFee (body) is the business-initiated escape
+      // hatch — WE cancelled, so the hold releases with no fee. Dark until
+      // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort — never
+      // block the committed status change.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+        await CardHolds.handleCardHoldCancellation({
+          scheduledServiceId: svc.id,
+          waiveFee: req.body?.waiveCardHoldFee === true,
+        });
       } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
 
       try {
