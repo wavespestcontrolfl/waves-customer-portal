@@ -294,13 +294,22 @@ function isDateStampFinding(finding) {
   return /\b(future|current|past|stale|placeholder|outdated|1970|epoch|today|publish\w*)\b/.test(b);
 }
 
-function restampFrontmatterDates(markdown, today = etDateString()) {
+// `published` is restamped ONLY when the caller knows the PR publishes a
+// brand-new post (includePublished) — on a refresh of an already-live page,
+// rewriting `published` to today would silently change the article's
+// original publication date. Freshness/review fields (updated /
+// technically_reviewed / fact_checked / modified) are safe to restamp on
+// either lane: the file IS being updated by this very fix.
+function restampFrontmatterDates(markdown, { today = etDateString(), includePublished = false } = {}) {
   let parsed;
   try { parsed = fm.parse(markdown); } catch (_) { return { markdown, changed: false }; }
   const data = parsed && parsed.data;
   if (!data || Object.keys(data).length === 0) return { markdown, changed: false };
   let changed = false;
-  for (const key of FRONTMATTER_DATE_FIELDS) {
+  const fields = includePublished
+    ? FRONTMATTER_DATE_FIELDS
+    : FRONTMATTER_DATE_FIELDS.filter((k) => k !== 'published');
+  for (const key of fields) {
     if (data[key] !== undefined && data[key] !== today) { data[key] = today; changed = true; }
   }
   // Service/location pages carry a datetime `modified` instead of `updated`;
@@ -639,13 +648,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Deterministic date-restamp carve-out: resolve date-stamp findings in code
   // (today ET), and only send the REMAINING findings to the body-only LLM fix.
-  // If the restamp changed nothing (dates already current), the findings were
-  // misclassified — leave them in the LLM list so the false-positive park
-  // path still applies.
+  // ctx.restampPublished — lane assertion that this PR publishes a BRAND-NEW
+  // post, which is what makes rewriting `published` truthful; without it only
+  // the freshness/review fields restamp. If the restamp changed nothing
+  // (dates already current), the findings were misclassified — leave them in
+  // the LLM list so the false-positive park path still applies.
   const dateFindings = findings.filter(isDateStampFinding);
   let baseline = file.content;
   if (dateFindings.length > 0) {
-    const restamp = restampFrontmatterDates(baseline);
+    const restamp = restampFrontmatterDates(baseline, { includePublished: ctx.restampPublished === true });
     if (restamp.changed) baseline = restamp.markdown;
   }
   const restamped = baseline !== file.content;
@@ -761,7 +772,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof onRemediated === 'function') {
     try {
       const body = String((fm.parse(fixed) || {}).content || '').trim();
-      await onRemediated({ markdown: fixed, body, newHead, round });
+      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped });
     } catch (e) {
       return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark);
     }
@@ -789,6 +800,9 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     prNumber: row.astro_pr_number,
     branch: row.astro_branch_name,
     slug: row.slug,
+    // Rows under the `publishing` claim are initial publishes (pages-poll's
+    // lane), so restamping `published` to the fix date is truthful here.
+    restampPublished: true,
     // Frontmatter `category` is often only the broad Astro value; pass the real
     // topic like the publisher does so FAQ-blocked-service etc. fire.
     service: [row.category, row.tag],
@@ -812,13 +826,28 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // publishing sweep or an admin republish can move the row (or repoint it
     // at a NEW PR) mid-flight — an id-only update would overwrite the current
     // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
-    onRemediated: async ({ body }) => {
+    onRemediated: async ({ markdown, body, datesRestamped }) => {
+      const patch = { content: body, updated_at: new Date() };
+      // When the deterministic date restamp is part of the committed fix,
+      // mirror the corrected dates into the row's DATE columns too —
+      // otherwise the PR merges with healed frontmatter while blog_posts
+      // still stores the corrupt 1970/future values, so admin/SEO reads and
+      // any later rebuild-from-row keep resurfacing them.
+      if (datesRestamped) {
+        let data = null;
+        try { data = (fm.parse(markdown) || {}).data || null; } catch (_) { data = null; }
+        if (data) {
+          if (data.published) patch.publish_date = data.published;
+          if (data.technically_reviewed) patch.technically_reviewed_at = data.technically_reviewed;
+          if (data.fact_checked) patch.fact_checked_at = data.fact_checked;
+        }
+      }
       const updated = await db('blog_posts').where({
         id: row.id,
         publish_status: 'publishing',
         astro_pr_number: row.astro_pr_number,
         astro_branch_name: row.astro_branch_name,
-      }).update({ content: body, updated_at: new Date() });
+      }).update(patch);
       if (!updated) throw new Error(`blog_posts row ${row.id} no longer matches the publishing claim / tracked PR (state moved during remediation)`);
     },
     onPark: async (reason) => {
@@ -853,6 +882,11 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // column and posts are .mdx); onPark left null — the run stays parked at
     // completed_pending_review and status='parked' stops re-remediation.
     slug: null,
+    // Only a brand-new publish may restamp `published` — refresh/rewrite
+    // lanes must never rewrite an existing post's publication date. (Those
+    // lanes park at validateAutonomousRunGates before any commit anyway;
+    // this keeps the invariant local instead of relying on that gate.)
+    restampPublished: (run && run.action_type) === 'new_supporting_blog',
     onPark: null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
