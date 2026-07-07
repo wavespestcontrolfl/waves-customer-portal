@@ -481,10 +481,18 @@ If no contradictions, return: { "contradictions": [] }`
         emailBody: smsMessage,
       });
 
-      await db('lawn_assessments').where({ id: assessmentId }).update({
-        notification_sent: true,
-        notification_sent_at: new Date(),
-      });
+      // Stamp only when a channel actually delivered — an unconditional
+      // stamp recorded "notified" even when the dispatcher sent nothing
+      // (email-preferring customers, blocked SMS), permanently hiding the
+      // miss because the notification_sent guard above never retries.
+      if (result?.sent) {
+        await db('lawn_assessments').where({ id: assessmentId }).update({
+          notification_sent: true,
+          notification_sent_at: new Date(),
+        });
+      } else {
+        logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); left unstamped for re-send`);
+      }
 
       return result;
     } catch (err) {
