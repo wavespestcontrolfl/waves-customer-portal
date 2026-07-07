@@ -52,6 +52,7 @@ import {
   Send,
   Newspaper,
   Bot,
+  Leaf,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags } from "../hooks/useFeatureFlag";
@@ -123,6 +124,10 @@ const NAV_SECTIONS = [
   {
     section: "Field & Equipment",
     items: [
+      // The standalone photo-scoring flow (/admin/lawn-assessment) survived the
+      // V2 shell cutover as a route but lost its nav entry — restore it so the
+      // upload → analyze → review-scores area is reachable again.
+      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/price-match", icon: Tags, label: "Price Match" },
