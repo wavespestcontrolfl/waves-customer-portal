@@ -84,9 +84,24 @@ describe('publicIdentificationLabel — confidence naming gate', () => {
     expect(hedged).toBe(true);
   });
 
-  test('contested high confidence never names plainly', () => {
-    const { label } = publicIdentificationLabel(contract('ghost-ant', 'high', true));
-    expect(label).not.toBe('Ghost Ants');
+  test('contested IDs collapse to the GROUP GENERIC at any confidence — never "Likely <species>"', () => {
+    const high = publicIdentificationLabel(contract('ghost-ant', 'high', true));
+    expect(high.label).toBe('an ant species');
+    expect(high.hedged).toBe(true);
+    expect(high.specificity).toBe('generic');
+    const moderate = publicIdentificationLabel(contract('ghost-ant', 'moderate', true));
+    expect(moderate.label).toBe('an ant species');
+    expect(moderate.specificity).toBe('generic');
+  });
+
+  test('inspection-first sign entries stay hedged even at uncontested high confidence', () => {
+    for (const slug of ['subterranean-termite', 'drywood-termite', 'rodent', 'bed-bug']) {
+      const { hedged, specificity } = publicIdentificationLabel(contract(slug, 'high'));
+      expect(hedged).toBe(true);
+      expect(specificity).toBe('named');
+    }
+    // Non-sign entries still name plainly at high confidence.
+    expect(publicIdentificationLabel(contract('ghost-ant', 'high')).hedged).toBe(false);
   });
 
   test('unmatched ID falls back to category generic', () => {
@@ -115,6 +130,28 @@ describe('buildPublicPestReport — egress allowlist', () => {
       ...overrides,
     };
   }
+
+  test('a generic-label report never leaks the species blurb', () => {
+    // Low confidence: the label degrades to "an ant species" — the about copy
+    // must not say "Ghost ants are…" and re-leak the withheld ID.
+    const low = buildPublicPestReport(rowFor('ghost-ant', 'low'));
+    expect(low.identified.label).toBe('an ant species');
+    expect(JSON.stringify(low)).not.toContain('Ghost ants');
+
+    // Contested high confidence collapses the same way.
+    const contestedContract = buildPestReportContract(identificationResult('ghost-ant', 'high'));
+    contestedContract.identification.contested = true;
+    const contested = buildPublicPestReport({
+      report_contract: JSON.stringify(contestedContract),
+      contact_snapshot: null,
+      address_snapshot: null,
+    });
+    expect(contested.identified.label).toBe('an ant species');
+    expect(JSON.stringify(contested)).not.toContain('Ghost ants');
+
+    // Named labels (plain or "Likely") still carry the library blurb.
+    expect(buildPublicPestReport(rowFor('ghost-ant', 'moderate')).about).toContain('Ghost ants');
+  });
 
   test('model free-text never reaches the public payload', () => {
     const json = JSON.stringify(buildPublicPestReport(rowFor('fire-ant')));
@@ -199,5 +236,51 @@ describe('buildPestTeaser — pre-capture payload withholds the ID', () => {
     expect(teaser.identified_teaser).toBe('We identified an insect.');
     expect(teaser.safety_flag).toBe(false);
     expect(teaser.identified_specific).toBe(false);
+  });
+});
+
+describe('aggregateIdentification — cross-photo vote', () => {
+  const { aggregateIdentification, LIBRARY_BY_SLUG } = _test;
+  const matched = (slug, confidence = 'high') => ({ entry: LIBRARY_BY_SLUG.get(slug), confidence, category: LIBRARY_BY_SLUG.get(slug).category });
+  const unmatched = (category) => ({ entry: null, confidence: 'low', category });
+
+  test('agreeing photos keep the winner at its best confidence', () => {
+    const id = aggregateIdentification([matched('ghost-ant'), matched('ghost-ant', 'moderate')]);
+    expect(id.entry.slug).toBe('ghost-ant');
+    expect(id.confidence).toBe('high');
+    expect(id.contested).toBe(false);
+  });
+
+  test('rival species votes contest the winner', () => {
+    const id = aggregateIdentification([matched('ghost-ant'), matched('fire-ant')]);
+    expect(id.contested).toBe(true);
+    expect(id.confidence).toBe('moderate');
+  });
+
+  test('an unmatched photo with a CONTRADICTING category contests the winner', () => {
+    const id = aggregateIdentification([matched('ghost-ant'), unmatched('rodent')]);
+    expect(id.contested).toBe(true);
+    expect(id.confidence).toBe('moderate');
+  });
+
+  test('an unmatched not-a-pest photo contests the winner', () => {
+    const id = aggregateIdentification([matched('ghost-ant'), unmatched('not_a_pest')]);
+    expect(id.contested).toBe(true);
+  });
+
+  test('an inconclusive (blurry/other) photo caps confidence WITHOUT contesting', () => {
+    const id = aggregateIdentification([matched('ghost-ant'), unmatched('other')]);
+    expect(id.contested).toBe(false);
+    expect(id.confidence).toBe('moderate'); // never plain-named from a mixed upload
+    const sameCategory = aggregateIdentification([matched('ghost-ant'), unmatched('insect')]);
+    expect(sameCategory.contested).toBe(false);
+    expect(sameCategory.confidence).toBe('moderate');
+  });
+
+  test('all-unmatched photos aggregate to a category-generic low-confidence result', () => {
+    const id = aggregateIdentification([unmatched('insect'), unmatched('other')]);
+    expect(id.entry).toBeNull();
+    expect(id.confidence).toBe('low');
+    expect(id.category).toBe('insect');
   });
 });

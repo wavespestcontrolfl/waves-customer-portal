@@ -220,6 +220,23 @@ app.use('/api/pay/statement', (req, res, next) => {
   }
   next();
 });
+// Dark photo-assessment funnels carry the same unobservable-when-dark
+// contract: while the gate is off the surface must read 404 even for an IP
+// that already exhausted the global /api/ limiter (a 429 would reveal it).
+app.use('/api/public/lawn-assessment', (req, res, next) => {
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+app.use('/api/public/pest-identifier', (req, res, next) => {
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -291,7 +308,11 @@ const photoAssessmentDailyLimiter = rateLimit({
     || !/^\/analyze\/?$/.test(req.path)
     || !require('./config/feature-gates').isEnabled(
       String(req.baseUrl || '').includes('pest-identifier') ? 'pestIdentifier' : 'lawnAssessmentMagnet',
-    ),
+    )
+    // Only requests that could reach a paid vision call burn the budget —
+    // malformed/empty floods and honeypot trips are rejected without a model
+    // call and must not 429 real prospects behind a shared IP.
+    || !require('./routes/public-lawn-assessment').isPlausibleAnalyzeBody(req.body),
 });
 
 // Body parsing

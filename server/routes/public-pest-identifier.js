@@ -160,9 +160,11 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
       return res.status(200).json({ ok: true });
     }
 
+    // Only a FAILED verification blocks — a verified token returns ok:true,
+    // enforced:true (same predicate as routes/lead-webhook.js).
     const turnstileToken = body.turnstile_token || body['cf-turnstile-response'];
     const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, resolveSubmitHost(req));
-    if (isEnabled('leadTurnstile') && turnstile.enforced) {
+    if (!turnstile.ok && isEnabled('leadTurnstile') && turnstile.enforced) {
       return res.status(403).json({ error: 'Verification failed. Please try again.' });
     }
 
@@ -236,7 +238,10 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
 
 function validateClaim(body = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'invalid_body' };
-  const claimToken = typeof body.claim_token === 'string' ? body.claim_token : '';
+  // Accept both spellings: /analyze returns the bearer as camelCase
+  // `claimToken`, so a client replaying the field it received must not 404.
+  const claimToken = typeof body.claim_token === 'string' ? body.claim_token
+    : (typeof body.claimToken === 'string' ? body.claimToken : '');
   if (!TOKEN_RE.test(claimToken)) return { ok: false, error: 'invalid_claim_token' };
 
   const firstName = cleanString(body.first_name, 80);
@@ -419,9 +424,12 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     setPublicPrivacyHeaders(res);
     const row = await loadSentIdentification(req.params.token);
     if (!row) return res.status(404).json({ error: 'Report not found' });
-    // Funnel-stage stamp: first successful report view (best-effort, set-once).
+    // Funnel-stage stamp: first successful report view. Intentionally
+    // fire-and-forget (void, .catch attached) — a metrics write must never
+    // add latency or failure to the customer's report load; the guarded
+    // update makes concurrent first views idempotent.
     if (!row.report_first_viewed_at) {
-      db('pest_identifications')
+      void db('pest_identifications')
         .where({ id: row.id })
         .whereNull('report_first_viewed_at')
         .update({ report_first_viewed_at: db.fn.now() })

@@ -172,9 +172,11 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
     }
 
     // Turnstile — verified here, enforced by the same gate as the lead webhook.
+    // Only a FAILED verification blocks (a verified token returns ok:true,
+    // enforced:true — same predicate as routes/lead-webhook.js).
     const turnstileToken = body.turnstile_token || body['cf-turnstile-response'];
     const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, resolveSubmitHost(req));
-    if (isEnabled('leadTurnstile') && turnstile.enforced) {
+    if (!turnstile.ok && isEnabled('leadTurnstile') && turnstile.enforced) {
       return res.status(403).json({ error: 'Verification failed. Please try again.' });
     }
 
@@ -264,7 +266,10 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
  */
 function validateClaim(body = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'invalid_body' };
-  const claimToken = typeof body.claim_token === 'string' ? body.claim_token : '';
+  // Accept both spellings: /analyze returns the bearer as camelCase
+  // `claimToken`, so a client replaying the field it received must not 404.
+  const claimToken = typeof body.claim_token === 'string' ? body.claim_token
+    : (typeof body.claimToken === 'string' ? body.claimToken : '');
   if (!CLAIM_TOKEN_RE.test(claimToken)) return { ok: false, error: 'invalid_claim_token' };
 
   const firstName = cleanString(body.first_name, 80);
@@ -430,11 +435,31 @@ router.post('/:id/claim', claimLimiter, async (req, res, next) => {
   }
 });
 
+/**
+ * Cheap plausibility check for the mount-level paid daily limiter (index.js).
+ * Only requests that could actually reach a paid vision call count against
+ * the shared 40/day budget — malformed floods, empty posts, and honeypot
+ * trips are rejected by the routes without a model call and must not burn
+ * the budget for a shared/NAT'd IP. (A verified-failed Turnstile still
+ * counts: that check is async and can't run in a limiter predicate.)
+ * Shape rules mirror the analyze validators in BOTH funnel routes.
+ */
+function isPlausibleAnalyzeBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (typeof body.fax_number === 'string' && body.fax_number.trim()) return false; // honeypot
+  const photos = Array.isArray(body.photos) ? body.photos.filter(Boolean) : [];
+  if (!photos.length || photos.length > MAX_PHOTOS) return false;
+  return photos.some((photo) => photo && typeof photo.data === 'string'
+    && photo.data.length > 0 && photo.data.length <= MAX_PHOTO_CHARS);
+}
+
 module.exports = router;
+module.exports.isPlausibleAnalyzeBody = isPlausibleAnalyzeBody;
 module.exports._test = {
   validateClaim,
   buildTeaser,
   buildLawnPricingSnapshot,
   LAWN_SIZE_BANDS,
   normalizePhotos,
+  isPlausibleAnalyzeBody,
 };

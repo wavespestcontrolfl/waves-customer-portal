@@ -39,13 +39,14 @@ mockDb.transaction = (cb) => {
 
 const mockGateState = { lawnAssessmentMagnet: true, leadTurnstile: false, pestIdentifier: false };
 let mockHoneypotTripped = false;
-let mockTurnstileEnforced = false;
+// Mirrors utils/turnstile contract: a VERIFIED token is { ok:true, enforced:true }.
+let mockTurnstileResult = { ok: true, enforced: false };
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => !!mockGateState[gate] }));
 jest.mock('../utils/turnstile', () => ({
-  verifyTurnstileToken: jest.fn(async () => ({ ok: !mockTurnstileEnforced, enforced: mockTurnstileEnforced })),
+  verifyTurnstileToken: jest.fn(async () => mockTurnstileResult),
 }));
 jest.mock('../utils/lead-abuse', () => ({
   isHoneypotTripped: () => mockHoneypotTripped,
@@ -100,7 +101,9 @@ const LADDER_RESULT = {
   findingsSource: 'multimodel',
   fallbackReason: null,
   photoAnalysis: null,
-  provenance: { challenge: { passed: true }, perceptionModel: 'gemini-3.5-flash', challengeModel: 'claude-opus-4-8', writerModel: null },
+  // Sentinel provenance values — model IDs live in server/config/models.js
+  // only (AGENTS.md); tests must not pin real model literals.
+  provenance: { challenge: { passed: true }, perceptionModel: 'perception-model-sentinel', challengeModel: 'challenge-model-sentinel', writerModel: null },
 };
 
 function analyzeBody(overrides = {}) {
@@ -143,7 +146,7 @@ beforeEach(() => {
   mockDiagnosticRow = null;
   mockUpdateResult = 1;
   mockHoneypotTripped = false;
-  mockTurnstileEnforced = false;
+  mockTurnstileResult = { ok: true, enforced: false };
   mockGateState.lawnAssessmentMagnet = true;
   mockGateState.leadTurnstile = false;
   Object.keys(inserts).forEach((k) => { inserts[k] = []; });
@@ -177,8 +180,8 @@ describe('POST /analyze', () => {
     });
   });
 
-  test('turnstile failure blocks when GATE_LEAD_TURNSTILE is on', async () => {
-    mockTurnstileEnforced = true;
+  test('turnstile FAILURE blocks when GATE_LEAD_TURNSTILE is on', async () => {
+    mockTurnstileResult = { ok: false, enforced: true };
     mockGateState.leadTurnstile = true;
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/public/lawn-assessment/analyze`, {
@@ -186,6 +189,18 @@ describe('POST /analyze', () => {
       });
       expect(res.status).toBe(403);
       expect(mockLadder).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a VERIFIED token passes with GATE_LEAD_TURNSTILE on (verified = ok:true, enforced:true)', async () => {
+    mockTurnstileResult = { ok: true, enforced: true };
+    mockGateState.leadTurnstile = true;
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/public/lawn-assessment/analyze`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(analyzeBody()),
+      });
+      expect(res.status).toBe(201);
+      expect(mockLadder).toHaveBeenCalled();
     });
   });
 
@@ -304,6 +319,19 @@ describe('POST /:id/claim', () => {
     });
   });
 
+  test('accepts the camelCase claimToken field the analyze response returned', async () => {
+    mockDiagnosticRow = analyzedRow();
+    await withServer(async (base) => {
+      const body = claimBody();
+      delete body.claim_token;
+      body.claimToken = CLAIM_TOKEN;
+      const res = await fetch(`${base}/api/public/lawn-assessment/${ROW_ID}/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(201);
+    });
+  });
+
   test('missing contact info is a 400', async () => {
     mockDiagnosticRow = analyzedRow();
     await withServer(async (base) => {
@@ -314,5 +342,25 @@ describe('POST /:id/claim', () => {
       });
       expect(res.status).toBe(400);
     });
+  });
+});
+
+describe('isPlausibleAnalyzeBody (paid daily-limiter predicate)', () => {
+  const { isPlausibleAnalyzeBody } = require('../routes/public-lawn-assessment');
+
+  test('accepts a body that could reach a paid vision call', () => {
+    expect(isPlausibleAnalyzeBody({ photos: [{ data: 'aGVsbG8=' }] })).toBe(true);
+  });
+
+  test('rejects malformed/empty/honeypot bodies so they never burn the budget', () => {
+    expect(isPlausibleAnalyzeBody(undefined)).toBe(false);
+    expect(isPlausibleAnalyzeBody(null)).toBe(false);
+    expect(isPlausibleAnalyzeBody({})).toBe(false);
+    expect(isPlausibleAnalyzeBody({ photos: [] })).toBe(false);
+    expect(isPlausibleAnalyzeBody({ photos: [{}] })).toBe(false);
+    expect(isPlausibleAnalyzeBody({ photos: [{ data: '' }] })).toBe(false);
+    expect(isPlausibleAnalyzeBody({ photos: Array.from({ length: 6 }, () => ({ data: 'aGVsbG8=' })) })).toBe(false);
+    expect(isPlausibleAnalyzeBody({ photos: [{ data: 'a'.repeat(6_000_001) }] })).toBe(false);
+    expect(isPlausibleAnalyzeBody({ photos: [{ data: 'aGVsbG8=' }], fax_number: 'bot' })).toBe(false);
   });
 });

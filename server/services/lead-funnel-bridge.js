@@ -95,7 +95,19 @@ function applyStagePredicate(query, target) {
 // `scopeRows` narrows the base query to the caller's lead row(s).
 function runStageUpdate(db, target, scopeRows) {
   const run = (handle) => applyStagePredicate(scopeRows(handle('ad_service_attribution')), target)
-    .update({ funnel_stage: target, updated_at: new Date() });
+    .update({
+      funnel_stage: target,
+      updated_at: new Date(),
+      // Lead-only funnels (e.g. the photo-assessment claims) create their
+      // attribution row BEFORE a customer exists, and revenue sync loads rows
+      // by customer_id only (ad-attribution-sync) — so stamp the lead's
+      // customer onto the row at every stage advance. COALESCE keeps an
+      // already-stamped customer_id untouched, and rows whose lead has no
+      // customer yet simply stay NULL until a later transition.
+      customer_id: handle.raw(
+        'COALESCE(ad_service_attribution.customer_id, (SELECT l.customer_id FROM leads l WHERE l.id = ad_service_attribution.lead_id))',
+      ),
+    });
   if (db && db.isTransaction && typeof db.transaction === 'function') {
     return db.transaction((sp) => run(sp));
   }

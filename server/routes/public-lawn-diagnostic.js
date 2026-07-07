@@ -246,10 +246,12 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     setPrivacyHeaders(res);
     const row = await loadSentDiagnostic(req.params.token);
     if (!row) return res.status(404).json({ error: 'Report not found' });
-    // Funnel-stage stamp: first successful report view (best-effort, set-once —
-    // the guarded update makes concurrent first views idempotent).
+    // Funnel-stage stamp: first successful report view. Intentionally
+    // fire-and-forget (void, .catch attached) — a metrics write must never
+    // add latency or failure to the customer's report load; the guarded
+    // update makes concurrent first views idempotent.
     if (!row.report_first_viewed_at) {
-      db('lawn_diagnostics')
+      void db('lawn_diagnostics')
         .where({ id: row.id })
         .whereNull('report_first_viewed_at')
         .update({ report_first_viewed_at: db.fn.now() })

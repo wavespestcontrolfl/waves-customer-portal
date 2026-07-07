@@ -505,6 +505,52 @@ function mergeModelResults(claude, gemini) {
 }
 
 /**
+ * Cross-photo aggregation: the most-supported library entry wins the vote.
+ * Unmatched photos count too — one that resolved to no entry but a
+ * CONTRADICTING category (or not-a-pest) disputes the winner just like a
+ * rival species vote (→ contested, which the egress layer collapses to a
+ * generic label); an inconclusive photo (category 'other', or the winner's
+ * own category — e.g. one sharp shot + one blurry one) doesn't dispute the
+ * ID but caps confidence at moderate so a mixed upload can never publish a
+ * plainly-named species.
+ */
+function aggregateIdentification(perPhoto) {
+  const votes = new Map();
+  for (const result of perPhoto) {
+    if (!result.entry) continue;
+    const tally = votes.get(result.entry.slug) || { entry: result.entry, count: 0, best: 'low' };
+    tally.count += 1;
+    if (CONFIDENCE_RANK[result.confidence] > CONFIDENCE_RANK[tally.best]) tally.best = result.confidence;
+    votes.set(result.entry.slug, tally);
+  }
+
+  if (!votes.size) {
+    const categories = perPhoto.map((r) => r.category);
+    const notAPest = categories.every((c) => c === 'not_a_pest');
+    return {
+      entry: null,
+      confidence: 'low',
+      category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
+      contested: false,
+    };
+  }
+
+  const ranked = [...votes.values()].sort((x, y) => y.count - x.count || CONFIDENCE_RANK[y.best] - CONFIDENCE_RANK[x.best]);
+  const winner = ranked[0];
+  const unmatched = perPhoto.filter((result) => !result.entry);
+  const contradicting = unmatched.some((result) => result.category === 'not_a_pest'
+    || (result.category !== 'other' && result.category !== winner.entry.category));
+  const inconclusive = unmatched.length > 0 && !contradicting;
+  const contested = ranked.length > 1 || contradicting;
+  return {
+    entry: winner.entry,
+    confidence: (contested || inconclusive) ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
+    category: winner.entry.category,
+    contested,
+  };
+}
+
+/**
  * Identify from a set of photos (the funnel sends 1–5 of the same subject).
  * Per-photo dual-vision, then a cross-photo vote: the most-supported library
  * entry wins; cross-photo disagreement caps confidence at moderate.
@@ -528,36 +574,7 @@ async function identifyPest(photos = []) {
 
   if (!perPhoto.length) return { ok: false, reason: 'vision_unavailable' };
 
-  const votes = new Map();
-  for (const result of perPhoto) {
-    if (!result.entry) continue;
-    const tally = votes.get(result.entry.slug) || { entry: result.entry, count: 0, best: 'low' };
-    tally.count += 1;
-    if (CONFIDENCE_RANK[result.confidence] > CONFIDENCE_RANK[tally.best]) tally.best = result.confidence;
-    votes.set(result.entry.slug, tally);
-  }
-
-  let identification;
-  if (votes.size) {
-    const ranked = [...votes.values()].sort((x, y) => y.count - x.count || CONFIDENCE_RANK[y.best] - CONFIDENCE_RANK[x.best]);
-    const winner = ranked[0];
-    const contested = ranked.length > 1;
-    identification = {
-      entry: winner.entry,
-      confidence: contested ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
-      category: winner.entry.category,
-      contested,
-    };
-  } else {
-    const categories = perPhoto.map((r) => r.category);
-    const notAPest = categories.every((c) => c === 'not_a_pest');
-    identification = {
-      entry: null,
-      confidence: 'low',
-      category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
-      contested: false,
-    };
-  }
+  const identification = aggregateIdentification(perPhoto);
 
   return {
     ok: true,
@@ -600,21 +617,32 @@ function buildPestReportContract(result) {
 // ── Public egress (mirrors buildPublicLawnReport's allowlist discipline) ──────
 
 /**
- * Customer-facing display label, confidence-gated:
- *   high + matched          → the library label, stated plainly
- *   moderate + matched      → "likely" phrasing
- *   low / unmatched         → group- or category-generic
- * Termite/rodent/bed-bug style "sign" entries always keep their hedged label.
+ * Customer-facing display label, confidence-gated. `specificity` says whether
+ * the label names the library entry ('named') or collapsed to a group/category
+ * generic ('generic') — the report uses it to gate the species blurb so a
+ * withheld ID never leaks through the descriptive copy.
+ *   high + matched + uncontested → the library label, stated plainly
+ *   moderate + matched           → "likely" phrasing (still named, hedged)
+ *   contested / low / unmatched  → group- or category-generic
+ * Inspection-first entries (termite/rodent/bed-bug style signs) stay hedged
+ * at ANY confidence — a photo ID is suggestive, the inspection confirms; the
+ * API must never invite confirmed/WDO-style rendering.
  */
 function publicIdentificationLabel(contract) {
   const ident = (contract && contract.identification) || {};
   const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
   if (!item) {
-    return { label: CATEGORY_GENERIC[ident.category] || CATEGORY_GENERIC.other, hedged: true };
+    return { label: CATEGORY_GENERIC[ident.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
   }
-  if (ident.confidence === 'high' && !ident.contested) return { label: item.label, hedged: false };
-  if (ident.confidence === 'moderate') return { label: `Likely ${item.label}`, hedged: true };
-  return { label: GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category] || CATEGORY_GENERIC.other, hedged: true };
+  // Conflicting cross-photo IDs never name a species, whatever the confidence.
+  if (ident.contested) {
+    return { label: GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
+  }
+  if (ident.confidence === 'high') {
+    return { label: item.label, hedged: item.inspection_required === true, specificity: 'named' };
+  }
+  if (ident.confidence === 'moderate') return { label: `Likely ${item.label}`, hedged: true, specificity: 'named' };
+  return { label: GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
 }
 
 const NEXT_STEPS = {
@@ -642,7 +670,7 @@ function buildPublicPestReport(row = {}) {
   const contract = parseJson(row.report_contract, {});
   const ident = contract.identification || {};
   const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
-  const { label, hedged } = publicIdentificationLabel(contract);
+  const { label, hedged, specificity } = publicIdentificationLabel(contract);
   const urgency = clampEnum(contract.urgency, URGENCIES, 'low');
   const service = contract.service || {};
   const notAPest = ident.category === 'not_a_pest' || (item && item.category === 'not_a_pest');
@@ -673,8 +701,13 @@ function buildPublicPestReport(row = {}) {
       disease_vector: !!safety.disease_vector,
       structural_threat: !!safety.structural_threat,
     },
-    // Library-authored, static copy — never model text.
-    about: item ? item.customer_blurb : 'We want a closer look at this one — the photo doesn’t show enough detail for a confident ID, and our team reviews every submission personally.',
+    // Library-authored, static copy — never model text. The species blurb is
+    // shown ONLY when the label names the entry ('named'): when the label
+    // collapsed to a generic ("an ant species"), the blurb must not leak the
+    // withheld ID ("Ghost ants are…").
+    about: item && specificity === 'named'
+      ? item.customer_blurb
+      : 'We want a closer look at this one — the photo doesn’t show enough detail for a confident ID, and our team reviews every submission personally.',
     next_step: notAPest ? null : NEXT_STEPS[urgency] || NEXT_STEPS.low,
     recommendation: notAPest ? null : {
       service_label: service.label || 'General Pest Control',
@@ -728,6 +761,7 @@ module.exports = {
     normalizeName,
     lowerConfidenceOf,
     downgrade,
+    aggregateIdentification,
     LIBRARY_BY_SLUG,
     GROUP_GENERIC,
     CATEGORY_GENERIC,
