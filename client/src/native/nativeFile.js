@@ -10,9 +10,27 @@
  * Files, AirDrop, Mail, and (on iOS) Print. Web builds never load the
  * plugins: both imports are dynamic behind isNativeApp().
  */
+import { Capacitor } from '@capacitor/core';
 import { isNativeApp } from './platform';
 
 export { isNativeApp };
+
+/**
+ * True only when the running BINARY has the Filesystem + Share plugins
+ * compiled in. The shell loads this JS live from the portal
+ * (capacitor.config server.url), so already-installed App Store builds
+ * execute new bundles without the new plugins — for them every entry
+ * point here must return false and let callers keep their legacy path,
+ * not throw "plugin not implemented".
+ */
+export function canSaveNative() {
+  if (!isNativeApp()) return false;
+  try {
+    return Capacitor.isPluginAvailable('Filesystem') && Capacitor.isPluginAvailable('Share');
+  } catch {
+    return false;
+  }
+}
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -42,11 +60,12 @@ export function safeFileName(name, fallback = 'Waves_Document.pdf') {
 
 /**
  * Save a Blob into the app cache and open the OS share sheet on it.
- * Returns false on web (caller keeps its browser path), true once the
- * share sheet has been offered (including when the customer dismisses it).
+ * Returns false on web AND on native binaries without the plugins (caller
+ * keeps its legacy path), true once the share sheet has been offered
+ * (including when the customer dismisses it).
  */
 export async function saveBlobNative(blob, fileName) {
-  if (!isNativeApp()) return false;
+  if (!canSaveNative()) return false;
   const { Filesystem, Directory } = await import('@capacitor/filesystem');
   const { Share } = await import('@capacitor/share');
   const path = safeFileName(fileName);
@@ -67,7 +86,7 @@ export async function saveBlobNative(blob, fileName) {
  * Returns false on web.
  */
 export async function saveUrlNative(url, fileName) {
-  if (!isNativeApp()) return false;
+  if (!canSaveNative()) return false;
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
   let token = '';

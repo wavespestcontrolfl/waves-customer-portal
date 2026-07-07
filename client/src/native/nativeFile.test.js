@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { safeFileName, saveBlobNative, saveUrlNative } from './nativeFile';
+import { canSaveNative, safeFileName, saveBlobNative, saveUrlNative } from './nativeFile';
 
 describe('nativeFile', () => {
+  it('canSaveNative is false on web — anchor intercepts must leave browser taps alone', () => {
+    expect(canSaveNative()).toBe(false);
+  });
+
   it('safeFileName strips path separators and reserved characters', () => {
     expect(safeFileName('../../etc/passwd')/*, path traversal */).toBe('.._.._etc_passwd');
     expect(safeFileName('WDO Report: 7/14?.pdf')).toBe('WDO Report_ 7_14_.pdf');

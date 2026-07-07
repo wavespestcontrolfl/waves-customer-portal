@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { isNativeApp, saveUrlNative } from '../native/nativeFile';
+import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
@@ -1774,7 +1774,9 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
                 trackReportEvent(token, 'pdf_downloaded');
                 // In the Capacitor shell an <a download> dead-ends the
                 // webview — route through the native share sheet (F-046).
-                if (isNativeApp()) {
+                // canSaveNative: old installed binaries run this JS without
+                // the plugins — leave their legacy tap behavior alone.
+                if (canSaveNative()) {
                   e.preventDefault();
                   saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
                     .catch(() => window.alert('Could not save the PDF. Please try again.'));
@@ -4565,8 +4567,9 @@ function LegacyReport({ data, token, glass = false }) {
             download
             data-glass-accent={glass ? '' : undefined}
             onClick={(e) => {
-              // Capacitor webview: <a download> dead-ends — share sheet instead.
-              if (isNativeApp()) {
+              // Capacitor webview: <a download> dead-ends — share sheet
+              // instead (old binaries without the plugins keep legacy taps).
+              if (canSaveNative()) {
                 e.preventDefault();
                 saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
                   .catch(() => window.alert('Could not save the PDF. Please try again.'));

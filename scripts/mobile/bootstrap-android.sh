@@ -25,7 +25,8 @@ echo "==> 1/5  Installing Capacitor deps (pinning to latest majors)…"
 npm install \
   @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest \
   @capacitor/push-notifications@latest @capacitor/app@latest \
-  @capacitor/status-bar@latest @capacitor/splash-screen@latest
+  @capacitor/status-bar@latest @capacitor/splash-screen@latest \
+  @capacitor/filesystem@latest @capacitor/share@latest
 
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build

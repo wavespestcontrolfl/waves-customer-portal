@@ -79,7 +79,7 @@
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useGlassSurface } from '../glass/glass-engine';
-import { isNativeApp, saveUrlNative } from '../native/nativeFile';
+import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -1966,8 +1966,9 @@ export default function PayPageV2() {
                 href={`${API_BASE}/pay/${token}/invoice.pdf`}
                 onClick={(e) => {
                   // Capacitor webview: a bare PDF navigation replaces the SPA
-                  // with no back control — share sheet instead (F-046).
-                  if (isNativeApp()) {
+                  // with no back control — share sheet instead (F-046). Old
+                  // binaries without the plugins keep the legacy navigation.
+                  if (canSaveNative()) {
                     e.preventDefault();
                     saveUrlNative(`${API_BASE}/pay/${token}/invoice.pdf`, 'Waves_Invoice.pdf')
                       .catch(() => window.alert('Could not save the PDF. Please try again.'));

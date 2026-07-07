@@ -24,7 +24,8 @@ echo "==> 1/5  Installing Capacitor deps (pinning to latest majors)…"
 npm install \
   @capacitor/core@latest @capacitor/cli@latest @capacitor/ios@latest \
   @capacitor/push-notifications@latest @capacitor/app@latest \
-  @capacitor/status-bar@latest @capacitor/splash-screen@latest
+  @capacitor/status-bar@latest @capacitor/splash-screen@latest \
+  @capacitor/filesystem@latest @capacitor/share@latest
 
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build
@@ -98,9 +99,47 @@ if [ -f "$PLIST" ]; then
   echo "==> Info.plist usage strings set (Face ID, camera, photo library R/W) ✓"
 fi
 
+# @capacitor/filesystem touches file-timestamp APIs — Apple requires the app
+# to declare NSPrivacyAccessedAPICategoryFileTimestamp (reason C617.1) in a
+# privacy manifest or App Review rejects the binary (Capacitor 7 docs).
+# Idempotent: written once; on the FIRST bootstrap after this was introduced
+# the file must also be added to the App target in Xcode (manual step below).
+PRIVACY="ios/App/App/PrivacyInfo.xcprivacy"
+if [ ! -f "$PRIVACY" ]; then
+  cat > "$PRIVACY" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSPrivacyAccessedAPITypes</key>
+  <array>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array>
+        <string>C617.1</string>
+      </array>
+    </dict>
+  </array>
+  <key>NSPrivacyCollectedDataTypes</key>
+  <array/>
+  <key>NSPrivacyTracking</key>
+  <false/>
+</dict>
+</plist>
+PLIST
+  echo "==> PrivacyInfo.xcprivacy written (Filesystem file-timestamp declaration) ✓"
+else
+  echo "==> PrivacyInfo.xcprivacy already present ✓"
+fi
+
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
 cat <<'NOTES'
+   • If PrivacyInfo.xcprivacy is new this run: File → Add Files to "App"…
+     → select App/PrivacyInfo.xcprivacy → check "App" target membership
+     (required for the Filesystem plugin's file-timestamp declaration).
    • Signing & Capabilities → select your Team (bundle id: com.wavespestcontrol.portal)
    • + Capability → Push Notifications
    • + Capability → Background Modes → check "Remote notifications"
