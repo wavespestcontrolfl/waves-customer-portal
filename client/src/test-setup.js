@@ -40,3 +40,37 @@ if (typeof window !== 'undefined' && !window.IntersectionObserver) {
   window.IntersectionObserver = IntersectionObserverStub;
   globalThis.IntersectionObserver = IntersectionObserverStub;
 }
+
+// jsdom in this runner exposes a localStorage whose methods are not callable
+// (localStorage.getItem is not a function), which breaks any component that
+// reads it on mount — #2463's NotificationBell specs shipped red on main
+// because of this. Individual suites already work around it per-file with
+// vi.stubGlobal (ReportViewPage.render.test.jsx et al); provide a functional
+// in-memory default here so a fresh test file doesn't inherit the trap.
+// Guarded: only installs when the real one is unusable, and a suite that
+// stubs its own localStorage still wins (vi.stubGlobal overrides globalThis).
+if (typeof window !== 'undefined') {
+  let usable = false;
+  try {
+    usable = typeof window.localStorage?.getItem === 'function';
+  } catch {
+    usable = false; // jsdom can throw SecurityError on opaque origins
+  }
+  if (!usable) {
+    const store = new Map();
+    const localStorageShim = {
+      getItem: (k) => (store.has(String(k)) ? store.get(String(k)) : null),
+      setItem: (k, v) => { store.set(String(k), String(v)); },
+      removeItem: (k) => { store.delete(String(k)); },
+      clear: () => { store.clear(); },
+      key: (i) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    };
+    // Plain assignment throws (read-only property in this environment) —
+    // defineProperty is required for both targets.
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: localStorageShim });
+    if (globalThis !== window) {
+      Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: localStorageShim });
+    }
+  }
+}
