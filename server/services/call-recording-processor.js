@@ -311,6 +311,31 @@ function referrerNameFromExtracted(extracted = {}) {
   return raw.slice(0, 100); // sane cap for a name/'unnamed' (detail is clamped again at write)
 }
 
+// Additional properties discussed on the call (multi-property callers: a
+// landlord's rental + home, two units, a second house). Prefer the V1
+// extraction's normalized entries; fall back to the V2 extraction's
+// property.additional_properties (mapped to the same flat shape). Both sources
+// were normalized/filtered upstream, so entries here always carry a street.
+function resolveCallAdditionalProperties(extracted = {}, v2Extraction = null) {
+  const v1Entries = Array.isArray(extracted.additional_properties) ? extracted.additional_properties : [];
+  if (v1Entries.length) return v1Entries;
+  const { mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
+  return mapAdditionalPropertiesToLegacy(v2Extraction?.property?.additional_properties);
+}
+
+// Quote signals from EITHER extractor. quote_promised means the agent committed
+// to send a quote AFTER the call (work still owed) — it keeps the lead open in
+// the pipeline even when an appointment was also booked, and fires the
+// quote-promised admin notification. quote_requested is informational (stored
+// on the lead) and never changes routing on its own.
+function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
+  const svc = v2Extraction?.service_request || {};
+  return {
+    quoteRequested: extracted.quote_requested === true || svc.quote_requested === true,
+    quotePromised: extracted.quote_promised === true || svc.quote_promised === true,
+  };
+}
+
 // A lead is "qualified" only once we've actually captured the contact info the
 // office needs to work it: first + last name, a service street address, and an
 // email. Phone is implicit (caller ID). Evaluate against the MERGED record
@@ -457,10 +482,58 @@ async function findReusableCallLead(database, { phone, customerId, workableUnnam
 // booking txn would leave it aborted after a SQL error and doom the COMMIT,
 // rolling back the booking. The savepoint contains a conversion failure to
 // the conversion alone; the booking still commits.
-async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid }) {
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false }) {
   if (!leadId) return false;
   try {
     return await trx.transaction(async (inner) => {
+      // Quote still owed (the agent promised to send an estimate after the
+      // call): the booked appointment does NOT close the deal. Claim the lead
+      // for the customer so it can't be reused elsewhere, log the booking on
+      // its timeline, but leave the status OPEN so it stays in the leads
+      // pipeline until the quote is actually sent/worked. The customer is
+      // deliberately NOT promoted to 'won' either — their pipeline_stage keeps
+      // mirroring the open lead.
+      if (keepOpenForQuote) {
+        const ownedOrUnclaimedOpen = (q) =>
+          q.whereNull('customer_id').orWhere('customer_id', customerId);
+        // The reused lead can carry a CLOSED status (lost / unresponsive /
+        // disqualified — findReusableCallLead's customer-attached path doesn't
+        // filter them). "Stays open for the quote" must mean VISIBLY open:
+        // reopen those to 'new' in the same claim write, or the promised
+        // quote hides in a closed lead the pipeline view never shows.
+        const currentLead = await inner('leads')
+          .where({ id: leadId })
+          .whereNotIn('status', ['won', 'duplicate'])
+          .where(ownedOrUnclaimedOpen)
+          .first('id', 'status');
+        if (!currentLead) return false;
+        const OPEN_LEAD_STATUSES = new Set(['new', 'contacted', 'estimate_sent', 'estimate_viewed']);
+        const claimUpdates = { customer_id: customerId, updated_at: new Date() };
+        if (!OPEN_LEAD_STATUSES.has(String(currentLead.status || '').toLowerCase())) {
+          claimUpdates.status = 'new';
+        }
+        const claimed = await inner('leads')
+          .where({ id: leadId })
+          .whereNotIn('status', ['won', 'duplicate'])
+          .where(ownedOrUnclaimedOpen)
+          .update(claimUpdates);
+        if (claimed) {
+          await inner('lead_activities').insert({
+            lead_id: leadId,
+            activity_type: 'appointment_booked',
+            description: 'Appointment booked by phone — lead kept OPEN: agent promised to send a quote after the call',
+            performed_by: 'system',
+            metadata: JSON.stringify({
+              customerId,
+              triggerSource: 'appointment_booked_quote_pending',
+              scheduledServiceId,
+              callSid,
+            }),
+          });
+        }
+        logger.info(`[call-proc] Lead ${leadId} kept open (quote promised) despite phone booking for ${callSid}`);
+        return false;
+      }
       // Ownership guard: leadId can come from the phone-only existing-lead
       // lookup, and a caller phone can be shared across leads. Only a lead
       // that is unclaimed (customer_id NULL) or already belongs to the
@@ -1536,6 +1609,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "city": "string or null — must be a Florida city",
   "state": "FL",
   "zip": "string or null",
+  "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -1549,10 +1623,36 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "lead_quality": "hot/warm/cold/spam",
   "matched_service": "best match from: ${matchedServiceList}, or null — prefer the MOST SPECIFIC service that fits (e.g. a German/kitchen cockroach infestation cleanout is Cockroach Control Service, not General Pest Control)",
   "quoted_price": number or null,
+  "quote_requested": true/false,
+  "quote_promised": true/false,
   "follow_up_visit_mentioned": true/false,
   "follow_up_date_time": "same ISO format as preferred_date_time, or null",
   "referred_by": "if the caller EXPLICITLY says a friend / neighbor / existing customer referred or recommended them, the referrer's name — or 'unnamed' if they say they were referred but don't name who. Else null."
 }
+
+IMPORTANT — multiple properties (address_line1 vs additional_properties):
+- When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), address_line1/city/zip hold the PRIMARY property and EVERY other property goes in additional_properties — never drop one, never merge two addresses into one.
+- Primary = the property the caller treats as their main one (owner-occupied beats rental; the booked-visit property beats an unbooked one; else the first address given).
+- When the caller says a second property has the "same" city/ZIP/community as the first ("same zip and everything"), RESOLVE it: copy the stated city/ZIP onto that entry.
+- is_rental: true when the caller says the property is a rental, investment property, tenant-occupied, or Airbnb/short-term rental.
+- additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home.
+
+IMPORTANT — quote_requested / quote_promised (drives the sales pipeline):
+- quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
+- quote_promised: true ONLY when the AGENT commits to send a quote/estimate AFTER the call ("we'll send you a quote this afternoon", "I'll email you an estimate", "we'll text you pricing"). A price merely spoken on the call is NOT a promised quote. This field means WORK IS STILL OWED to the caller after hangup — set it even when an appointment was also booked.
+
+IMPORTANT — assessments vs formal inspections (service matching):
+- A caller who SUSPECTS a pest problem or wants someone to come look, diagnose, or check ("I think I have termites", "something is eating my lawn", "can someone come take a look") matches "Waves Assessment" — NOT a formal inspection service.
+- "WDO Inspection Service" is ONLY for an explicitly requested wood-destroying-organism REPORT: real-estate sale/closing/refinance, lender or VA requirement, "termite letter"/"clearance letter", or the caller literally asks for a WDO inspection.
+- The Pre-Slab Termidor rule above still wins for pre-construction/soil-treatment requests.
+
+IMPORTANT — transcript reliability (the transcript is evidence, not truth):
+- CORRECTIONS: when the caller corrects themselves ("it's 555-2091 — sorry, no, 555-2901"), the LAST clearly confirmed value wins. Apply this to every field: phone, address, date, time, email, service.
+- FINAL OUTCOME WINS: in a long call the plan can change ("Tuesday... actually let's do Wednesday", cancel → reschedule). Extract the FINAL agreed state at hangup, not an earlier abandoned one.
+- NEGATION: read carefully around "not/don't/never" — "I do NOT want to cancel" is not a cancellation. A missed negation reverses the meaning; when a negation makes intent unclear, use the more conservative value.
+- WHO SAID IT: only the CALLER's words establish agreement, consent, or a request. An agent reading a script ("you can cancel any time"), suggesting, or summarizing is not the caller agreeing. "Yeah, that sounds fine" only confirms what the caller was directly responding to.
+- SIMILAR-SOUNDING NUMBERS: fifteen/fifty, "two oh five"/"205", B/D/P/T/V letters — when the transcript makes a number or spelled letter genuinely ambiguous and it isn't confirmed elsewhere in the call, return null rather than guess.
+- MENTIONED ≠ AGREED: something discussed hypothetically ("if it comes back you could do quarterly") was not requested, booked, or purchased.
 
 IMPORTANT — referred_by (word-of-mouth attribution):
 - Set referred_by ONLY on an explicit referral: "my neighbor Jane told me to call", "a friend recommended you", "you treat my sister's house and she said to call". Use the referrer's name if stated, else "unnamed".
@@ -2842,6 +2942,36 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Multi-property call: the extractors carry EVERY property discussed on the
+    // call (primary in the flat address fields, the rest in additional_properties).
+    // Quote signals ride the same extractions. Resolved once here — used by the
+    // advisory triage below, the customer_properties persistence, the lead
+    // enrichment, and the booking's lead-conversion decision.
+    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2Result?.extraction);
+    const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
+      resolveCallQuoteSignals(extracted, v2Result?.extraction);
+
+    // Advisory review signal for EVERY multi-property call (new customers
+    // included — the returning-caller differs-check below can't see a brand-new
+    // customer whose two addresses arrived on one call, which is exactly the
+    // case that used to drop the second property silently).
+    if (callAdditionalProps.length && !bridgeNeedsConfirmation.includes('second_service_address')) {
+      bridgeNeedsConfirmation.push('second_service_address');
+      try {
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'second_service_address',
+            extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+            severity: 'advisory',
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      } catch (triageErr) {
+        logger.warn(`[call-proc-bridge] multi-property triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    }
+
     // Lightweight multi-property signal: a returning caller gave a service
     // address that differs from the one already on their customer record (the
     // one-address-per-customer model can't hold both, and the upsert above only
@@ -2991,6 +3121,29 @@ const CallRecordingProcessor = {
             state: extracted.state,
             zip: extracted.zip,
             occupancyType: isRental ? 'rental_investment' : 'unknown',
+            source: 'call_pipeline',
+          });
+        }
+        // Every ADDITIONAL property discussed on the call (a landlord's second
+        // rental, another unit, a second house) is recorded as a secondary
+        // property. City + ZIP are required so the dedup key matches a later
+        // full-address call — the extraction prompt resolves "same zip and
+        // everything" onto each entry, so a complete entry is the normal case;
+        // an incomplete one still surfaces via the advisory triage flag above.
+        // recordCallProperty dedups on the full address key, so reprocessing a
+        // call (or a repeat caller) never duplicates a property.
+        for (const extra of callAdditionalProps) {
+          const extraCity = String(extra.city || '').trim();
+          const extraZip = String(extra.zip || '').trim();
+          if (!extraCity || !extraZip) continue;
+          await customerProperties.recordCallProperty({
+            customerId,
+            address_line1: extra.address_line1,
+            address_line2: extra.address_line2 || null,
+            city: extraCity,
+            state: extra.state || extracted.state,
+            zip: extraZip,
+            occupancyType: (extra.is_rental || isRental) ? 'rental_investment' : 'unknown',
             source: 'call_pipeline',
           });
         }
@@ -3302,6 +3455,9 @@ const CallRecordingProcessor = {
             ...(extracted.is_voicemail ? { voicemail: true } : {}),
             ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
             ...(mergedNeedsConfirmation.length ? { needs_confirmation: mergedNeedsConfirmation } : {}),
+            ...(callQuoteRequested ? { quote_requested: true } : {}),
+            ...(callQuotePromised ? { quote_promised: true } : {}),
+            ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
@@ -3318,6 +3474,30 @@ const CallRecordingProcessor = {
           // statuses are excluded from reuse upstream on the recovery path
           // and never reopened here).
           if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
+          // Quote promised on the call: stamp a same-day follow-up deadline so
+          // the pipeline surfaces the owed quote (agent said "we'll send it
+          // this afternoon"). Before 5 PM ET → today 5 PM; after → tomorrow
+          // 10 AM. Never moves an EARLIER existing follow-up later.
+          if (callQuotePromised) {
+            try {
+              const nowET = new Date();
+              const todayFive = parseETDateTime(`${etDateString(nowET)}T17:00`);
+              let quoteDue = todayFive;
+              if (!(quoteDue instanceof Date) || isNaN(quoteDue.getTime()) || quoteDue <= nowET) {
+                const tomorrow = new Date(nowET.getTime() + 24 * 60 * 60 * 1000);
+                quoteDue = parseETDateTime(`${etDateString(tomorrow)}T10:00`);
+              }
+              const existingFollowUp = current?.next_follow_up_at ? new Date(current.next_follow_up_at) : null;
+              // Only PULL IN the follow-up (or set one where none exists) —
+              // an existing earlier or already-overdue follow-up stays put.
+              if (quoteDue instanceof Date && !isNaN(quoteDue.getTime())
+                  && (!existingFollowUp || isNaN(existingFollowUp.getTime()) || existingFollowUp > quoteDue)) {
+                leadUpdates.next_follow_up_at = quoteDue;
+              }
+            } catch (dueErr) {
+              logger.warn(`[call-proc] quote-due follow-up stamp skipped: ${dueErr.message}`);
+            }
+          }
           leadUpdates.updated_at = new Date();
           // findReusableCallLead already excludes a lead owned by ANOTHER
           // customer from the lookup, so `current` is never foreign here. The
@@ -3363,6 +3543,32 @@ const CallRecordingProcessor = {
                 : {}),
             }),
           }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+
+          // The agent promised to send a quote after the call — that promise
+          // has no artifact anywhere (no estimate exists yet), so surface it
+          // as an admin notification with the deadline. Without this the
+          // promise lives only in the recording and dies if nobody remembers
+          // (this is exactly what happened on real multi-property quote calls).
+          if (callQuotePromised && enriched) {
+            try {
+              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+                .filter(Boolean)
+                .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
+              const servicesText = extracted.matched_service || extracted.requested_service || 'service discussed on the call';
+              const propertyCount = 1 + callAdditionalProps.length;
+              await require('./notification-service').notifyAdmin(
+                'lead',
+                'Quote promised on call — send it',
+                `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — the lead stays open in the pipeline until it goes out.`,
+                {
+                  link: `/admin/leads?lead=${leadId}`,
+                  metadata: { leadId, callSid: call.twilio_call_sid, quote_promised: true, property_count: propertyCount },
+                },
+              );
+            } catch (notifyErr) {
+              logger.warn(`[call-proc] quote-promised admin notify failed: ${notifyErr.message}`);
+            }
+          }
         }
 
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
@@ -3434,6 +3640,10 @@ const CallRecordingProcessor = {
       // V2-approved booking.
       extracted.specific_service_name = v2Flat.specific_service_name || null;
       extracted.quoted_price = typeof v2Flat.quoted_price === 'number' ? v2Flat.quoted_price : null;
+      // Quote flags are NOT adopted here: they were already resolved as the
+      // union of both extractors (resolveCallQuoteSignals) before the lead
+      // writes ran, and a V2 null/false must not clear a V1 quote promise the
+      // office was already notified about.
       extracted.follow_up_visit_mentioned = v2Flat.follow_up_visit_mentioned === true;
       extracted.follow_up_date_time = (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time))
         ? v2Flat.follow_up_date_time.slice(0, 16)
@@ -3802,6 +4012,7 @@ const CallRecordingProcessor = {
                     customerId,
                     scheduledServiceId: primaryRow.id,
                     callSid,
+                    keepOpenForQuote: callQuotePromised,
                   });
                   // After the backfill so the child inherits the assigned tech.
                   followUpCreated = await ensureCallFollowUpVisit(primaryRow);
@@ -3838,12 +4049,25 @@ const CallRecordingProcessor = {
                   // is customer-visible (GET /api/schedule returns it verbatim),
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
-                  internal_notes: (priceInfo.source === 'transcript'
-                    && callBookingCatalogRow
-                    && Number(callBookingCatalogRow.base_price) > 0
-                    && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
-                    ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
-                    : null,
+                  internal_notes: [
+                    (priceInfo.source === 'transcript'
+                      && callBookingCatalogRow
+                      && Number(callBookingCatalogRow.base_price) > 0
+                      && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
+                      ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
+                      : null,
+                    // Recurring services never stamp estimated_price (the rate
+                    // belongs to plan/subscription billing, not this visit) —
+                    // but a rate the agent quoted on the call must not vanish:
+                    // it's the number plan setup has to honor.
+                    (priceInfo.price == null
+                      && callBookingCatalogRow
+                      && callBookingCatalogRow.billing_type !== 'one_time'
+                      && typeof extracted.quoted_price === 'number'
+                      && extracted.quoted_price > 0)
+                      ? `Rate quoted on call: $${extracted.quoted_price.toFixed(2)} (recurring service — set up plan billing at this rate; intentionally not stamped on this visit).`
+                      : null,
+                  ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
                   source_action: 'ai_call_pipeline',
@@ -3872,6 +4096,7 @@ const CallRecordingProcessor = {
                     customerId,
                     scheduledServiceId: created.id,
                     callSid,
+                    keepOpenForQuote: callQuotePromised,
                   });
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
@@ -3891,6 +4116,7 @@ const CallRecordingProcessor = {
                     customerId,
                     scheduledServiceId: existingByKey.id,
                     callSid,
+                    keepOpenForQuote: callQuotePromised,
                   });
                   // This is exactly the retry whose first attempt may have
                   // lost the savepointed follow-up insert — ensure visit 2.
@@ -4476,6 +4702,8 @@ CallRecordingProcessor._test = {
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
+  resolveCallAdditionalProperties,
+  resolveCallQuoteSignals,
 };
 
 module.exports = CallRecordingProcessor;

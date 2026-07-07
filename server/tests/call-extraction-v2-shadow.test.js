@@ -64,8 +64,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v1');
-    expect(PROMPT_HASH).toMatch(/^v1-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v2');
+    expect(PROMPT_HASH).toMatch(/^v2-[a-f0-9]{12}$/);
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {
@@ -108,7 +108,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.0.0');
+    expect(SCHEMA_VERSION).toBe('1.1.0');
   });
 
   test('prompt hash is deterministic', () => {

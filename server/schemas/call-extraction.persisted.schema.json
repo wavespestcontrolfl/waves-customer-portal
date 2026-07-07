@@ -155,7 +155,43 @@
             "species_notes": { "type": ["string", "null"] }
           }
         },
-        "access_notes": { "type": ["string", "null"] }
+        "access_notes": { "type": ["string", "null"] },
+        "additional_properties": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "raw_text": { "type": ["string", "null"] },
+              "street_line_1": { "type": ["string", "null"] },
+              "street_line_2": { "type": ["string", "null"] },
+              "city": { "type": ["string", "null"] },
+              "state": { "type": ["string", "null"], "enum": ["FL", null] },
+              "postal_code": {
+                "type": ["string", "null"],
+                "pattern": "^\\d{5}(-\\d{4})?$"
+              },
+              "subdivision_or_community": { "type": ["string", "null"] },
+              "property_type": {
+                "type": ["string", "null"],
+                "enum": [
+                  "single_family", "condo", "townhouse", "mobile_home",
+                  "multi_family", "hoa_common_area", "commercial",
+                  "vacant_lot", "unknown", null
+                ]
+              },
+              "occupancy": {
+                "type": ["string", "null"],
+                "enum": [
+                  "owner_occupied", "rental_investment", "commercial",
+                  "seasonal", "vacant", "unknown", null
+                ]
+              },
+              "notes": { "type": ["string", "null"] }
+            }
+          }
+        }
       }
     },
 
@@ -247,7 +283,9 @@
           "enum": ["bronze", "silver", "gold", "platinum", null]
         },
         "specific_service_name": { "type": ["string", "null"] },
-        "quoted_price_usd": { "type": ["number", "null"] }
+        "quoted_price_usd": { "type": ["number", "null"] },
+        "quote_requested": { "type": ["boolean", "null"] },
+        "quote_promised": { "type": ["boolean", "null"] }
       }
     },
 
@@ -393,7 +431,9 @@
           "cancellation_request",
           "manual_review_requested",
           "ambiguous_scheduling",
-          "reschedule_or_cancel"
+          "reschedule_or_cancel",
+          "multi_property_call",
+          "quote_promised"
         ]
       },
       "uniqueItems": true

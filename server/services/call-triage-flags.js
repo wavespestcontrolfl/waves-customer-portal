@@ -247,6 +247,15 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (detectRentalSignal({ extracted: { call_summary: extraction.meta.call_summary }, callerRelationship: caller.relationship_to_property })) {
     flags.push('rental_or_tenant_occupied');
   }
+  // Multi-property + promised-quote signals — deterministic from the extraction
+  // body so they reach Needs Review even when the model omitted the flag.
+  // Both ADVISORY: they inform the office, never hold an appointment.
+  if (Array.isArray(property.additional_properties) && property.additional_properties.length > 0) {
+    flags.push('multi_property_call');
+  }
+  if (extraction.service_request?.quote_promised === true) {
+    flags.push('quote_promised');
+  }
 
   // A decisive AV acceptance is authoritative for the address + service area —
   // drop any address flags reached above (incl. a lead_quality-sourced
@@ -269,6 +278,12 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // Recovered-street read-back reminder — informs the callback, never blocks
   // routing (the recovered premise passed Address Validation).
   'address_recovered',
+  // Caller discussed more than one property — the extra addresses are recorded
+  // (customer_properties) / surfaced on the lead; the booked visit itself is fine.
+  'multi_property_call',
+  // Agent promised to send a quote after the call — work is owed to the caller,
+  // but the appointment that was ALSO booked must still auto-route.
+  'quote_promised',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
