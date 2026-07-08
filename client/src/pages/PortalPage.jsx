@@ -10957,14 +10957,6 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  // Lock the page scroll while the sheet is open — on iOS a touch scroll on
-  // the sheet otherwise chains to the page behind it.
-  useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
-  }, []);
-
   const muted = PORTAL_SHELL.muted;
   const card = {
     background: PORTAL_SHELL.surface,
@@ -11210,14 +11202,6 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
-
-  // Lock the page scroll while the chat is open — on iOS a touch scroll on
-  // the overlay otherwise chains to the page behind it.
-  useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
-  }, []);
 
   // The iOS keyboard doesn't resize the layout viewport — it pans it, which
   // shoved the sheet (header and close button included) off the top of the
