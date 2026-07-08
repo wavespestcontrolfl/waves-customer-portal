@@ -78,8 +78,9 @@ describe('apple-app-site-association', () => {
     const components = detail.components;
     const catchAllIdx = components.findIndex((c) => c['/'] === '*');
     // Exact roots AND descendants — a bare '/admin' link must not fall
-    // through to the catch-all.
-    for (const excluded of ['/admin', '/admin/*', '/tech', '/tech/*', '/api', '/api/*']) {
+    // through to the catch-all. '/r' referral links 302 to the marketing
+    // site, so they stay in the browser.
+    for (const excluded of ['/admin', '/admin/*', '/tech', '/tech/*', '/api', '/api/*', '/r', '/r/*']) {
       const idx = components.findIndex((c) => c['/'] === excluded);
       expect(idx).toBeGreaterThanOrEqual(0);
       expect(components[idx].exclude).toBe(true);

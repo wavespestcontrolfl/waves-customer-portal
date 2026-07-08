@@ -22,9 +22,11 @@ links therefore stay portal URLs forever; the app claims them at the OS level.
    - Android: `autoVerify` intent-filter on MainActivity (bootstrap-android.sh
      injects it after `cap sync` — client/android is gitignored, so the script
      is the source of truth). Android has no path-exclude syntax, so the
-     filter is an ALLOWLIST of customer link prefixes (`/l/`, `/r/`, `/track`,
-     `/pay`, `/report`, …) — `/api`, `/admin`, `/tech` are never claimed, and
-     a path not on the list keeps opening in the browser. New customer link
+     filter is an ALLOWLIST of customer link prefixes (`/l/`, `/track`,
+     `/pay`, `/billing`, `/report`, …) — `/api`, `/admin`, `/tech` are never
+     claimed, and a path not on the list keeps opening in the browser. `/r/`
+     referral links are excluded on BOTH platforms: they 302 to the marketing
+     site, which would strand the app's webview off-portal. New customer link
      surface ⇒ add its prefix in bootstrap-android.sh AND rebuild.
 3. In the app, Capacitor fires `appUrlOpen` / `getLaunchUrl` with the tapped
    URL; `client/src/native/nativeLinks.js` navigates the webview to the same

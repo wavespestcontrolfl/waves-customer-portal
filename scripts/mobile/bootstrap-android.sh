@@ -76,7 +76,10 @@ fi
 # to target.
 MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [ -f "$MANIFEST" ]; then
-  APP_LINK_PREFIXES="/l/ /r/ /track /pay /receipt /report /pest-report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report /service-outlines"
+  # /r/ (referral links) is deliberately ABSENT: referral-links.js 302s those
+  # to the marketing site, which would strand the app's webview off-portal —
+  # they belong in the browser (iOS AASA excludes them too).
+  APP_LINK_PREFIXES="/l/ /track /pay /billing /receipt /report /pest-report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report /service-outlines"
   IND="            "
   NL=$'\n'
   FILTER="${IND}<intent-filter android:autoVerify=\"true\">${NL}"

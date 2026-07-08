@@ -68,6 +68,10 @@ router.get('/apple-app-site-association', (req, res) => {
             { '/': '/tech/*', exclude: true },
             { '/': '/api', exclude: true },
             { '/': '/api/*', exclude: true },
+            // Referral links 302 to the marketing site (referral-links.js) —
+            // claiming them would strand the app's webview off-portal.
+            { '/': '/r', exclude: true },
+            { '/': '/r/*', exclude: true },
             { '/': '*' },
           ],
         },
