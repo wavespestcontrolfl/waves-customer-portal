@@ -44,6 +44,7 @@ function flatView(extraction) {
     quote_requested: svc.quote_requested === true,
     quote_promised: svc.quote_promised === true,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
+    secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -80,6 +81,25 @@ function mapAdditionalPropertiesToLegacy(entries) {
       property_type: p.property_type || null,
       notes: p.notes || null,
     }));
+}
+
+// V2 secondary_contact → the legacy flat shape the processor's secondary-
+// contact persistence expects (same keys as the V1 extraction's
+// secondary_contact). An entry with no name, phone, or email is dropped —
+// there is nothing to persist or review without one.
+function mapSecondaryContactToLegacy(contact) {
+  if (!contact || typeof contact !== 'object') return null;
+  const mapped = {
+    first_name: contact.first_name || null,
+    last_name: contact.last_name || null,
+    phone: contact.phone_e164 || null,
+    email: contact.email || null,
+    role: contact.role || 'unknown',
+    wants_notifications: contact.wants_notifications === true,
+    notes: contact.notes || null,
+  };
+  if (!mapped.first_name && !mapped.last_name && !mapped.phone && !mapped.email) return null;
+  return mapped;
 }
 
 function mapServiceCategoryToLegacy(category) {
@@ -120,4 +140,5 @@ module.exports = {
   mapServiceCategoryToLegacy,
   mapLeadQualityToLegacy,
   mapAdditionalPropertiesToLegacy,
+  mapSecondaryContactToLegacy,
 };

@@ -86,6 +86,7 @@ const CONFIRM_REASON_TEXT = {
   email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
+  secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -334,6 +335,73 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
     quoteRequested: extracted.quote_requested === true || svc.quote_requested === true,
     quotePromised: extracted.quote_promised === true || svc.quote_promised === true,
   };
+}
+
+// Secondary contact from EITHER extractor (a realtor's home buyer, a landlord's
+// tenant, a spouse): prefer the V1 extraction's normalized object; fall back to
+// the V2 extraction's secondary_contact (mapped to the same flat shape). Both
+// sources were normalized upstream, so an object here always carries at least
+// a name, phone, or email.
+function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
+  if (extracted.secondary_contact && typeof extracted.secondary_contact === 'object') {
+    return extracted.secondary_contact;
+  }
+  const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  return mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+}
+
+// Persist a call's secondary contact into the customer's first EMPTY
+// service-contact slot so the existing appointment fan-out
+// (customer-contact.js getAppointmentContacts: confirmation, en-route,
+// tech-arrived) starts including them. Only runs when the CALLER directed
+// notifications to this person (wants_notifications) — a merely-mentioned
+// person stays in the triage payload / lead extracted_data for the office to
+// decide on. Two guardrails:
+// - Never overwrite: only a fully empty slot is written; a phone/email already
+//   on the record (primary or any slot) makes this a no-op.
+// - Filling a slot silently REPLACES the primary in appointment texts
+//   (getAppointmentContacts drops the primary unless appointment_notify_primary
+//   is set) — so when this write adds the customer's FIRST service contact, it
+//   also sets appointment_notify_primary=true to keep the caller in the loop.
+//   A customer who already had service contacts keeps their existing
+//   notify-primary choice: that was an explicit admin decision.
+// Returns a short status string for logging/tests.
+async function persistCallSecondaryContact(customerId, contact) {
+  if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
+  if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (!customer) return 'skipped_no_customer';
+
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const lowerEmail = (v) => String(v || '').trim().toLowerCase();
+  const knownPhones = [customer.phone, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.phone])]
+    .map(last10).filter(Boolean);
+  const knownEmails = [customer.email, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.email])]
+    .map(lowerEmail).filter(Boolean);
+  if (contact.phone && knownPhones.includes(last10(contact.phone))) return 'skipped_phone_on_record';
+  if (!contact.phone && contact.email && knownEmails.includes(lowerEmail(contact.email))) return 'skipped_email_on_record';
+
+  const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()
+    || String(customer[s.phone] || '').trim() || String(customer[s.email] || '').trim());
+  const hadAnyServiceContact = SERVICE_CONTACT_SLOTS.some(slotHasContent);
+  const emptySlot = SERVICE_CONTACT_SLOTS.find((s) => !slotHasContent(s));
+  if (!emptySlot) return 'skipped_slots_full';
+
+  const fullName = [contact.first_name, contact.last_name]
+    .map((v) => String(v || '').trim()).filter(Boolean).join(' ') || null;
+  await db('customers').where({ id: customerId }).update({
+    [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
+    [emptySlot.phone]: contact.phone || null,
+    [emptySlot.email]: contact.email || null,
+  });
+  if (!hadAnyServiceContact) {
+    await db('notification_prefs')
+      .insert({ customer_id: customerId, appointment_notify_primary: true })
+      .onConflict('customer_id')
+      .merge({ appointment_notify_primary: true });
+  }
+  return 'written';
 }
 
 // A lead is "qualified" only once we've actually captured the contact info the
@@ -1610,6 +1678,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "state": "FL",
   "zip": "string or null",
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
+  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -1636,6 +1705,14 @@ IMPORTANT — multiple properties (address_line1 vs additional_properties):
 - When the caller says a second property has the "same" city/ZIP/community as the first ("same zip and everything"), RESOLVE it: copy the stated city/ZIP onto that entry.
 - is_rental: true when the caller says the property is a rental, investment property, tenant-occupied, or Airbnb/short-term rental.
 - additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home.
+
+IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
+- Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent.
+- The CALLER's own identity always goes in the top-level first_name/last_name/phone/email fields. secondary_contact is ONLY the other person — never duplicate the caller into it, and never put the other person's phone/email into the caller's fields.
+- role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent).
+- wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — gets wants_notifications false.
+- When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
+- Apply the same spelled-out-input, correction, and do-not-invent rules as the caller's own contact fields. A person mentioned with no name AND no contact info: secondary_contact is null.
 
 IMPORTANT — quote_requested / quote_promised (drives the sales pipeline):
 - quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
@@ -2955,6 +3032,7 @@ const CallRecordingProcessor = {
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
+    const callSecondaryContact = resolveCallSecondaryContact(extracted, v2CanonicalExtraction);
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
@@ -2974,6 +3052,29 @@ const CallRecordingProcessor = {
           .ignore();
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] multi-property triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    }
+
+    // Advisory review signal whenever a second person was named on the call
+    // (realtor's buyer, landlord's tenant): the extraction now retains their
+    // contact info, but the office should confirm it before relying on it —
+    // and when the persistence gate below is off, this triage item is the ONLY
+    // surface carrying the second contact besides the lead's extracted_data.
+    if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
+      bridgeNeedsConfirmation.push('secondary_contact_captured');
+      try {
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'secondary_contact_captured',
+            extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+            severity: 'advisory',
+            extraPayload: { secondary_contact: callSecondaryContact },
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      } catch (triageErr) {
+        logger.warn(`[call-proc-bridge] secondary-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
       }
     }
 
@@ -3161,6 +3262,20 @@ const CallRecordingProcessor = {
         // Log the error CODE/NAME only — a DB error message can echo the failing
         // address (e.g. unique-constraint "Key (address_key)=(...) already exists").
         logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+      }
+    }
+
+    // Secondary-contact persistence (additive, gated, non-blocking). Runs
+    // BEFORE the appointment step so a booking made on this same call already
+    // fans its confirmation out to the new contact. Kill switch = unset the gate;
+    // the triage item + lead extracted_data still carry the contact either way.
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContact) {
+      try {
+        const result = await persistCallSecondaryContact(customerId, callSecondaryContact);
+        logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+      } catch (e) {
+        // Code/name only — a DB error message can echo the contact's phone/email.
+        logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
       }
     }
 
@@ -3468,6 +3583,7 @@ const CallRecordingProcessor = {
             ...(callQuoteRequested ? { quote_requested: true } : {}),
             ...(callQuotePromised ? { quote_promised: true } : {}),
             ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
+            ...(callSecondaryContact ? { secondary_contact: callSecondaryContact } : {}),
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
@@ -4747,6 +4863,8 @@ CallRecordingProcessor._test = {
   findReusableCallLead,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
+  resolveCallSecondaryContact,
+  persistCallSecondaryContact,
 };
 
 module.exports = CallRecordingProcessor;

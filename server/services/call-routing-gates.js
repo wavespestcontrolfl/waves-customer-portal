@@ -110,6 +110,7 @@ function buildTriageItem({
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     address_recovered: 'address_review',
+    secondary_contact_captured: 'customer_field_conflict',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;

@@ -256,6 +256,13 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (extraction.service_request?.quote_promised === true) {
     flags.push('quote_promised');
   }
+  // A second person was named as a party to the service (realtor's buyer,
+  // landlord's tenant) — deterministic from the extraction body. ADVISORY:
+  // the office confirms their contact info; the booking itself is fine.
+  const secondary = extraction.secondary_contact;
+  if (secondary && (secondary.name_full || secondary.first_name || secondary.phone_e164 || secondary.email)) {
+    flags.push('secondary_contact_captured');
+  }
 
   // A decisive AV acceptance is authoritative for the address + service area —
   // drop any address flags reached above (incl. a lead_quality-sourced
@@ -284,6 +291,9 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // Agent promised to send a quote after the call — work is owed to the caller,
   // but the appointment that was ALSO booked must still auto-route.
   'quote_promised',
+  // A second contact (buyer/tenant/spouse) was named on the call — the office
+  // confirms their info; never holds the appointment.
+  'secondary_contact_captured',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
