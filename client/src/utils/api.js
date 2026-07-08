@@ -431,6 +431,13 @@ class ApiClient {
     });
   }
 
+  sendReferralEmailInvite(data) {
+    return this.request('/referrals/invite-email', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   // ---- Promotions ----
   getRelevantPromotions() {
     return this.request('/promotions/relevant');
