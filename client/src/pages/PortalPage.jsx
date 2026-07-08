@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { useAuth } from '../hooks/useAuth';
+import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import api from '../utils/api';
 import { formatAddress } from '../utils/format-address';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
@@ -1759,6 +1760,7 @@ function ServicesTab() {
   const [searchTerm, setSearchTerm] = useState('');
   const [photoMap, setPhotoMap] = useState({});
   const [lightbox, setLightbox] = useState(null);
+  useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
 
   const loadServices = useCallback(() => {
     setLoading(true);
@@ -3250,12 +3252,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.firstName || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
                             placeholder="First name"
+                            autoCapitalize="words"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
                           <input
                             value={contact.lastName || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
                             placeholder="Last name"
+                            autoCapitalize="words"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
                         </div>
@@ -3264,6 +3268,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.phone || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
                             placeholder="Phone number"
+                            type="tel"
                             inputMode="tel"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
@@ -3271,7 +3276,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.email || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
                             placeholder="Email address"
+                            type="email"
                             inputMode="email"
+                            autoCapitalize="none"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
                         </div>
@@ -3349,6 +3356,7 @@ function BillingTab({ customer }) {
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
+  useLockBodyScroll(showAddCard); // freeze the page behind the add-card modal
   const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
@@ -4255,6 +4263,9 @@ function BillingTab({ customer }) {
             id="portal-billing-email"
             name="billingEmail"
             type="email"
+            inputMode="email"
+            autoComplete="email"
+            autoCapitalize="none"
             value={billingEmail}
             onChange={e => setBillingEmail(e.target.value)}
             placeholder={customer?.email || 'billing@example.com'}
@@ -4456,6 +4467,12 @@ function PasswordField({ value, onChange, placeholder, label }) {
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
           aria-label={inputLabel}
+          // Gate / garage / lockbox access codes — not login credentials.
+          // Suppress the password-manager save/fill prompt and text munging.
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           style={{
             width: '100%',
             padding: '10px 42px 10px 12px',
@@ -4810,11 +4827,21 @@ function PropertyTab({ customer }) {
     />
   );
 
+  // Mobile keyboard hints derived from the field type, so every typed usage
+  // (e.g. HOA phone/email) gets the right keyboard without touching each call
+  // site. No autoComplete: these collect third-party contacts (HOA/management),
+  // so autofill shouldn't offer the account holder's own details. Plain text
+  // stays unhinted.
+  const TYPE_HINTS = {
+    tel: { inputMode: 'tel' },
+    email: { inputMode: 'email', autoCapitalize: 'none' },
+  };
   const textInput = (field, placeholder, label, type = 'text') => (
     <div>
       {label && <label style={labelStyle}>{label}</label>}
       <input
         type={type}
+        {...(TYPE_HINTS[type] || {})}
         value={prefs[field] || ''}
         onChange={e => updateField(field, e.target.value)}
         placeholder={placeholder}
@@ -4832,6 +4859,7 @@ function PropertyTab({ customer }) {
       <div style={{ position: 'relative' }}>
         <input
           type="number"
+          inputMode="decimal"
           min="0"
           max="5"
           step="0.25"
@@ -6702,6 +6730,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 }
 
 function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, secondaryButton, onClose }) {
+  // Rendered only while open — lock the page behind the modal.
+  useLockBodyScroll(true);
   const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
   const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
   const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
@@ -10017,6 +10047,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
+  useLockBodyScroll(open);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -10917,6 +10948,8 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
 }
 
 function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
+  // Rendered only while open — lock the page behind the sheet.
+  useLockBodyScroll(true);
   // Close on Esc for keyboard users.
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -11161,6 +11194,8 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 // AI CHAT WIDGET
 // =========================================================================
 function ChatWidget({ customer, onClose, initialQuestion }) {
+  // Rendered only while open — lock the page behind the chat overlay.
+  useLockBodyScroll(true);
   const compact = useIsMobile(760);
   const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
