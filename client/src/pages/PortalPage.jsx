@@ -11524,7 +11524,7 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
-    <div style={{
+    <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
       // opaque page wash here would occlude it.
