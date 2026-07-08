@@ -1571,31 +1571,31 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
   ].filter(Boolean);
 
   return (
-    <div className="customer-preview-scope rounded-sm overflow-hidden border-hairline border-[#E7E2D7] bg-[#FAF8F3] mb-6">
-      <div className="bg-white border-b border-[#E7E2D7] px-5 py-3 flex items-center justify-between gap-4">
-        <span className="text-13 font-semibold text-[#1B2C5B]">(941) 297-5749</span>
+    <div className="customer-preview-scope cp-scene rounded-sm overflow-hidden border-hairline border-[rgba(4,57,94,0.16)] mb-6">
+      <div className="bg-white/60 backdrop-blur border-b border-[rgba(4,57,94,0.12)] px-5 py-3 flex items-center justify-between gap-4">
+        <span className="text-13 font-semibold text-[#04395E]">(941) 297-5749</span>
         <img src="/waves-logo.png" alt="Waves" className="h-7 block" />
       </div>
 
       <div className="px-5 py-6 max-w-[720px] mx-auto">
-        <div className="text-11 uppercase tracking-[0.12em] font-bold text-[#6B7280] mb-1">
+        <div className="text-11 uppercase tracking-[0.12em] font-bold text-[rgba(12,21,40,0.7)] mb-1">
           Your estimate · {serviceLabel}
         </div>
-        <h2 className="customer-preview-serif text-[#1B2C5B] text-[34px] leading-[1.08] font-medium tracking-normal m-0">
+        <h2 className="customer-preview-display text-[#04395E] text-[34px] leading-[1.08] m-0">
           Hey {firstNameFromCustomerName(form.customerName)}, here's your custom quote.
         </h2>
         {form.address && (
-          <div className="text-18 text-[#3F4A65] leading-snug mt-4">
+          <div className="text-18 text-[rgba(12,21,40,0.7)] leading-snug mt-4">
             {form.address}
           </div>
         )}
         {propertyLine && (
-          <div className="text-13 text-[#6B7280] mt-1">{propertyLine}</div>
+          <div className="text-13 text-[rgba(12,21,40,0.66)] mt-1">{propertyLine}</div>
         )}
 
         {pestTier && Array.isArray(R?.pestTiers) && R.pestTiers.length > 1 && (
-          <div className="bg-white rounded-[14px] border border-[#CBD5E1] px-4 py-4 mt-5">
-            <div className="text-12 font-bold uppercase tracking-[0.08em] text-[#64748B] mb-3">
+          <div className="cp-glass-card rounded-[14px] px-4 py-4 mt-5">
+            <div className="text-12 font-bold uppercase tracking-[0.08em] text-[rgba(12,21,40,0.6)] mb-3">
               How often?
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -1607,14 +1607,12 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                     key={tier.label}
                     onClick={() => onSelectPestFreq?.(tier.apps)}
                     className={cn(
-                      "rounded-sm border px-3 py-3 text-left transition-colors",
-                      selected
-                        ? "bg-[#009CDE] text-white border-[#009CDE]"
-                        : "bg-white text-[#1B2C5B] border-[#E2E8F0] hover:border-[#009CDE]",
+                      "rounded-[14px] px-3 py-3 text-left transition-colors",
+                      selected ? "cp-gold text-[#1B2C5B]" : "cp-chip text-[#04395E]",
                     )}
                   >
-                    <span className="block text-13 font-bold">{tier.label}</span>
-                    <span className={cn("block text-11 mt-1", selected ? "text-white/85" : "text-[#64748B]")}>
+                    <span className="block text-13 font-semibold">{tier.label}</span>
+                    <span className={cn("block text-11 mt-1", selected ? "text-[#1B2C5B]/80" : "text-[rgba(12,21,40,0.6)]")}>
                       {fmt(tier.pa)}/visit
                     </span>
                   </button>
@@ -1625,11 +1623,11 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
         )}
 
         {hasOneTimeChoice && (
-          <div className="bg-[#F1F5F9] rounded-full p-1 border border-[#E2E8F0] mt-5 flex gap-1 shadow-[0_1px_4px_rgba(15,23,42,0.04)]">
-            <div className="flex-1 rounded-full bg-[#009CDE] text-white text-center text-13 font-semibold px-3 py-2">
+          <div className="cp-chip rounded-full p-1 mt-5 flex gap-1">
+            <div className="cp-gold flex-1 rounded-full text-[#1B2C5B] text-center text-13 font-semibold px-3 py-2">
               {oneTimeChoiceMeta.recurringLabel}
             </div>
-            <div className="flex-1 rounded-full text-[#3F4A65] text-center text-13 font-semibold px-3 py-2">
+            <div className="flex-1 rounded-full text-[rgba(4,57,94,0.75)] text-center text-13 font-semibold px-3 py-2">
               {oneTimeChoiceMeta.oneTimeLabel}
             </div>
           </div>
@@ -1639,15 +1637,15 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
           <div className="pt-5 pb-3">
             <div className="flex items-baseline gap-2 flex-wrap">
               {intervalSavings > 0 && (
-                <span className="customer-preview-serif text-24 text-[#9CA3AF] line-through">
+                <span className="customer-preview-display text-24 text-[rgba(12,21,40,0.4)] line-through">
                   {fmt(intervalBase)}{cadence.period}
                 </span>
               )}
-              <span className="customer-preview-serif text-[58px] leading-none font-medium text-[#1B2C5B]">
+              <span className="customer-preview-display text-[58px] leading-none text-[#04395E] u-nums">
                 {fmt(intervalTotal)}
               </span>
-              <span className="text-24 font-medium text-[#6B7280]">{cadence.period}</span>
-              <span className="inline-block px-3 py-1 rounded-sm bg-[#EEF2FF] text-[#1B2C5B] text-12 font-bold tracking-[0.02em]">
+              <span className="text-24 font-medium text-[rgba(12,21,40,0.66)]">{cadence.period}</span>
+              <span className="inline-block px-3 py-1 rounded-full bg-[rgba(4,57,94,0.08)] text-[#04395E] text-12 font-bold tracking-[0.02em]">
                 WaveGuard {waveGuardTier}
               </span>
             </div>
@@ -1656,69 +1654,69 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                 discount (owner directive; matches the customer page). The
                 struck anchor above still shows a discount was applied. */}
             {dayPrice > 0 && (
-              <div className="text-14 text-[#6B7280] mt-2">
+              <div className="text-14 text-[rgba(12,21,40,0.66)] mt-2">
                 That's just {fmt(dayPrice)}/day for complete home protection.
               </div>
             )}
             {firstVisitFees.map((fee) => (
               <div
                 key={`${fee.service}-${fee.price}`}
-                className="mt-3 max-w-[520px] p-3.5 rounded-[10px] bg-white border border-[#D4CBB8]"
+                className="cp-glass-soft mt-3 max-w-[520px] p-3.5 rounded-[10px]"
               >
-                <div className="text-14 font-bold text-[#1B2C5B]">
+                <div className="text-14 font-bold text-[#04395E]">
                   + {fmtInt(fee.price)} one-time {fee.name}
                 </div>
                 {fee.detail && (
-                  <div className="text-12 text-[#6B7280] mt-0.5">{fee.detail}</div>
+                  <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{fee.detail}</div>
                 )}
                 {fee.waivedWithPrepay && (
-                  <div className="text-12 text-[#6B7280] mt-0.5">
+                  <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">
                     Waived when the customer pays the year in full up front.
                   </div>
                 )}
               </div>
             ))}
-            <div className="text-13 text-[#1B2C5B] mt-3">
+            <div className="text-13 text-[#04395E] mt-3">
               Try us risk-free — 90-day money-back guarantee.
             </div>
           </div>
         ) : oneTimeStandaloneTotal > 0 ? (
           <div className="pt-5 pb-3">
             <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="customer-preview-serif text-[58px] leading-none font-medium text-[#1B2C5B]">
+              <span className="customer-preview-display text-[58px] leading-none text-[#04395E] u-nums">
                 {fmt(oneTimeStandaloneTotal)}
               </span>
-              <span className="text-24 font-medium text-[#6B7280]">one-time</span>
+              <span className="text-24 font-medium text-[rgba(12,21,40,0.66)]">one-time</span>
             </div>
-            <div className="text-14 text-[#6B7280] mt-2">
+            <div className="text-14 text-[rgba(12,21,40,0.66)] mt-2">
               One visit, pay on service day. No recurring schedule.
             </div>
           </div>
         ) : null}
 
         {hasOneTimeChoice && (
-          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
-            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[#6B7280] mb-1">
+          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
+            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[rgba(12,21,40,0.7)] mb-1">
               {oneTimeChoiceMeta.oneTimeLabel}
             </div>
             <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="customer-preview-serif text-[42px] leading-none font-medium text-[#1B2C5B]">
+              <span className="customer-preview-display text-[42px] leading-none text-[#04395E] u-nums">
                 {fmt(oneTimeChoiceAmount)}
               </span>
-              <span className="text-20 font-medium text-[#6B7280]">one-time</span>
+              <span className="text-20 font-medium text-[rgba(12,21,40,0.66)]">one-time</span>
             </div>
-            <div className="text-14 text-[#6B7280] mt-2">
+            <div className="text-14 text-[rgba(12,21,40,0.66)] mt-2">
               {oneTimeChoiceMeta.description}
             </div>
             {oneTimeChoiceRows.length > 0 && (
-              <div className="divide-y divide-[#E7E2D7] mt-4">
+              <div className="divide-y divide-[rgba(4,57,94,0.12)] mt-4">
                 {oneTimeChoiceRows.map((item) => (
                   <div key={`${item.name}-${item.price}`} className="flex justify-between gap-4 py-2 text-14">
-                    <div className="text-[#3F4A65]">
+                    <div className="text-[rgba(12,21,40,0.7)]">
                       <div>{item.name}</div>
-                      {item.detail && <div className="text-12 text-[#6B7280] mt-0.5">{item.detail}</div>}
+                      {item.detail && <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{item.detail}</div>}
                     </div>
-                    <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#1B2C5B]")}>
+                    <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
                       {previewLineAmount(item.price)}
                     </div>
                   </div>
@@ -1729,28 +1727,28 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
         )}
 
         {(satelliteUrl || aiMetrics.length > 0) && (
-          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
-            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[#6B7280] mb-1">
+          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
+            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[rgba(12,21,40,0.7)] mb-1">
               Waves AI analysis
             </div>
-            <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-2">
+            <div className="customer-preview-display text-24 leading-tight text-[#04395E] mb-2">
               Here's what we found at your property
             </div>
             {satelliteUrl && (
               <img
                 src={satelliteUrl}
                 alt="Satellite view"
-                className="w-full max-h-64 object-cover rounded-[10px] border border-[#E7E2D7] mb-3"
+                className="w-full max-h-64 object-cover rounded-[10px] border border-white/70 mb-3"
               />
             )}
             {aiMetrics.length > 0 && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                 {aiMetrics.map((metric) => (
-                  <div key={metric.label} className="bg-[#F7F5EE] border border-[#E7E2D7] rounded-[10px] px-3 py-2">
-                    <div className="text-10 uppercase tracking-[0.08em] text-[#6B7280] font-bold">
+                  <div key={metric.label} className="cp-glass-soft rounded-[10px] px-3 py-2">
+                    <div className="text-10 uppercase tracking-[0.08em] text-[rgba(12,21,40,0.66)] font-bold">
                       {metric.label}
                     </div>
-                    <div className="customer-preview-serif text-18 text-[#1B2C5B] capitalize">
+                    <div className="customer-preview-display text-18 text-[#04395E] capitalize">
                       {metric.value}
                     </div>
                   </div>
@@ -1761,32 +1759,32 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
         )}
 
         {!presentMode && (
-          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
-            <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-3">
+          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
+            <div className="customer-preview-display text-24 leading-tight text-[#04395E] mb-3">
               Find a date &amp; time that works for you
             </div>
-            <div className="text-14 text-[#6B7280] leading-relaxed mb-4">
+            <div className="text-14 text-[rgba(12,21,40,0.66)] leading-relaxed mb-4">
               These are the route windows customers see after opening their secure estimate link.
             </div>
-            <div className="bg-[#F7F5EE] border border-dashed border-[#D4CBB8] rounded-[10px] p-4 text-center text-13 text-[#6B7280]">
+            <div className="bg-white/40 border border-dashed border-[rgba(4,57,94,0.25)] rounded-[10px] p-4 text-center text-13 text-[rgba(12,21,40,0.66)]">
               Live route availability loads on the public estimate.
             </div>
           </div>
         )}
 
         {oneTimeRows.length > 0 && !hasOneTimeChoice && (
-          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
-            <div className="text-15 font-bold text-[#1B2C5B] mb-2">
+          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
+            <div className="text-15 font-bold text-[#04395E] mb-2">
               One-time items billed separately
             </div>
-            <div className="divide-y divide-[#E7E2D7]">
+            <div className="divide-y divide-[rgba(4,57,94,0.12)]">
               {oneTimeRows.map((item) => (
                 <div key={`${item.name}-${item.price}`} className="flex justify-between gap-4 py-2 text-14">
-                  <div className="text-[#3F4A65]">
+                  <div className="text-[rgba(12,21,40,0.7)]">
                     <div>{item.name}</div>
-                    {item.detail && <div className="text-12 text-[#6B7280] mt-0.5">{item.detail}</div>}
+                    {item.detail && <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{item.detail}</div>}
                   </div>
-                  <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#1B2C5B]")}>
+                  <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
                     {previewLineAmount(item.price)}
                   </div>
                 </div>
@@ -1796,13 +1794,13 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
         )}
 
         {monthlyTotal > 0 && (
-          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
-            <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-3">
+          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
+            <div className="customer-preview-display text-24 leading-tight text-[#04395E] mb-3">
               What WaveGuard members get
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2">
               {CUSTOMER_PREVIEW_PERKS.map((perk) => (
-                <div key={perk} className="text-14 text-[#3F4A65] flex gap-2">
+                <div key={perk} className="text-14 text-[rgba(12,21,40,0.7)] flex gap-2">
                   <span className="text-[#16A34A] font-bold">✓</span>
                   <span>{perk}</span>
                 </div>
@@ -1811,16 +1809,16 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
           </div>
         )}
 
-        <div className="bg-[#1B2C5B] text-white text-center rounded-[14px] border border-[#1B2C5B] p-6 mt-4">
-          <div className="customer-preview-serif text-26 leading-tight">
+        <div className="cp-navy-panel text-white text-center rounded-[14px] p-6 mt-4">
+          <div className="customer-preview-display text-26 leading-tight">
             Go Waves!
           </div>
-          <div className="customer-preview-serif text-20 leading-tight text-white/90 mt-1">
+          <div className="customer-preview-display text-20 leading-tight text-white/90 mt-1">
             Wave Goodbye to Pests!
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
           {!presentMode && (
-            <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
+            <div className="cp-gold inline-flex mt-4 px-5 py-3 rounded-full text-[#1B2C5B] text-15 font-semibold">
               Pick a time and book
             </div>
           )}
@@ -4153,20 +4151,75 @@ export default function EstimateToolViewV2({
           .waves-roboto-scope * {
             font-family: ${ROBOTO} !important;
           }
+          /* Customer-preview glass system — mirrors the live estimate page's
+             glass theme (glass-theme.css) without mounting the glass engine,
+             which re-themes the whole <html> element and would glass the
+             admin chrome. Everything is scoped to .customer-preview-scope. */
           .customer-preview-scope,
           .customer-preview-scope * {
-            font-family: 'Inter', system-ui, sans-serif !important;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+              "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+            -webkit-font-smoothing: antialiased;
           }
-          .customer-preview-serif {
-            font-family: 'Source Serif 4', Georgia, serif !important;
+          .customer-preview-display {
+            font-weight: 700 !important;
+            letter-spacing: -0.03em !important;
+          }
+          .cp-scene {
+            background:
+              radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%),
+              radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%),
+              radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%),
+              radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%),
+              linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%);
+          }
+          .cp-glass-card {
+            position: relative;
+            background: linear-gradient(135deg, rgba(255,255,255,.45), rgba(255,255,255,.22)),
+              rgba(255,255,255,.35);
+            border: 1px solid rgba(255,255,255,.7);
+            backdrop-filter: blur(18px) saturate(165%);
+            -webkit-backdrop-filter: blur(18px) saturate(165%);
+            box-shadow: 0 8px 26px rgba(4,57,94,.08), inset 0 1px 0 rgba(255,255,255,.48),
+              inset 1px 1px 0 rgba(175,225,255,.22);
+          }
+          .cp-glass-soft {
+            background: linear-gradient(135deg, rgba(255,255,255,.5), rgba(255,255,255,.25)),
+              rgba(255,255,255,.3);
+            border: 1px solid rgba(255,255,255,.62);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.42);
+          }
+          .cp-chip {
+            background: linear-gradient(135deg, rgba(255,255,255,.34), rgba(255,255,255,.1)),
+              rgba(255,255,255,.22);
+            border: 1px solid rgba(255,255,255,.62);
+            backdrop-filter: blur(18px) saturate(170%);
+            -webkit-backdrop-filter: blur(18px) saturate(170%);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.42), 0 8px 22px rgba(4,57,94,.1);
+          }
+          .cp-chip:is(button):hover {
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.5), 0 10px 26px rgba(4,57,94,.13),
+              0 0 22px rgba(10,126,194,.2);
+          }
+          .cp-gold {
+            background: linear-gradient(135deg, rgba(255,222,120,.6), rgba(244,176,20,.45)),
+              rgba(240,165,0,.38);
+            border: 1px solid rgba(255,238,180,.92);
+            box-shadow: 0 10px 26px rgba(180,110,0,.22), 0 0 18px rgba(240,165,0,.2),
+              inset 0 1px 0 rgba(255,255,255,.32), inset 0 -2px 8px rgba(180,110,0,.18);
+          }
+          .cp-navy-panel {
+            background: linear-gradient(135deg, #04395E, #065A8C);
+            border: 1px solid rgba(255,255,255,.2);
+            box-shadow: 0 18px 50px rgba(4,57,94,.28);
           }
         `}</style>{" "}
         {/* Full-screen pricing-only present mode — show prices to the customer
             in person without the booking section. Tier toggle stays live so the
             operator can switch frequency in front of the customer. */}
         {presentMode && E && (
-          <div className="fixed inset-0 z-50 bg-[#FAF8F3] overflow-y-auto">
-            <div className="sticky top-0 z-10 border-b border-[#E7E2D7] bg-white/95 backdrop-blur">
+          <div className="cp-scene fixed inset-0 z-50 overflow-y-auto">
+            <div className="sticky top-0 z-10 border-b border-[rgba(4,57,94,0.14)] bg-white/80 backdrop-blur">
               <div className="flex items-center justify-between gap-4 px-4 py-2.5">
                 <span className="text-11 font-medium uppercase tracking-[0.1em] text-[#6B7280]">
                   Presenting to customer · pricing only
@@ -4210,11 +4263,11 @@ export default function EstimateToolViewV2({
               {presentQuoteRequired ? (
                 // Custom-quote estimate: no firm price to present (the saved/public
                 // flow zeroes totals and the link won't honor a partial price).
-                <div className="customer-preview-scope rounded-[14px] border border-[#E7E2D7] bg-white p-8 text-center">
-                  <div className="customer-preview-serif text-[28px] leading-tight text-[#1B2C5B] mb-3">
+                <div className="customer-preview-scope cp-glass-card rounded-[14px] p-8 text-center">
+                  <div className="customer-preview-display text-[28px] leading-tight text-[#04395E] mb-3">
                     This is a custom quote
                   </div>
-                  <div className="mx-auto max-w-[460px] text-15 leading-relaxed text-[#6B7280]">
+                  <div className="mx-auto max-w-[460px] text-15 leading-relaxed text-[rgba(12,21,40,0.66)]">
                     The services selected need an on-site inspection before we can set a firm
                     price, so there's no final number to show here yet. We'll prepare a detailed
                     quote and send it over.
@@ -4225,8 +4278,8 @@ export default function EstimateToolViewV2({
                   {/* Mask the preview while regenerating so the customer never sees the
                       newly-selected cadence paired with the previous tier's price. */}
                   {generating && (
-                    <div className="absolute inset-0 z-10 flex items-start justify-center bg-[#FAF8F3]/70 pt-12 backdrop-blur-[1px]">
-                      <span className="rounded-full border border-[#E7E2D7] bg-white px-4 py-2 text-13 font-medium text-[#1B2C5B] shadow-sm">
+                    <div className="absolute inset-0 z-10 flex items-start justify-center bg-[#EDF3F9]/70 pt-12 backdrop-blur-[1px]">
+                      <span className="rounded-full border border-[rgba(4,57,94,0.16)] bg-white px-4 py-2 text-13 font-medium text-[#04395E] shadow-sm">
                         Updating pricing…
                       </span>
                     </div>
@@ -6899,11 +6952,11 @@ export default function EstimateToolViewV2({
                       // shows "your account manager will finalize" with no
                       // dollar amounts. (Present mode already gates this;
                       // engine numbers stay in the details panel below.)
-                      <div className="customer-preview-scope rounded-[14px] border border-[#E7E2D7] bg-white p-8 text-center mb-2">
-                        <div className="customer-preview-serif text-[24px] leading-tight text-[#1B2C5B] mb-3">
+                      <div className="customer-preview-scope cp-scene rounded-[14px] border border-[rgba(4,57,94,0.16)] p-8 text-center mb-2">
+                        <div className="customer-preview-display text-[24px] leading-tight text-[#04395E] mb-3">
                           This is a custom quote
                         </div>
-                        <div className="mx-auto max-w-[460px] text-14 leading-relaxed text-[#6B7280]">
+                        <div className="mx-auto max-w-[460px] text-14 leading-relaxed text-[rgba(12,21,40,0.66)]">
                           The selected services need review before a firm
                           price, so the customer page shows no dollar amounts —
                           just that their account manager will finalize the
