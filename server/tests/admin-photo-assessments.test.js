@@ -288,14 +288,42 @@ describe('POST /:type/:id/send-report', () => {
 
   test('falls back to the linked lead email when the snapshot has none', async () => {
     const LEAD = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
-    mockRows.lawn_diagnostics = [lawnRow({ contact_snapshot: null, lead_id: LEAD })];
+    const CUSTOMER = 'cccccccc-dddd-4eee-8fff-000000000000';
+    // customer_id is ALSO linked: the delivery log must attribute the send to
+    // the lead that actually supplied the address, not the customer link.
+    mockRows.lawn_diagnostics = [lawnRow({ contact_snapshot: null, lead_id: LEAD, customer_id: CUSTOMER })];
     mockLeadRow = { id: LEAD, email: 'lead@example.com', first_name: 'Lee' };
+    mockCustomerRow = { id: CUSTOMER, email: 'customer@example.com', first_name: 'Casey' };
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
       });
       expect(res.status).toBe(200);
-      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'lead@example.com', firstName: 'Lee' }));
+      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
+        to: 'lead@example.com',
+        firstName: 'Lee',
+        recipientType: 'lead',
+        recipientId: LEAD,
+      }));
+    });
+  });
+
+  test('an explicit email override is delivered without entity linkage', async () => {
+    const CUSTOMER = 'cccccccc-dddd-4eee-8fff-000000000000';
+    mockRows.lawn_diagnostics = [lawnRow({ customer_id: CUSTOMER })];
+    mockCustomerRow = { id: CUSTOMER, email: 'customer@example.com', first_name: 'Casey' };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/send-report`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'typed@example.com' }),
+      });
+      expect(res.status).toBe(200);
+      // An admin-typed address belongs to no linked entity — recording it
+      // against the customer would misdirect suppression/bounce handling.
+      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
+        to: 'typed@example.com',
+        recipientType: null,
+        recipientId: null,
+      }));
     });
   });
 
@@ -350,7 +378,12 @@ describe('POST /:type/:id/send-report', () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
       });
       expect(res.status).toBe(200);
-      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'customer@example.com', firstName: 'Casey' }));
+      expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
+        to: 'customer@example.com',
+        firstName: 'Casey',
+        recipientType: 'customer',
+        recipientId: CUSTOMER,
+      }));
     });
   });
 

@@ -158,6 +158,9 @@ export default function PestReportViewPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    // Token changes reuse this mounted component (React Router param nav) —
+    // a stale notFound from the previous token must not mask a good report.
+    setNotFound(false);
     try {
       const res = await fetch(`${API_BASE}/public/pest-identifier/${token}`);
       if (res.status === 404) { setNotFound(true); setLoading(false); return; }

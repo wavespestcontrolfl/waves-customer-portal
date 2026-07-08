@@ -55,11 +55,15 @@ const dateTimeET = (v) =>
 
 // Funnel stage, deepest rung first. Viewed outranks sent: the public claim
 // path stamps last_sent_at when it mints the link, so a claimed-then-viewed
-// row must read "Viewed", not stay stuck at "Report sent".
+// row must read "Viewed", not stay stuck at "Report sent". "Link released"
+// catches Get-link rows (status flips to sent at mint, but last_sent_at /
+// claimed_at stay null because nothing was emailed or claimed) — the report
+// URL is live, so they must not read as an unreleased teaser.
 export function stageOf(row) {
   if (row.report_first_viewed_at) return { key: "viewed", label: "Viewed" };
   if (row.last_sent_at) return { key: "sent", label: "Report sent" };
   if (row.claimed_at) return { key: "unlocked", label: "Unlocked" };
+  if (row.status === "sent") return { key: "link_released", label: "Link released" };
   if (row.status === "archived") return { key: "archived", label: "Archived" };
   return { key: "teaser", label: "Teaser only" };
 }

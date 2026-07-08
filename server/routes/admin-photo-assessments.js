@@ -468,12 +468,22 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     // Recipient resolution: explicit override → snapshot → linked lead →
     // linked customer. Each rung falls through when it has NO email (public
     // claims can create phone-only leads), not just when the link is absent.
-    let email = cleanString(req.body?.email, 254) || contact.email || null;
+    // emailSource tracks WHICH rung supplied the address so the delivery
+    // log's recipient_type/id points at the entity actually mailed —
+    // suppression and bounce recovery act on that linkage, so a lead-fallback
+    // send must not be recorded against the linked customer.
+    let email = cleanString(req.body?.email, 254) || null;
+    let emailSource = email ? 'override' : null;
+    if (!email && contact.email) {
+      email = contact.email;
+      emailSource = 'snapshot';
+    }
     let firstName = contact.first_name || null;
     if (!email && row.lead_id) {
       const lead = await db('leads').where({ id: row.lead_id }).select('email', 'first_name').first();
       if (lead?.email) {
         email = lead.email;
+        emailSource = 'lead';
         firstName = firstName || lead.first_name || null;
       }
     }
@@ -481,11 +491,29 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
       const customer = await db('customers').where({ id: row.customer_id }).select('email', 'first_name').first();
       if (customer?.email) {
         email = customer.email;
+        emailSource = 'customer';
         firstName = firstName || customer.first_name || null;
       }
     }
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return res.status(400).json({ error: 'No valid recipient email — add one to the request or link a contact first' });
+    }
+
+    // Map the winning rung to the entity the address actually belongs to.
+    // Snapshot addresses were captured by the claim that created/linked the
+    // lead, so they attribute to the lead when one exists; an admin-typed
+    // override belongs to no linked entity and is logged without linkage.
+    let recipientType = null;
+    let recipientId = null;
+    if (emailSource === 'lead') {
+      recipientType = 'lead';
+      recipientId = row.lead_id;
+    } else if (emailSource === 'customer') {
+      recipientType = 'customer';
+      recipientId = row.customer_id;
+    } else if (emailSource === 'snapshot') {
+      recipientType = row.lead_id ? 'lead' : (row.customer_id ? 'customer' : null);
+      recipientId = row.lead_id || row.customer_id || null;
     }
 
     const { reportToken, expiresAt } = await mintReportToken(config, row.id);
@@ -502,8 +530,8 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
         firstName,
         reportUrl,
         expiresAt,
-        recipientType: row.customer_id ? 'customer' : (row.lead_id ? 'lead' : null),
-        recipientId: row.customer_id || row.lead_id || null,
+        recipientType,
+        recipientId,
       });
     } catch (emailErr) {
       logger.error(`[admin-photo-assessments] unexpected send error for ${row.id}: ${emailErr.message}`);
