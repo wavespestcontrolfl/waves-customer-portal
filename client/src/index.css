@@ -27,12 +27,22 @@ html {
    zoomed-in (pinch-out is fiddly). The portal's inline styles size inputs at
    14px, so force >=16px on touch devices to suppress the involuntary zoom.
    Pinch-zoom itself stays enabled (no user-scalable=no in the viewport tag).
-   Scoped to .portal-root so admin/tech surfaces are untouched. */
+
+   !important is required: the fields set font-size inline (style={{ fontSize:
+   14 }}), and author CSS without it loses to inline styles. Scoped to two
+   customer-only hooks so admin/tech surfaces are untouched:
+   - .portal-root  — the in-page customer portal tree
+   - [data-glass]  — glass-themed modals portaled to <body> (e.g. AutopayCard's
+     Modal via createPortal), which sit outside .portal-root. data-glass is
+     never used on admin surfaces (they're monochrome). */
 @media (pointer: coarse) {
   .portal-root input,
   .portal-root textarea,
-  .portal-root select {
-    font-size: 16px;
+  .portal-root select,
+  [data-glass] input,
+  [data-glass] textarea,
+  [data-glass] select {
+    font-size: 16px !important;
   }
 }
 
