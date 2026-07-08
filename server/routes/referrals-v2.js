@@ -298,7 +298,10 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'That’s your own email — invite a friend instead.' });
     }
 
-    // Cooldown: same promoter+email within 24 hours = no-op (double-tap protection).
+    // Rolling 24h cooldown: same promoter+email within 24 hours = no-op. This
+    // is a cheap fast-path (skips SendGrid) for spaced-apart re-taps; the
+    // idempotencyKey below is the ATOMIC guard for concurrent double-taps that
+    // both pass this read before either writes its referral_invites row.
     const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const recent = await db('referral_invites')
       .where({ promoter_id: promoter.id })
@@ -312,39 +315,61 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
 
     const friendly = friendName ? friendName.replace(/[<>]/g, '').trim() : '';
     const EmailTemplateLibrary = require('../services/email-template-library');
-    const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'referral.friend_invite',
-      to: cleanEmail,
-      payload: {
-        friend_name: friendly || 'there',
-        referrer_name: promoter.first_name || 'A Waves customer',
-        referral_url: referralLink,
-        referral_offer_line: engine.buildRefereeOfferLine(settings),
-      },
-      recipientType: 'referral_promoter',
-      recipientId: promoter.id,
-      categories: ['referral_invite'],
-      // SendGrid 4xx bodies can echo the recipient address — keep provider
-      // errors out of the logs (the redacted reason is logged below).
-      suppressProviderErrorLog: true,
-    });
+    let result;
+    try {
+      result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'referral.friend_invite',
+        to: cleanEmail,
+        payload: {
+          friend_name: friendly || 'there',
+          referrer_name: promoter.first_name || 'A Waves customer',
+          referral_url: referralLink,
+          referral_offer_line: engine.buildRefereeOfferLine(settings),
+        },
+        recipientType: 'referral_promoter',
+        recipientId: promoter.id,
+        categories: ['referral_invite'],
+        // Deterministic key = the atomic dedupe the cooldown read can't
+        // provide: email_messages.idempotency_key is uniquely indexed, so two
+        // concurrent sends collapse to one at the DB (the loser resolves
+        // against the winner / raises a retryable in-flight collision).
+        // Scoped to a UTC-day bucket so it blocks the concurrent window but a
+        // genuine next-day re-invite (past the 24h cooldown) still sends —
+        // >24h apart is always a different day, so no silent no-op.
+        idempotencyKey: `referral.friend_invite:${promoter.id}:${cleanEmail}:${new Date().toISOString().slice(0, 10)}`,
+        // SendGrid 4xx bodies can echo the recipient address — keep provider
+        // errors out of the logs (the redacted reason is logged below).
+        suppressProviderErrorLog: true,
+      });
+    } catch (sendErr) {
+      // A concurrent request already reserved this key and is mid-flight —
+      // treat as a deduped success, not a failure (the other request sends it).
+      if (sendErr.code === 'EMAIL_SEND_IN_PROGRESS' || sendErr.status === 409) {
+        return res.json({ success: true, deduped: true });
+      }
+      throw sendErr;
+    }
 
-    if (result && result.sent === false) {
+    if (result && result.sent === false && !result.deduped) {
       logger.warn(`[referrals-v2] Friend invite email not sent for promoter ${promoter.id}: ${result.reason || 'blocked'}`);
       return res.status(422).json({ error: 'We couldn’t email that address. Double-check it and try again.' });
     }
 
-    // Best-effort log for cooldown tracking (mirrors the SMS /invite leg).
-    await db('referral_invites').insert({
-      promoter_id: promoter.id,
-      email: cleanEmail,
-      sent_at: new Date(),
-    }).catch(() => { /* table/column may not exist yet */ });
+    // Best-effort log for the rolling-cooldown fast-path (mirrors the SMS
+    // /invite leg). Skip it on a deduped result so a re-send collision doesn't
+    // refresh the window off a message it didn't actually send.
+    if (!result?.deduped) {
+      await db('referral_invites').insert({
+        promoter_id: promoter.id,
+        email: cleanEmail,
+        sent_at: new Date(),
+      }).catch(() => { /* table/column may not exist yet */ });
 
-    await db('referral_promoters').where({ id: promoter.id }).update({
-      last_share_at: new Date(),
-      updated_at: new Date(),
-    });
+      await db('referral_promoters').where({ id: promoter.id }).update({
+        last_share_at: new Date(),
+        updated_at: new Date(),
+      });
+    }
 
     res.json({ success: true });
   } catch (err) {
