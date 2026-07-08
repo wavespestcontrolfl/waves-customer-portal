@@ -4069,13 +4069,14 @@ function BillingTab({ customer }) {
 
       {/* ── Stripe Add Card Modal ── */}
       {showAddCard && (
-        <div style={{
+        <div data-glass-scrim="" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
           zIndex: 9999, padding: 20,
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
-          <div style={{
+          <div role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
+            maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
             boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
             border: '1px solid #E7E2D7',
           }}>
