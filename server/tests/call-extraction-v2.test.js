@@ -136,8 +136,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.0.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.0.0');
+  test('schema version is 1.1.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.1.0');
   });
 
   describe('model-output schema', () => {
@@ -304,6 +304,14 @@ describe('schema validation', () => {
       data.meta.schema_version = '2.0.0';
       const { valid } = validatePersisted(data);
       expect(valid).toBe(false);
+    });
+
+    test('the injected SCHEMA_VERSION validates', () => {
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      const { valid, errors } = validatePersisted(data);
+      expect(errors).toBeNull();
+      expect(valid).toBe(true);
     });
   });
 });

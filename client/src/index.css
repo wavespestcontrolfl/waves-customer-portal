@@ -22,6 +22,30 @@ html {
   text-size-adjust: 100%;
 }
 
+/* iOS Safari/WKWebView auto-zooms the whole page in whenever a focused form
+   control has a font smaller than 16px, then leaves the customer stranded
+   zoomed-in (pinch-out is fiddly). The portal's inline styles size inputs at
+   14px, so force >=16px on touch devices to suppress the involuntary zoom.
+   Pinch-zoom itself stays enabled (no user-scalable=no in the viewport tag).
+
+   !important is required: the fields set font-size inline (style={{ fontSize:
+   14 }}), and author CSS without it loses to inline styles. Scoped to two
+   customer-only hooks so admin/tech surfaces are untouched:
+   - .portal-root  — the in-page customer portal tree
+   - [data-glass]  — glass-themed modals portaled to <body> (e.g. AutopayCard's
+     Modal via createPortal), which sit outside .portal-root. data-glass is
+     never used on admin surfaces (they're monochrome). */
+@media (pointer: coarse) {
+  .portal-root input,
+  .portal-root textarea,
+  .portal-root select,
+  [data-glass] input,
+  [data-glass] textarea,
+  [data-glass] select {
+    font-size: 16px !important;
+  }
+}
+
 /* preflight is disabled, so border-width utilities have no effect without
    an explicit border-style. Force solid on hairline so it actually renders. */
 .border-hairline {

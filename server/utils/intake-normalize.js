@@ -171,6 +171,40 @@ function normalizeQuotedPrice(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Strict boolean for the model's quote flags: only a literal true (or "true")
+// counts. Anything else — false, null, absent, junk — is false, so a garbled
+// value can never keep a lead open or fire a quote-promised notification.
+function normalizeStrictBoolean(value) {
+  return value === true || (typeof value === 'string' && value.trim().toLowerCase() === 'true');
+}
+
+// Model-emitted additional_properties (multi-property calls): keep only entries
+// with a usable street line, normalize each address component with the same
+// helpers as the primary address, and cap the list — a hallucinated flood of
+// entries must not fan out into customer_properties writes.
+const MAX_ADDITIONAL_PROPERTIES = 5;
+function normalizeAdditionalProperties(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const address_line1 = normalizeNullableStreetLine(entry.address_line1);
+    if (!address_line1) continue;
+    out.push({
+      address_line1,
+      address_line2: normalizeNullableStreetLine(entry.address_line2),
+      city: cleanNullableText(entry.city),
+      state: normalizeCallState(entry.state),
+      zip: normalizeZip(entry.zip),
+      is_rental: normalizeStrictBoolean(entry.is_rental),
+      property_type: cleanNullableText(entry.property_type),
+      notes: cleanNullableText(entry.notes),
+    });
+    if (out.length >= MAX_ADDITIONAL_PROPERTIES) break;
+  }
+  return out;
+}
+
 function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
   const source = extracted && typeof extracted === 'object' && !Array.isArray(extracted)
     ? extracted
@@ -210,6 +244,9 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     follow_up_date_time: cleanNullableText(source.follow_up_date_time),
     is_lead: normalizeIsLead(source.is_lead),
     call_type: normalizeCallType(source.call_type),
+    additional_properties: normalizeAdditionalProperties(source.additional_properties),
+    quote_requested: normalizeStrictBoolean(source.quote_requested),
+    quote_promised: normalizeStrictBoolean(source.quote_promised),
   };
 }
 
@@ -300,6 +337,7 @@ module.exports = {
   normalizePhoneForStorage,
   normalizeWebsiteQuoteContact,
   normalizeCallExtraction,
+  normalizeAdditionalProperties,
   normalizeContactRecord,
   applyContactNormalization,
   clearLineTypeOnPhoneChange,

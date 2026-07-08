@@ -20,6 +20,16 @@ html[data-glass-theme] {
      scene shows through — same effect the estimate walker gets by
      matching computed page colors. */
   --page: transparent;
+  /* The remaining warm/marketing brand tokens remap to the glass system
+     while the theme is mounted — otherwise WavesShell chrome and every
+     var(--text)/var(--border) consumer keeps rendering the old navy
+     #1B2C5B ink and warm #E7E2D7 hairlines over the scene. --surface
+     stays white (cards carry data-glass) and status colors stay reserved. */
+  --text: #04395e;
+  --border: rgba(4, 57, 94, 0.16);
+  --border-strong: rgba(4, 57, 94, 0.24);
+  --brand-soft: rgba(4, 57, 94, 0.08);
+  --brand-ring: rgba(4, 57, 94, 0.18);
 }
 
 /* ---------- native-markup helpers ----------

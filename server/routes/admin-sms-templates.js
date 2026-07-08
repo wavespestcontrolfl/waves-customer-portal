@@ -323,9 +323,11 @@ const MSG_TYPE_TO_TEMPLATE = {
   reactivation: 'seasonal_reactivation',
   // Kill-switch mappings — the sending WORKFLOWS behind these rows are
   // retired, but the message types are still emitted by live paths
-  // (campaign upsell drafts, customer-intel/retention-agent outreach) and
+  // (campaign upsell drafts, the customer-intel retention-approve route) and
   // isTemplateActive treats a MISSING key as active. The rows stay, disabled,
   // as the operator pause switch (see 20260706000010_sms_template_cleanup).
+  // ('retention_outreach' belonged to the removed retention agent — the
+  // mapping stays as defense-in-depth for anything still emitting it.)
   retention: 'health_retention_offer',
   retention_outreach: 'health_retention_offer',
   upsell: 'waveguard_upsell',

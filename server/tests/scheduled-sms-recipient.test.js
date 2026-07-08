@@ -17,7 +17,7 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
-const { resolveScheduledRecipient, scheduledDepositReceiptAllowed } = require('../services/scheduler');
+const { resolveScheduledRecipient, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
 
 function mockCustomerLookup(row) {
   db.mockImplementation((table) => {
@@ -106,5 +106,26 @@ describe('scheduledDepositReceiptAllowed', () => {
   test('fails open on a lookup error — matches the immediate path default', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
+  });
+});
+
+describe('classifyDepositReplayFallback — channel-flip email handoff outcomes', () => {
+  test('delivered email or a full receipt opt-out blocks the queued text', () => {
+    expect(classifyDepositReplayFallback({ sent: true })).toBe('handled');
+    expect(classifyDepositReplayFallback({ sent: false, reason: 'receipt_opted_out' })).toBe('handled');
+  });
+
+  test('a deterministically undeliverable email lets the queued TEXT proceed — it is the only receipt left', () => {
+    // Mirrors the immediate path\'s undeliverable-email SMS fallback
+    // (codex P2 on 6b73a479).
+    for (const reason of ['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
+      expect(classifyDepositReplayFallback({ sent: false, reason })).toBe('sms_fallback');
+    }
+  });
+
+  test('transient failures ride the bounded retry rail', () => {
+    expect(classifyDepositReplayFallback({ sent: false, reason: 'prefs_lookup_failed' })).toBe('retry');
+    expect(classifyDepositReplayFallback({ sent: false, reason: 'connect ETIMEDOUT' })).toBe('retry');
+    expect(classifyDepositReplayFallback({})).toBe('retry');
   });
 });

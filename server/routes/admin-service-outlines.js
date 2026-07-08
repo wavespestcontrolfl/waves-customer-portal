@@ -3,6 +3,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
+const { wrapServiceEmail, ctaButton, colors } = require('../services/email-template');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -533,12 +534,19 @@ router.post('/:id/send', async (req, res, next) => {
         const title = packet.title || 'Your Waves Lawn Care Program Overview';
         const greetingName = escapeHtml(estimate.customer_name || 'there');
         const escapedPublicUrl = escapeHtml(publicUrl);
-        const html = `
-          <p>Hi ${greetingName},</p>
-          <p>Your Waves lawn care program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>
-          <p><a href="${escapedPublicUrl}">View your lawn care program overview</a></p>
-          <p>Waves Pest Control</p>
-        `;
+        // Standard service chrome — this send previously shipped bare
+        // unbranded <p> tags, the only customer email outside the wrappers.
+        const html = wrapServiceEmail({
+          preheader: 'Your lawn care program overview is ready.',
+          body: [
+            `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">Your lawn care program overview</h1>`,
+            `<div style="font-size:15px;line-height:1.58;color:${colors.BODY};">`,
+            `<p style="margin:0 0 14px 0;">Hi ${greetingName},</p>`,
+            '<p style="margin:0 0 14px 0;">Your Waves lawn care program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>',
+            '</div>',
+            `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(escapedPublicUrl, 'View my program overview')}</div>`,
+          ].join(''),
+        });
         outcomes.email = await sendgrid.sendOne({
           to: estimate.customer_email,
           subject: title,

@@ -20,6 +20,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp } from '../native/platform';
+import { saveBlobNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
@@ -40,6 +41,9 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const blob = await r.blob();
+  // In the Capacitor shell the programmatic <a download> click below is a
+  // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+  if (await saveBlobNative(blob, fileName)) return;
   const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = blobUrl;
@@ -433,8 +437,10 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }
     <div style={{
       padding: 16,
       borderRadius: 8,
-      background: PORTAL_SHELL.page,
-      border: `1px solid ${PORTAL_SHELL.border}`,
+      // Whisper-white, not the warm PORTAL_SHELL.page — this inline state
+      // sits inside glass cards and the warm wash read as the old theme.
+      background: GLASS_SUBTLE,
+      border: '1px solid rgba(255,255,255,0.65)',
       display: 'flex',
       gap: 12,
       alignItems: 'flex-start',
@@ -1221,7 +1227,9 @@ function DashboardTab({ customer, onSwitchTab }) {
   // card; inert without the glass theme mounted (no offsets, no stacking context).
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
-  const subtle = PORTAL_SHELL.page;
+  // Whisper-white like every other tab — the warm PORTAL_SHELL.page wash
+  // read as the old theme on the glass scene (portal is glass-only).
+  const subtle = GLASS_SUBTLE;
   const dashboardLabel = {
     fontSize: 14,
     fontWeight: 850,
@@ -1391,8 +1399,8 @@ function DashboardTab({ customer, onSwitchTab }) {
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
-            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#FAF8F3',
-            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E7E2D7'}`,
+            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : GLASS_SUBTLE,
+            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : 'rgba(255,255,255,0.65)'}`,
             cursor: 'pointer',
             textAlign: 'left',
             fontFamily: FONTS.body,
@@ -1442,7 +1450,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   return (
                     <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
                       minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : '#FAF8F3',
+                      background: active ? color : GLASS_SUBTLE,
                       color: active ? '#fff' : B.grayMid,
                       fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
                     }}>{n}</button>
@@ -3332,6 +3340,9 @@ function BillingTab({ customer }) {
   const [billingEmail, setBillingEmail] = useState('');
   const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
+  const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
+  const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
@@ -3367,6 +3378,9 @@ function BillingTab({ customer }) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingSmsEnabled(!!prefsData.billingReminder);
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
+          setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
+          setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setEmailPrefEnabled(prefsData.emailEnabled !== false);
         }
         setLoading(false);
       }).catch(err => {
@@ -3757,6 +3771,14 @@ function BillingTab({ customer }) {
     </div>
   );
 
+  // Email/Both delivery can only be offered with an email on file (the billing
+  // recipient email or the account email) — otherwise the backend would
+  // suppress the texts with no deliverable email leg left. Same for the
+  // portal-wide email opt-out (Settings → Email Messages off): the receipt
+  // senders skip their email legs when email_enabled=false, so an email-only
+  // channel would suppress the text AND never email — the notice just drops.
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
+
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
@@ -3764,8 +3786,22 @@ function BillingTab({ customer }) {
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
+      // No email on file (or email messages opted out portal-wide) → the
+      // dropdowns render locked to Text; persist what is shown so an
+      // SMS-suppressing 'email' choice can't linger with no deliverable
+      // email leg.
+      billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
+      paymentConfirmationChannel: hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
       .then(() => {
+        // Keep local state in step with the coerced save — otherwise
+        // re-adding an email (or re-enabling email messages) in the same
+        // session resurrects a stale Email/Both selection the server was
+        // just normalized away from.
+        if (!hasBillingEmail) {
+          setBillingReminderChannel('sms');
+          setPaymentConfirmationChannel('sms');
+        }
         setBillingPrefsSaving(false);
         setBillingPrefsStatus('saved');
         setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
@@ -4236,10 +4272,30 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Billing reminder texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
           </div>
+          {(() => {
+            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const selectable = billingSmsEnabled && hasBillingEmail;
+            return (
+              <select
+                value={hasBillingEmail ? billingReminderChannel : 'sms'}
+                onChange={(e) => setBillingReminderChannel(e.target.value)}
+                disabled={!selectable}
+                aria-label="Delivery method for billing reminders"
+                style={{
+                  fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                }}
+              >
+                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
@@ -4264,10 +4320,30 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Payment confirmation texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
           </div>
+          {(() => {
+            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const selectable = paymentSmsEnabled && hasBillingEmail;
+            return (
+              <select
+                value={hasBillingEmail ? paymentConfirmationChannel : 'sms'}
+                onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
+                disabled={!selectable}
+                aria-label="Delivery method for payment confirmations"
+                style={{
+                  fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                }}
+              >
+                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}
@@ -4557,13 +4633,13 @@ function ServicePrefsSection() {
                 width: 34,
                 height: 34,
                 borderRadius: 8,
-                background: on ? '#F8FCFE' : '#FAF8F3',
+                background: on ? '#F8FCFE' : GLASS_SUBTLE,
                 color: on ? B.blueDeeper : ESTIMATE_MUTED,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                border: '1px solid #E7E2D7',
+                border: '1px solid rgba(255,255,255,0.65)',
               }}>
                 <Icon name={r.icon} size={17} strokeWidth={2} />
               </span>
@@ -6571,7 +6647,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime, 0) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
-                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
+                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
                         <div style={{ color: '#475569', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                         <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                       </div>
@@ -6943,7 +7019,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                           selected.estimatedPlanMonthly ? { label: 'Plan total', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
                           selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                         ].filter(Boolean).map(item => (
-                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
+                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
                             <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                             <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                           </div>
@@ -8718,7 +8794,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
-    pending: { label: 'Pending', color: muted, bg: '#FAF8F3' },
+    pending: { label: 'Pending', color: muted, bg: GLASS_SUBTLE },
     contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#F8FCFE' },
     estimated: { label: 'Estimated', color: B.orange, bg: `${B.orange}14` },
     signed_up: { label: 'Signed up', color: B.blueDeeper, bg: '#F0FDF4' },
@@ -9219,7 +9295,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
     }
   };
 
-  const downloadBlob = (blob, fileName = 'Waves_Document.pdf') => {
+  const downloadBlob = async (blob, fileName = 'Waves_Document.pdf') => {
+    // In the Capacitor shell the programmatic <a download> click below is a
+    // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+    if (await saveBlobNative(blob, fileName)) return;
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;
@@ -10258,13 +10337,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                       gap: 8,
                     }}>
-                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Plan</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
                           {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
                         </div>
                       </div>
-                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Last service</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
@@ -10545,8 +10624,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     alignItems: photos.length ? 'stretch' : 'center',
                     minHeight: photos.length ? 0 : 92,
                     borderRadius: 8,
-                    border: photos.length ? 'none' : '1px solid #E7E2D7',
-                    background: photos.length ? 'transparent' : '#FAF8F3',
+                    border: photos.length ? 'none' : '1px solid rgba(255,255,255,0.65)',
+                    background: photos.length ? 'transparent' : GLASS_SUBTLE,
                     padding: photos.length ? 0 : 12,
                     color: muted,
                     fontSize: 14,
@@ -10722,9 +10801,9 @@ function MyRequestsCard() {
           const created = new Date(r.createdAt);
           return (
             <article key={r.id} style={{
-              border: '1px solid #E7E2D7',
+              border: '1px solid rgba(255,255,255,0.65)',
               borderRadius: 8,
-              background: '#FAF8F3',
+              background: GLASS_SUBTLE,
               padding: 12,
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
@@ -11062,10 +11141,10 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           <div style={{
             display: 'flex',
             gap: 4,
-            background: '#FAF8F3',
+            background: GLASS_SUBTLE,
             borderRadius: 8,
             padding: 4,
-            border: '1px solid #E7E2D7',
+            border: '1px solid rgba(255,255,255,0.65)',
             minWidth: compact ? '100%' : 260,
           }}>
             {pill('upcoming', 'Upcoming')}
@@ -11445,7 +11524,7 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
-    <div style={{
+    <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
       // opaque page wash here would occlude it.

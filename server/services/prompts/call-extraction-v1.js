@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v1';
+const PROMPT_VERSION = 'v2';
 
 function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}) {
   const bookableServiceNames = Array.isArray(opts.bookableServiceNames)
@@ -73,13 +73,31 @@ PROPERTY:
 - hoa_community_flag: true if property is IN an HOA community (e.g. Lakewood Ranch, Heritage Harbor).
 - hoa_common_area_service: true ONLY if service is FOR HOA-owned common areas (clubhouse, retention ponds, entry beds). A single-family home inside an HOA is hoa_community_flag=true but hoa_common_area_service=false.
 
+MULTIPLE PROPERTIES (service_address vs additional_properties):
+- When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), service_address holds the PRIMARY property and EVERY other property goes into property.additional_properties — never drop one, never merge two addresses into one.
+- Primary = the property the caller treats as their main one (owner-occupied beats rental; the booked-visit property beats an unbooked one; else the first address given).
+- When the caller says a second property shares the first one's city/ZIP/community ("same zip and everything", "both in Calusa Country Club"), RESOLVE it: copy the stated city/postal_code/subdivision onto that entry.
+- occupancy: "rental_investment" when the caller says a property is a rental, investment property, tenant-occupied, or short-term rental; "owner_occupied" when they live there; else "unknown".
+- additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home. Set the multi_property_call triage flag whenever additional_properties is non-empty.
+
 SERVICE REQUEST:
 - primary_service_category: Map caller's request to the best enum value.
 - specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Control Service"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
 - quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.
+- ASSESSMENT vs FORMAL INSPECTION: a caller who SUSPECTS a pest problem or wants someone to come look, diagnose, or check ("I think I have termites", "something is eating my lawn", "can someone come take a look") maps to the "Waves Assessment" catalog service — NOT a formal inspection. "WDO Inspection Service" is ONLY for an explicitly requested wood-destroying-organism REPORT: real-estate sale/closing/refinance, lender or VA requirement, "termite letter"/"clearance letter", or the caller literally asking for a WDO inspection. The pre-slab/soil-treatment rule above still wins for pre-construction requests.
+- quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
+- quote_promised: true ONLY when the AGENT commits to send a quote/estimate AFTER the call ("we'll send you a quote this afternoon", "I'll email you an estimate", "we'll text you pricing"). A price merely spoken on the call is NOT a promised quote. This field means WORK IS STILL OWED to the caller after hangup — set it even when an appointment was also booked, and set the quote_promised triage flag with it.
 - pests_observed_status: "observed" when caller mentions seeing specific pests, "not_observed_preventative" when they want prevention without active pests, "not_observed_inquiry" for quote/info calls, "not_discussed" for non-pest topics (billing, cancellation).
 - waveguard_tier_mentioned: Only set if the caller explicitly names a WaveGuard tier they saw on the site or an ad. Do NOT infer.
+
+TRANSCRIPT RELIABILITY — the transcript is evidence, not truth:
+- CORRECTIONS: when the caller corrects themselves ("it's 555-2091 — sorry, no, 555-2901"), the LAST clearly confirmed value wins. Apply to every field: phone, address, date, time, email, service.
+- FINAL OUTCOME WINS: in a long call the plan can change ("Tuesday... actually let's do Wednesday", cancel → reschedule). Extract the FINAL agreed state at hangup, not an earlier abandoned one.
+- NEGATION: read carefully around "not/don't/never" — "I do NOT want to cancel" is not a cancellation_request. A missed negation reverses the meaning; when a negation makes intent unclear, choose the conservative value and lower the relevant confidence.
+- WHO SAID IT: only the CALLER's words establish agreement, consent, or a request. An agent reading a script ("you can cancel any time"), suggesting, or summarizing is not the caller agreeing. "Yeah, that sounds fine" only confirms what the caller was directly responding to — pin the evidence quote accordingly.
+- SIMILAR-SOUNDING VALUES: fifteen/fifty, "two oh five"/"205", B/D/P/T/V letters — when a number or spelled letter is genuinely ambiguous and not confirmed elsewhere in the call, return null rather than guess, and lower the relevant confidence to 0.6 or below.
+- MENTIONED ≠ AGREED: something discussed hypothetically ("if it comes back you could do quarterly") was not requested, booked, or purchased.
 
 CONSENT:
 - sms_consent_given: true only if the caller explicitly agrees to receive text messages. Implied consent (giving a phone number) does NOT count.
@@ -124,6 +142,8 @@ TRIAGE FLAGS — Set flags for situations requiring human review:
 - cancellation_request: Caller wants to cancel service.
 - ambiguous_scheduling: Scheduling was discussed but outcome is unclear.
 - reschedule_or_cancel: Caller wants to reschedule or cancel.
+- multi_property_call: The caller discussed service at more than one property (additional_properties is non-empty). Advisory — never blocks routing.
+- quote_promised: The agent committed to send a quote/estimate after the call (quote_promised is true). Advisory — never blocks routing.
 
 Waves services: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, Palm Injection, Exclusion. Calls about unrelated work (SEO, marketing, advertising, construction advice) are not Waves services.
 ${bookableCatalogBlock}`;

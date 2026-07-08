@@ -147,7 +147,7 @@ See `server/services/intelligence-bar/README.md` for the full template + 6-line 
 
 # Other Systems (Quick Reference)
 
-**Managed Agents (6)** — Anthropic Claude Managed Agents API. Configs in `server/services/agents/`. Blog Content Engine, Backlink Strategy, Customer Assistant, Lead Response, Customer Retention, Weekly BI Briefing.
+**Managed Agents (5)** — Anthropic Claude Managed Agents API. Configs are the `*-agent-config.js` files in `server/services/`. Blog Content Engine, Backlink Strategy, Customer Assistant, Lead Response, Weekly BI Briefing. (Customer Retention was removed 2026-07-08 — owner directive: no automated churn outreach to customers; retention drafts remain owner-approved via /admin customer-intel.)
 
 **Spoke Fleet — 15 Astro sites on Cloudflare Pages/Workers** — hub-and-spoke SEO network across SWFL markets (Bradenton, Parrish, Palmetto, Sarasota, Venice, North Port). Multi-domain GSC integration, multi-site publishing, DataForSEO rank tracking, 157-post blog calendar. **NOT WordPress. NOT Elementor. NOT RankMath.** Do not reintroduce any of them.
 

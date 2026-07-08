@@ -135,8 +135,24 @@ const TRUST_RANK = {
  *                               'marketing'     — sms_enabled true AND
  *                                                 a consent capture record
  *                               'none'          — purpose bypasses consent
- *   - prefsColumn             Optional notification_prefs column that must be
- *                             true (in addition to sms_enabled) for a send to fire.
+ *   - prefsColumn             Optional notification_prefs column (or array of
+ *                             columns, ALL of which must be non-false) that
+ *                             must be true (in addition to sms_enabled) for a
+ *                             send to fire.
+ *   - channelColumn           Optional notification_prefs column holding the
+ *                             customer's delivery-channel choice for this
+ *                             purpose (sms | email | both). 'email' suppresses
+ *                             the SMS leg — the email version of these notices
+ *                             is delivered by its own lane (receipt / billing
+ *                             emails to the billing address). Reuses the
+ *                             migration-104 channel columns so channel-aware
+ *                             senders (estimate-deposits, estimate-card-holds)
+ *                             and this gate read the SAME preference.
+ *   - channelGate             Optional. 'opt_in' makes the channelColumn gate
+ *                             apply only when the caller declares an email leg
+ *                             exists (input.hasEmailLeg) — for purposes where
+ *                             some sends are SMS-only confirmations with no
+ *                             email equivalent.
  *   - minIdentityTrust        Minimum identityTrustLevel required to send.
  *   - requireIds              Field names on the input that must be present.
  *
@@ -232,6 +248,15 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'billing_reminder',
+    channelColumn: 'billing_channel',
+    // 'opt_in' like payment_receipt: an unconditional gate would turn an
+    // email-preferring customer's billing reminder into silence for any
+    // SMS-only automated sender. Callers with an email fallback opt in via
+    // input.hasEmailLeg — the operator Comms billing reminder does (its
+    // block is surfaced to the operator, who can email instead); the
+    // notification dispatcher's billing lane pre-filters on billing_channel
+    // itself before this gate ever runs.
+    channelGate: 'opt_in',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
@@ -240,7 +265,22 @@ const PURPOSE_POLICY = {
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
-    prefsColumn: 'payment_receipt',
+    // Two opt-outs, both honored: payment_receipt is the long-standing
+    // receipt kill switch (migration 104, also honored by the
+    // estimate-deposits / estimate-card-holds email legs);
+    // payment_confirmation_sms is the portal Billing card's "Payment
+    // confirmation texts" toggle, which was stored but never enforced at
+    // send time before this. Both default true, so default-on customers
+    // are unaffected.
+    prefsColumn: ['payment_receipt', 'payment_confirmation_sms'],
+    channelColumn: 'payment_receipt_channel',
+    // 'opt_in': the email-only channel gate only fires when the caller
+    // declares an email leg (input.hasEmailLeg) — the invoice receipt path
+    // does; the SMS-only payment confirmations (billing-cron autopay
+    // successes, invoice thank-yous, balance payment-received, manual-charge
+    // receipts) have no email equivalent, so an email-only preference must
+    // not silence them entirely.
+    channelGate: 'opt_in',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
   },
