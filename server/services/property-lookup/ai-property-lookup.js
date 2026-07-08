@@ -1275,7 +1275,13 @@ function situsHouseNumberExactMatch(searchAddress, situsAddress, typedAddress = 
 // web-search records can be checked against the typed address; null when no
 // segment carries a clean number+street-word shape (builder floorplans,
 // county parcel pages, numeric listing ids) — no signal, never a mismatch.
-function houseNumberFromSourceUrl(url) {
+// The address-shaped path segment of a listing URL, or null. A segment
+// counts when it starts with a number, a separator, then a street token: a
+// word ("Skipping") or an ordinal ("45th"). The ordinal branch keeps
+// "4506-45th-Street-W" from being skipped; the token requirement keeps
+// pure-numeric id segments (an 8-10 digit zpid also exceeds the 6-digit
+// house-number cap) from masquerading as a house number.
+function addressSlugSegment(url) {
   if (!url || typeof url !== 'string') return null;
   let path;
   try {
@@ -1284,22 +1290,35 @@ function houseNumberFromSourceUrl(url) {
     return null;
   }
   for (const segment of path.split('/')) {
-    // Number, separator, then a street token: a word ("Skipping") or an
-    // ordinal ("45th"). The ordinal branch keeps "4506-45th-Street-W" from
-    // being skipped; the token requirement keeps pure-numeric id segments
-    // (an 8-10 digit zpid also exceeds the 6-digit house-number cap) from
-    // masquerading as a house number.
-    const match = /^(\d{1,6})[-_](?=[A-Za-z]|\d{1,4}(?:ST|ND|RD|TH)\b)/i.exec(segment);
-    if (match) return match[1];
+    if (/^(\d{1,6})[-_](?=[A-Za-z]|\d{1,4}(?:ST|ND|RD|TH)\b)/i.test(segment)) return segment;
   }
   return null;
 }
 
+function houseNumberFromSourceUrl(url) {
+  const segment = addressSlugSegment(url);
+  return segment ? /^(\d{1,6})/.exec(segment)[1] : null;
+}
+
+// Full normalized "NUMBER STREET" identity from a listing slug. Separators
+// become spaces and the whole segment runs through normalizeCountyStreetLine
+// + stripUnitDesignators, which also peels the trailing city/state/zip
+// tokens listing slugs carry ("14375-Skipping-Stone-Loop_Parrish_FL_34219"
+// → "14375 SKIPPING STONE LOOP") and canonicalizes suffix variance the same
+// way the typed side is normalized.
+function slugAddressLine(url) {
+  const segment = addressSlugSegment(url);
+  if (!segment) return null;
+  return stripUnitDesignators(normalizeCountyStreetLine(segment.replace(/[-_]+/g, ' '))) || null;
+}
+
 // Source types whose detail URLs embed the PROPERTY's address as the slug —
-// the only URLs where a leading number is a house number. Builder catalogs
-// (plan-number slugs), county parcel pages, and permit pages carry other
-// numbers there, so they never enter the mismatch comparison.
-const ADDRESS_SLUG_SOURCE_TYPES = new Set(['listing', 'aggregator', 'generic', 'unknown']);
+// the only URLs where a leading number is a house number. Restricted to
+// CLASSIFIED listing/aggregator hosts: builder catalogs and permit pages
+// carry plan/permit numbers in the slug position, and an UNCLASSIFIED host
+// can too (an unrecognized builder's "/1820-magnolia-plan" must not read as
+// a wrong house and torpedo valid new-construction evidence — codex P2).
+const ADDRESS_SLUG_SOURCE_TYPES = new Set(['listing', 'aggregator']);
 
 // The situs guard's twin for the AI web-search path. The prompt forbids
 // borrowing facts from a nearby home, but nothing enforced it — a trio
@@ -1316,23 +1335,39 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   if (!record) return false;
   const typedNumber = leadingHouseNumber(typedAddress);
   if (!typedNumber) return false;
+  // Same bare-'#' pre-strip as the audit, so a typed unit can't ride into
+  // the street identity.
+  const typedLine = stripUnitDesignators(
+    normalizeCountyStreetLine(String(typedAddress).replace(/#\s*[A-Za-z0-9-]+/g, ' ')),
+  );
   // EVERY citation is checked, not just the primary URL — a provider can
   // parse facts out of a neighbor listing while citing a generic page first
-  // (codex P2). Rule: any exact-address citation positively CONFIRMS the
-  // record (comps/nearby-homes links beside it don't poison a good source);
-  // otherwise a single disagreeing address slug drops it.
+  // (codex P2). Rules:
+  //   confirm  = a citation's FULL slug identity (number + street) matches
+  //              the typed address — a same-number listing on a DIFFERENT
+  //              street never confirms (codex P2);
+  //   drop     = no confirmation and some address slug carries a different
+  //              house number;
+  //   same number / different street = no signal either way, and it cannot
+  //              mask a disagreeing citation elsewhere in the record.
   const urls = [...new Set([
     ...(Array.isArray(record._aiSources) ? record._aiSources.map((s) => s?.url) : []),
     record._aiSourceUrl,
   ].filter(Boolean))];
+  let confirmed = false;
   let sawDisagreement = false;
   for (const url of urls) {
     if (!ADDRESS_SLUG_SOURCE_TYPES.has(classifyPropertySource(url).type)) continue;
-    const sourceNumber = houseNumberFromSourceUrl(url);
-    if (!sourceNumber) continue;
-    if (sourceNumber === typedNumber) return false;
-    sawDisagreement = true;
+    const slugLine = slugAddressLine(url);
+    const slugNumber = slugLine ? leadingHouseNumber(slugLine) : null;
+    if (!slugNumber) continue;
+    if (slugNumber !== typedNumber) {
+      sawDisagreement = true;
+    } else if (slugLine === typedLine) {
+      confirmed = true;
+    }
   }
+  if (confirmed) return false;
   return sawDisagreement;
 }
 
@@ -3653,6 +3688,7 @@ module.exports = {
     situsHouseNumberMismatch,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,
+    slugAddressLine,
     aiRecordHouseNumberMismatch,
     lookupPropertyFromManateePAO,
     lookupPropertyFromSarasotaPAO,

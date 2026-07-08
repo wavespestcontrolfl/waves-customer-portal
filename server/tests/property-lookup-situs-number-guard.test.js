@@ -366,21 +366,47 @@ describe('AI web-record house-number guard', () => {
     expect(aiRecordHouseNumberMismatch(confirmedWithComps, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
   });
 
-  test('only address-slug source types enter the comparison (codex P1)', () => {
+  test('only classified listing/aggregator URLs enter the comparison (codex P1+P2)', () => {
     // Builder floorplan URLs carry PLAN numbers in the slug position — a
     // valid prompt-allowed source that must never read as a wrong house.
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/1820-magnolia-plan',
-      _aiSourceType: 'builder',
     }, '14384 Skipping Stone Lp')).toBe(false);
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.buildzoom.com/permit/12345-some-permit',
-      _aiSourceType: 'permit',
     }, '14384 Skipping Stone Lp')).toBe(false);
-    // A listing-typed record with the same slug shape still fires.
+    // An UNCLASSIFIED host with a plan-number slug is excluded too — an
+    // unrecognized builder's page must not torpedo new-construction evidence.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.some-swfl-builder.com/1820-magnolia-plan',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    // A classified listing with the same slug shape still fires.
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.zillow.com/homedetails/14343-Skipping-Stone-Loop-Parrish-FL-34219/2063272367_zpid/',
-      _aiSourceType: 'listing',
     }, '14384 Skipping Stone Lp')).toBe(true);
+  });
+
+  test('confirmation requires the full slug identity — same number on a different street neither confirms nor drops alone (codex P2)', () => {
+    const crossStreet = {
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/4506-45th-Ave-W-Bradenton-FL-34209/333_zpid/',
+    };
+    // Same number, different street: no signal by itself…
+    expect(aiRecordHouseNumberMismatch(crossStreet, '4506 45th St W, Bradenton, FL 34209')).toBe(false);
+    // …it does NOT confirm, so it cannot mask a disagreeing citation.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: crossStreet._aiSourceUrl,
+      _aiSources: [
+        { provider: 'openai', url: crossStreet._aiSourceUrl },
+        { provider: 'openai', url: 'https://www.zillow.com/homedetails/4510-45th-St-W-Bradenton-FL-34209/444_zpid/' },
+      ],
+    }, '4506 45th St W, Bradenton, FL 34209')).toBe(true);
+    // A true full-identity citation still confirms over a comp.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/4506-45th-St-W-Bradenton-FL-34209/555_zpid/',
+      _aiSources: [
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/4506-45th-St-W-Bradenton-FL-34209/555_zpid/' },
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/4510-45th-St-W-Bradenton-FL-34209/444_zpid/' },
+      ],
+    }, '4506 45th St W, Bradenton, FL 34209')).toBe(false);
   });
 });
