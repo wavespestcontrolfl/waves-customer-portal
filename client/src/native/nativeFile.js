@@ -32,6 +32,20 @@ export function canSaveNative() {
   }
 }
 
+/**
+ * True when the running binary can offer the OS share sheet on a URL. Wider
+ * than canSaveNative(): link shares need only the Share plugin, not
+ * Filesystem.
+ */
+export function canShareNative() {
+  if (!isNativeApp()) return false;
+  try {
+    return Capacitor.isPluginAvailable('Share');
+  } catch {
+    return false;
+  }
+}
+
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -73,6 +87,24 @@ export async function saveBlobNative(blob, fileName) {
   const written = await Filesystem.writeFile({ path, data, directory: Directory.Cache });
   try {
     await Share.share({ title: path, url: written.uri });
+  } catch (err) {
+    if (!isShareCancel(err)) throw err;
+  }
+  return true;
+}
+
+/**
+ * Open the OS share sheet on a URL (link share, no file bytes). In the
+ * webview navigator.clipboard is unreliable and navigator.share loses its
+ * user-activation across an await — the Share plugin has neither problem.
+ * Returns false on web and on binaries without the plugin (caller keeps its
+ * legacy path), true once the sheet has been offered (including dismissal).
+ */
+export async function shareUrlNative(url, title) {
+  if (!canShareNative()) return false;
+  const { Share } = await import('@capacitor/share');
+  try {
+    await Share.share({ title: title || 'Waves document', url });
   } catch (err) {
     if (!isShareCancel(err)) throw err;
   }

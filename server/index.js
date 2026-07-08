@@ -151,7 +151,10 @@ const cspDirectives = {
   // self-hosted/proxy deployment stays CSP-allowed — keep it in lockstep with
   // the VITE_GROWTHBOOK_API_HOST baked into the client build.
   connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", (process.env.GROWTHBOOK_API_HOST || 'https://cdn.growthbook.io').replace(/\/+$/, '')],
-  frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
+  // blob: — the customer portal's in-app document viewer renders Bearer-only
+  // report PDFs through an iframe on a blob URL (Capacitor shell has no
+  // download pipeline); blob frames are same-origin script-created only.
+  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
   mediaSrc: ["'self'", "https:"],
   // PostHog session replay records via a web worker created from a blob URL.
   workerSrc: ["'self'", "blob:"],
