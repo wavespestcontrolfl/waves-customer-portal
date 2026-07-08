@@ -130,16 +130,19 @@ function SendReportDialog({ open, onClose, type, id, defaultEmail, onSent }) {
   );
 }
 
-function LinkDialog({ open, onClose, type, id, onLinked }) {
-  const [kind, setKind] = useState("lead"); // lead | customer
+function LinkDialog({ open, onClose, type, id, onLinked, allowLead = true }) {
+  // Unclaimed public-funnel rows can't take a lead link (the server 409s:
+  // the prospect's own /claim rejects rows that already carry a lead_id) —
+  // start on and restrict to the Customer tab for those.
+  const [kind, setKind] = useState(allowLead ? "lead" : "customer"); // lead | customer
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (open) { setKind("lead"); setQuery(""); setResults([]); setError(""); setBusy(false); }
-  }, [open]);
+    if (open) { setKind(allowLead ? "lead" : "customer"); setQuery(""); setResults([]); setError(""); setBusy(false); }
+  }, [open, allowLead]);
 
   useEffect(() => {
     if (!open || query.trim().length < 2) { setResults([]); return undefined; }
@@ -187,10 +190,15 @@ function LinkDialog({ open, onClose, type, id, onLinked }) {
       <DialogBody className="space-y-3">
         <Tabs value={kind} onValueChange={setKind}>
           <TabList>
-            <Tab value="lead">Lead</Tab>
+            <Tab value="lead" disabled={!allowLead}>Lead</Tab>
             <Tab value="customer">Customer</Tab>
           </TabList>
         </Tabs>
+        {!allowLead ? (
+          <p className="text-[14px] text-zinc-500">
+            Lead linking is unavailable until the prospect unlocks their report — their claim creates and links the lead.
+          </p>
+        ) : null}
         <Input placeholder={`Search ${kind}s by name, phone, email…`} value={query} onChange={(e) => setQuery(e.target.value)} />
         {results.length ? (
           <div className="border border-hairline border-zinc-200 rounded-md divide-y divide-zinc-100">
@@ -493,6 +501,7 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
         onClose={() => setShowLink(false)}
         type={type}
         id={id}
+        allowLead={!assessment || assessment.source !== "public_funnel" || !!assessment.claimed_at}
         onLinked={() => { load(); onChanged(); }}
       />
     </Sheet>

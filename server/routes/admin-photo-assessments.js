@@ -369,6 +369,14 @@ router.post('/:type/:id/link', async (req, res, next) => {
       if (body.lead_id === null) {
         updates.lead_id = null;
       } else {
+        // Same releasability rule as minting: the public claim handlers 409
+        // any row that already carries a lead_id, so linking a lead onto a
+        // still-unclaimed public_funnel row would permanently lock the
+        // prospect's own unlock out. Unlinking (null) stays allowed — it is
+        // the manual recovery path.
+        if (row.source === 'public_funnel' && !row.claimed_at) {
+          return res.status(409).json({ error: 'This assessment has not been claimed yet — linking a lead now would block the prospect\'s own unlock. Wait for the claim (or archive the row).' });
+        }
         if (!UUID_RE.test(String(body.lead_id))) return res.status(400).json({ error: 'invalid lead_id' });
         const lead = await db('leads').where({ id: body.lead_id }).first();
         if (!lead) return res.status(404).json({ error: 'Lead not found' });

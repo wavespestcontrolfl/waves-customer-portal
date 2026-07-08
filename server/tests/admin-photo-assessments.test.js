@@ -240,6 +240,32 @@ describe('POST /:type/:id/link', () => {
       expect(updates.pest_identifications[0].lead_id).toBeNull();
     });
   });
+
+  test('lead-linking an UNCLAIMED public-funnel row is a 409 (claim would 409 on the lead), no write', async () => {
+    mockRows.lawn_diagnostics = [lawnRow({ claimed_at: null })];
+    mockLeadRow = { id: LEAD_ID };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/link`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: LEAD_ID }),
+      });
+      expect(res.status).toBe(409);
+      expect(updates.lawn_diagnostics).toBeUndefined();
+    });
+  });
+
+  test('an unclaimed public-funnel row still accepts a customer link and a lead UNLINK', async () => {
+    const CUSTOMER = 'cccccccc-dddd-4eee-8fff-000000000000';
+    mockRows.lawn_diagnostics = [lawnRow({ claimed_at: null })];
+    mockCustomerRow = { id: CUSTOMER };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}/link`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER, lead_id: null }),
+      });
+      expect(res.status).toBe(200);
+      expect(updates.lawn_diagnostics[0].customer_id).toBe(CUSTOMER);
+      expect(updates.lawn_diagnostics[0].lead_id).toBeNull();
+    });
+  });
 });
 
 describe('POST /:type/:id/send-report', () => {
