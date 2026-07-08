@@ -238,9 +238,15 @@ describe('lookupPropertyFromAITrio interpolated-geocode acceptance', () => {
 });
 
 describe('situsHouseNumberExactMatch (interpolated acceptance rule)', () => {
-  test('true only when both sides expose the same clean number', () => {
+  test('true only when both sides expose the same clean number on the same street', () => {
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 LUXE AVE APT 101')).toBe(true);
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13510 LUXE AVE')).toBe(false);
+  });
+  test('a cross-street parcel sharing the house number is NOT a positive match (codex P1)', () => {
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 PINE ST')).toBe(false);
+  });
+  test('suffix spelling differences do not break street agreement', () => {
+    expect(situsHouseNumberExactMatch('14375 Skipping Stone Lp', '14375 SKIPPING STONE LOOP')).toBe(true);
   });
   test('missing or range numbers are NOT a positive match', () => {
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', 'LUXE AVE')).toBe(false);
@@ -293,5 +299,23 @@ describe('AI web-record house-number guard', () => {
     expect(aiRecordHouseNumberMismatch({ _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=1' }, '14384 Skipping Stone Lp')).toBe(false);
     expect(aiRecordHouseNumberMismatch(neighbor, 'Skipping Stone Lp, Parrish')).toBe(false);
     expect(aiRecordHouseNumberMismatch(null, '14384 Skipping Stone Lp')).toBe(false);
+  });
+
+  test('only address-slug source types enter the comparison (codex P1)', () => {
+    // Builder floorplan URLs carry PLAN numbers in the slug position — a
+    // valid prompt-allowed source that must never read as a wrong house.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/1820-magnolia-plan',
+      _aiSourceType: 'builder',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.buildzoom.com/permit/12345-some-permit',
+      _aiSourceType: 'permit',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    // A listing-typed record with the same slug shape still fires.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/14343-Skipping-Stone-Loop-Parrish-FL-34219/2063272367_zpid/',
+      _aiSourceType: 'listing',
+    }, '14384 Skipping Stone Lp')).toBe(true);
   });
 });

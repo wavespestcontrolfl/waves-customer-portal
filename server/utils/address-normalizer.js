@@ -109,7 +109,7 @@ const STREET_SPLIT_SUFFIX_ALIAS_KEYS = [
   'trail', 'trl',
   'parkway', 'pkwy',
   'highway', 'hwy',
-  'loop',
+  'loop', 'lp',
   'pass',
   'path',
   'run',

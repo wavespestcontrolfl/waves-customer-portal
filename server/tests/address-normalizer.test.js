@@ -43,6 +43,12 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({ raw: '202 Oak Grove, Sarasota, FL 34236' }).line1).toBe('202 Oak Grv');
     // Google's "Lp" abbreviation expands to the USPS-canonical LOOP
     expect(normalizeLeadAddress({ raw: '14384 Skipping Stone Lp, Parrish, FL 34219' }).line1).toBe('14384 Skipping Stone Loop');
+    // …and the comma-free splitter treats it as a street/city boundary too (codex P1)
+    expect(normalizeLeadAddress({ raw: '14384 Skipping Stone Lp Parrish FL 34219' })).toMatchObject({
+      line1: '14384 Skipping Stone Loop',
+      city: 'Parrish',
+      zip: '34219',
+    });
   });
 
   test('normalizes ordinal street names without shouting the suffix', () => {

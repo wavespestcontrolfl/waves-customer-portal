@@ -1238,14 +1238,25 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 }
 
 // Positive confirmation — both sides expose a single clean leading house
-// number AND they agree. Stricter than !situsHouseNumberMismatch (which is
+// number AND they agree, AND the street names agree (suffix-stripped, unit
+// designators peeled — an interpolated point can also land on a CROSS-street
+// parcel that happens to share the house number, which the number check
+// alone would bless). Stricter than !situsHouseNumberMismatch (which is
 // also true when either number is missing): interpolated-geocode parcel
 // matches require this, so a vacant developer lot with a blank situs can
 // never ride an interpolated point into the record.
 function situsHouseNumberExactMatch(searchAddress, situsAddress) {
   const searchNumber = leadingHouseNumber(searchAddress);
   const situsNumber = leadingHouseNumber(situsAddress);
-  return Boolean(searchNumber && situsNumber && searchNumber === situsNumber);
+  if (!searchNumber || !situsNumber || searchNumber !== situsNumber) return false;
+  // Units peel FIRST — a trailing "APT 101" hides the suffix from the
+  // end-anchored removeStreetSuffix.
+  const streetOf = (value) => removeStreetSuffix(
+    stripUnitDesignators(normalizeCountyStreetLine(value)),
+  ).replace(/^\d+\s+/, '').trim();
+  const searchStreet = streetOf(searchAddress);
+  const situsStreet = streetOf(situsAddress);
+  return Boolean(searchStreet && situsStreet && searchStreet === situsStreet);
 }
 
 // Listing/detail pages embed the property's house number as the first token
@@ -1274,6 +1285,12 @@ function houseNumberFromSourceUrl(url) {
   return null;
 }
 
+// Source types whose detail URLs embed the PROPERTY's address as the slug —
+// the only URLs where a leading number is a house number. Builder catalogs
+// (plan-number slugs), county parcel pages, and permit pages carry other
+// numbers there, so they never enter the mismatch comparison.
+const ADDRESS_SLUG_SOURCE_TYPES = new Set(['listing', 'aggregator', 'generic', 'unknown']);
+
 // The situs guard's twin for the AI web-search path. The prompt forbids
 // borrowing facts from a nearby home, but nothing enforced it — a trio
 // provider citing the NEIGHBOR's listing (live miss: realtor.com/14375-…
@@ -1282,8 +1299,11 @@ function houseNumberFromSourceUrl(url) {
 // fires only when the typed address and the source URL both expose a clean
 // house number and they differ.
 function aiRecordHouseNumberMismatch(record, searchAddress) {
+  if (!record) return false;
+  const sourceType = record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
+  if (!ADDRESS_SLUG_SOURCE_TYPES.has(sourceType)) return false;
   const typedNumber = leadingHouseNumber(searchAddress);
-  const sourceNumber = houseNumberFromSourceUrl(record?._aiSourceUrl);
+  const sourceNumber = houseNumberFromSourceUrl(record._aiSourceUrl);
   if (!typedNumber || !sourceNumber) return false;
   return typedNumber !== sourceNumber;
 }
