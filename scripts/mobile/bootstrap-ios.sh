@@ -134,6 +134,36 @@ else
   echo "==> PrivacyInfo.xcprivacy already present ✓"
 fi
 
+# Universal links: portal.wavespestcontrol.com URLs open the installed app
+# directly. Needs (a) this Associated Domains entitlement in the binary and
+# (b) the server serving /.well-known/apple-app-site-association
+# (GATE_UNIVERSAL_LINKS — see docs/mobile/universal-links.md). Idempotent:
+# creates the entitlements file if missing, appends the applinks entry if the
+# file exists without it. Xcode must reference the file (manual step below).
+ENTITLEMENTS="ios/App/App/App.entitlements"
+APPLINK_DOMAIN="applinks:portal.wavespestcontrol.com"
+if [ ! -f "$ENTITLEMENTS" ]; then
+  cat > "$ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.developer.associated-domains</key>
+  <array>
+    <string>${APPLINK_DOMAIN}</string>
+  </array>
+</dict>
+</plist>
+PLIST
+  echo "==> App.entitlements written (Associated Domains: ${APPLINK_DOMAIN}) ✓"
+elif /usr/libexec/PlistBuddy -c "Print :com.apple.developer.associated-domains" "$ENTITLEMENTS" 2>/dev/null | grep -q "$APPLINK_DOMAIN"; then
+  echo "==> App.entitlements already lists ${APPLINK_DOMAIN} ✓"
+else
+  /usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains array" "$ENTITLEMENTS" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains:0 string ${APPLINK_DOMAIN}" "$ENTITLEMENTS"
+  echo "==> ${APPLINK_DOMAIN} appended to App.entitlements ✓"
+fi
+
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
 cat <<'NOTES'
@@ -143,6 +173,12 @@ cat <<'NOTES'
    • Signing & Capabilities → select your Team (bundle id: com.wavespestcontrol.portal)
    • + Capability → Push Notifications
    • + Capability → Background Modes → check "Remote notifications"
+   • + Capability → Associated Domains → confirm applinks:portal.wavespestcontrol.com
+     is listed (this script pre-writes App/App.entitlements; if Xcode shows the
+     capability empty, Build Settings → Code Signing Entitlements must point at
+     App/App.entitlements). Automatic signing then enables Associated Domains
+     on the App ID for you. Server side, links only start opening in-app once
+     GATE_UNIVERSAL_LINKS=true is set on Railway — see docs/mobile/universal-links.md.
    • App Store Connect → Users and Access → Integrations → APNs Auth Key:
        create a .p8 key, note the Key ID + Team ID → these feed the backend
        APNs env vars (see docs/mobile/apns-backend-pr-plan.md).

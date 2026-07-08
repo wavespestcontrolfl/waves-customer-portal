@@ -344,6 +344,15 @@ const gates = {
   // missing/unreachable, assignment fails OPEN to control (current behavior).
   growthbookExperiments: process.env.GATE_GROWTHBOOK === 'true',
 
+  // Universal links / Android App Links — serves the /.well-known association
+  // files that let the installed native app claim portal.wavespestcontrol.com
+  // URLs (routes/well-known.js). Explicit opt-in in EVERY environment: it
+  // changes how links behave on customers' phones (open in app vs browser)
+  // and should flip only alongside binaries carrying the Associated Domains
+  // entitlement / autoVerify intent-filter. Kill = unset; both OSes fall back
+  // to the browser on their next association re-validation.
+  universalLinks: process.env.GATE_UNIVERSAL_LINKS === 'true',
+
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
   // trigger has been verified with run history and idempotency checks.

@@ -53,6 +53,57 @@ else
   echo "    Android push (FCM) will be inert until you add it (see step 5)."
 fi
 
+# Android App Links: verified https://portal.wavespestcontrol.com URLs open the
+# installed app directly. Needs (a) this autoVerify intent-filter on MainActivity
+# and (b) the server serving /.well-known/assetlinks.json with the Play signing
+# cert fingerprints (GATE_UNIVERSAL_LINKS — see docs/mobile/universal-links.md).
+#
+# Android intent-filters have no exclude syntax, so unlike the iOS AASA this is
+# an ALLOWLIST of customer link surfaces — claiming the whole host would grab
+# /api/... links too (direct PDF/report URLs in SMS/email would open a raw API
+# response in the webview instead of the browser download flow — codex P1 on
+# #2496). A path not listed here simply keeps opening in the browser; when a
+# new customer link surface ships, add its prefix here AND rebuild.
+# NOTE: pathPrefix is a plain string prefix — '/l/' and '/r/' need the trailing
+# slash or they'd swallow /login, /report, /reschedule, etc.
+#
+# Idempotent by REPLACEMENT, not by skipping: client/android persists across
+# bootstraps (gitignored, generated once), so a filter injected by an earlier
+# script revision — or an outdated allowlist — must not survive a re-run.
+# Every run strips ALL autoVerify intent-filters and re-injects the current
+# one; this script is the source of truth for the block. MainActivity is the
+# only activity in the Capacitor template, so the first </activity> is safe
+# to target.
+MANIFEST="android/app/src/main/AndroidManifest.xml"
+if [ -f "$MANIFEST" ]; then
+  # /r/ (referral links) is deliberately ABSENT: referral-links.js 302s those
+  # to the marketing site, which would strand the app's webview off-portal —
+  # they belong in the browser (iOS AASA excludes them too).
+  APP_LINK_PREFIXES="/l/ /track /pay /billing /receipt /report /pest-report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report /service-outlines"
+  IND="            "
+  NL=$'\n'
+  FILTER="${IND}<intent-filter android:autoVerify=\"true\">${NL}"
+  FILTER="${FILTER}${IND}    <action android:name=\"android.intent.action.VIEW\" />${NL}"
+  FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.DEFAULT\" />${NL}"
+  FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.BROWSABLE\" />${NL}"
+  FILTER="${FILTER}${IND}    <data android:scheme=\"https\" android:host=\"portal.wavespestcontrol.com\" />${NL}"
+  FILTER="${FILTER}${IND}    <data android:path=\"/\" />${NL}"
+  for p in $APP_LINK_PREFIXES; do
+    FILTER="${FILTER}${IND}    <data android:pathPrefix=\"$p\" />${NL}"
+  done
+  FILTER="${FILTER}${IND}</intent-filter>"
+  export FILTER
+  # Strip any previous autoVerify filter(s), then inject the current one.
+  perl -0pi -e 's{\n[ \t]*<intent-filter android:autoVerify="true">.*?</intent-filter>}{}gs' "$MANIFEST"
+  perl -0pi -e 's{(\n\s*</activity>)}{\n$ENV{FILTER}$1}' "$MANIFEST"
+  if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
+    echo "==> App Links intent-filter (re)injected into AndroidManifest.xml (customer-path allowlist) ✓"
+  else
+    echo "==> WARNING: could not inject the App Links intent-filter — add it to"
+    echo "    MainActivity in $MANIFEST manually (see docs/mobile/universal-links.md)."
+  fi
+fi
+
 echo
 echo "==> 5/5  Manual steps:"
 cat <<'NOTES'
@@ -72,6 +123,16 @@ cat <<'NOTES'
            -keyalg RSA -keysize 2048 -validity 10000
      • Configure it in android/app/build.gradle (signingConfigs) or
        android/keystore.properties (keep the keystore OUT of git).
+
+   APP LINKS (universal links):
+     • Play re-signs releases, so /.well-known/assetlinks.json must carry the
+       Play "App signing key certificate" SHA-256 (Play Console → Setup →
+       App signing) — include the upload cert too so local builds verify.
+       Set both, comma-separated, in the Railway env var
+       ANDROID_ASSETLINKS_SHA256, then GATE_UNIVERSAL_LINKS=true.
+     • Verify on-device after install:
+         adb shell pm get-app-links com.wavespestcontrol.portal
+       (portal.wavespestcontrol.com should show "verified".)
 
    GOOGLE PLAY:
      • Register the Play Console account as the ORGANIZATION (Waves Pest Control,
