@@ -208,6 +208,21 @@ describe('Manatee PAO property lookup facts', () => {
       '14384 SKIPPING STONE LOOP',
       '14384 SKIPPING STONE',
     ]);
+    // New suffix words canonicalize ONLY at the terminal position — inside a
+    // street name they must survive untouched or the outbound query key
+    // can't match the roll (codex P2).
+    expect(_private.manateeAddressSearchCandidates('123 Glen Oaks Drive, Bradenton, FL 34211')).toEqual([
+      '123 GLEN OAKS DR',
+      '123 GLEN OAKS',
+    ]);
+    expect(_private.manateeAddressSearchCandidates('123 Cove Point Road, Bradenton, FL 34211')).toEqual([
+      '123 COVE POINT RD',
+      '123 COVE POINT',
+    ]);
+    expect(_private.manateeAddressSearchCandidates('123 Summer Glen, Bradenton, FL 34211')).toEqual([
+      '123 SUMMER GLN',
+      '123 SUMMER',
+    ]);
   });
 
   test('matches a typed "Lp" street against a roll row spelled LOOP', () => {

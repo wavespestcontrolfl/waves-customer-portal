@@ -261,6 +261,28 @@ describe('situsHouseNumberExactMatch (interpolated acceptance rule)', () => {
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13500-13700 LUXE AVE')).toBe(false);
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', null)).toBe(false);
   });
+  test('anchored to the TYPED number when the geocoder snapped (codex P2)', () => {
+    // Google snapped nonexistent typed 14384 to real neighbor 14380: the
+    // canonical searchAddress and the situs agree with EACH OTHER, but not
+    // with what the customer typed — no positive confirmation.
+    expect(situsHouseNumberExactMatch(
+      '14380 Skipping Stone Loop, Parrish, FL 34219', // canonical (snapped)
+      '14380 SKIPPING STONE LOOP',
+      '14384 Skipping Stone Lp, Parrish, FL 34219', // typed
+    )).toBe(false);
+    // No snap: typed agrees → confirmed.
+    expect(situsHouseNumberExactMatch(
+      '14380 Skipping Stone Loop, Parrish, FL 34219',
+      '14380 SKIPPING STONE LOOP',
+      '14380 Skipping Stone Lp, Parrish, FL 34219',
+    )).toBe(true);
+    // Typed address without a clean number cannot positively confirm.
+    expect(situsHouseNumberExactMatch(
+      '14380 Skipping Stone Loop, Parrish, FL 34219',
+      '14380 SKIPPING STONE LOOP',
+      'Skipping Stone Lp, Parrish, FL 34219',
+    )).toBe(false);
+  });
 });
 
 describe('AI web-record house-number guard', () => {
@@ -318,6 +340,30 @@ describe('AI web-record house-number guard', () => {
     };
     expect(aiRecordHouseNumberMismatch(snappedNeighborListing, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
     expect(aiRecordHouseNumberMismatch(snappedNeighborListing, '14380 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+  });
+
+  test('every citation is scanned, not just the primary URL (codex P2)', () => {
+    // Primary source is a generic page; a secondary citation is the
+    // neighbor's listing that actually supplied the facts.
+    const hiddenNeighbor = {
+      _aiSourceUrl: 'https://www.zillow.com/parrish-fl/',
+      _aiSources: [
+        { provider: 'openai', url: 'https://www.zillow.com/parrish-fl/' },
+        { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
+      ],
+    };
+    expect(aiRecordHouseNumberMismatch(hiddenNeighbor, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
+
+    // An exact-address citation CONFIRMS the record even when a comps link
+    // for a neighbor rides beside it.
+    const confirmedWithComps = {
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/14384-Skipping-Stone-Loop-Parrish-FL-34219/111_zpid/',
+      _aiSources: [
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/14384-Skipping-Stone-Loop-Parrish-FL-34219/111_zpid/' },
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/14380-Skipping-Stone-Loop-Parrish-FL-34219/222_zpid/' },
+      ],
+    };
+    expect(aiRecordHouseNumberMismatch(confirmedWithComps, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
   });
 
   test('only address-slug source types enter the comparison (codex P1)', () => {

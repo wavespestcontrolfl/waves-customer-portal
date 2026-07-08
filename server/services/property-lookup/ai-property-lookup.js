@@ -1249,10 +1249,19 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 // missing): interpolated-geocode parcel matches require this, so a vacant
 // developer lot with a blank situs can never ride an interpolated point
 // into the record.
-function situsHouseNumberExactMatch(searchAddress, situsAddress) {
+// The house number is anchored to the ORIGINALLY TYPED address when one is
+// supplied (same rule as the audit and the AI URL guard): a non-partial
+// interpolated geocode can still have SNAPPED a nonexistent typed number to
+// a real neighbor, and searchAddress would then carry the neighbor's own
+// number — confirming exactly the wrong parcel. The STREET comparison stays
+// on searchAddress, whose geocoder-corrected spelling is what matches the
+// roll.
+function situsHouseNumberExactMatch(searchAddress, situsAddress, typedAddress = searchAddress) {
   const searchNumber = leadingHouseNumber(searchAddress);
   const situsNumber = leadingHouseNumber(situsAddress);
   if (!searchNumber || !situsNumber || searchNumber !== situsNumber) return false;
+  const typedNumber = leadingHouseNumber(typedAddress);
+  if (!typedNumber || typedNumber !== situsNumber) return false;
   const streetOf = (value) => stripUnitDesignators(normalizeCountyStreetLine(value))
     .replace(/^\d+\s+/, '').trim();
   const searchStreet = streetOf(searchAddress);
@@ -1305,12 +1314,26 @@ const ADDRESS_SLUG_SOURCE_TYPES = new Set(['listing', 'aggregator', 'generic', '
 // neighbor's own number and bless the neighbor's listing.
 function aiRecordHouseNumberMismatch(record, typedAddress) {
   if (!record) return false;
-  const sourceType = record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
-  if (!ADDRESS_SLUG_SOURCE_TYPES.has(sourceType)) return false;
   const typedNumber = leadingHouseNumber(typedAddress);
-  const sourceNumber = houseNumberFromSourceUrl(record._aiSourceUrl);
-  if (!typedNumber || !sourceNumber) return false;
-  return typedNumber !== sourceNumber;
+  if (!typedNumber) return false;
+  // EVERY citation is checked, not just the primary URL — a provider can
+  // parse facts out of a neighbor listing while citing a generic page first
+  // (codex P2). Rule: any exact-address citation positively CONFIRMS the
+  // record (comps/nearby-homes links beside it don't poison a good source);
+  // otherwise a single disagreeing address slug drops it.
+  const urls = [...new Set([
+    ...(Array.isArray(record._aiSources) ? record._aiSources.map((s) => s?.url) : []),
+    record._aiSourceUrl,
+  ].filter(Boolean))];
+  let sawDisagreement = false;
+  for (const url of urls) {
+    if (!ADDRESS_SLUG_SOURCE_TYPES.has(classifyPropertySource(url).type)) continue;
+    const sourceNumber = houseNumberFromSourceUrl(url);
+    if (!sourceNumber) continue;
+    if (sourceNumber === typedNumber) return false;
+    sawDisagreement = true;
+  }
+  return sawDisagreement;
 }
 
 async function lookupPropertyFromAITrio(address, geoContext = null) {
@@ -1352,7 +1375,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
       logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
       parcel = null;
     } else if (parcel && gisPrecision === 'interpolated'
-        && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress)) {
+        && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
       // An interpolated point is a guess along the street — keep the parcel
       // only when its situs POSITIVELY confirms the typed house number. A
       // blank/range situs (vacant developer lot, master parcel) proves
@@ -1717,6 +1740,35 @@ function normalizeCountyCityName(value) {
     .trim();
 }
 
+// New long-form suffixes canonicalize ONLY at the terminal suffix position
+// (optionally before a post-direction and/or a unit tail): these words are
+// common INSIDE street names ("Glen Oaks Dr", "Cove Point Rd"), and a global
+// replacement would corrupt the outbound county query key before any roll
+// row could match (codex P2). Terminal canonicalization is query-safe
+// because every candidate builder also emits a suffix-STRIPPED candidate,
+// so a roll that spells the suffix out is still found. The historical
+// globals below (AVENUE, STREET, …) keep their long-standing behavior.
+const TERMINAL_ONLY_SUFFIX_ALIASES = {
+  BEND: 'BND',
+  COVE: 'CV',
+  CROSSING: 'XING',
+  GLEN: 'GLN',
+  HIGHWAY: 'HWY',
+  // Google abbreviates Loop as "Lp" (live miss: "SKIPPING STONE LP" vs the
+  // Manatee roll's "SKIPPING STONE LOOP" read as street-not-found) — the
+  // roll spells it out, so LOOP is the canonical form here.
+  LP: 'LOOP',
+  PLAZA: 'PLZ',
+  POINT: 'PT',
+  POINTE: 'PT',
+  SQUARE: 'SQ',
+  TRACE: 'TRCE',
+};
+const TERMINAL_ONLY_SUFFIX_RE = new RegExp(
+  `\\b(${Object.keys(TERMINAL_ONLY_SUFFIX_ALIASES).join('|')})`
+  + '(?=(?:\\s+[NSEW])?(?:\\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)\\b[\\sA-Z0-9]*)?$)',
+);
+
 function normalizeCountyStreetLine(address) {
   const firstLine = String(address || '').split(',')[0] || '';
   const cleaned = firstLine
@@ -1734,30 +1786,18 @@ function normalizeCountyStreetLine(address) {
     .replace(/\bEAST\b/g, 'E')
     .replace(/\bWEST\b/g, 'W')
     .replace(/\bAVENUE\b/g, 'AVE')
-    .replace(/\bBEND\b/g, 'BND')
     .replace(/\bBOULEVARD\b/g, 'BLVD')
     .replace(/\bCIRCLE\b/g, 'CIR')
     .replace(/\bCOURT\b/g, 'CT')
-    .replace(/\bCOVE\b/g, 'CV')
-    .replace(/\bCROSSING\b/g, 'XING')
     .replace(/\bDRIVE\b/g, 'DR')
-    .replace(/\bGLEN\b/g, 'GLN')
-    .replace(/\bHIGHWAY\b/g, 'HWY')
     .replace(/\bLANE\b/g, 'LN')
-    // Google abbreviates Loop as "Lp" (live miss: "SKIPPING STONE LP" vs the
-    // Manatee roll's "SKIPPING STONE LOOP" read as street-not-found) — the
-    // roll spells it out, so LOOP is the canonical form here.
-    .replace(/\bLP\b/g, 'LOOP')
     .replace(/\bPARKWAY\b/g, 'PKWY')
     .replace(/\bPLACE\b/g, 'PL')
-    .replace(/\bPLAZA\b/g, 'PLZ')
-    .replace(/\bPOINTE?\b/g, 'PT')
     .replace(/\bROAD\b/g, 'RD')
-    .replace(/\bSQUARE\b/g, 'SQ')
     .replace(/\bSTREET\b/g, 'ST')
     .replace(/\bTERRACE\b/g, 'TER')
-    .replace(/\bTRACE\b/g, 'TRCE')
     .replace(/\bTRAIL\b/g, 'TRL')
+    .replace(TERMINAL_ONLY_SUFFIX_RE, (token) => TERMINAL_ONLY_SUFFIX_ALIASES[token])
     .replace(/\s+/g, ' ')
     .trim();
 }
