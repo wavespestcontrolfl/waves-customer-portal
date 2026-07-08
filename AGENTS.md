@@ -477,6 +477,13 @@ finding and warns on P1. Reviewers must return JSON matching
   data — for operator preview/share. Token in path, `noindex`).
   `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
   target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
+  `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
+  (static universal-link association JSON for the native app shell — no auth,
+  no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
+  AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
+  also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
+  `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
+  API/PDF responses must never be claimed by the app).
   `/api/public/track/:token` (read-only live service tracker; the
   `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
   rate limit. In ANY state it returns the customer property block — first name,

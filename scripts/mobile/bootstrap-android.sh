@@ -53,6 +53,28 @@ else
   echo "    Android push (FCM) will be inert until you add it (see step 5)."
 fi
 
+# Android App Links: verified https://portal.wavespestcontrol.com URLs open the
+# installed app directly. Needs (a) this autoVerify intent-filter on MainActivity
+# and (b) the server serving /.well-known/assetlinks.json with the Play signing
+# cert fingerprints (GATE_UNIVERSAL_LINKS — see docs/mobile/universal-links.md).
+# Idempotent: injected once into the generated manifest (client/android is
+# gitignored, so this runs on every fresh bootstrap). MainActivity is the only
+# activity in the Capacitor template, so the first </activity> is safe to target.
+MANIFEST="android/app/src/main/AndroidManifest.xml"
+if [ -f "$MANIFEST" ]; then
+  if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
+    echo "==> App Links intent-filter already present in AndroidManifest.xml ✓"
+  else
+    perl -0pi -e 's{(\n(\s*)</activity>)}{\n$2    <intent-filter android:autoVerify="true">\n$2        <action android:name="android.intent.action.VIEW" />\n$2        <category android:name="android.intent.category.DEFAULT" />\n$2        <category android:name="android.intent.category.BROWSABLE" />\n$2        <data android:scheme="https" android:host="portal.wavespestcontrol.com" />\n$2    </intent-filter>$1}' "$MANIFEST"
+    if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
+      echo "==> App Links intent-filter injected into AndroidManifest.xml ✓"
+    else
+      echo "==> WARNING: could not inject the App Links intent-filter — add it to"
+      echo "    MainActivity in $MANIFEST manually (see docs/mobile/universal-links.md)."
+    fi
+  fi
+fi
+
 echo
 echo "==> 5/5  Manual steps:"
 cat <<'NOTES'
@@ -72,6 +94,16 @@ cat <<'NOTES'
            -keyalg RSA -keysize 2048 -validity 10000
      • Configure it in android/app/build.gradle (signingConfigs) or
        android/keystore.properties (keep the keystore OUT of git).
+
+   APP LINKS (universal links):
+     • Play re-signs releases, so /.well-known/assetlinks.json must carry the
+       Play "App signing key certificate" SHA-256 (Play Console → Setup →
+       App signing) — include the upload cert too so local builds verify.
+       Set both, comma-separated, in the Railway env var
+       ANDROID_ASSETLINKS_SHA256, then GATE_UNIVERSAL_LINKS=true.
+     • Verify on-device after install:
+         adb shell pm get-app-links com.wavespestcontrol.portal
+       (portal.wavespestcontrol.com should show "verified".)
 
    GOOGLE PLAY:
      • Register the Play Console account as the ORGANIZATION (Waves Pest Control,
