@@ -1848,7 +1848,8 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
 describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the email leg', () => {
   const { sendDepositReceiptEmailFallback } = require('../services/estimate-deposits');
 
-  const fallbackDb = ({ estimate, customer, prefs, ledger }) => (table) => {
+  const ledgerCalls = { where: [], orderBy: 0 };
+  const fallbackDb = ({ estimate, customer, prefs, ledger, prefsLookupThrows = false }) => (table) => {
     const rows = {
       estimates: estimate,
       customers: customer,
@@ -1856,10 +1857,12 @@ describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the em
       estimate_deposits: ledger,
     };
     const q = {
-      where: () => q,
+      where: (...args) => { if (table === 'estimate_deposits') ledgerCalls.where.push(args[0]); return q; },
       whereIn: () => q,
-      orderBy: () => q,
-      first: () => Promise.resolve(rows[table] ?? null),
+      orderBy: () => { if (table === 'estimate_deposits') ledgerCalls.orderBy += 1; return q; },
+      first: () => (table === 'notification_prefs' && prefsLookupThrows
+        ? Promise.reject(new Error('db blip'))
+        : Promise.resolve(rows[table] ?? null)),
     };
     return q;
   };
@@ -1868,7 +1871,7 @@ describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the em
   const baseCustomer = { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' };
   const baseLedger = { amount: 70, stripe_payment_intent_id: 'pi_replay' };
 
-  beforeEach(() => mockSendTemplate.mockClear());
+  beforeEach(() => { mockSendTemplate.mockClear(); ledgerCalls.where.length = 0; ledgerCalls.orderBy = 0; });
 
   it('re-derives amount + PaymentIntent from the deposit ledger and sends the email', async () => {
     mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { payment_confirmation_sms: false }, ledger: baseLedger });
@@ -1902,5 +1905,28 @@ describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the em
     const r = await sendDepositReceiptEmailFallback('est-1');
     expect(r).toEqual({ sent: false, reason: 'no_received_deposit' });
     expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('fails CLOSED when the prefs lookup errors — a DB blip must not bypass the kill switch', async () => {
+    // The fallback often runs right after a PURPOSE_OPTED_OUT block that may
+    // BE the payment_receipt=false kill switch (codex round 6).
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, ledger: baseLedger, prefsLookupThrows: true });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'prefs_lookup_failed' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('targets the QUEUED deposit by PaymentIntent on multi-deposit estimates — never latest-row', async () => {
+    // A queued older receipt must not email the newest top-up's amount/PI
+    // (wrong idempotency key = wrong dedupe; codex round 6).
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: {}, ledger: { amount: 35, stripe_payment_intent_id: 'pi_queued' } });
+    const r = await sendDepositReceiptEmailFallback('est-1', { paymentIntentId: 'pi_queued' });
+    expect(r).toEqual({ sent: true });
+    expect(ledgerCalls.where).toContainEqual({ stripe_payment_intent_id: 'pi_queued' });
+    expect(ledgerCalls.orderBy).toBe(0);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'deposit_receipt:pi_queued',
+      payload: expect.objectContaining({ amount: '$35' }),
+    }));
   });
 });

@@ -441,7 +441,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {
-    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars }).catch((err) => {
+    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
     });
   } else if (!wantSms) {
@@ -456,7 +456,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
 }
 
 // SMS leg. Kill switch = the deposit_receipt SMS template row.
-async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars }) {
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }) {
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
@@ -535,6 +535,10 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars 
             entry_point: 'estimate_deposit_receipt_requeue',
             original_failure_code: result.code || null,
             estimate_id: estimateId,
+            // The exact deposit this queued text was receipting — the email
+            // fallback must target THIS ledger row on multi-deposit
+            // estimates, not the newest one.
+            payment_intent_id: paymentIntentId || null,
             // The customer can change their phone between the hold and
             // nextAllowedAt — the cron re-reads customers.phone at send time
             // so the phone_matches_customer trust it asserts stays true.
@@ -1521,7 +1525,7 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
 // row's rendered body); the deposit_receipt:<pi> idempotency key inside
 // sendDepositReceiptEmail dedupes against any email that already went out.
 // Best-effort by contract: returns { sent, reason } and never throws.
-async function sendDepositReceiptEmailFallback(estimateId) {
+async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = null } = {}) {
   try {
     const estimate = await db('estimates')
       .where({ id: estimateId })
@@ -1531,20 +1535,37 @@ async function sendDepositReceiptEmailFallback(estimateId) {
     const customer = estimate.customer_id
       ? await db('customers').where({ id: estimate.customer_id }).first()
       : null;
-    const prefs = estimate.customer_id
-      ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first().catch(() => null)
-      : null;
+    // FAIL CLOSED on a prefs lookup failure: this fallback often runs right
+    // after a PURPOSE_OPTED_OUT block, which may have been the
+    // payment_receipt=false kill switch — treating a DB blip as "no opt-out"
+    // would email a kill-switch customer the receipt their SMS block just
+    // suppressed (same rule as the receipt-delivery queue's lookup).
+    let prefs = null;
+    if (estimate.customer_id) {
+      try {
+        prefs = await db('notification_prefs').where({ customer_id: estimate.customer_id }).first();
+      } catch (lookupErr) {
+        logger.warn(`[estimate-deposits] deposit receipt email fallback prefs lookup failed for estimate ${estimateId}: ${lookupErr.message}`);
+        return { sent: false, reason: 'prefs_lookup_failed' };
+      }
+    }
     // payment_receipt=false is the full every-channel kill switch; the
     // portal-wide email opt-out is honored the same way the immediate email
     // leg honors it.
     if (prefs?.payment_receipt === false) return { sent: false, reason: 'receipt_opted_out' };
     if (prefs?.email_enabled === false) return { sent: false, reason: 'email_opted_out' };
 
-    const ledgerRow = await db('estimate_deposits')
+    // The queued row names the exact deposit it was receipting — a multi-
+    // deposit estimate (top-ups) must not have its OLDER queued receipt
+    // fall back to the NEWEST ledger row's amount/PI (wrong idempotency key
+    // = wrong dedupe, and the queued deposit stays unreceipted). Legacy
+    // queued rows without the PI keep the latest-row behavior.
+    const ledgerQuery = db('estimate_deposits')
       .where({ estimate_id: estimateId })
-      .whereIn('status', ['received', 'credited'])
-      .orderBy('received_at', 'desc')
-      .first('amount', 'stripe_payment_intent_id');
+      .whereIn('status', ['received', 'credited']);
+    const ledgerRow = paymentIntentId
+      ? await ledgerQuery.where({ stripe_payment_intent_id: paymentIntentId }).first('amount', 'stripe_payment_intent_id')
+      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'stripe_payment_intent_id');
     if (!ledgerRow) return { sent: false, reason: 'no_received_deposit' };
 
     await sendDepositReceiptEmail({

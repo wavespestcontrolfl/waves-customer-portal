@@ -1609,7 +1609,7 @@ function initScheduledJobs() {
             // suppressed replay hands off to it (kill switch + email opt-out
             // re-checked inside; deposit_receipt:<pi> key dedupes).
             if (claimMeta.estimate_id) {
-              const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id);
+              const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id, { paymentIntentId: claimMeta.payment_intent_id || null });
               logger.info(`[scheduled-sms] Deposit receipt ${msg.id} email fallback: ${fb.sent ? 'sent' : fb.reason}`);
             }
             continue;
@@ -1728,7 +1728,7 @@ function initScheduledJobs() {
             if (String(msg.message_type || '').toLowerCase() === 'deposit_receipt'
                 && claimMeta.estimate_id
                 && ['PURPOSE_OPTED_OUT', 'CHANNEL_EMAIL_ONLY', 'SMS_OPTED_OUT', 'SUPPRESSED_OPT_OUT'].includes(smsResult.code)) {
-              const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id);
+              const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id, { paymentIntentId: claimMeta.payment_intent_id || null });
               logger.info(`[scheduled-sms] Deposit receipt ${msg.id} email fallback: ${fb.sent ? 'sent' : fb.reason}`);
             }
             // The customer was never answered — used + parked cards return.

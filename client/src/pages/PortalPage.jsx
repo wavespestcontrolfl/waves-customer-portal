@@ -3338,6 +3338,7 @@ function BillingTab({ customer }) {
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
+  const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
@@ -3375,6 +3376,7 @@ function BillingTab({ customer }) {
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setEmailPrefEnabled(prefsData.emailEnabled !== false);
         }
         setLoading(false);
       }).catch(err => {
@@ -3767,8 +3769,11 @@ function BillingTab({ customer }) {
 
   // Email/Both delivery can only be offered with an email on file (the billing
   // recipient email or the account email) — otherwise the backend would
-  // suppress the texts with no deliverable email leg left.
-  const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email);
+  // suppress the texts with no deliverable email leg left. Same for the
+  // portal-wide email opt-out (Settings → Email Messages off): the receipt
+  // senders skip their email legs when email_enabled=false, so an email-only
+  // channel would suppress the text AND never email — the notice just drops.
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
 
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
@@ -3777,9 +3782,10 @@ function BillingTab({ customer }) {
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
-      // No email on file → the dropdowns render locked to Text; persist what
-      // is shown so an SMS-suppressing 'email' choice can't linger with no
-      // deliverable email.
+      // No email on file (or email messages opted out portal-wide) → the
+      // dropdowns render locked to Text; persist what is shown so an
+      // SMS-suppressing 'email' choice can't linger with no deliverable
+      // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
       paymentConfirmationChannel: hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
