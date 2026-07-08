@@ -77,7 +77,9 @@ describe('apple-app-site-association', () => {
     expect(detail.appIDs).toEqual(['TEAM123456.com.wavespestcontrol.portal']);
     const components = detail.components;
     const catchAllIdx = components.findIndex((c) => c['/'] === '*');
-    for (const excluded of ['/admin/*', '/tech/*', '/api/*']) {
+    // Exact roots AND descendants — a bare '/admin' link must not fall
+    // through to the catch-all.
+    for (const excluded of ['/admin', '/admin/*', '/tech', '/tech/*', '/api', '/api/*']) {
       const idx = components.findIndex((c) => c['/'] === excluded);
       expect(idx).toBeGreaterThanOrEqual(0);
       expect(components[idx].exclude).toBe(true);

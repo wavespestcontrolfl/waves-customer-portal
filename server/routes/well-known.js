@@ -60,8 +60,13 @@ router.get('/apple-app-site-association', (req, res) => {
         {
           appIDs: [appID],
           components: [
+            // Exact roots AND descendants: '/admin/*' alone would let a bare
+            // '/admin' link fall through to the catch-all (codex P2).
+            { '/': '/admin', exclude: true },
             { '/': '/admin/*', exclude: true },
+            { '/': '/tech', exclude: true },
             { '/': '/tech/*', exclude: true },
+            { '/': '/api', exclude: true },
             { '/': '/api/*', exclude: true },
             { '/': '*' },
           ],

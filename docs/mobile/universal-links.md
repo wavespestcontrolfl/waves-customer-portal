@@ -21,7 +21,11 @@ links therefore stay portal URLs forever; the app claims them at the OS level.
      step-5 notes).
    - Android: `autoVerify` intent-filter on MainActivity (bootstrap-android.sh
      injects it after `cap sync` — client/android is gitignored, so the script
-     is the source of truth).
+     is the source of truth). Android has no path-exclude syntax, so the
+     filter is an ALLOWLIST of customer link prefixes (`/l/`, `/r/`, `/track`,
+     `/pay`, `/report`, …) — `/api`, `/admin`, `/tech` are never claimed, and
+     a path not on the list keeps opening in the browser. New customer link
+     surface ⇒ add its prefix in bootstrap-android.sh AND rebuild.
 3. In the app, Capacitor fires `appUrlOpen` / `getLaunchUrl` with the tapped
    URL; `client/src/native/nativeLinks.js` navigates the webview to the same
    path (same-origin only). The shell loads the remote portal, so short-link
@@ -67,5 +71,6 @@ links in the browser. No client update needed.
   reinstall or an OS re-fetch; don't debug the entitlement first.
 - Tapping a link **inside** the app's own webview never bounces through the
   OS — universal links only apply from other apps (Messages, Mail, browser).
-- Android has no path-exclude syntax; the shell's existing staff redirect
-  (/admin, /tech out of the native shell) covers those paths there.
+- The client handler also refuses /admin, /tech, /api and any URL whose
+  pathname starts with `//` (protocol-relative smuggling) — keep that guard;
+  it backstops the association files.

@@ -57,6 +57,16 @@ fi
 # installed app directly. Needs (a) this autoVerify intent-filter on MainActivity
 # and (b) the server serving /.well-known/assetlinks.json with the Play signing
 # cert fingerprints (GATE_UNIVERSAL_LINKS — see docs/mobile/universal-links.md).
+#
+# Android intent-filters have no exclude syntax, so unlike the iOS AASA this is
+# an ALLOWLIST of customer link surfaces — claiming the whole host would grab
+# /api/... links too (direct PDF/report URLs in SMS/email would open a raw API
+# response in the webview instead of the browser download flow — codex P1 on
+# #2496). A path not listed here simply keeps opening in the browser; when a
+# new customer link surface ships, add its prefix here AND rebuild.
+# NOTE: pathPrefix is a plain string prefix — '/l/' and '/r/' need the trailing
+# slash or they'd swallow /login, /report, /reschedule, etc.
+#
 # Idempotent: injected once into the generated manifest (client/android is
 # gitignored, so this runs on every fresh bootstrap). MainActivity is the only
 # activity in the Capacitor template, so the first </activity> is safe to target.
@@ -65,9 +75,23 @@ if [ -f "$MANIFEST" ]; then
   if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
     echo "==> App Links intent-filter already present in AndroidManifest.xml ✓"
   else
-    perl -0pi -e 's{(\n(\s*)</activity>)}{\n$2    <intent-filter android:autoVerify="true">\n$2        <action android:name="android.intent.action.VIEW" />\n$2        <category android:name="android.intent.category.DEFAULT" />\n$2        <category android:name="android.intent.category.BROWSABLE" />\n$2        <data android:scheme="https" android:host="portal.wavespestcontrol.com" />\n$2    </intent-filter>$1}' "$MANIFEST"
+    APP_LINK_PREFIXES="/l/ /r/ /track /pay /receipt /report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report"
+    IND="            "
+    NL=$'\n'
+    FILTER="${IND}<intent-filter android:autoVerify=\"true\">${NL}"
+    FILTER="${FILTER}${IND}    <action android:name=\"android.intent.action.VIEW\" />${NL}"
+    FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.DEFAULT\" />${NL}"
+    FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.BROWSABLE\" />${NL}"
+    FILTER="${FILTER}${IND}    <data android:scheme=\"https\" android:host=\"portal.wavespestcontrol.com\" />${NL}"
+    FILTER="${FILTER}${IND}    <data android:path=\"/\" />${NL}"
+    for p in $APP_LINK_PREFIXES; do
+      FILTER="${FILTER}${IND}    <data android:pathPrefix=\"$p\" />${NL}"
+    done
+    FILTER="${FILTER}${IND}</intent-filter>"
+    export FILTER
+    perl -0pi -e 's{(\n\s*</activity>)}{\n$ENV{FILTER}$1}' "$MANIFEST"
     if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
-      echo "==> App Links intent-filter injected into AndroidManifest.xml ✓"
+      echo "==> App Links intent-filter injected into AndroidManifest.xml (customer-path allowlist) ✓"
     else
       echo "==> WARNING: could not inject the App Links intent-filter — add it to"
       echo "    MainActivity in $MANIFEST manually (see docs/mobile/universal-links.md)."
