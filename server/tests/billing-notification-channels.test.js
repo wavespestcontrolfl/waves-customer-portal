@@ -172,20 +172,31 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.code).toBe('SMS_OPTED_OUT');
   });
 
-  test("channel 'email' outranks the purpose toggles too — the delivered email IS the receipt", async () => {
-    // Same ordering rationale: 'channel_email_only' lets the queue stamp
-    // receipt_sent_at off the delivered email leg.
-    const policy = resolvePolicy('customer', 'payment_receipt');
-    const res = await checkConsentForPurpose(
+  test("a purpose toggle OFF outranks the email-channel redirect — the customer opted out of the notice, not just the text", async () => {
+    // billing_reminder=false + channel='email' must read PURPOSE_OPTED_OUT:
+    // the Comms path turns CHANNEL_EMAIL_ONLY into a send-it-by-email
+    // instruction, which would bypass an explicit opt-out (codex P1 on
+    // 5806621e). The receipt queue is indifferent — PURPOSE_OPTED_OUT maps
+    // to receipt_texts_opted_out, a non-actionable skip that also stamps
+    // off a delivered email, same as channel_email_only.
+    const billing = await checkConsentForPurpose(
+      smsInput('billing'),
+      resolvePolicy('customer', 'billing'),
+      contactState({ sms_enabled: true, billing_reminder: false, billing_channel: 'email', billing_email: 'ap@example.com' }),
+    );
+    expect(billing.ok).toBe(false);
+    expect(billing.code).toBe('PURPOSE_OPTED_OUT');
+
+    const receipt = await checkConsentForPurpose(
       { ...smsInput('payment_receipt'), hasEmailLeg: true },
-      policy,
+      resolvePolicy('customer', 'payment_receipt'),
       contactState(
         { sms_enabled: true, payment_confirmation_sms: false, payment_receipt_channel: 'email' },
         { id: 'c1', email: 'adam@example.com' },
       ),
     );
-    expect(res.ok).toBe(false);
-    expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
+    expect(receipt.ok).toBe(false);
+    expect(receipt.code).toBe('PURPOSE_OPTED_OUT');
   });
 
   test("channel gate only applies to the sms channel — an email send through the wrapper is not blocked", async () => {

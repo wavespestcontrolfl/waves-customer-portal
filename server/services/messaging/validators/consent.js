@@ -85,12 +85,17 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // UI can't save an email-only choice without one, but a direct API write
   // (or an email removed later) could; suppressing the text then would leave
   // the customer with NO channel, so SMS stays the fallback.
-  // Checked BEFORE the opt-out switches below: an email-only customer who has
-  // also texted STOP (or toggled a purpose off) must still read as
-  // CHANNEL_EMAIL_ONLY, not SMS_OPTED_OUT — callers like the receipt-delivery
-  // queue treat the channel preference as an expected skip but an opt-out on
-  // the SMS leg as an actionable failure, and would retry forever a receipt
-  // whose email leg already delivered. The SMS is suppressed either way.
+  // Checked BEFORE the sms_enabled master switch below: an email-only
+  // customer who has also texted STOP must still read as CHANNEL_EMAIL_ONLY,
+  // not SMS_OPTED_OUT — callers like the receipt-delivery queue treat the
+  // channel preference as an expected skip. But NOT before the per-purpose
+  // toggles: a customer who turned the notice type itself off (e.g.
+  // billing_reminder=false) has opted out of the NOTICE, not just the text —
+  // returning the email redirect would tell the Comms operator to email a
+  // reminder the customer explicitly disabled (codex P1 on 5806621e). The
+  // queue is indifferent: PURPOSE_OPTED_OUT maps to receipt_texts_opted_out,
+  // which is both a non-actionable skip and in the stamp list, same as
+  // channel_email_only.
   // channelGate 'opt_in' policies (billing, payment_receipt) only apply the
   // gate when the CALLER declares an email leg exists (input.hasEmailLeg) —
   // several sends are SMS-only with no email equivalent (billing-cron autopay
@@ -98,8 +103,11 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // Comms billing reminder), and suppressing those for an email-only customer
   // would leave them with no message at all. Flows with a real email sidecar
   // (the invoice receipt path) opt in.
+  const purposeToggledOff = [].concat(policy.prefsColumn || [])
+    .some((prefsColumn) => prefs[prefsColumn] === false);
   const channelGateApplies = policy.channelColumn
     && input.channel === 'sms'
+    && !purposeToggledOff
     && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);
   if (channelGateApplies && prefs[policy.channelColumn] === 'email') {
     // email_enabled=false is the portal-wide email opt-out: every receipt /

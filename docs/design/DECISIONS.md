@@ -1483,3 +1483,11 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 - `comms-tools.js`: NOT removed/auto-wired — the operator-as-email-fallback ruling stands (DECISIONS round-4 entry; rebutted inline with codex's own round-4 recommendation). Improvement instead: a `CHANNEL_EMAIL_ONLY` block on `billing_reminder` returns an explicit instruction ("…set to EMAIL — send this reminder to their billing/account email instead") so the model relays a next step, not a generic failure. Wiring a real automated billing email sender = new customer-comms surface = owner decision.
 
 **Verification.** jest: new gate test (email-only + `email_enabled=false` → SMS proceeds), new fallback propagation test (recipient-less → `{ sent:false, reason:'no_recipient_email' }`), affected 7 suites 216 tests green. `check:portal-brand` clean; vite build clean.
+
+## 2026-07-08 — Receipt legs round 8: purpose toggles outrank the email-channel redirect (claude/waves-portal-dropdown-0uo971, follow-up 9)
+
+**Context.** Codex round 8 (on 5806621e): 1 P1. A customer with `billing_channel='email'` who then turns the Billing Reminder toggle OFF still classified as `CHANNEL_EMAIL_ONLY` (the round-1 ordering ran the channel gate before the per-purpose toggles) — and the round-7 Comms instruction then told the operator to send by email a reminder the customer had explicitly disabled. The round-1 ordering rationale (the queue would retry an opt-out as actionable) is obsolete: since round 3, `receipt_texts_opted_out` is both a non-actionable skip and in the queue's stamp list, identical in effect to `channel_email_only`.
+
+**Change.** `validators/consent.js`: the channel gate now also requires every `prefsColumn` toggle to pass (`purposeToggledOff` short-circuits it) — a disabled notice type reads `PURPOSE_OPTED_OUT` regardless of channel; the customer opted out of the NOTICE, not just the text. STOP ordering is unchanged (`sms_enabled` master switch still ranks below the gate — STOP+email-only stays `CHANNEL_EMAIL_ONLY`, pinned). The round-2 "channel outranks the purpose toggles" test is inverted with the new rationale, asserting `PURPOSE_OPTED_OUT` for both the billing and payment_receipt shapes.
+
+**Verification.** jest: inverted + extended ordering test; full consent/messaging/receipt/billing sweep 56 suites, 500 tests green. Server-only diff.
