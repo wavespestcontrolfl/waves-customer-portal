@@ -927,6 +927,44 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
+  it('email-only channel whose email leg is undeliverable falls back to the TEXT', async () => {
+    // Stale email-only rows (email removed / email messages opted out after
+    // choosing Email) must not leave a paid deposit with no receipt on any
+    // channel (codex P1 on d040aa76) — mirrors the consent gate fallback.
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    // Portal-wide email opt-out
+    let ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      prefsRow: { payment_receipt_channel: 'email', email_enabled: false },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    // No recipient email on file at all
+    sendCustomerMessage.mockClear();
+    ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: '' },
+      prefsRow: { payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
   it('leads: SMS when the estimate has a phone; email gap-fill when it only has an email', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

@@ -232,6 +232,23 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
   });
 
+  test('portal-wide email opt-out (email_enabled=false) skips the receipt email as an expected skip', async () => {
+    // The transactional_required stream bypasses suppression groups, so the
+    // queue must honor the opt-out itself, like the deposit/no-show legs
+    // (codex P1 on d040aa76). The SMS leg carries the receipt.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: { payment_receipt: true, email_enabled: false },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(true);
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
+  });
+
   test("the migration-default payment_receipt_channel='sms' does NOT gate the email leg", async () => {
     // Migration 104 seeded 'sms' as the column DEFAULT on every existing
     // prefs row, so channel==='sms' cannot distinguish an explicit Text

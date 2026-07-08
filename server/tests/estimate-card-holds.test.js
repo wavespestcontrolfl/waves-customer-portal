@@ -467,6 +467,33 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
   });
 
+  it('email-only channel with email messages opted out falls back to the SMS receipt', async () => {
+    // The fee was charged — a receipt has to land somewhere (codex P1 on
+    // d040aa76; deposit twin).
+    stubDb([null, { payment_receipt_channel: 'email', email_enabled: false }, { first_name: 'Sam' }]);
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceiptEmail).not.toHaveBeenCalled();
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+  });
+
+  it('email-only channel with NO recipient email falls back to the SMS receipt; a transient email error does NOT', async () => {
+    stubDb([null, { payment_receipt_channel: 'email', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+
+    // Transient provider failure: stays email-preferring, invoice unstamped
+    // for the admin needs-receipt path — no surprise text.
+    mockSendReceipt.mockClear();
+    stubDb([null, { payment_receipt_channel: 'email', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'provider 500' });
+    const r2 = await settleNoShowFee(pi());
+    expect(r2.settled).toBe(true);
+    expect(mockSendReceipt).not.toHaveBeenCalled();
+  });
+
   it('honors a payment_receipt opt-out — neither channel, just the office notify', async () => {
     stubDb([null, { payment_receipt: false, payment_receipt_channel: 'both' }, { first_name: 'Sam' }]);
     const r = await settleNoShowFee(pi());

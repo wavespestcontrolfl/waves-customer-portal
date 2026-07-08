@@ -1491,3 +1491,14 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 **Change.** `validators/consent.js`: the channel gate now also requires every `prefsColumn` toggle to pass (`purposeToggledOff` short-circuits it) — a disabled notice type reads `PURPOSE_OPTED_OUT` regardless of channel; the customer opted out of the NOTICE, not just the text. STOP ordering is unchanged (`sms_enabled` master switch still ranks below the gate — STOP+email-only stays `CHANNEL_EMAIL_ONLY`, pinned). The round-2 "channel outranks the purpose toggles" test is inverted with the new rationale, asserting `PURPOSE_OPTED_OUT` for both the billing and payment_receipt shapes.
 
 **Verification.** jest: inverted + extended ordering test; full consent/messaging/receipt/billing sweep 56 suites, 500 tests green. Server-only diff.
+
+## 2026-07-08 — Receipt legs round 9: undeliverable email-only channels fall back to the text (claude/waves-portal-dropdown-0uo971, follow-up 10)
+
+**Context.** Codex round 9 (on d040aa76): 3 P1s, one theme — an email-only channel whose email leg can no longer deliver left the customer with NO receipt: (1) deposit receipts with `email_enabled=false` or no address on file sent neither leg; (2) the no-show fee twin, same; (3) the invoice receipt queue never honored `email_enabled=false` at all (nothing downstream checks it — the transactional_required stream bypasses suppression groups), so portal-wide-opted-out customers kept getting the PDF email.
+
+**Change.**
+- `receipt-delivery-queue.js`: the email leg honors `email_enabled=false` as an expected `email_opted_out` skip (SMS carries the receipt; consent gate's round-7 fix already lets the SMS through for email-channel + opted-out-email customers).
+- `estimate-deposits.js`: email deliverability resolved up-front with the sender's own recipient sources — `channel='email'` with an unusable email leg (opt-out or no address) falls back to the TEXT, mirroring the consent gate.
+- `estimate-card-holds.js`: email leg attempted FIRST; a deterministic miss (`email_enabled=false` or "No receipt recipient email") falls back to the SMS receipt; a transient provider error does NOT (stays email-preferring, invoice unstamped for the admin needs-receipt path).
+
+**Verification.** jest: 4 new fallback tests across queue/deposits/card-holds incl. the transient-vs-deterministic distinction; regression sweep 81 suites, 884 tests green. Server-only diff.

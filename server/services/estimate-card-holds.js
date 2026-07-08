@@ -846,15 +846,14 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
   const smsChannel = channel === 'sms' || channel === 'both';
 
-  // SMS receipt — sendReceipt stamps receipt_sent_at + routes through the
-  // payment_receipt template/policy (kill switch, per-location number, opt-out).
-  if (!receiptOptOut && smsChannel) {
-    try {
-      await require('./invoice').sendReceipt(invoice.id);
-    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
-  }
-  // Emailed PDF receipt.
-  if (!receiptOptOut && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut)) && prefs?.email_enabled !== false) {
+  // Emailed PDF receipt — attempted FIRST so an email-only channel whose
+  // email leg deterministically can't deliver (portal-wide email opt-out or
+  // no recipient address) falls back to the TEXT below: the fee was charged,
+  // a receipt has to land somewhere (undeliverable-email fallback, same as
+  // the consent gate / deposit twin). A transient provider error does NOT
+  // fall back — the invoice stays unstamped for the admin needs-receipt path.
+  let emailDeterministicMiss = prefs?.email_enabled === false;
+  if (!receiptOptOut && !emailDeterministicMiss && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))) {
     try {
       const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
       // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
@@ -865,8 +864,19 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
       if (emailResult?.ok) {
         await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
           .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
+      } else if (emailResult?.error === 'No receipt recipient email') {
+        emailDeterministicMiss = true;
       }
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
+  }
+  // SMS receipt — sendReceipt stamps receipt_sent_at + routes through the
+  // payment_receipt template/policy (kill switch, per-location number,
+  // opt-out — a texts opt-out is enforced by the policy, so the doomed
+  // fallback attempt for an opted-out customer is skipped up-front).
+  if (!receiptOptOut && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))) {
+    try {
+      await require('./invoice').sendReceipt(invoice.id);
+    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
   }
 
   // Office heads-up so a "what's this charge?" call isn't a surprise.

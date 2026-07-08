@@ -422,13 +422,23 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
   const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
   const leadEmail = String(estimate.customer_email || '').trim();
 
-  const wantSms = estimate.customer_id
-    ? (channel === 'sms' || channel === 'both')
-    : true;
   // email_enabled === false is the portal-wide email opt-out — the
   // transactional_required stream bypasses suppression-group filtering, so
   // it must be honored here (same check the no-show fee receipt does).
   const emailOptOut = prefs?.email_enabled === false;
+  // Deliverability of the email leg, resolved up-front with the SAME
+  // recipient sources the email sender uses — an email-only channel whose
+  // email can never deliver (portal-wide opt-out / no address on file) must
+  // fall back to the text, mirroring the consent gate's undeliverable-email
+  // SMS fallback. Stale email-only rows reach this path even though the
+  // portal UI now locks the dropdowns (direct writes, removed emails).
+  const emailRecipient = customer
+    ? (require('./customer-contact').getReceiptEmailRecipients(customer, prefs || {})[0]?.email || '')
+    : leadEmail;
+  const emailUsable = !emailOptOut && !!emailRecipient;
+  const wantSms = estimate.customer_id
+    ? (channel === 'sms' || channel === 'both' || (channel === 'email' && !emailUsable))
+    : true;
   // The receipt-texts opt-outs (the portal "Payment confirmation texts"
   // toggle, and the STOP/sms_enabled master switch) block the SMS leg at the
   // consent gate — for a Text-channel customer the email is then the only
@@ -437,7 +447,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
   // every-channel kill switch.
   const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
   const wantEmail = estimate.customer_id
-    ? (!receiptOptOut && !emailOptOut && (channel === 'email' || channel === 'both' || (wantSms && (!phone || smsOptedOut))))
+    ? (!receiptOptOut && emailUsable && (channel === 'email' || channel === 'both' || (!phone || smsOptedOut)))
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {
