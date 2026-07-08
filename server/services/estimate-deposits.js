@@ -573,7 +573,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   const sendgrid = require('./sendgrid-mail');
   if (!sendgrid.isConfigured()) {
     logger.warn(`[estimate-deposits] deposit receipt email skipped for estimate ${estimateId} — SendGrid not configured`);
-    return;
+    return { sent: false, reason: 'sendgrid_not_configured' };
   }
 
   // Customer-linked receipts resolve recipients the same way invoice
@@ -590,7 +590,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   }
   if (!recipient?.email) {
     logger.info(`[estimate-deposits] deposit receipt email skipped for estimate ${estimateId} — no receipt email recipient`);
-    return;
+    return { sent: false, reason: 'no_recipient_email' };
   }
 
   const firstName = String(customer?.first_name || '').trim()
@@ -625,15 +625,19 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
     });
     if (result?.blocked) {
       logger.warn(`[estimate-deposits] deposit receipt email suppressed for estimate ${estimateId}: ${result.reason || 'suppressed'}`);
-      return;
+      return { sent: false, reason: result.reason || 'suppressed' };
     }
     if (result?.deduped) {
       logger.info(`[estimate-deposits] deposit receipt email deduped for estimate ${estimateId} (pi=${paymentIntentId})`);
-      return;
+      // The receipt already went out under this idempotency key — delivered.
+      return { sent: true, deduped: true };
     }
     logger.info(`[estimate-deposits] deposit receipt email sent for estimate ${estimateId}`);
+    return { sent: true };
   } catch (err) {
-    logger.error(`[estimate-deposits] deposit receipt email send failed for estimate ${estimateId}: ${EmailTemplateLibrary.redactEmailAddresses(err.message)}`);
+    const redacted = EmailTemplateLibrary.redactEmailAddresses(err.message);
+    logger.error(`[estimate-deposits] deposit receipt email send failed for estimate ${estimateId}: ${redacted}`);
+    return { sent: false, reason: redacted };
   }
 }
 
@@ -1568,14 +1572,17 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
       : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'stripe_payment_intent_id');
     if (!ledgerRow) return { sent: false, reason: 'no_received_deposit' };
 
-    await sendDepositReceiptEmail({
+    // Propagate the leg's real outcome — a no-recipient / suppression /
+    // provider miss must not read as "receipted" in the scheduler log while
+    // the paid deposit still has no receipt anywhere (codex round 7).
+    const emailResult = await sendDepositReceiptEmail({
       estimate,
       customer,
       prefs,
       amountDollars: Number(ledgerRow.amount || 0),
       paymentIntentId: ledgerRow.stripe_payment_intent_id,
     });
-    return { sent: true };
+    return emailResult?.sent ? { sent: true } : { sent: false, reason: emailResult?.reason || 'email_not_sent' };
   } catch (err) {
     logger.warn(`[estimate-deposits] deposit receipt email fallback failed for estimate ${estimateId}: ${err.message}`);
     return { sent: false, reason: err.message };

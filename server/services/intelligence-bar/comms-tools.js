@@ -589,9 +589,16 @@ async function sendSms(input) {
   // failure) and /execute success is `!result.error`. Without an explicit
   // error field, blocked sends would be reported as successful tool
   // executions at the API layer.
+  // CHANNEL_EMAIL_ONLY on a billing reminder is a REDIRECT, not a dead end:
+  // the operator is the email fallback on this manual path (DECISIONS
+  // round-4 ruling) — spell out the next step so the model relays it as an
+  // instruction rather than a generic failure.
+  const actionableError = result.code === 'CHANNEL_EMAIL_ONLY' && message_type === 'billing_reminder'
+    ? 'This customer has Billing Reminder Delivery set to EMAIL — the text was not sent. Send this reminder to their billing/account email instead.'
+    : null;
   return {
     success: false,
-    error: result.reason || result.code || 'send blocked',
+    error: actionableError || result.reason || result.code || 'send blocked',
     blocked: !!result.blocked,
     code: result.code,
     reason: result.reason,

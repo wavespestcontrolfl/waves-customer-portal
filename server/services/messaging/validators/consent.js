@@ -102,7 +102,13 @@ async function checkConsentForPurpose(input, policy, contactState) {
     && input.channel === 'sms'
     && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);
   if (channelGateApplies && prefs[policy.channelColumn] === 'email') {
-    const deliverableEmail = prefs.billing_email || contactState.customer?.email;
+    // email_enabled=false is the portal-wide email opt-out: every receipt /
+    // billing email leg skips it, so an address on file is NOT deliverable —
+    // suppressing the SMS too would drop the notice entirely. The portal UI
+    // now locks the dropdowns to Text in that state, but pre-existing rows
+    // and direct preference writes can still carry channel='email'.
+    const deliverableEmail = prefs.email_enabled !== false
+      && (prefs.billing_email || contactState.customer?.email);
     if (deliverableEmail) {
       return {
         ok: false,

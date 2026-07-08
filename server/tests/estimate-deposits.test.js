@@ -1907,6 +1907,15 @@ describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the em
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
+  it('propagates a non-send from the email leg — a recipient-less fallback must not read as receipted', async () => {
+    // The scheduler logs this result; { sent: true } over a skipped email
+    // would make the missing receipt invisible (codex round 7).
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: { ...baseCustomer, email: '' }, prefs: {}, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'no_recipient_email' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
   it('fails CLOSED when the prefs lookup errors — a DB blip must not bypass the kill switch', async () => {
     // The fallback often runs right after a PURPOSE_OPTED_OUT block that may
     // BE the payment_receipt=false kill switch (codex round 6).

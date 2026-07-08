@@ -123,6 +123,20 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.ok).toBe(true);
   });
 
+  test("portal-wide email opt-out (email_enabled=false) makes an email-only channel undeliverable — SMS stays the fallback", async () => {
+    // Every receipt/billing email leg skips email_enabled=false customers,
+    // so suppressing the SMS on their stored channel='email' row would drop
+    // the notice entirely. Pre-existing rows / direct writes can carry this
+    // state even though the portal UI now locks the dropdowns (codex round 7).
+    const policy = resolvePolicy('customer', 'billing');
+    const res = await checkConsentForPurpose(
+      smsInput('billing'),
+      policy,
+      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com', email_enabled: false }),
+    );
+    expect(res.ok).toBe(true);
+  });
+
   test("channel 'email' outranks a STOP opt-out — the skip must read as the channel preference", async () => {
     // An email-only customer who has also texted STOP gets CHANNEL_EMAIL_ONLY,
     // not SMS_OPTED_OUT: the receipt-delivery queue treats the channel

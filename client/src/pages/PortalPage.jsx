@@ -3790,6 +3790,14 @@ function BillingTab({ customer }) {
       paymentConfirmationChannel: hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
       .then(() => {
+        // Keep local state in step with the coerced save — otherwise
+        // re-adding an email (or re-enabling email messages) in the same
+        // session resurrects a stale Email/Both selection the server was
+        // just normalized away from.
+        if (!hasBillingEmail) {
+          setBillingReminderChannel('sms');
+          setPaymentConfirmationChannel('sms');
+        }
         setBillingPrefsSaving(false);
         setBillingPrefsStatus('saved');
         setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
