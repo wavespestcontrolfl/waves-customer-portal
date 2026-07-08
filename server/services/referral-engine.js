@@ -58,6 +58,23 @@ function referralLinkForCode(code, baseUrl) {
   return `${normalizeReferralBaseUrl(baseUrl)}${code}`;
 }
 
+function centsToDollars(cents) {
+  const n = Number(cents || 0) / 100;
+  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
+}
+
+// Friend-facing referee offer line for the email referral invite
+// (referral.friend_invite). Composed from LIVE settings so the discount
+// amount is never baked into template copy; drops cleanly to a warm,
+// no-amount line when no referee discount is configured. Kept pure +
+// exported so the copy is unit-testable without a DB.
+function buildRefereeOfferLine(settings = {}) {
+  const refereeCents = Number(settings.referee_discount_cents || 0);
+  return refereeCents > 0
+    ? `Book your first service through their referral link and you’ll get ${centsToDollars(refereeCents)} off — our way of saying welcome.`
+    : 'Book your first service through their referral link and you’ll be in great hands from your very first visit.';
+}
+
 function referralCodeFromLink(link) {
   try {
     const url = new URL(String(link || '').trim());
@@ -1160,8 +1177,10 @@ module.exports = {
   getPromoterStats,
   getProgramAnalytics,
   getPromoterReferralLink,
+  buildRefereeOfferLine,
   _internals: {
     normalizeReferralBaseUrl,
     referralLinkForCode,
+    centsToDollars,
   },
 };

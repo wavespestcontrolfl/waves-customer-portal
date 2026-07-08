@@ -8604,7 +8604,9 @@ function ReferTab({ customer, onSwitchTab }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [form, setForm] = useState({ name: '', phone: '' });
+  const [emailForm, setEmailForm] = useState({ name: '', email: '' });
   const [submitting, setSubmitting] = useState(false);
+  const [emailSubmitting, setEmailSubmitting] = useState(false);
   const [notice, setNotice] = useState(null);
   const [copied, setCopied] = useState(false);
 
@@ -8827,10 +8829,29 @@ function ReferTab({ customer, onSwitchTab }) {
   const handleSmsShare = () => {
     openShareUrl(`sms:?body=${encodeURIComponent(shareText)}`, 'Text message opened. Referral link copied as a backup.');
   };
+  // Email now routes through the branded-glass server send (Email a friend
+  // form below) instead of a plain mailto draft — focus that form.
   const handleEmailShare = () => {
-    const subject = encodeURIComponent('Waves Pest Control referral');
-    const body = encodeURIComponent(`${shareText}\n\nThanks!`);
-    openShareUrl(`mailto:?subject=${subject}&body=${body}`, 'Email draft opened. Referral link copied as a backup.');
+    const el = document.getElementById('portal-referral-email');
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => el.focus(), 350);
+  };
+  const handleEmailSubmit = async (e) => {
+    e.preventDefault();
+    const friendName = emailForm.name.trim();
+    const friendEmail = emailForm.email.trim();
+    if (!friendName || !friendEmail) return;
+    setEmailSubmitting(true);
+    try {
+      await api.sendReferralEmailInvite({ friendName, email: friendEmail });
+      setEmailForm({ name: '', email: '' });
+      flash(`Your referral email to ${friendName.split(/\s+/)[0]} is on the way!`);
+    } catch (err) {
+      flash(err?.message || 'Could not send the referral email. Please try again.', 'error');
+    } finally {
+      setEmailSubmitting(false);
+    }
   };
 
   return (
@@ -9051,6 +9072,75 @@ function ReferTab({ customer, onSwitchTab }) {
           </form>
         </section>
       </div>
+
+      <section data-glass="card" style={{ ...card, padding: 20 }}>
+        <div style={sectionTitle}>Send Invite</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Email a friend</div>
+        <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+          We will send a branded referral email from Waves with your link and their new-customer offer.
+        </div>
+        <form onSubmit={handleEmailSubmit} style={{ marginTop: 16 }}>
+          <label htmlFor="portal-referral-email-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            Friend's Name
+          </label>
+          <input
+            id="portal-referral-email-name"
+            name="referralEmailName"
+            type="text"
+            value={emailForm.name}
+            onChange={e => setEmailForm(prev => ({ ...prev, name: e.target.value }))}
+            placeholder="Jane Smith"
+            autoComplete="name"
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid #D8D0C0',
+              fontSize: 14,
+              fontFamily: FONTS.body,
+              color: B.blueDeeper,
+              background: '#fff',
+              outline: 'none',
+              boxSizing: 'border-box',
+              marginBottom: 12,
+            }}
+          />
+          <label htmlFor="portal-referral-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            Email Address
+          </label>
+          <input
+            id="portal-referral-email"
+            name="referralEmail"
+            type="email"
+            inputMode="email"
+            value={emailForm.email}
+            onChange={e => setEmailForm(prev => ({ ...prev, email: e.target.value }))}
+            placeholder="jane@example.com"
+            autoComplete="email"
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid #D8D0C0',
+              fontSize: 14,
+              fontFamily: FONTS.body,
+              color: B.blueDeeper,
+              background: '#fff',
+              outline: 'none',
+              boxSizing: 'border-box',
+              marginBottom: 14,
+            }}
+          />
+          <button type="submit" disabled={!emailForm.name.trim() || !emailForm.email.trim() || emailSubmitting} data-glass-accent="" style={{
+            ...primaryButton,
+            width: '100%',
+            opacity: emailSubmitting || !emailForm.name.trim() || !emailForm.email.trim() ? 0.65 : 1,
+            cursor: emailSubmitting || !emailForm.name.trim() || !emailForm.email.trim() ? 'not-allowed' : 'pointer',
+          }}>
+            {emailSubmitting ? 'Sending...' : 'Send Email Invite'}
+          </button>
+        </form>
+      </section>
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>

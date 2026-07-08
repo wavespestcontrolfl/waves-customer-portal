@@ -47,6 +47,11 @@ const inviteSchema = Joi.object({
   friendName: Joi.string().trim().max(100).optional().allow(''),
 });
 
+const inviteEmailSchema = Joi.object({
+  email: Joi.string().trim().email().max(254).required(),
+  friendName: Joi.string().trim().max(100).optional().allow(''),
+});
+
 // =========================================================================
 // GET / — full referral data (auto-enrolls if needed)
 // =========================================================================
@@ -266,6 +271,88 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
   } catch (err) {
     logger.error(`[Referrals] Invite SMS failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to send invite' });
+  }
+});
+
+// =========================================================================
+// POST /invite-email — send a branded-glass referral invite email to a friend
+// =========================================================================
+// The email twin of /invite: mirrors the portal's "Text a friend" flow but
+// sends the referral.friend_invite branded template from Waves instead of a
+// plain mailto draft. Best-effort tracking only (no referral/lead row) — it
+// replaces a client-side mailto that tracked nothing.
+router.post('/invite-email', inviteLimiter, async (req, res, next) => {
+  try {
+    const { value, error } = inviteEmailSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { email, friendName } = value;
+    const cleanEmail = email.trim().toLowerCase();
+
+    const { promoter } = await engine.enrollPromoter(req.customerId);
+    const settings = await engine.getSettings();
+    const referralLink = engine.getPromoterReferralLink(promoter, settings);
+
+    // Can't invite your own address.
+    const promoterEmail = String(promoter.customer_email || '').trim().toLowerCase();
+    if (promoterEmail && promoterEmail === cleanEmail) {
+      return res.status(400).json({ error: 'That’s your own email — invite a friend instead.' });
+    }
+
+    // Cooldown: same promoter+email within 24 hours = no-op (double-tap protection).
+    const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recent = await db('referral_invites')
+      .where({ promoter_id: promoter.id })
+      .whereRaw('LOWER(email) = ?', [cleanEmail])
+      .where('sent_at', '>=', cooldownStart)
+      .first()
+      .catch(() => null);
+    if (recent) {
+      return res.json({ success: true, deduped: true });
+    }
+
+    const friendly = friendName ? friendName.replace(/[<>]/g, '').trim() : '';
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'referral.friend_invite',
+      to: cleanEmail,
+      payload: {
+        friend_name: friendly || 'there',
+        referrer_name: promoter.first_name || 'A Waves customer',
+        referral_url: referralLink,
+        referral_offer_line: engine.buildRefereeOfferLine(settings),
+      },
+      recipientType: 'referral_promoter',
+      recipientId: promoter.id,
+      categories: ['referral_invite'],
+      // SendGrid 4xx bodies can echo the recipient address — keep provider
+      // errors out of the logs (the redacted reason is logged below).
+      suppressProviderErrorLog: true,
+    });
+
+    if (result && result.sent === false) {
+      logger.warn(`[referrals-v2] Friend invite email not sent for promoter ${promoter.id}: ${result.reason || 'blocked'}`);
+      return res.status(422).json({ error: 'We couldn’t email that address. Double-check it and try again.' });
+    }
+
+    // Best-effort log for cooldown tracking (mirrors the SMS /invite leg).
+    await db('referral_invites').insert({
+      promoter_id: promoter.id,
+      email: cleanEmail,
+      sent_at: new Date(),
+    }).catch(() => { /* table/column may not exist yet */ });
+
+    await db('referral_promoters').where({ id: promoter.id }).update({
+      last_share_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    const reason = err.status
+      ? `SendGrid ${err.status}`
+      : require('../services/email-template-library').redactEmailAddresses(err.message);
+    logger.error(`[Referrals] Invite email failed: ${reason}`);
+    res.status(500).json({ error: 'Failed to send invite email' });
   }
 });
 
