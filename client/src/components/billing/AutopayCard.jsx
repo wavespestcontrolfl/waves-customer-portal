@@ -59,6 +59,7 @@ import {
 } from '../../lib/stripeSetupActions';
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 
 // Local alias kept for the many call sites below; values come from the
 // shared customer palette (this used to be a hand-copied hex block).
@@ -542,7 +543,7 @@ export default function AutopayCard({ onStateChange }) {
           {modal === 'day' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <label style={{ fontSize: 14, color: PORTAL_BILLING.body, fontWeight: 600 }}>Charge day of month (1-28)</label>
-              <input type="number" min={1} max={28} value={selectedDay}
+              <input type="number" inputMode="numeric" min={1} max={28} value={selectedDay}
                 onChange={(e) => setSelectedDay(parseInt(e.target.value) || 1)}
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8 }} />
               <div style={{ fontSize: 12, color: PORTAL_BILLING.muted }}>
@@ -564,6 +565,9 @@ export default function AutopayCard({ onStateChange }) {
 }
 
 function Modal({ title, children, onClose }) {
+  // Mounted only while open, so lock unconditionally — the page behind the
+  // scrim shouldn't scroll on iOS while the dialog is up.
+  useLockBodyScroll(true);
   // Portaled to <body>: under glass the host card carries backdrop-filter
   // (and a hover transform), which turns it into the containing block for
   // position:fixed children — the scrim would cover only the card.
