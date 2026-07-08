@@ -4155,7 +4155,7 @@ async function sendPrepaidReceiptForInvoice(invoice) {
   }).catch((err) => ({ ok: false, error: err.message }));
   let smsResult = { ok: false, skipped: true };
   try {
-    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false });
+    const r = await InvoiceService.sendReceipt(invoice.id, { force: true, recordActivity: false, hasEmailLeg: true });
     smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
   } catch (err) {
     smsResult = { ok: false, error: err.message };

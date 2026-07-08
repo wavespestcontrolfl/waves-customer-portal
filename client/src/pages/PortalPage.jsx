@@ -3340,6 +3340,9 @@ function BillingTab({ customer }) {
   const [billingEmail, setBillingEmail] = useState('');
   const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
+  const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
+  const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
@@ -3375,6 +3378,9 @@ function BillingTab({ customer }) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingSmsEnabled(!!prefsData.billingReminder);
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
+          setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
+          setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setEmailPrefEnabled(prefsData.emailEnabled !== false);
         }
         setLoading(false);
       }).catch(err => {
@@ -3765,6 +3771,14 @@ function BillingTab({ customer }) {
     </div>
   );
 
+  // Email/Both delivery can only be offered with an email on file (the billing
+  // recipient email or the account email) — otherwise the backend would
+  // suppress the texts with no deliverable email leg left. Same for the
+  // portal-wide email opt-out (Settings → Email Messages off): the receipt
+  // senders skip their email legs when email_enabled=false, so an email-only
+  // channel would suppress the text AND never email — the notice just drops.
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
+
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
@@ -3772,8 +3786,22 @@ function BillingTab({ customer }) {
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
+      // No email on file (or email messages opted out portal-wide) → the
+      // dropdowns render locked to Text; persist what is shown so an
+      // SMS-suppressing 'email' choice can't linger with no deliverable
+      // email leg.
+      billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
+      paymentConfirmationChannel: hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
       .then(() => {
+        // Keep local state in step with the coerced save — otherwise
+        // re-adding an email (or re-enabling email messages) in the same
+        // session resurrects a stale Email/Both selection the server was
+        // just normalized away from.
+        if (!hasBillingEmail) {
+          setBillingReminderChannel('sms');
+          setPaymentConfirmationChannel('sms');
+        }
         setBillingPrefsSaving(false);
         setBillingPrefsStatus('saved');
         setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
@@ -4244,10 +4272,30 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Billing reminder texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
           </div>
+          {(() => {
+            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const selectable = billingSmsEnabled && hasBillingEmail;
+            return (
+              <select
+                value={hasBillingEmail ? billingReminderChannel : 'sms'}
+                onChange={(e) => setBillingReminderChannel(e.target.value)}
+                disabled={!selectable}
+                aria-label="Delivery method for billing reminders"
+                style={{
+                  fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                }}
+              >
+                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
@@ -4272,10 +4320,30 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Payment confirmation texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
           </div>
+          {(() => {
+            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const selectable = paymentSmsEnabled && hasBillingEmail;
+            return (
+              <select
+                value={hasBillingEmail ? paymentConfirmationChannel : 'sms'}
+                onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
+                disabled={!selectable}
+                aria-label="Delivery method for payment confirmations"
+                style={{
+                  fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                }}
+              >
+                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}

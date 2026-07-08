@@ -76,6 +76,57 @@ async function checkConsentForPurpose(input, policy, contactState) {
 
   const prefs = contactState.prefs;
 
+  // Per-purpose delivery-channel column (sms | email | both). 'email' means
+  // the customer chose email-only delivery for this notification type, so the
+  // SMS leg is suppressed — the email version arrives via its own lane
+  // (receipt / billing emails to the billing address). Only gates SMS: an
+  // email send through the wrapper must not be blocked by an email-preferring
+  // customer. And only when a deliverable email actually exists — the portal
+  // UI can't save an email-only choice without one, but a direct API write
+  // (or an email removed later) could; suppressing the text then would leave
+  // the customer with NO channel, so SMS stays the fallback.
+  // Checked BEFORE the sms_enabled master switch below: an email-only
+  // customer who has also texted STOP must still read as CHANNEL_EMAIL_ONLY,
+  // not SMS_OPTED_OUT — callers like the receipt-delivery queue treat the
+  // channel preference as an expected skip. But NOT before the per-purpose
+  // toggles: a customer who turned the notice type itself off (e.g.
+  // billing_reminder=false) has opted out of the NOTICE, not just the text —
+  // returning the email redirect would tell the Comms operator to email a
+  // reminder the customer explicitly disabled (codex P1 on 5806621e). The
+  // queue is indifferent: PURPOSE_OPTED_OUT maps to receipt_texts_opted_out,
+  // which is both a non-actionable skip and in the stamp list, same as
+  // channel_email_only.
+  // channelGate 'opt_in' policies (billing, payment_receipt) only apply the
+  // gate when the CALLER declares an email leg exists (input.hasEmailLeg) —
+  // several sends are SMS-only with no email equivalent (billing-cron autopay
+  // successes, invoice thank-yous, balance payment-received, the operator
+  // Comms billing reminder), and suppressing those for an email-only customer
+  // would leave them with no message at all. Flows with a real email sidecar
+  // (the invoice receipt path) opt in.
+  const purposeToggledOff = [].concat(policy.prefsColumn || [])
+    .some((prefsColumn) => prefs[prefsColumn] === false);
+  const channelGateApplies = policy.channelColumn
+    && input.channel === 'sms'
+    && !purposeToggledOff
+    && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);
+  if (channelGateApplies && prefs[policy.channelColumn] === 'email') {
+    // email_enabled=false is the portal-wide email opt-out: every receipt /
+    // billing email leg skips it, so an address on file is NOT deliverable —
+    // suppressing the SMS too would drop the notice entirely. The portal UI
+    // now locks the dropdowns to Text in that state, but pre-existing rows
+    // and direct preference writes can still carry channel='email'.
+    const deliverableEmail = prefs.email_enabled !== false
+      && (prefs.billing_email || contactState.customer?.email);
+    if (deliverableEmail) {
+      return {
+        ok: false,
+        code: 'CHANNEL_EMAIL_ONLY',
+        reason: `Recipient prefers email-only delivery for the "${policy.channelColumn}" notification type`,
+      };
+    }
+    logger.warn(`[messaging:consent] ${policy.channelColumn}='email' but no billing/account email on file — SMS stays the fallback, subject to the opt-out gates`);
+  }
+
   // Master kill-switch. Set to false on STOP keyword (existing twilio-webhook
   // logic) and on any opt-out detection by detectOptOut().
   if (prefs.sms_enabled === false) {
@@ -86,14 +137,15 @@ async function checkConsentForPurpose(input, policy, contactState) {
     };
   }
 
-  // Per-purpose pref column (e.g. billing_reminder, service_reminder_24h).
-  if (policy.prefsColumn) {
-    const allowed = prefs[policy.prefsColumn];
-    if (allowed === false) {
+  // Per-purpose pref column(s) (e.g. billing_reminder, service_reminder_24h).
+  // A policy may name several (payment_receipt honors both the legacy
+  // receipt kill switch and the portal texts toggle) — ALL must be non-false.
+  for (const prefsColumn of [].concat(policy.prefsColumn || [])) {
+    if (prefs[prefsColumn] === false) {
       return {
         ok: false,
         code: 'PURPOSE_OPTED_OUT',
-        reason: `Recipient has disabled the "${policy.prefsColumn}" notification type`,
+        reason: `Recipient has disabled the "${prefsColumn}" notification type`,
       };
     }
   }
@@ -135,7 +187,7 @@ async function loadContactState(input) {
   if (input.customerId) {
     try {
       state.prefs = await db('notification_prefs').where({ customer_id: input.customerId }).first();
-      state.customer = await db('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'city');
+      state.customer = await db('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
     } catch (err) {
       logger.warn(`[messaging:consent] customer lookup failed: ${err.message}`);
       state.lookupFailed = true;
@@ -146,7 +198,7 @@ async function loadContactState(input) {
   // flows where the wrapper is invoked with only `to` set.
   if (!state.customer && input.to) {
     try {
-      const cust = await db('customers').where({ phone: input.to }).first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'city');
+      const cust = await db('customers').where({ phone: input.to }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
       if (cust) {
         state.customer = cust;
         state.prefs = await db('notification_prefs').where({ customer_id: cust.id }).first();
