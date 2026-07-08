@@ -205,6 +205,8 @@ const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
+const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
+const AdminPhotoAssessmentsPage = lazyWithRetry(() => import('./pages/admin/PhotoAssessmentsPage'));
 const LawnReportV2Preview = lazyWithRetry(() => import('./pages/LawnReportV2Preview'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
@@ -376,6 +378,7 @@ export default function App() {
               /estimate quote wizard keeps #FAF8F3 (deliberately un-glassed),
               /newsletter keeps its dark hero, /pay group keeps the pro wash. */}
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/pest-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><PestReportViewPage /></WavesShell></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ServiceOutlinePage /></WavesShell></Suspense>} />
           <Route path="/review/:token" element={<ReviewLinkRedirect />} />
@@ -426,6 +429,7 @@ export default function App() {
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
             <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
+            <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminPhotoAssessmentsPage /></Suspense>} />
             <Route path="lawn-protocol" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn protocol...</div>}><AdminLawnProtocolPage /></Suspense>} />
             <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
             <Route path="equipment-calibration" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment calibration...</div>}><AdminEquipmentCalibrationPage /></Suspense>} />
