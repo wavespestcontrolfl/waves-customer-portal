@@ -71,7 +71,7 @@ class HealthScorer {
     // score is not this layer's job. Upsells were still persisted above.
     // engagement_trend is mirrored from the canonical score_trend (which the
     // scorer just refreshed) so consumers that surface engagement_trend — e.g.
-    // retention-agent-tools get_at_risk_customers — never read a stale value
+    // the admin customer-intel at-risk views — never read a stale value
     // left over from the old engine.
     if (row) {
       await db('customer_health_scores').where('id', row.id).update({

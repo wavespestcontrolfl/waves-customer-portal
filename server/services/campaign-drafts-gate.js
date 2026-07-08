@@ -60,7 +60,8 @@ const COOLDOWN_INTERVAL = `NOW() - INTERVAL '${COOLDOWN_DAYS} days'`;
 // message_type values written by the existing campaign-grade senders:
 // upsell-trigger ('upsell'), renewal-reminder ('renewal'), legacy
 // seasonal-reactivation sends + approved reactivation drafts ('reactivation'),
-// retention agent ('retention_outreach'), and the Customer Intelligence
+// the retired retention agent ('retention_outreach' — kept so any historical
+// sms_log rows still count toward cooldowns), and the Customer Intelligence
 // retention-approve route ('retention' — admin-customer-intel sends with
 // original_message_type: 'retention', persisted as sms_log.message_type).
 // Approved campaign drafts log the same values (admin-drafts
