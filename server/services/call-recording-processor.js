@@ -416,7 +416,15 @@ async function persistCallSecondaryContact(customerId, contact) {
 
   const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()
     || String(customer[s.phone] || '').trim() || String(customer[s.email] || '').trim());
-  const hadAnyServiceContact = SERVICE_CONTACT_SLOTS.some(slotHasContent);
+  // "Already had a service contact" means a REACHABLE one (phone or email) —
+  // that's what makes getAppointmentContacts / the email resolvers drop the
+  // primary. A name-only placeholder slot never carried notifications, so the
+  // contact written now is effectively the customer's first and the
+  // notify-primary prefs must still be set. Slot SELECTION still avoids
+  // name-only slots (any content) so a placeholder is never overwritten.
+  const slotReachable = (s) => !!(String(customer[s.phone] || '').trim()
+    || String(customer[s.email] || '').trim());
+  const hadAnyServiceContact = SERVICE_CONTACT_SLOTS.some(slotReachable);
   const emptySlot = SERVICE_CONTACT_SLOTS.find((s) => !slotHasContent(s));
   if (!emptySlot) return 'skipped_slots_full';
 
@@ -1242,11 +1250,22 @@ function hasUsablePhone(value) {
 }
 
 function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
+  // A service-contact slot email satisfies the email requirement: it is a
+  // deliverable account email (appointment-email's resolveRecipients includes
+  // slot emails). Load-bearing for the realtor-books-for-buyer flow — the
+  // secondary-contact scrub clears the buyer's email off the CALLER's fields,
+  // and the gated persistence writes it into a slot BEFORE this gate runs, so
+  // without the slot fallback the exact call this feature targets would be
+  // skipped as missing_required_customer_fields.
+  const slotEmail = customer.service_contact_email
+    || customer.service_contact2_email
+    || customer.service_contact3_email
+    || null;
   const merged = {
     firstName: customer.first_name || extracted.first_name || null,
     lastName: customer.last_name || extracted.last_name || null,
     phone: customer.phone || extracted.phone || callerPhone || null,
-    email: customer.email || extracted.email || null,
+    email: customer.email || extracted.email || slotEmail || null,
     streetAddress: customer.address_line1 || extracted.address_line1 || null,
     city: customer.city || extracted.city || null,
     state: customer.state || extracted.state || null,
@@ -4442,7 +4461,8 @@ const CallRecordingProcessor = {
                       original_message_type: 'confirmation',
                     },
                   });
-                  if (sendResult.blocked || sendResult.sent === false) {
+                  const primaryOk = !(sendResult.blocked || sendResult.sent === false);
+                  if (!primaryOk) {
                     logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
                     appointmentResult = {
                       smsSent: false,
@@ -4454,10 +4474,10 @@ const CallRecordingProcessor = {
                       scheduledDate: scheduledDateForLog,
                       windowStart: windowStartForLog,
                     };
-                    return false;
+                  } else {
+                    logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
+                    appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   }
-                  logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
-                  appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   // Gated fan-out to the OTHER appointment contacts: the same
                   // call may have named a second notification recipient (just
                   // persisted into a service-contact slot above) — without
@@ -4466,8 +4486,11 @@ const CallRecordingProcessor = {
                   // the same contact resolution as the admin confirmation path
                   // (getAppointmentContacts) and re-renders the template per
                   // contact so the greeting carries THEIR name, not the
-                  // caller's. Non-blocking: a fan-out failure never voids the
-                  // primary confirmation that already went out.
+                  // caller's. Runs REGARDLESS of the primary send's outcome —
+                  // a landline/bad primary number must not strand the
+                  // buyer/tenant whose slot was just written for this purpose —
+                  // and non-blocking: a fan-out failure never voids a primary
+                  // confirmation that already went out.
                   if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true') {
                     try {
                       const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
@@ -4521,7 +4544,7 @@ const CallRecordingProcessor = {
                       logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);
                     }
                   }
-                  return true;
+                  return primaryOk;
                 },
               });
               if (!smsRan) {

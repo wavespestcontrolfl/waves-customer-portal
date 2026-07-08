@@ -63,6 +63,7 @@ const REASON_LABELS = {
   address_recovered: "Address recovered — read back",
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
+  secondary_contact_captured: "Second contact named — confirm",
 };
 
 // Correction evidence the call processor attaches to address/email review
@@ -75,12 +76,26 @@ function parsePayload(payload) {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
-function ConfirmEvidence({ payload }) {
+export function ConfirmEvidence({ payload }) {
   const p = parsePayload(payload);
   if (!p) return null;
   const emailCandidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
   const addressCandidates = Array.isArray(p.address_candidates) ? p.address_candidates : [];
+  // secondary_contact arrives in the V2 nested shape (name_full / phone_e164)
+  // from the deterministic-flags insert or the flat shape (phone) from the
+  // processor's payload-rich insert — render either.
+  const sc = p.secondary_contact && typeof p.secondary_contact === "object" ? p.secondary_contact : null;
+  const scValue = sc
+    ? [
+        sc.name_full || [sc.first_name, sc.last_name].filter(Boolean).join(" ") || null,
+        sc.role && sc.role !== "unknown" ? `(${sc.role.replace(/_/g, " ")})` : null,
+        sc.phone || sc.phone_e164 || null,
+        sc.email || null,
+      ].filter(Boolean).join(" · ")
+      + (sc.wants_notifications === true ? " — caller asked they get notifications" : "")
+    : "";
   const rows = [
+    scValue && { label: "Second contact", value: scValue },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

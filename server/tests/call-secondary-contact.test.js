@@ -27,6 +27,7 @@ const {
   normalizeCallExtraction,
   resolveCallSecondaryContact,
   persistCallSecondaryContact,
+  validatePhoneCallAppointmentCustomer,
 } = _test;
 const { flatView, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
 const { normalizeSecondaryContact: normalizeSecondaryContactV2 } = require('../utils/normalize-extraction-v2');
@@ -388,6 +389,32 @@ describe('persistCallSecondaryContact', () => {
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record');
     expect(writes.updates).toHaveLength(0);
     expect(writes2.updates).toHaveLength(0);
+  });
+
+  test('a service-contact slot email satisfies the appointment email requirement (post-scrub bookability)', () => {
+    // The chimera scrub clears the buyer's email off the caller's fields; the
+    // gated persistence writes it into a slot BEFORE the appointment gate —
+    // the gate must accept it or the exact realtor-books-for-buyer call this
+    // feature targets is skipped as missing_required_customer_fields.
+    const base = {
+      first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
+      email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
+    };
+    expect(validatePhoneCallAppointmentCustomer(base, {}, '+14074933469').missing).toContain('email');
+    const withSlot = { ...base, service_contact_email: 'joseph.haught89431@gmail.com' };
+    expect(validatePhoneCallAppointmentCustomer(withSlot, {}, '+14074933469').missing).not.toContain('email');
+  });
+
+  test('a name-only placeholder slot never carried notifications: prefs are still set, and the placeholder is not overwritten', async () => {
+    const writes = makeDb({ customer: { ...bareCustomer, service_contact_name: 'Gate guard (placeholder)' } });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    // Slot 1 has content (name) — never overwritten; write lands in slot 2.
+    expect(Object.keys(writes.updates[0])).toEqual(
+      expect.arrayContaining(['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'])
+    );
+    // But a name-only slot is unreachable (no phone/email), so this is the
+    // customer's FIRST reachable contact — notify-primary prefs must be set.
+    expect(writes.prefsMerges).toHaveLength(1);
   });
 
   test('existing service contacts: fills the next empty slot but preserves the admin notify-primary choice', async () => {
