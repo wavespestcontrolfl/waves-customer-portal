@@ -48,7 +48,12 @@ function installDb({ firstResults = {} } = {}) {
       where() { return chain; },
       whereRaw() { return chain; },
       first() { return Promise.resolve(firstResults[table] ?? null); },
-      insert(row) { recordedInserts.push({ table, row }); return Promise.resolve([1]); },
+      insert(row) {
+        recordedInserts.push({ table, row });
+        const p = Promise.resolve([1]);
+        p.returning = () => Promise.resolve([{ id: 'res-1' }]);
+        return p;
+      },
       update(row) { recordedUpdates.push({ table, row }); return Promise.resolve(1); },
       del() { recordedDeletes.push({ table }); return Promise.resolve(1); },
     };
@@ -176,13 +181,54 @@ describe('POST /api/referrals/invite-email — atomic dedupe', () => {
     expect(recordedDeletes).toHaveLength(0);
   });
 
-  test('rolling 24h cooldown short-circuits before hitting the mailer', async () => {
-    installDb({ firstResults: { referral_invites: { id: 'inv-1' } } });
+  test('rolling 24h cooldown short-circuits before hitting the mailer (row past the in-flight window)', async () => {
+    installDb({ firstResults: { referral_invites: { id: 'inv-1', sent_at: new Date(Date.now() - 10 * 60 * 1000).toISOString() } } });
 
     const res = await post('/api/referrals/invite-email', { email: 'friend@example.com', friendName: 'Jordan' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true, deduped: true });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a young reservation (first request possibly mid-send) defers to the mailer instead of reporting success', async () => {
+    // The other request's reservation is 30s old — its send is unproven. This
+    // request must resolve at the email_messages layer, not off the row.
+    installDb({ firstResults: { referral_invites: { id: 'inv-1', sent_at: new Date(Date.now() - 30 * 1000).toISOString() } } });
+    const collision = new Error('email send already in progress');
+    collision.code = 'EMAIL_SEND_IN_PROGRESS';
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(collision);
+
+    const res = await post('/api/referrals/invite-email', { email: 'friend@example.com' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, deduped: true });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalled();
+    // Passthrough never inserted a reservation of its own inside the txn.
+    expect(recordedInserts.filter((i) => i.table === 'referral_invites')).toHaveLength(0);
+  });
+
+  test('a young reservation whose send was blocked surfaces the failure to the second tap', async () => {
+    // The exact race Codex flagged: first request's send got suppressed —
+    // the second tap must NOT be told success off the reservation row.
+    installDb({ firstResults: { referral_invites: { id: 'inv-1', sent_at: new Date(Date.now() - 30 * 1000).toISOString() } } });
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: false, blocked: true, deduped: true, reason: 'Email suppressed' });
+
+    const res = await post('/api/referrals/invite-email', { email: 'friend@example.com' });
+    expect(res.status).toBe(422);
+    // Not our reservation — nothing to release.
+    expect(recordedDeletes).toHaveLength(0);
+  });
+
+  test('a young reservation whose send failed lets this request send for real and log its own cooldown row', async () => {
+    installDb({ firstResults: { referral_invites: { id: 'inv-1', sent_at: new Date(Date.now() - 30 * 1000).toISOString() } } });
+    // Library found the prior attempt failed terminally and retried → real send.
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+
+    const res = await post('/api/referrals/invite-email', { email: 'friend@example.com' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+    // Wrote the cooldown row it never reserved, and bumped the share timestamp.
+    expect(recordedInserts.some((i) => i.table === 'referral_invites' && i.row.email === 'friend@example.com')).toBe(true);
+    expect(recordedUpdates.some((u) => u.table === 'referral_promoters')).toBe(true);
   });
 
   test('refuses to email the promoter’s own address (enrollment snapshot)', async () => {

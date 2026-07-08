@@ -310,44 +310,63 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
     // read-then-insert can't race — including double-taps that straddle UTC
     // midnight, the hole a date-bucketed idempotency key alone leaves. The
     // reservation is released on a failed send so a retry isn't locked out.
+    //
+    // A reservation only PROVES a send once it outlives the in-flight window
+    // (failed sends delete their row; mirrors the library's
+    // QUEUED_IN_FLIGHT_MS). A younger row may belong to a request still
+    // mid-send, so we don't report success off it — we fall through to
+    // sendTemplate and let the email_messages idempotency layer resolve the
+    // truth: in-flight → honest dedupe, succeeded → dedupe, failed → retry.
+    const RESERVATION_IN_FLIGHT_MS = 2 * 60 * 1000;
     const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    let reservedRowId = null;
     let reserved = false;
     try {
-      const cooldownHit = await db.transaction(async (trx) => {
+      const verdict = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`referral-invite-email:${promoter.id}:${cleanEmail}`]);
         const recent = await trx('referral_invites')
           .where({ promoter_id: promoter.id })
           .whereRaw('LOWER(email) = ?', [cleanEmail])
           .where('sent_at', '>=', cooldownStart)
           .first();
-        if (recent) return true;
-        await trx('referral_invites').insert({
-          promoter_id: promoter.id,
-          email: cleanEmail,
-          sent_at: new Date(),
-        });
-        return false;
+        if (recent) {
+          const age = Date.now() - new Date(recent.sent_at).getTime();
+          // NaN age (unparseable sent_at) counts as old → cooldown.
+          return age < RESERVATION_IN_FLIGHT_MS ? { state: 'in_flight' } : { state: 'cooldown' };
+        }
+        const inserted = await trx('referral_invites')
+          .insert({
+            promoter_id: promoter.id,
+            email: cleanEmail,
+            sent_at: new Date(),
+          })
+          .returning('id');
+        return { state: 'reserved', id: inserted?.[0]?.id ?? inserted?.[0] ?? null };
       });
-      if (cooldownHit) {
+      if (verdict.state === 'cooldown') {
         return res.json({ success: true, deduped: true });
       }
-      reserved = true;
+      if (verdict.state === 'reserved') {
+        reserved = true;
+        reservedRowId = verdict.id;
+      }
     } catch (reserveErr) {
       // referral_invites is a best-effort tracking table — if the reservation
       // can't be taken (e.g. migration not applied yet), send without it; the
       // idempotency key below still collapses same-day duplicates.
       logger.warn(`[referrals-v2] invite-email cooldown reservation unavailable: ${reserveErr.message}`);
     }
-    // Cooldown passed, so the only row inside the window is the one we just
-    // wrote — safe to target by promoter+email+window.
+    // Deletes only OUR row (by id when the driver returned one) — a
+    // concurrent request's reservation is never ours to release.
     const releaseReservation = () => {
       if (!reserved) return Promise.resolve();
-      return db('referral_invites')
-        .where({ promoter_id: promoter.id })
-        .whereRaw('LOWER(email) = ?', [cleanEmail])
-        .where('sent_at', '>=', cooldownStart)
-        .del()
-        .catch(() => {});
+      const q = reservedRowId != null
+        ? db('referral_invites').where({ id: reservedRowId })
+        : db('referral_invites')
+            .where({ promoter_id: promoter.id })
+            .whereRaw('LOWER(email) = ?', [cleanEmail])
+            .where('sent_at', '>=', cooldownStart);
+      return q.del().catch(() => {});
     };
 
     const friendly = friendName ? friendName.replace(/[<>]/g, '').trim() : '';
@@ -402,6 +421,16 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
     // Skip the share-timestamp bump on a deduped result — this request didn't
     // actually send anything. (The cooldown row is the pre-send reservation.)
     if (!result?.deduped) {
+      if (!reserved) {
+        // In-flight passthrough that ended up doing the real send (the
+        // library retried a failed attempt) — write the cooldown row this
+        // request never reserved. Best-effort, like the SMS leg's log.
+        await db('referral_invites').insert({
+          promoter_id: promoter.id,
+          email: cleanEmail,
+          sent_at: new Date(),
+        }).catch(() => {});
+      }
       await db('referral_promoters').where({ id: promoter.id }).update({
         last_share_at: new Date(),
         updated_at: new Date(),
