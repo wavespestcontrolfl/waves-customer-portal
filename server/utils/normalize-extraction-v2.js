@@ -78,6 +78,11 @@ function normalizeProperty(property) {
 // survives, so downstream consumers never see an empty shell.
 function normalizeSecondaryContact(contact) {
   if (!contact || typeof contact !== 'object') return null;
+  // Same transcript-garble rejection as the V1 normalizer: a URL-shaped
+  // "email" ("www.cw63@gmail.com") is a mishearing, never a mailbox — it
+  // must not survive into a service-contact write when V2 is the source.
+  const { looksGarbledTranscriptEmail } = require('./intake-normalize');
+  const validEmail = cleanValidEmail(contact.email);
   const normalized = {
     ...contact,
     name_full: cleanText(contact.name_full),
@@ -85,7 +90,7 @@ function normalizeSecondaryContact(contact) {
     last_name: contact.last_name ? properCaseName(contact.last_name) : null,
     phone_e164: normalizePhone(contact.phone_e164),
     phone_raw_spoken: cleanText(contact.phone_raw_spoken),
-    email: cleanValidEmail(contact.email),
+    email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
     notes: cleanText(contact.notes),
   };
   if (!normalized.name_full && !normalized.first_name && !normalized.last_name

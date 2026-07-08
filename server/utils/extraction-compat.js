@@ -89,9 +89,19 @@ function mapAdditionalPropertiesToLegacy(entries) {
 // there is nothing to persist or review without one.
 function mapSecondaryContactToLegacy(contact) {
   if (!contact || typeof contact !== 'object') return null;
+  // A V2 contact can arrive with only name_full populated ("Joseph Haught"
+  // unsplit) — derive first/last from it so the name survives the flat
+  // mapping instead of producing an unnamed (or dropped) contact.
+  let firstName = contact.first_name || null;
+  let lastName = contact.last_name || null;
+  if (!firstName && !lastName && String(contact.name_full || '').trim()) {
+    const parts = String(contact.name_full).trim().split(/\s+/);
+    firstName = parts[0];
+    lastName = parts.slice(1).join(' ') || null;
+  }
   const mapped = {
-    first_name: contact.first_name || null,
-    last_name: contact.last_name || null,
+    first_name: firstName,
+    last_name: lastName,
     phone: contact.phone_e164 || null,
     email: contact.email || null,
     role: contact.role || 'unknown',

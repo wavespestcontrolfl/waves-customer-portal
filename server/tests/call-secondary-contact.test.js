@@ -128,20 +128,47 @@ describe('secondary_contact V2 mapping', () => {
     expect(flat.secondary_contact.role).toBe('home_buyer');
   });
 
-  test('resolveCallSecondaryContact prefers V1, falls back to V2', () => {
-    const v1 = { first_name: 'A', last_name: null, phone: '+19415550000', email: null, role: 'tenant', wants_notifications: true, notes: null };
-    expect(resolveCallSecondaryContact({ secondary_contact: v1 }, { secondary_contact: v2Contact })).toBe(v1);
+  test('a V2 contact with only name_full keeps its name in the flat mapping', () => {
+    const mapped = mapSecondaryContactToLegacy({
+      name_full: 'Joseph Haught', first_name: null, last_name: null,
+      phone_e164: '+19542901693', email: null, role: 'home_buyer', wants_notifications: true, notes: null,
+    });
+    expect(mapped.first_name).toBe('Joseph');
+    expect(mapped.last_name).toBe('Haught');
+  });
+
+  test('resolveCallSecondaryContact: same person → field-wise merge, V2 fills V1 gaps, wants_notifications ORs', () => {
+    const v1Partial = { first_name: 'Joseph', last_name: null, phone: null, email: null, role: 'unknown', wants_notifications: false, notes: null };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1Partial }, { secondary_contact: v2Contact });
+    expect(merged).toEqual({
+      first_name: 'Joseph',
+      last_name: 'Haught',
+      phone: '+19542901693',
+      email: 'joseph.haught89431@gmail.com',
+      role: 'home_buyer',
+      wants_notifications: true,
+      notes: null,
+    });
     expect(resolveCallSecondaryContact({}, { secondary_contact: v2Contact }).first_name).toBe('Joseph');
     expect(resolveCallSecondaryContact({}, null)).toBeNull();
   });
 
-  test('normalizeExtractionV2 secondary contact: e164/email enforced, empty shell nulled', () => {
+  test('resolveCallSecondaryContact: conflicting identities never merge — V1 wins unmerged', () => {
+    const v1Matt = { first_name: 'Matt', last_name: null, phone: '+19415551111', email: null, role: 'real_estate_agent', wants_notifications: false, notes: null };
+    const out = resolveCallSecondaryContact({ secondary_contact: v1Matt }, { secondary_contact: v2Contact });
+    expect(out).toBe(v1Matt);
+    expect(out.wants_notifications).toBe(false);
+  });
+
+  test('normalizeExtractionV2 secondary contact: e164/email enforced, garbled email rejected, empty shell nulled', () => {
     const normalized = normalizeSecondaryContactV2({
       ...v2Contact, phone_e164: 'not-a-phone', email: 'nope', first_name: 'joseph', last_name: null, name_full: null,
     });
     expect(normalized.phone_e164).toBeNull();
     expect(normalized.email).toBeNull();
     expect(normalized.first_name).toBe('Joseph');
+    // URL-shaped transcript garble is not a mailbox — same guard as V1.
+    expect(normalizeSecondaryContactV2({ ...v2Contact, email: 'www.cw63@gmail.com' }).email).toBeNull();
     expect(normalizeSecondaryContactV2({ role: 'tenant', wants_notifications: true })).toBeNull();
   });
 });
@@ -247,16 +274,26 @@ describe('persistCallSecondaryContact', () => {
     wants_notifications: true, notes: null,
   };
 
-  function makeDb({ customer }) {
-    const writes = { updates: [], prefsMerges: [] };
+  function makeDb({ customer, updateRows = 1 }) {
+    const writes = { updates: [], prefsMerges: [], whereFns: 0 };
     db.mockImplementation((table) => {
       if (table === 'customers') {
-        return {
-          where: jest.fn(() => ({
-            first: jest.fn(async () => customer),
-            update: jest.fn(async (payload) => { writes.updates.push(payload); return 1; }),
-          })),
+        const b = {
+          where: jest.fn((arg) => {
+            // The conditional slot write chains .where(fn) emptiness guards —
+            // invoke them against a sub-builder (mirroring knex) so the
+            // predicate is exercised and counted.
+            if (typeof arg === 'function') {
+              writes.whereFns += 1;
+              const sub = { whereNull: jest.fn(() => sub), orWhere: jest.fn(() => sub) };
+              arg(sub);
+            }
+            return b;
+          }),
+          first: jest.fn(async () => customer),
+          update: jest.fn(async (payload) => { writes.updates.push(payload); return updateRows; }),
         };
+        return b;
       }
       if (table === 'notification_prefs') {
         return {
@@ -279,7 +316,7 @@ describe('persistCallSecondaryContact', () => {
     service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null,
   };
 
-  test('writes the first empty slot and opts the primary back into appointment texts', async () => {
+  test('writes the first empty slot and keeps the primary on appointment texts AND service reports', async () => {
     const writes = makeDb({ customer: bareCustomer });
     const result = await persistCallSecondaryContact('cust-1', buyer);
     expect(result).toBe('written');
@@ -288,8 +325,30 @@ describe('persistCallSecondaryContact', () => {
       service_contact_phone: '+19542901693',
       service_contact_email: 'joseph.haught89431@gmail.com',
     }]);
+    // Emptiness re-asserted in the UPDATE's WHERE (race guard) — one
+    // predicate per slot column.
+    expect(writes.whereFns).toBe(3);
     expect(writes.prefsMerges).toHaveLength(1);
-    expect(writes.prefsMerges[0].mergePayload).toEqual({ appointment_notify_primary: true });
+    expect(writes.prefsMerges[0].mergePayload).toEqual({
+      appointment_notify_primary: true,
+      service_report_notify_primary: true,
+    });
+  });
+
+  test('a lost race (slot filled between read and write) is a no-op, not an overwrite', async () => {
+    const writes = makeDb({ customer: bareCustomer, updateRows: 0 });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_slot_race');
+    expect(writes.prefsMerges).toHaveLength(0);
+  });
+
+  test('new phone but an email already on the record: phone is kept, duplicate email is dropped', async () => {
+    const writes = makeDb({ customer: { ...bareCustomer, email: 'joseph.haught89431@gmail.com' } });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact_name: 'Joseph Haught',
+      service_contact_phone: '+19542901693',
+      service_contact_email: null,
+    }]);
   });
 
   test('no explicit notification intent → no write (contact stays triage/lead-only)', async () => {

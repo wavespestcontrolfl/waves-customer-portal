@@ -338,16 +338,38 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 }
 
 // Secondary contact from EITHER extractor (a realtor's home buyer, a landlord's
-// tenant, a spouse): prefer the V1 extraction's normalized object; fall back to
-// the V2 extraction's secondary_contact (mapped to the same flat shape). Both
-// sources were normalized upstream, so an object here always carries at least
-// a name, phone, or email.
+// tenant, a spouse). Both sources were normalized upstream, so an object here
+// always carries at least a name, phone, or email. When BOTH extractors caught
+// the same person, merge field-wise (V1 wins where present, V2 fills gaps —
+// split parses where one extractor caught the phone/email the other missed);
+// when their identities conflict (different phone, email, or first name), the
+// V1 extraction wins unmerged — never chimera two different people.
 function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
-  if (extracted.secondary_contact && typeof extracted.secondary_contact === 'object') {
-    return extracted.secondary_contact;
-  }
   const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
-  return mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
+    ? extracted.secondary_contact
+    : null;
+  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  if (!v1 || !v2) return v1 || v2;
+
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const conflicts = (v1.phone && v2.phone && last10(v1.phone) !== last10(v2.phone))
+    || (v1.email && v2.email && norm(v1.email) !== norm(v2.email))
+    || (v1.first_name && v2.first_name && norm(v1.first_name) !== norm(v2.first_name));
+  if (conflicts) return v1;
+
+  return {
+    first_name: v1.first_name || v2.first_name,
+    last_name: v1.last_name || v2.last_name,
+    phone: v1.phone || v2.phone,
+    email: v1.email || v2.email,
+    role: (v1.role && v1.role !== 'unknown') ? v1.role : v2.role,
+    // OR, not V1-wins: either extractor observing the caller's direction
+    // ("send notifications to the buyer and myself") is enough.
+    wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    notes: v1.notes || v2.notes,
+  };
 }
 
 // Persist a call's secondary contact into the customer's first EMPTY
@@ -380,7 +402,14 @@ async function persistCallSecondaryContact(customerId, contact) {
   const knownEmails = [customer.email, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.email])]
     .map(lowerEmail).filter(Boolean);
   if (contact.phone && knownPhones.includes(last10(contact.phone))) return 'skipped_phone_on_record';
-  if (!contact.phone && contact.email && knownEmails.includes(lowerEmail(contact.email))) return 'skipped_email_on_record';
+  // Email dedup runs INDEPENDENTLY of the phone: a contact with a new phone
+  // but an email already on the record (primary or any slot) keeps the phone
+  // and drops the duplicate email — otherwise the caller's own address gets
+  // re-filed under the buyer/tenant's name and future appointment emails
+  // reach it mislabeled. Email-only contacts with a known email are a no-op.
+  const emailOnRecord = contact.email && knownEmails.includes(lowerEmail(contact.email));
+  if (!contact.phone && emailOnRecord) return 'skipped_email_on_record';
+  const slotEmail = emailOnRecord ? null : (contact.email || null);
 
   const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()
     || String(customer[s.phone] || '').trim() || String(customer[s.email] || '').trim());
@@ -390,16 +419,29 @@ async function persistCallSecondaryContact(customerId, contact) {
 
   const fullName = [contact.first_name, contact.last_name]
     .map((v) => String(v || '').trim()).filter(Boolean).join(' ') || null;
-  await db('customers').where({ id: customerId }).update({
+  // Conditional write: the slot was chosen from a prior read, so re-assert its
+  // emptiness in the UPDATE's WHERE — a concurrent admin edit or reprocessed
+  // call filling it between read and write must make this a 0-row no-op, never
+  // an overwrite.
+  let write = db('customers').where({ id: customerId });
+  for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
+    write = write.where((q) => q.whereNull(col).orWhere(col, ''));
+  }
+  const updated = await write.update({
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
     [emptySlot.phone]: contact.phone || null,
-    [emptySlot.email]: contact.email || null,
+    [emptySlot.email]: slotEmail,
   });
+  if (!updated) return 'skipped_slot_race';
   if (!hadAnyServiceContact) {
+    // Keep the caller in the loop on BOTH surfaces that drop the primary once
+    // a service contact exists: appointment texts (getAppointmentContacts)
+    // AND service-report emails (getServiceReportEmailRecipients) — the
+    // realtor who said "the buyer and myself" needs the WDO report too.
     await db('notification_prefs')
-      .insert({ customer_id: customerId, appointment_notify_primary: true })
+      .insert({ customer_id: customerId, appointment_notify_primary: true, service_report_notify_primary: true })
       .onConflict('customer_id')
-      .merge({ appointment_notify_primary: true });
+      .merge({ appointment_notify_primary: true, service_report_notify_primary: true });
   }
   return 'written';
 }
@@ -4385,6 +4427,69 @@ const CallRecordingProcessor = {
                   }
                   logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
                   appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
+                  // Gated fan-out to the OTHER appointment contacts: the same
+                  // call may have named a second notification recipient (just
+                  // persisted into a service-contact slot above) — without
+                  // this, the buyer/tenant gets later reminders and en-route
+                  // texts but misses the initial booking confirmation. Uses
+                  // the same contact resolution as the admin confirmation path
+                  // (getAppointmentContacts) and re-renders the template per
+                  // contact so the greeting carries THEIR name, not the
+                  // caller's. Non-blocking: a fan-out failure never voids the
+                  // primary confirmation that already went out.
+                  if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true') {
+                    try {
+                      const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
+                      const freshCustomer = await db('customers').where({ id: customerId }).first();
+                      const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+                      const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+                      const extraContacts = getAppointmentContacts(freshCustomer || {}, prefsRow)
+                        .filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
+                      for (const contact of extraContacts) {
+                        const contactBody = await renderSmsTemplate('appointment_confirmation', {
+                          first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
+                          service_type: serviceType,
+                          date_time: extracted.preferred_date_time,
+                          date: parsedDate,
+                          time: parsedTime,
+                          reschedule_line: '',
+                        }, {
+                          workflow: 'call_booking_confirmation',
+                          entity_type: 'customer',
+                          entity_id: customerId,
+                        });
+                        if (!contactBody) continue;
+                        // Same content-level dedup as the primary send: don't
+                        // re-fire an identical confirmation on a reprocess.
+                        const recentDup = await db('sms_log')
+                          .where({ to_phone: contact.phone, message_type: 'confirmation' })
+                          .where('message_body', contactBody)
+                          .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+                          .first()
+                          .catch(() => null);
+                        if (recentDup) continue;
+                        await sendCustomerMessage({
+                          to: contact.phone,
+                          body: contactBody,
+                          channel: 'sms',
+                          audience: 'customer',
+                          purpose: 'appointment_confirmation',
+                          customerId,
+                          appointmentId: scheduledServiceId,
+                          identityTrustLevel: isServiceContactRole(contact.role)
+                            ? 'service_contact_authorized'
+                            : 'phone_matches_customer',
+                          metadata: {
+                            original_message_type: 'confirmation',
+                            appointment_contact_role: contact.role,
+                          },
+                        });
+                        logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                      }
+                    } catch (fanErr) {
+                      logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);
+                    }
+                  }
                   return true;
                 },
               });
