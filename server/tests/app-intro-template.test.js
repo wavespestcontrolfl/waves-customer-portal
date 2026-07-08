@@ -11,7 +11,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/sendgrid-mail', () => ({ serviceGroupId: () => 0, newsletterGroupId: () => 0 }));
 
 const { renderTemplate } = require('../services/email-template-library');
-const { TEMPLATE } = require('../models/migrations/20260707000020_app_intro_email_lawn_waves_ai');
+const { TEMPLATE } = require('../models/migrations/20260708000011_app_intro_email_v4_track_reminders');
 
 const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
@@ -42,6 +42,25 @@ describe('app_intro email content contract', () => {
     expect(html).toContain('app-reschedule.png');
     expect(html).toContain('app-waves-ai.png');
     expect(html).toContain('Dana');
+  });
+
+  test('v4: live-tracking finally has its screenshot, in its own section', () => {
+    const { html } = renderAppIntro();
+    expect(html).toContain('app-track.png');
+    // The track shot must sit between its section heading and the next one —
+    // v2/v3 shipped this section imageless (old capture showed a broken map).
+    const section = html.slice(
+      html.indexOf('Watch your tech arrive'),
+      html.indexOf('Every visit documented'),
+    );
+    expect(section).toContain('app-track.png');
+  });
+
+  test('v4: reminder-toggles screenshot and the desktop /app pointer are present', () => {
+    const { html, text } = renderAppIntro();
+    expect(html).toContain('app-reminders.png');
+    expect(html).toContain('wavespestcontrol.com/app');
+    expect(text).toContain('wavespestcontrol.com/app');
   });
 
   test('uses only email-safe images and leaves no unresolved variables', () => {
