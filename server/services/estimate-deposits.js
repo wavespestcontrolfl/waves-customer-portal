@@ -1511,6 +1511,56 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
   return totalRestoredCents / 100;
 }
 
+// Email fallback for a SCHEDULED deposit-receipt replay the cron suppressed
+// on the customer's own choice (channel flipped to email, receipt texts or
+// SMS toggled off while the text sat on the quiet-hours/retry rail). The
+// immediate path already treats those opt-outs as "the email carries the
+// receipt" — without this twin, a preference change while queued left the
+// paid deposit with no receipt on any channel (codex round 5). Re-derives
+// amount + PaymentIntent from the deposit ledger (never trusts the queued
+// row's rendered body); the deposit_receipt:<pi> idempotency key inside
+// sendDepositReceiptEmail dedupes against any email that already went out.
+// Best-effort by contract: returns { sent, reason } and never throws.
+async function sendDepositReceiptEmailFallback(estimateId) {
+  try {
+    const estimate = await db('estimates')
+      .where({ id: estimateId })
+      .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
+    if (!estimate) return { sent: false, reason: 'estimate_not_found' };
+
+    const customer = estimate.customer_id
+      ? await db('customers').where({ id: estimate.customer_id }).first()
+      : null;
+    const prefs = estimate.customer_id
+      ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first().catch(() => null)
+      : null;
+    // payment_receipt=false is the full every-channel kill switch; the
+    // portal-wide email opt-out is honored the same way the immediate email
+    // leg honors it.
+    if (prefs?.payment_receipt === false) return { sent: false, reason: 'receipt_opted_out' };
+    if (prefs?.email_enabled === false) return { sent: false, reason: 'email_opted_out' };
+
+    const ledgerRow = await db('estimate_deposits')
+      .where({ estimate_id: estimateId })
+      .whereIn('status', ['received', 'credited'])
+      .orderBy('received_at', 'desc')
+      .first('amount', 'stripe_payment_intent_id');
+    if (!ledgerRow) return { sent: false, reason: 'no_received_deposit' };
+
+    await sendDepositReceiptEmail({
+      estimate,
+      customer,
+      prefs,
+      amountDollars: Number(ledgerRow.amount || 0),
+      paymentIntentId: ledgerRow.stripe_payment_intent_id,
+    });
+    return { sent: true };
+  } catch (err) {
+    logger.warn(`[estimate-deposits] deposit receipt email fallback failed for estimate ${estimateId}: ${err.message}`);
+    return { sent: false, reason: err.message };
+  }
+}
+
 module.exports = {
   assessDepositFollowUpEligibility,
   computeDepositAmount,
@@ -1528,6 +1578,7 @@ module.exports = {
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
   summarizeEstimateDeposit,
+  sendDepositReceiptEmailFallback,
   linkedScheduledServiceId,
   restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,

@@ -1604,6 +1604,14 @@ function initScheduledJobs() {
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'receipt_channel_not_sms')"),
             });
             logger.info(`[scheduled-sms] Skipped deposit receipt ${msg.id} — customer receipt channel is no longer sms`);
+            // The customer flipped to email while the text sat on this rail —
+            // the immediate path would have delivered the email leg, so the
+            // suppressed replay hands off to it (kill switch + email opt-out
+            // re-checked inside; deposit_receipt:<pi> key dedupes).
+            if (claimMeta.estimate_id) {
+              const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id);
+              logger.info(`[scheduled-sms] Deposit receipt ${msg.id} email fallback: ${fb.sent ? 'sent' : fb.reason}`);
+            }
             continue;
           }
           const smsResult = await sendCustomerMessage({
@@ -1710,6 +1718,19 @@ function initScheduledJobs() {
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            // A deposit-receipt replay the customer's OWN choice suppressed
+            // (texts toggle / STOP / email-only flipped while queued) hands
+            // off to the deposit email leg — the immediate path treats the
+            // same opt-outs as "the email carries the receipt", and without
+            // this the paid deposit ends up with no receipt on any channel.
+            // PURPOSE_OPTED_OUT can also mean the payment_receipt kill
+            // switch; the fallback re-checks it (and email_enabled) itself.
+            if (String(msg.message_type || '').toLowerCase() === 'deposit_receipt'
+                && claimMeta.estimate_id
+                && ['PURPOSE_OPTED_OUT', 'CHANNEL_EMAIL_ONLY', 'SMS_OPTED_OUT', 'SUPPRESSED_OPT_OUT'].includes(smsResult.code)) {
+              const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id);
+              logger.info(`[scheduled-sms] Deposit receipt ${msg.id} email fallback: ${fb.sent ? 'sent' : fb.reason}`);
+            }
             // The customer was never answered — used + parked cards return.
             const blockedMeta = await readFreshMeta();
             await require('./sms-suggest-mode').reopenScheduledSuggestions({

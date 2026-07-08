@@ -250,6 +250,10 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
 
     expect(result.ok).toBe(true);
     expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    // The queue is a paired-legs caller — it must declare the email sidecar
+    // so email-only customers get the channel_email_only SMS skip (the flag
+    // is caller-declared now; codex round 5).
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 

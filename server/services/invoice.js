@@ -2352,7 +2352,15 @@ const InvoiceService = {
    * webhook and pay-v2 confirm handlers wrap the call in their own
    * .catch() with loud error logging.
    */
-  async sendReceipt(invoiceId, { force = false, recordActivity = true } = {}) {
+  // hasEmailLeg: the caller declares whether THIS receipt attempt is paired
+  // with a sendReceiptEmail sidecar (the receipt-delivery queue, the batch
+  // resend, the prepaid completion receipt). It opts the SMS leg into the
+  // email-only channel gate (channelGate 'opt_in' on the payment_receipt
+  // policy) — a paired caller's SMS skips as channel_email_only and the email
+  // carries the receipt. Manual single-channel operator sends (via='sms')
+  // must NOT declare it: the operator explicitly chose the text, and there is
+  // no email leg on that route to carry the receipt (codex round 5).
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -2455,10 +2463,9 @@ const InvoiceService = {
       invoiceId,
       entryPoint: "invoice_receipt_sms",
       metadata: { original_message_type: "receipt" },
-      // Opts in to the email-only channel gate (channelGate 'opt_in' on the
-      // payment_receipt policy): THIS flow has a real email sidecar — the
-      // receipt-delivery queue / webhook pair this SMS with sendReceiptEmail.
-      hasEmailLeg: true,
+      // Caller-declared (see the sendReceipt option doc above) — only flows
+      // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
+      hasEmailLeg,
     });
     if (sendResult.blocked || sendResult.sent === false) {
       // Email-only delivery preference is an intentional suppression, not a

@@ -1844,3 +1844,63 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
     expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
   });
 });
+
+describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the email leg', () => {
+  const { sendDepositReceiptEmailFallback } = require('../services/estimate-deposits');
+
+  const fallbackDb = ({ estimate, customer, prefs, ledger }) => (table) => {
+    const rows = {
+      estimates: estimate,
+      customers: customer,
+      notification_prefs: prefs,
+      estimate_deposits: ledger,
+    };
+    const q = {
+      where: () => q,
+      whereIn: () => q,
+      orderBy: () => q,
+      first: () => Promise.resolve(rows[table] ?? null),
+    };
+    return q;
+  };
+
+  const baseEstimate = { id: 'est-1', customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', customer_email: 'stale@estimate.example', token: 'tok-1' };
+  const baseCustomer = { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' };
+  const baseLedger = { amount: 70, stripe_payment_intent_id: 'pi_replay' };
+
+  beforeEach(() => mockSendTemplate.mockClear());
+
+  it('re-derives amount + PaymentIntent from the deposit ledger and sends the email', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { payment_confirmation_sms: false }, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: true });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'deposit.receipt',
+      to: 'sam@customer.example',
+      idempotencyKey: 'deposit_receipt:pi_replay',
+      payload: expect.objectContaining({ amount: '$70' }),
+    }));
+  });
+
+  it('payment_receipt=false stays the full kill switch — PURPOSE_OPTED_OUT replays must not email', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { payment_receipt: false }, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'receipt_opted_out' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('portal-wide email opt-out is honored', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { email_enabled: false }, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'email_opted_out' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('no received/credited ledger row → nothing to receipt', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: {}, ledger: null });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'no_received_deposit' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+});

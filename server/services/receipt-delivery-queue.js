@@ -174,7 +174,7 @@ async function processReceiptDeliveryJob(job) {
     const InvoiceService = require('./invoice');
     const { sendReceiptEmail } = require('./invoice-email');
 
-    smsResult = await InvoiceService.sendReceipt(invoice.id)
+    smsResult = await InvoiceService.sendReceipt(invoice.id, { hasEmailLeg: true })
       .catch((err) => ({ sent: false, reason: err.message }));
     if (actionableSmsFailure(smsResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt SMS not sent for invoice ${invoice.invoice_number}: ${smsResult.reason}`);

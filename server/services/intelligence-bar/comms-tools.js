@@ -106,7 +106,7 @@ Use for: "text Henderson that we're running late", "send a reminder to Smith abo
         customer_id: { type: 'string' },
         phone: { type: 'string', description: 'Direct phone number' },
         message: { type: 'string', description: 'The SMS body' },
-        message_type: { type: 'string', enum: ['manual', 'reminder', 'follow_up'], description: 'Default: manual' },
+        message_type: { type: 'string', enum: ['manual', 'reminder', 'follow_up', 'billing_reminder'], description: 'Default: manual. Use billing_reminder for billing/overdue-balance nudges — it honors the customer\'s billing_reminder toggle and their Billing Reminder Delivery channel (an email-preferring customer returns a blocked "prefers email" result instead of texting against their choice).' },
       },
       required: ['message'],
     },

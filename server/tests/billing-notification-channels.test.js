@@ -221,6 +221,18 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
   });
 });
 
+describe('Comms send_sms schema exposes billing_reminder', () => {
+  test('the model can actually select the type that activates the billing channel gate', () => {
+    // The opt-in gate only fires for message_type='billing_reminder' — if the
+    // advertised enum omits it, the IB model can never send one and the
+    // Billing Reminder Delivery preference is unenforceable from the Comms
+    // path (codex round 5).
+    const { COMMS_TOOLS } = require('../services/intelligence-bar/comms-tools');
+    const sendSms = COMMS_TOOLS.find((t) => t.name === 'send_sms');
+    expect(sendSms.input_schema.properties.message_type.enum).toContain('billing_reminder');
+  });
+});
+
 describe('notifications route mapping for the billing channels', () => {
   test('accepts the two portal keys and writes the migration-104 columns', () => {
     expect(notificationPrefsDbUpdates({
