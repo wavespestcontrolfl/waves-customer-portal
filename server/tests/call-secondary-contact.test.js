@@ -158,6 +158,24 @@ describe('secondary_contact V2 mapping', () => {
     const out = resolveCallSecondaryContact({ secondary_contact: v1Matt }, { secondary_contact: v2Contact });
     expect(out).toBe(v1Matt);
     expect(out.wants_notifications).toBe(false);
+    // Same first name + different surname is a DIFFERENT person — "Joseph
+    // Smith" must not inherit Joseph Haught's phone/email.
+    const v1JosephSmith = { first_name: 'Joseph', last_name: 'Smith', phone: null, email: null, role: 'tenant', wants_notifications: true, notes: null };
+    expect(resolveCallSecondaryContact({ secondary_contact: v1JosephSmith }, { secondary_contact: v2Contact })).toBe(v1JosephSmith);
+  });
+
+  test('buildTriageItem carries the extraction secondary_contact on every insert site', () => {
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    const item = buildTriageItem({
+      callLogId: 'call-1',
+      flag: 'secondary_contact_captured',
+      extraction: { meta: { call_summary: 's' }, secondary_contact: v2Contact },
+      severity: 'advisory',
+    });
+    expect(JSON.parse(item.payload).secondary_contact.phone_e164).toBe('+19542901693');
+    // Other flags are unaffected.
+    const other = buildTriageItem({ callLogId: 'call-1', flag: 'missing_last_name', extraction: { meta: {}, secondary_contact: v2Contact } });
+    expect(JSON.parse(other.payload).secondary_contact).toBeUndefined();
   });
 
   test('normalizeExtractionV2 secondary contact: e164/email enforced, garbled email rejected, empty shell nulled', () => {
@@ -338,7 +356,10 @@ describe('persistCallSecondaryContact', () => {
   test('a lost race (slot filled between read and write) is a no-op, not an overwrite', async () => {
     const writes = makeDb({ customer: bareCustomer, updateRows: 0 });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_slot_race');
-    expect(writes.prefsMerges).toHaveLength(0);
+    // Prefs land BEFORE the slot write by design (a crash between the two must
+    // never leave a visible slot with the primary silently dropped); a lost
+    // race leaves them set — benign, since no new contact was written.
+    expect(writes.prefsMerges).toHaveLength(1);
   });
 
   test('new phone but an email already on the record: phone is kept, duplicate email is dropped', async () => {

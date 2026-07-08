@@ -356,7 +356,10 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
   const norm = (v) => String(v || '').trim().toLowerCase();
   const conflicts = (v1.phone && v2.phone && last10(v1.phone) !== last10(v2.phone))
     || (v1.email && v2.email && norm(v1.email) !== norm(v2.email))
-    || (v1.first_name && v2.first_name && norm(v1.first_name) !== norm(v2.first_name));
+    || (v1.first_name && v2.first_name && norm(v1.first_name) !== norm(v2.first_name))
+    // Same first name is NOT the same person when the surnames disagree —
+    // without this, "Joe Smith" (V1) could inherit "Joe Jones"'s (V2) phone.
+    || (v1.last_name && v2.last_name && norm(v1.last_name) !== norm(v2.last_name));
   if (conflicts) return v1;
 
   return {
@@ -419,6 +422,22 @@ async function persistCallSecondaryContact(customerId, contact) {
 
   const fullName = [contact.first_name, contact.last_name]
     .map((v) => String(v || '').trim()).filter(Boolean).join(' ') || null;
+  // Prefs FIRST, slot second: the moment a service-contact slot is populated,
+  // getAppointmentContacts / getServiceReportEmailRecipients drop the primary
+  // unless the notify-primary prefs are set — so the prefs write must land
+  // BEFORE the slot becomes visible, or a crash between the two silently cuts
+  // the caller out of the updates they explicitly asked for. The inverse
+  // failure (prefs set, slot write loses the race below) is benign: with no
+  // new contact the prefs are inert defaults-plus.
+  // Both flags: appointment texts AND service-report emails both have this
+  // drop-the-primary semantic — the realtor who said "the buyer and myself"
+  // needs the WDO report too.
+  if (!hadAnyServiceContact) {
+    await db('notification_prefs')
+      .insert({ customer_id: customerId, appointment_notify_primary: true, service_report_notify_primary: true })
+      .onConflict('customer_id')
+      .merge({ appointment_notify_primary: true, service_report_notify_primary: true });
+  }
   // Conditional write: the slot was chosen from a prior read, so re-assert its
   // emptiness in the UPDATE's WHERE — a concurrent admin edit or reprocessed
   // call filling it between read and write must make this a 0-row no-op, never
@@ -433,16 +452,6 @@ async function persistCallSecondaryContact(customerId, contact) {
     [emptySlot.email]: slotEmail,
   });
   if (!updated) return 'skipped_slot_race';
-  if (!hadAnyServiceContact) {
-    // Keep the caller in the loop on BOTH surfaces that drop the primary once
-    // a service contact exists: appointment texts (getAppointmentContacts)
-    // AND service-report emails (getServiceReportEmailRecipients) — the
-    // realtor who said "the buyer and myself" needs the WDO report too.
-    await db('notification_prefs')
-      .insert({ customer_id: customerId, appointment_notify_primary: true, service_report_notify_primary: true })
-      .onConflict('customer_id')
-      .merge({ appointment_notify_primary: true, service_report_notify_primary: true });
-  }
   return 'written';
 }
 
@@ -2929,6 +2938,43 @@ const CallRecordingProcessor = {
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
     }
 
+    // Multi-property / quote / secondary-contact signals from the extractors.
+    // Resolved BEFORE the customer upsert (Step 3): the secondary-contact
+    // scrub below must run before extracted.email/phone are written onto the
+    // caller's record. Canonical writes only trust a V2 extraction that passed
+    // schema validation — a schema_failed payload is still stored raw for
+    // audit (ai_extraction_enriched, triage payloads) but must not drive
+    // customer/lead side effects.
+    const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
+    const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
+      resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
+    const callSecondaryContact = resolveCallSecondaryContact(extracted, v2CanonicalExtraction);
+
+    // Deterministic backstop for the exact chimera this feature exists to
+    // prevent: when the model leaves the SECOND person's email/phone in the
+    // caller's top-level fields too (the 2026-07-08 WDO call stored the
+    // buyer's email on the realtor's record), clear the caller-side copy
+    // BEFORE the upsert persists it. Email: the secondary owns it; the
+    // caller's email is simply unknown. Phone: only scrubbed when the ANI
+    // disagrees — extracted.phone legitimately equals the ANI on most calls,
+    // and resolveCallContactPhone falls back to the ANI once cleared.
+    if (callSecondaryContact) {
+      const scrubLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      if (extracted.email && callSecondaryContact.email
+          && String(extracted.email).toLowerCase() === String(callSecondaryContact.email).toLowerCase()) {
+        extracted.email = null;
+        logger.info(`[call-proc] Scrubbed secondary contact's email off the caller fields for ${maskSid(callSid)}`);
+      }
+      const aniLast10 = scrubLast10(call.from_phone);
+      if (extracted.phone && callSecondaryContact.phone
+          && scrubLast10(extracted.phone) === scrubLast10(callSecondaryContact.phone)
+          && aniLast10 && scrubLast10(extracted.phone) !== aniLast10) {
+        extracted.phone = null;
+        logger.info(`[call-proc] Scrubbed secondary contact's phone off the caller fields for ${maskSid(callSid)}`);
+      }
+    }
+
     // Step 3: Create or update customer
     let customerId = call.customer_id;
     const phone = resolveCallContactPhone(call, extracted.phone);
@@ -3060,21 +3106,6 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
-
-    // Multi-property call: the extractors carry EVERY property discussed on the
-    // call (primary in the flat address fields, the rest in additional_properties).
-    // Quote signals ride the same extractions. Resolved once here — used by the
-    // advisory triage below, the customer_properties persistence, the lead
-    // enrichment, and the booking's lead-conversion decision.
-    // Canonical writes (property records, quote routing, lead enrichment) only
-    // trust a V2 extraction that passed schema validation — a schema_failed
-    // payload is still stored raw for audit (ai_extraction_enriched, triage
-    // payloads) but must not drive customer/lead side effects.
-    const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
-    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
-    const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
-      resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
-    const callSecondaryContact = resolveCallSecondaryContact(extracted, v2CanonicalExtraction);
 
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
