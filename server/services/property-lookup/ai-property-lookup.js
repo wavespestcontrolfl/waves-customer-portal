@@ -1238,22 +1238,23 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 }
 
 // Positive confirmation — both sides expose a single clean leading house
-// number AND they agree, AND the street names agree (suffix-stripped, unit
-// designators peeled — an interpolated point can also land on a CROSS-street
-// parcel that happens to share the house number, which the number check
-// alone would bless). Stricter than !situsHouseNumberMismatch (which is
-// also true when either number is missing): interpolated-geocode parcel
-// matches require this, so a vacant developer lot with a blank situs can
-// never ride an interpolated point into the record.
+// number AND they agree, AND the full street identities agree (unit
+// designators peeled; suffix and any post-direction KEPT — "4506 45th St W"
+// and "4506 45th Ave W" / "4506 45th St E" are different streets, and an
+// interpolated point landing on the wrong one would pass a name-only check).
+// normalizeCountyStreetLine canonicalizes abbreviation variance (Lp→LOOP,
+// Avenue→AVE, East→E) on BOTH sides first, so formatting differences never
+// fail the comparison — only a genuinely different street does. Stricter
+// than !situsHouseNumberMismatch (which is also true when either number is
+// missing): interpolated-geocode parcel matches require this, so a vacant
+// developer lot with a blank situs can never ride an interpolated point
+// into the record.
 function situsHouseNumberExactMatch(searchAddress, situsAddress) {
   const searchNumber = leadingHouseNumber(searchAddress);
   const situsNumber = leadingHouseNumber(situsAddress);
   if (!searchNumber || !situsNumber || searchNumber !== situsNumber) return false;
-  // Units peel FIRST — a trailing "APT 101" hides the suffix from the
-  // end-anchored removeStreetSuffix.
-  const streetOf = (value) => removeStreetSuffix(
-    stripUnitDesignators(normalizeCountyStreetLine(value)),
-  ).replace(/^\d+\s+/, '').trim();
+  const streetOf = (value) => stripUnitDesignators(normalizeCountyStreetLine(value))
+    .replace(/^\d+\s+/, '').trim();
   const searchStreet = streetOf(searchAddress);
   const situsStreet = streetOf(situsAddress);
   return Boolean(searchStreet && situsStreet && searchStreet === situsStreet);
@@ -1297,12 +1298,16 @@ const ADDRESS_SLUG_SOURCE_TYPES = new Set(['listing', 'aggregator', 'generic', '
 // accepted as evidence for 14384, its lot size trusted at listing weight)
 // passed straight through the merge. Positive-only, like the situs guard:
 // fires only when the typed address and the source URL both expose a clean
-// house number and they differ.
-function aiRecordHouseNumberMismatch(record, searchAddress) {
+// house number and they differ. Compared against the ORIGINALLY TYPED
+// address, never the canonical searchAddress — Google can snap a
+// nonexistent house number to the nearest real premise (same rule as the
+// house-number audit), and the snapped searchAddress would then carry the
+// neighbor's own number and bless the neighbor's listing.
+function aiRecordHouseNumberMismatch(record, typedAddress) {
   if (!record) return false;
   const sourceType = record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
   if (!ADDRESS_SLUG_SOURCE_TYPES.has(sourceType)) return false;
-  const typedNumber = leadingHouseNumber(searchAddress);
+  const typedNumber = leadingHouseNumber(typedAddress);
   const sourceNumber = houseNumberFromSourceUrl(record._aiSourceUrl);
   if (!typedNumber || !sourceNumber) return false;
   return typedNumber !== sourceNumber;
@@ -1410,7 +1415,9 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     .filter((r) => r.status === 'fulfilled' && r.value)
     .map((r) => r.value)
     .filter((record) => {
-      if (!aiRecordHouseNumberMismatch(record, searchAddress)) return true;
+      // Typed `address`, NOT searchAddress: the canonical form can carry a
+      // geocoder-snapped neighbor number (see aiRecordHouseNumberMismatch).
+      if (!aiRecordHouseNumberMismatch(record, address)) return true;
       // The provider cited a page for a DIFFERENT house number (usually the
       // nearest listed neighbor when the exact address has no listing) —
       // every fact on it describes the wrong property. No address values in

@@ -245,8 +245,15 @@ describe('situsHouseNumberExactMatch (interpolated acceptance rule)', () => {
   test('a cross-street parcel sharing the house number is NOT a positive match (codex P1)', () => {
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 PINE ST')).toBe(false);
   });
+  test('suffix and post-direction are part of the street identity (codex P2)', () => {
+    // Same name, different suffix or directional = a different street.
+    expect(situsHouseNumberExactMatch('4506 45th St W', '4506 45TH AVE W')).toBe(false);
+    expect(situsHouseNumberExactMatch('4506 45th St W', '4506 45TH ST E')).toBe(false);
+    expect(situsHouseNumberExactMatch('4506 45th Street W', '4506 45TH ST W')).toBe(true);
+  });
   test('suffix spelling differences do not break street agreement', () => {
     expect(situsHouseNumberExactMatch('14375 Skipping Stone Lp', '14375 SKIPPING STONE LOOP')).toBe(true);
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 LUXE AVE')).toBe(true);
   });
   test('missing or range numbers are NOT a positive match', () => {
     expect(situsHouseNumberExactMatch('13649 Luxe Avenue', 'LUXE AVE')).toBe(false);
@@ -299,6 +306,18 @@ describe('AI web-record house-number guard', () => {
     expect(aiRecordHouseNumberMismatch({ _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=1' }, '14384 Skipping Stone Lp')).toBe(false);
     expect(aiRecordHouseNumberMismatch(neighbor, 'Skipping Stone Lp, Parrish')).toBe(false);
     expect(aiRecordHouseNumberMismatch(null, '14384 Skipping Stone Lp')).toBe(false);
+  });
+
+  test('the trio anchors the guard to the TYPED address, not the canonical one (codex P2)', () => {
+    // Google can snap a nonexistent typed number (14384) to a real neighbor
+    // (14380) — the canonical searchAddress then carries 14380 and would
+    // bless the neighbor's own listing. The trio passes the typed address.
+    const snappedNeighborListing = {
+      _aiSourceUrl: 'https://www.realtor.com/realestateandhomes-detail/14380-Skipping-Stone-Loop_Parrish_FL_34219',
+      _aiSourceType: 'listing',
+    };
+    expect(aiRecordHouseNumberMismatch(snappedNeighborListing, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
+    expect(aiRecordHouseNumberMismatch(snappedNeighborListing, '14380 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
   });
 
   test('only address-slug source types enter the comparison (codex P1)', () => {
