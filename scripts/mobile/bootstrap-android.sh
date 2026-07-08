@@ -67,35 +67,37 @@ fi
 # NOTE: pathPrefix is a plain string prefix — '/l/' and '/r/' need the trailing
 # slash or they'd swallow /login, /report, /reschedule, etc.
 #
-# Idempotent: injected once into the generated manifest (client/android is
-# gitignored, so this runs on every fresh bootstrap). MainActivity is the only
-# activity in the Capacitor template, so the first </activity> is safe to target.
+# Idempotent by REPLACEMENT, not by skipping: client/android persists across
+# bootstraps (gitignored, generated once), so a filter injected by an earlier
+# script revision — or an outdated allowlist — must not survive a re-run.
+# Every run strips ALL autoVerify intent-filters and re-injects the current
+# one; this script is the source of truth for the block. MainActivity is the
+# only activity in the Capacitor template, so the first </activity> is safe
+# to target.
 MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [ -f "$MANIFEST" ]; then
+  APP_LINK_PREFIXES="/l/ /r/ /track /pay /receipt /report /pest-report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report /service-outlines"
+  IND="            "
+  NL=$'\n'
+  FILTER="${IND}<intent-filter android:autoVerify=\"true\">${NL}"
+  FILTER="${FILTER}${IND}    <action android:name=\"android.intent.action.VIEW\" />${NL}"
+  FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.DEFAULT\" />${NL}"
+  FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.BROWSABLE\" />${NL}"
+  FILTER="${FILTER}${IND}    <data android:scheme=\"https\" android:host=\"portal.wavespestcontrol.com\" />${NL}"
+  FILTER="${FILTER}${IND}    <data android:path=\"/\" />${NL}"
+  for p in $APP_LINK_PREFIXES; do
+    FILTER="${FILTER}${IND}    <data android:pathPrefix=\"$p\" />${NL}"
+  done
+  FILTER="${FILTER}${IND}</intent-filter>"
+  export FILTER
+  # Strip any previous autoVerify filter(s), then inject the current one.
+  perl -0pi -e 's{\n[ \t]*<intent-filter android:autoVerify="true">.*?</intent-filter>}{}gs' "$MANIFEST"
+  perl -0pi -e 's{(\n\s*</activity>)}{\n$ENV{FILTER}$1}' "$MANIFEST"
   if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
-    echo "==> App Links intent-filter already present in AndroidManifest.xml ✓"
+    echo "==> App Links intent-filter (re)injected into AndroidManifest.xml (customer-path allowlist) ✓"
   else
-    APP_LINK_PREFIXES="/l/ /r/ /track /pay /receipt /report /rate /prep /reschedule /estimate /contract /recap /review /book /login /quote /lawn-report"
-    IND="            "
-    NL=$'\n'
-    FILTER="${IND}<intent-filter android:autoVerify=\"true\">${NL}"
-    FILTER="${FILTER}${IND}    <action android:name=\"android.intent.action.VIEW\" />${NL}"
-    FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.DEFAULT\" />${NL}"
-    FILTER="${FILTER}${IND}    <category android:name=\"android.intent.category.BROWSABLE\" />${NL}"
-    FILTER="${FILTER}${IND}    <data android:scheme=\"https\" android:host=\"portal.wavespestcontrol.com\" />${NL}"
-    FILTER="${FILTER}${IND}    <data android:path=\"/\" />${NL}"
-    for p in $APP_LINK_PREFIXES; do
-      FILTER="${FILTER}${IND}    <data android:pathPrefix=\"$p\" />${NL}"
-    done
-    FILTER="${FILTER}${IND}</intent-filter>"
-    export FILTER
-    perl -0pi -e 's{(\n\s*</activity>)}{\n$ENV{FILTER}$1}' "$MANIFEST"
-    if grep -q 'android:autoVerify="true"' "$MANIFEST"; then
-      echo "==> App Links intent-filter injected into AndroidManifest.xml (customer-path allowlist) ✓"
-    else
-      echo "==> WARNING: could not inject the App Links intent-filter — add it to"
-      echo "    MainActivity in $MANIFEST manually (see docs/mobile/universal-links.md)."
-    fi
+    echo "==> WARNING: could not inject the App Links intent-filter — add it to"
+    echo "    MainActivity in $MANIFEST manually (see docs/mobile/universal-links.md)."
   fi
 fi
 
