@@ -417,7 +417,7 @@ describe('persistCallSecondaryContact', () => {
     expect(writes.prefsMerges).toHaveLength(1);
   });
 
-  test('existing service contacts: fills the next empty slot but preserves the admin notify-primary choice', async () => {
+  test('existing PHONE contact: appointment notify-primary is the admin\'s prior choice, but the FIRST slot email still flips the report flag', async () => {
     const writes = makeDb({
       customer: { ...bareCustomer, service_contact_name: 'Property Manager', service_contact_phone: '+19415557777' },
     });
@@ -427,7 +427,33 @@ describe('persistCallSecondaryContact', () => {
       service_contact2_phone: '+19542901693',
       service_contact2_email: 'joseph.haught89431@gmail.com',
     }]);
-    expect(writes.prefsMerges).toHaveLength(0);
+    // Slot phones already existed → the admin's appointment notify-primary
+    // choice stands. No slot EMAIL existed → report emails flip now.
+    expect(writes.prefsMerges).toHaveLength(1);
+    expect(writes.prefsMerges[0].mergePayload).toEqual({ service_report_notify_primary: true });
+  });
+
+  test('existing EMAIL-only contact: first slot PHONE still flips appointment notify-primary', async () => {
+    const writes = makeDb({
+      customer: { ...bareCustomer, service_contact_name: 'Landlord', service_contact_email: 'landlord@example.com' },
+    });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    // A slot email already existed → the report-email choice stands; the
+    // first slot PHONE flips appointment texts.
+    expect(writes.prefsMerges).toHaveLength(1);
+    expect(writes.prefsMerges[0].mergePayload).toEqual({ appointment_notify_primary: true });
+  });
+
+  test('email-only secondary contact: slot written with email, only the report flag flips', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, phone: null })).toBe('written');
+    expect(writes.updates).toEqual([{
+      service_contact_name: 'Joseph Haught',
+      service_contact_phone: null,
+      service_contact_email: 'joseph.haught89431@gmail.com',
+    }]);
+    expect(writes.prefsMerges).toHaveLength(1);
+    expect(writes.prefsMerges[0].mergePayload).toEqual({ service_report_notify_primary: true });
   });
 
   test('all three slots occupied → no-op', async () => {

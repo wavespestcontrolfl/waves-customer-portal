@@ -416,15 +416,14 @@ async function persistCallSecondaryContact(customerId, contact) {
 
   const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()
     || String(customer[s.phone] || '').trim() || String(customer[s.email] || '').trim());
-  // "Already had a service contact" means a REACHABLE one (phone or email) —
-  // that's what makes getAppointmentContacts / the email resolvers drop the
-  // primary. A name-only placeholder slot never carried notifications, so the
-  // contact written now is effectively the customer's first and the
-  // notify-primary prefs must still be set. Slot SELECTION still avoids
-  // name-only slots (any content) so a placeholder is never overwritten.
-  const slotReachable = (s) => !!(String(customer[s.phone] || '').trim()
-    || String(customer[s.email] || '').trim());
-  const hadAnyServiceContact = SERVICE_CONTACT_SLOTS.some(slotReachable);
+  // The two notify-primary prefs guard DIFFERENT channels, so "already had a
+  // service contact" is judged PER CHANNEL: appointment texts drop the primary
+  // on the first slot PHONE (getAppointmentContacts is phone-based), report
+  // emails drop the primary on the first slot EMAIL. A name-only placeholder
+  // slot never carried notifications on either channel. Slot SELECTION still
+  // avoids any slot with content, so a placeholder is never overwritten.
+  const hadSlotPhone = SERVICE_CONTACT_SLOTS.some((s) => !!String(customer[s.phone] || '').trim());
+  const hadSlotEmail = SERVICE_CONTACT_SLOTS.some((s) => !!String(customer[s.email] || '').trim());
   const emptySlot = SERVICE_CONTACT_SLOTS.find((s) => !slotHasContent(s));
   if (!emptySlot) return 'skipped_slots_full';
 
@@ -437,14 +436,19 @@ async function persistCallSecondaryContact(customerId, contact) {
   // the caller out of the updates they explicitly asked for. The inverse
   // failure (prefs set, slot write loses the race below) is benign: with no
   // new contact the prefs are inert defaults-plus.
-  // Both flags: appointment texts AND service-report emails both have this
-  // drop-the-primary semantic — the realtor who said "the buyer and myself"
-  // needs the WDO report too.
-  if (!hadAnyServiceContact) {
+  // Per channel: writing the customer's first slot PHONE flips
+  // appointment_notify_primary (texts); writing their first slot EMAIL flips
+  // service_report_notify_primary (report emails — the realtor who said "the
+  // buyer and myself" needs the WDO report too). A channel where a reachable
+  // slot already existed keeps its existing admin-configured choice.
+  const prefsToSet = {};
+  if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
+  if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
+  if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
-      .insert({ customer_id: customerId, appointment_notify_primary: true, service_report_notify_primary: true })
+      .insert({ customer_id: customerId, ...prefsToSet })
       .onConflict('customer_id')
-      .merge({ appointment_notify_primary: true, service_report_notify_primary: true });
+      .merge(prefsToSet);
   }
   // Conditional write: the slot was chosen from a prior read, so re-assert its
   // emptiness in the UPDATE's WHERE — a concurrent admin edit or reprocessed
@@ -3155,16 +3159,22 @@ const CallRecordingProcessor = {
     if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
       bridgeNeedsConfirmation.push('secondary_contact_captured');
       try {
+        const secondaryTriageItem = buildTriageItem({
+          callLogId: call.id,
+          flag: 'secondary_contact_captured',
+          extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+          severity: 'advisory',
+          extraPayload: { secondary_contact: callSecondaryContact },
+        });
+        // MERGE the payload (not ignore): in enforce mode the deterministic-
+        // flags loop inserts this flag first with the V2 extraction's contact,
+        // but persistence uses the RESOLVED contact (V1 on a V1/V2 identity
+        // conflict) — the open Needs Review row must show the person that was
+        // actually written to the slot, not a stale competing extraction.
         await db('triage_items')
-          .insert(buildTriageItem({
-            callLogId: call.id,
-            flag: 'secondary_contact_captured',
-            extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-            severity: 'advisory',
-            extraPayload: { secondary_contact: callSecondaryContact },
-          }))
+          .insert(secondaryTriageItem)
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore();
+          .merge({ payload: secondaryTriageItem.payload, updated_at: new Date() });
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] secondary-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
       }
@@ -4539,6 +4549,28 @@ const CallRecordingProcessor = {
                           },
                         });
                         logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                      }
+                      // Email-only service contacts never appear in the SMS
+                      // contact list (getAppointmentContacts is phone-based)
+                      // and the default 'sms' channel never runs the email
+                      // leg — so an email-only buyer/tenant whose slot email
+                      // just made this call BOOKABLE would get nothing.
+                      // Send them (and only them) the confirmation email;
+                      // recipientFilter keeps the phone-channel primary from
+                      // receiving an email their channel choice didn't ask for.
+                      const { getServiceContactSlots } = require('./customer-contact');
+                      const emailOnlySlots = getServiceContactSlots(freshCustomer || {})
+                        .filter((s) => s.email && !s.phone);
+                      if (emailOnlySlots.length) {
+                        const AppointmentEmail = require('./appointment-email');
+                        await AppointmentEmail.sendAppointmentConfirmationEmail({
+                          customerId,
+                          scheduledServiceId,
+                          appointmentTime: parseETDateTime(extracted.preferred_date_time),
+                          serviceLabel: serviceType,
+                          recipientFilter: emailOnlySlots.map((s) => s.email),
+                        });
+                        logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
                       }
                     } catch (fanErr) {
                       logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);
