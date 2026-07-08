@@ -1753,27 +1753,44 @@ function initScheduledJobs() {
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
-            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
-            logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
             // A deposit-receipt replay the customer's OWN choice suppressed
             // (texts toggle / STOP / email-only flipped while queued) hands
-            // off to the deposit email leg — the immediate path treats the
-            // same opt-outs as "the email carries the receipt", and without
-            // this the paid deposit ends up with no receipt on any channel.
-            // PURPOSE_OPTED_OUT can also mean the payment_receipt kill
-            // switch; the fallback re-checks it (and email_enabled) itself.
+            // off to the deposit email leg BEFORE the row goes terminal — the
+            // immediate path treats the same opt-outs as "the email carries
+            // the receipt". PURPOSE_OPTED_OUT can also mean the
+            // payment_receipt kill switch; the fallback re-checks it (and
+            // email_enabled) itself. A TRANSIENT fallback failure (prefs
+            // blip / provider error) reschedules the row on the bounded
+            // attempt rail so the handoff reruns, instead of discarding the
+            // only remaining receipt path (codex P2 on a3de55b9); a
+            // deterministic email miss means nothing can deliver — the SMS
+            // was the customer's own block — so the row goes terminal.
+            let fbOutcome = null;
             if (String(msg.message_type || '').toLowerCase() === 'deposit_receipt'
                 && claimMeta.estimate_id
                 && ['PURPOSE_OPTED_OUT', 'CHANNEL_EMAIL_ONLY', 'SMS_OPTED_OUT', 'SUPPRESSED_OPT_OUT'].includes(smsResult.code)) {
               const fb = await require('./estimate-deposits').sendDepositReceiptEmailFallback(claimMeta.estimate_id, { paymentIntentId: claimMeta.payment_intent_id || null });
-              logger.info(`[scheduled-sms] Deposit receipt ${msg.id} email fallback: ${fb.sent ? 'sent' : fb.reason}`);
+              fbOutcome = classifyDepositReplayFallback(fb);
+              logger.info(`[scheduled-sms] Deposit receipt ${msg.id} email fallback: ${fb.sent ? 'sent' : fb.reason} (${fbOutcome})`);
             }
-            // The customer was never answered — used + parked cards return.
-            const blockedMeta = await readFreshMeta();
-            await require('./sms-suggest-mode').reopenScheduledSuggestions({
-              decisionIds: [blockedMeta.agent_decision_id, ...(Array.isArray(blockedMeta.parked_decision_ids) ? blockedMeta.parked_decision_ids : [])],
-              reason: 'Scheduled send was blocked — suggestion reopened.',
-            });
+            if (fbOutcome === 'retry' && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'scheduled',
+                scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                updated_at: completedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('deposit_email_handoff_retry_at', ?::timestamptz)", [completedAt]),
+              });
+              logger.warn(`[scheduled-sms] Deposit receipt ${msg.id} email handoff transient failure — rescheduled (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
+            } else {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
+              logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+              // The customer was never answered — used + parked cards return.
+              const blockedMeta = await readFreshMeta();
+              await require('./sms-suggest-mode').reopenScheduledSuggestions({
+                decisionIds: [blockedMeta.agent_decision_id, ...(Array.isArray(blockedMeta.parked_decision_ids) ? blockedMeta.parked_decision_ids : [])],
+                reason: 'Scheduled send was blocked — suggestion reopened.',
+              });
+            }
           }
         } catch (err) {
           logger.error(`[scheduled-sms] Failed: ${err.message}`);

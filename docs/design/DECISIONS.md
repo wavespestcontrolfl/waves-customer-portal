@@ -1512,3 +1512,11 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 - `scheduler.js`: the handoff runs the fallback FIRST and classifies its outcome via the exported `classifyDepositReplayFallback` — `handled` (email sent / `receipt_opted_out`) blocks the row; `sms_fallback` (deterministic email miss) lets the queued TEXT proceed through the normal replay send (the pipeline re-checks every current opt-out); `retry` (prefs blip / provider error) keeps the row on the bounded attempt rail.
 
 **Verification.** jest: new 'both'-keeps-its-text case; classifier unit tests (all three outcomes); regression sweep 84 suites, 910 tests green. Server-only diff.
+
+## 2026-07-08 — Receipt legs round 11: transient handoff failures retry in the policy-blocked branch too (claude/waves-portal-dropdown-0uo971, follow-up 12)
+
+**Context.** Codex round 11 (on a3de55b9): 1 P2 — the symmetric gap to round 10. In the terminal-blocked branch (queued deposit text suppressed by the customer's own policy: texts toggle / STOP / email-only), the row was marked `blocked` BEFORE the email handoff ran, so a transient fallback failure (`prefs_lookup_failed` / provider error) was only logged and the last receipt path was discarded.
+
+**Change.** `scheduler.js`: the blocked branch now runs the handoff first and classifies it with the same `classifyDepositReplayFallback` — `retry` reschedules the row on the bounded `scheduled_sms_attempts` rail (the handoff reruns next tick; the SMS re-block is idempotent policy enforcement); everything else goes terminal as before (a deterministic email miss here means NOTHING can deliver — the SMS was the customer's own block). Suggestion-reopen stays on the terminal path only.
+
+**Verification.** jest: classifier already unit-tested (all three outcomes); affected sweep green. Server-only one-file diff; cron glue over the tested classifier, same coverage ruling as rounds 5/10.
