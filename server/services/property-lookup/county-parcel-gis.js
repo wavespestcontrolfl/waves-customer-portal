@@ -125,7 +125,7 @@ const COUNTY_LAYERS = {
       'PARID', 'SITUS_ADDRESS', 'SITUS_POSTAL_CITY', 'SITUS_POSTAL_ZIP',
       'LAND_SQFT_CAMA', 'BLDGS_SQFT_LIVING', 'BLDG_R1_STORIES', 'BLDG_R1_YRBUILT',
       'BLDGS_LIVINGUNITS', 'CUR_DOR_LUC_CODE', 'CUR_MAN_LUC_DESC',
-      'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR',
+      'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR', 'FEATS_SQFT_IMPERV',
     ],
     parse: (g) => ({
       parcelId: cleanStr(g('PARID')),
@@ -142,6 +142,11 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('PAR_SUBDIV_NAME')),
       poolFlag: yesNoFlag(g('PAR_SWIMPOOL_FLAG')),
       rollYear: positiveOrNull(g('CUR_ROLL_YEAR')),
+      // Assessed impervious sqft (driveways, pool decks) — feeds the shadow
+      // footprint-turf computation when the GIS layer is the only county hit
+      // (new construction). 0 on the roll means not-yet-assessed, not "no
+      // hardscape" (live probe: a just-sold 2024 build carried 0) → null.
+      imperviousAreaSf: positiveOrNull(g('FEATS_SQFT_IMPERV')),
     }),
   },
   Sarasota: {
@@ -166,6 +171,7 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('subd')),
       poolFlag: yesNoFlag(g('pool')),
       rollYear: null,
+      imperviousAreaSf: null, // not in the Sarasota layer
     }),
   },
   Charlotte: {
@@ -189,6 +195,7 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('subneighborhood')),
       poolFlag: null,
       rollYear: null,
+      imperviousAreaSf: null, // not in the Charlotte ownership layer
     }),
   },
 };

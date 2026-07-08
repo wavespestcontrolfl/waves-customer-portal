@@ -202,6 +202,31 @@ describe('Manatee PAO property lookup facts', () => {
       '123 ST GEORGE DR',
       '123 ST GEORGE',
     ]);
+    // Google abbreviates Loop as "Lp"; the roll spells LOOP (live miss:
+    // Skipping Stone read as street-not-found).
+    expect(_private.manateeAddressSearchCandidates('14384 Skipping Stone Lp, Parrish, FL 34219')).toEqual([
+      '14384 SKIPPING STONE LOOP',
+      '14384 SKIPPING STONE',
+    ]);
+  });
+
+  test('matches a typed "Lp" street against a roll row spelled LOOP', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['497332659', 'REAL PROPERTY', '', ';14375 SKIPPING STONE LOOP;', 'PARRISH'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '14375 Skipping Stone Lp, Parrish, FL 34219')).toMatchObject({
+      parcelId: '497332659',
+    });
   });
 
   test('filters ambiguous PAO search rows by requested city', () => {

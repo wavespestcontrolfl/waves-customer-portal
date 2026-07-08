@@ -41,6 +41,8 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({ raw: '789 Ridge Parkway, Sarasota, FL 34236' }).line1).toBe('789 Ridge Pkwy');
     expect(normalizeLeadAddress({ raw: '101 Shore Dr., Sarasota, FL 34236' }).line1).toBe('101 Shore Dr');
     expect(normalizeLeadAddress({ raw: '202 Oak Grove, Sarasota, FL 34236' }).line1).toBe('202 Oak Grv');
+    // Google's "Lp" abbreviation expands to the USPS-canonical LOOP
+    expect(normalizeLeadAddress({ raw: '14384 Skipping Stone Lp, Parrish, FL 34219' }).line1).toBe('14384 Skipping Stone Loop');
   });
 
   test('normalizes ordinal street names without shouting the suffix', () => {

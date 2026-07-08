@@ -772,6 +772,10 @@ function buildCadastralRecord(parcel, address) {
     // the only public-record hit, this carries the pool into pest/mosquito
     // pricing instead of leaving it for vision to (maybe) catch.
     hasPool: parcel.poolFlag ?? null,
+    // Assessed impervious sqft (Manatee GIS layer only) — lets the shadow
+    // footprint-turf computation run for GIS-only records instead of waiting
+    // on the PAO features scrape.
+    imperviousAreaSf: parcel.imperviousAreaSf ?? null,
     source: parcel.sourceUrl || null,
     confidence: 'high',
     county: parcel.county,
@@ -813,18 +817,26 @@ function buildCadastralRecord(parcel, address) {
   return record;
 }
 
-// Parcel matching trusts the point, so the point has to be trustworthy:
-// rooftop-grade geocodes only. Interpolated and centroid results can land on
-// a neighbor (or a downtown block), and a wrong parcel at cadastral weight is
-// far worse than falling back to the address search.
+// Parcel matching trusts the point, so the point has to be trustworthy.
+// ROOFTOP geocodes are trusted outright (subject to the situs-mismatch guard).
+// RANGE_INTERPOLATED is exactly what a brand-new plat geocodes as — the one
+// case the live county roll layer exists for — so it may TRY the point
+// lookup, but the caller only keeps the parcel on a POSITIVE situs
+// house-number match (an interpolated point can land on a neighbor, and a
+// wrong parcel at county weight is far worse than the address search).
+// Centroid/approximate results stay excluded.
+function parcelGisPrecision(geoContext) {
+  if (!geoContext
+      || geoContext.partialMatch
+      || !Number.isFinite(geoContext.lat)
+      || !Number.isFinite(geoContext.lng)) return null;
+  if (geoContext.locationType === 'ROOFTOP') return 'rooftop';
+  if (geoContext.locationType === 'RANGE_INTERPOLATED') return 'interpolated';
+  return null;
+}
+
 function canUseParcelGis(geoContext) {
-  return Boolean(
-    geoContext
-    && !geoContext.partialMatch
-    && geoContext.locationType === 'ROOFTOP'
-    && Number.isFinite(geoContext.lat)
-    && Number.isFinite(geoContext.lng),
-  );
+  return parcelGisPrecision(geoContext) !== null;
 }
 
 // Attached AFTER mergePropertyRecords — the merge spreads only the
@@ -870,6 +882,17 @@ function preserveCountyGisLandUse(merged, cadastralRecord) {
   } else if (!String(existing).toLowerCase().includes(String(gisLandUse).toLowerCase())) {
     merged._raw.landUse = `${existing} ${gisLandUse}`;
   }
+  return merged;
+}
+
+// Same survival problem as the land-use description: the merge spreads only
+// the winning record, so when the live PAO record wins the tie its (usually
+// null — the features scrape is Manatee-detail-only) imperviousAreaSf drops
+// the GIS layer's assessed figure and the footprint-turf shadow loses its
+// impervious term. Backfill-only — a real PAO features value always wins.
+function preserveCountyGisImpervious(merged, cadastralRecord) {
+  if (!merged || cadastralRecord?.imperviousAreaSf == null) return merged;
+  if (merged.imperviousAreaSf == null) merged.imperviousAreaSf = cadastralRecord.imperviousAreaSf;
   return merged;
 }
 
@@ -1214,6 +1237,57 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
   return searchNumber !== situsNumber;
 }
 
+// Positive confirmation — both sides expose a single clean leading house
+// number AND they agree. Stricter than !situsHouseNumberMismatch (which is
+// also true when either number is missing): interpolated-geocode parcel
+// matches require this, so a vacant developer lot with a blank situs can
+// never ride an interpolated point into the record.
+function situsHouseNumberExactMatch(searchAddress, situsAddress) {
+  const searchNumber = leadingHouseNumber(searchAddress);
+  const situsNumber = leadingHouseNumber(situsAddress);
+  return Boolean(searchNumber && situsNumber && searchNumber === situsNumber);
+}
+
+// Listing/detail pages embed the property's house number as the first token
+// of a path segment ("/14375-Skipping-Stone-Loop_Parrish_FL_34219",
+// "/fl/parrish/14344-skipping-stone-loop/pid_..."). Extract it so AI
+// web-search records can be checked against the typed address; null when no
+// segment carries a clean number+street-word shape (builder floorplans,
+// county parcel pages, numeric listing ids) — no signal, never a mismatch.
+function houseNumberFromSourceUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  let path;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  for (const segment of path.split('/')) {
+    // Number, separator, then a street token: a word ("Skipping") or an
+    // ordinal ("45th"). The ordinal branch keeps "4506-45th-Street-W" from
+    // being skipped; the token requirement keeps pure-numeric id segments
+    // (an 8-10 digit zpid also exceeds the 6-digit house-number cap) from
+    // masquerading as a house number.
+    const match = /^(\d{1,6})[-_](?=[A-Za-z]|\d{1,4}(?:ST|ND|RD|TH)\b)/i.exec(segment);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+// The situs guard's twin for the AI web-search path. The prompt forbids
+// borrowing facts from a nearby home, but nothing enforced it — a trio
+// provider citing the NEIGHBOR's listing (live miss: realtor.com/14375-…
+// accepted as evidence for 14384, its lot size trusted at listing weight)
+// passed straight through the merge. Positive-only, like the situs guard:
+// fires only when the typed address and the source URL both expose a clean
+// house number and they differ.
+function aiRecordHouseNumberMismatch(record, searchAddress) {
+  const typedNumber = leadingHouseNumber(searchAddress);
+  const sourceNumber = houseNumberFromSourceUrl(record?._aiSourceUrl);
+  if (!typedNumber || !sourceNumber) return false;
+  return typedNumber !== sourceNumber;
+}
+
 async function lookupPropertyFromAITrio(address, geoContext = null) {
   // County street-string matching and AI search prompts both get the
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
@@ -1226,7 +1300,8 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   // inside the shared county budget with its own (shorter) timeout; every
   // failure mode degrades to the address-search path below.
   let parcel = null;
-  if (canUseParcelGis(geoContext)) {
+  const gisPrecision = parcelGisPrecision(geoContext);
+  if (gisPrecision) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
     // County roll layer first: fresher than the annual FDOR statewide roll (new
     // plats appear sooner) and it carries the land-use description that splits
@@ -1250,6 +1325,14 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
       // would all describe the wrong building — and let the typed-address
       // search below decide. No address values in the log (PII rule).
       logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
+      parcel = null;
+    } else if (parcel && gisPrecision === 'interpolated'
+        && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress)) {
+      // An interpolated point is a guess along the street — keep the parcel
+      // only when its situs POSITIVELY confirms the typed house number. A
+      // blank/range situs (vacant developer lot, master parcel) proves
+      // nothing about which lot the guess landed on.
+      logger.warn('[county-property] interpolated-geocode GIS parcel lacks a confirming situs house number — degrading to address search');
       parcel = null;
     }
   }
@@ -1294,6 +1377,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   if (countyRecord && hasCountyPricingCore(countyRecord)) {
     const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
     preserveCountyGisLandUse(merged, cadastralRecord);
+    preserveCountyGisImpervious(merged, cadastralRecord);
     return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
@@ -1302,16 +1386,29 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     lookupPropertyFromOpenAI(searchAddress),
     lookupPropertyFromGemini(searchAddress),
   ]);
+  const aiRecords = results
+    .filter((r) => r.status === 'fulfilled' && r.value)
+    .map((r) => r.value)
+    .filter((record) => {
+      if (!aiRecordHouseNumberMismatch(record, searchAddress)) return true;
+      // The provider cited a page for a DIFFERENT house number (usually the
+      // nearest listed neighbor when the exact address has no listing) —
+      // every fact on it describes the wrong property. No address values in
+      // the log (PII rule).
+      logger.warn('[ai-property] dropping AI web record — source URL house number disagrees with typed address', {
+        provider: record._provider || 'ai',
+      });
+      return false;
+    });
   const records = [
     countyRecord,
     cadastralRecord,
-    ...results
-      .filter((r) => r.status === 'fulfilled' && r.value)
-      .map((r) => r.value),
+    ...aiRecords,
   ].filter(Boolean);
 
   if (!records.length) return null;
   const merged = preserveCountyGisLandUse(mergePropertyRecords(records, searchAddress), cadastralRecord);
+  preserveCountyGisImpervious(merged, cadastralRecord);
   return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
@@ -1595,29 +1692,47 @@ function normalizeCountyCityName(value) {
 
 function normalizeCountyStreetLine(address) {
   const firstLine = String(address || '').split(',')[0] || '';
-  const normalized = firstLine
+  const cleaned = firstLine
     .toUpperCase()
     .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Strip the trailing zip/FL/city BEFORE any token replacement — the city
+  // hints are raw names, and replacing directionals or suffix words first
+  // corrupts cities that contain them ("ROTONDA WEST" → "ROTONDA W",
+  // "SOUTH GULF COVE" → "SOUTH GULF CV") so they never strip.
+  return stripCountyLocationSuffix(cleaned)
     .replace(/\bNORTH\b/g, 'N')
     .replace(/\bSOUTH\b/g, 'S')
     .replace(/\bEAST\b/g, 'E')
     .replace(/\bWEST\b/g, 'W')
     .replace(/\bAVENUE\b/g, 'AVE')
+    .replace(/\bBEND\b/g, 'BND')
     .replace(/\bBOULEVARD\b/g, 'BLVD')
     .replace(/\bCIRCLE\b/g, 'CIR')
     .replace(/\bCOURT\b/g, 'CT')
+    .replace(/\bCOVE\b/g, 'CV')
+    .replace(/\bCROSSING\b/g, 'XING')
     .replace(/\bDRIVE\b/g, 'DR')
+    .replace(/\bGLEN\b/g, 'GLN')
+    .replace(/\bHIGHWAY\b/g, 'HWY')
     .replace(/\bLANE\b/g, 'LN')
+    // Google abbreviates Loop as "Lp" (live miss: "SKIPPING STONE LP" vs the
+    // Manatee roll's "SKIPPING STONE LOOP" read as street-not-found) — the
+    // roll spells it out, so LOOP is the canonical form here.
+    .replace(/\bLP\b/g, 'LOOP')
     .replace(/\bPARKWAY\b/g, 'PKWY')
     .replace(/\bPLACE\b/g, 'PL')
+    .replace(/\bPLAZA\b/g, 'PLZ')
+    .replace(/\bPOINTE?\b/g, 'PT')
     .replace(/\bROAD\b/g, 'RD')
+    .replace(/\bSQUARE\b/g, 'SQ')
     .replace(/\bSTREET\b/g, 'ST')
     .replace(/\bTERRACE\b/g, 'TER')
+    .replace(/\bTRACE\b/g, 'TRCE')
     .replace(/\bTRAIL\b/g, 'TRL')
-    .replace(/\bWAY\b/g, 'WAY')
     .replace(/\s+/g, ' ')
     .trim();
-  return stripCountyLocationSuffix(normalized);
 }
 
 function stripCountyLocationSuffix(normalizedStreet) {
@@ -1643,18 +1758,28 @@ function extractTrailingCountyCity(normalizedText) {
   return cities.find((city) => text === city || text.endsWith(` ${city}`)) || null;
 }
 
+// Canonical (post-normalizeCountyStreetLine) street suffixes the county
+// matchers recognize. One list feeds removeStreetSuffix / extractStreetSuffix /
+// extractPostSuffixDirection / AUDIT_SUFFIX_ALT so they can never drift apart
+// again — the original inline copies omitted LOOP entirely, and every
+// Loop-suffixed street (all of Canoe Creek) read as not-on-the-roll.
+const COUNTY_STREET_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
+const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
+const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
+const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');
+
 function removeStreetSuffix(street) {
   return String(street || '')
-    .replace(/\s+(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)(?:\s+[NSEW])?$/i, '')
+    .replace(REMOVE_SUFFIX_RE, '')
     .trim();
 }
 
 function extractStreetSuffix(street) {
-  return String(street || '').match(/\b(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)(?:\s+[NSEW])?$/i)?.[1]?.toUpperCase() || null;
+  return String(street || '').match(EXTRACT_SUFFIX_RE)?.[1]?.toUpperCase() || null;
 }
 
 function extractPostSuffixDirection(street) {
-  return String(street || '').match(/\b(?:AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\s+([NSEW])\b/i)?.[1]?.toUpperCase() || null;
+  return String(street || '').match(POST_SUFFIX_DIRECTION_RE)?.[1]?.toUpperCase() || null;
 }
 
 // ── House-number audit ──────────────────────────────────────────
@@ -1698,9 +1823,9 @@ function stripUnitDesignators(street) {
   return s;
 }
 
-// The street suffix alternation shared by the audit's relaxed matcher — keep
-// in sync with removeStreetSuffix above.
-const AUDIT_SUFFIX_ALT = '(?:AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)';
+// The street suffix alternation shared by the audit's relaxed matcher —
+// derived from the same canonical list as removeStreetSuffix.
+const AUDIT_SUFFIX_ALT = `(?:${COUNTY_STREET_SUFFIXES})`;
 
 // Which county rolls could vouch for this address — geocoded county first
 // (mirrors lookupPropertyFromCountyRecords' ordering), then any county whose
@@ -3445,6 +3570,7 @@ module.exports = {
     attachParcelMeta,
     buildCadastralRecord,
     preserveCountyGisLandUse,
+    preserveCountyGisImpervious,
     buildPropertyDataQuality,
     canonicalLookupAddress,
     canUseParcelGis,
@@ -3456,7 +3582,11 @@ module.exports = {
     hasCountyPricingCore,
     hasAnyPropertyFact,
     leadingHouseNumber,
+    parcelGisPrecision,
     situsHouseNumberMismatch,
+    situsHouseNumberExactMatch,
+    houseNumberFromSourceUrl,
+    aiRecordHouseNumberMismatch,
     lookupPropertyFromManateePAO,
     lookupPropertyFromSarasotaPAO,
     lookupPropertyFromCharlottePAO,

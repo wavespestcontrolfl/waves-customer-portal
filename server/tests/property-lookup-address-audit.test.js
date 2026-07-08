@@ -99,6 +99,33 @@ describe('auditAddressHouseNumber', () => {
     });
   });
 
+  test('LP↔LOOP live miss: typed "Lp" audits against a roll that spells LOOP', async () => {
+    // 2026-07-08: "14384 Skipping Stone Lp, Parrish" — the street IS on the
+    // Manatee roll (178 LOOP parcels) but the pre-fix suffix tables knew
+    // neither LP nor LOOP, so the audit reported street-not-found instead of
+    // "number missing — nearest 14383/14388" (the actionable verdict: 14384
+    // is a brand-new Canoe Creek lot not yet on the roll).
+    mockSitusResponse([
+      '14375 SKIPPING STONE LOOP',
+      '14380 SKIPPING STONE LOOP',
+      '14383 SKIPPING STONE LOOP',
+      '14388 SKIPPING STONE LOOP',
+    ]);
+
+    const audit = await auditAddressHouseNumber('14384 Skipping Stone Lp, Parrish, FL 34219, USA');
+
+    expect(audit).toMatchObject({
+      county: 'Manatee',
+      houseNumber: 14384,
+      streetLabel: 'SKIPPING STONE LOOP',
+      streetExists: true,
+      hasExactMatch: false,
+      parcelCount: 4,
+    });
+    expect(audit.nearestNumbers).toContain(14383);
+    expect(audit.nearestNumbers).toContain(14388);
+  });
+
   test('address outside every serviced county gate → null', async () => {
     mockSitusResponse(TOBERMORY_SITUS);
 
