@@ -1502,3 +1502,13 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 - `estimate-card-holds.js`: email leg attempted FIRST; a deterministic miss (`email_enabled=false` or "No receipt recipient email") falls back to the SMS receipt; a transient provider error does NOT (stays email-preferring, invoice unstamped for the admin needs-receipt path).
 
 **Verification.** jest: 4 new fallback tests across queue/deposits/card-holds incl. the transient-vs-deterministic distinction; regression sweep 81 suites, 884 tests green. Server-only diff.
+
+## 2026-07-08 — Receipt legs round 10: 'both' keeps its text, the replay handoff never strands a receipt (claude/waves-portal-dropdown-0uo971, follow-up 11)
+
+**Context.** Codex round 10 (on 6b73a479): 2 P2s, both interactions of the round-9 fixes. (1) The no-show email-first reorder stamped `receipt_sent_at` before the SMS leg — the unforced `sendReceipt` re-read the invoice, saw the stamp, and returned `already-sent`, so `channel='both'` customers were delivered email-only. (2) The scheduler's channel-flip handoff blocked the queued deposit text unconditionally, then attempted the email fallback — a deterministic email miss (`email_opted_out` / `no_recipient_email`) discarded the only receipt left.
+
+**Change.**
+- `estimate-card-holds.js`: the email-delivered stamp moved AFTER the SMS attempt (idempotent `whereNull` — the SMS leg may have stamped first); both legs now fire for 'both'.
+- `scheduler.js`: the handoff runs the fallback FIRST and classifies its outcome via the exported `classifyDepositReplayFallback` — `handled` (email sent / `receipt_opted_out`) blocks the row; `sms_fallback` (deterministic email miss) lets the queued TEXT proceed through the normal replay send (the pipeline re-checks every current opt-out); `retry` (prefs blip / provider error) keeps the row on the bounded attempt rail.
+
+**Verification.** jest: new 'both'-keeps-its-text case; classifier unit tests (all three outcomes); regression sweep 84 suites, 910 tests green. Server-only diff.

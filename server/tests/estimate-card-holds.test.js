@@ -467,6 +467,17 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
   });
 
+  it("channel 'both' delivers BOTH legs — the email stamp must not make sendReceipt read already-sent", async () => {
+    // Stamping receipt_sent_at before the SMS attempt made the unforced
+    // sendReceipt skip the requested text (codex P2 on 6b73a479).
+    stubDb([null, { payment_receipt_channel: 'both', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+  });
+
   it('email-only channel with email messages opted out falls back to the SMS receipt', async () => {
     // The fee was charged — a receipt has to land somewhere (codex P1 on
     // d040aa76; deposit twin).

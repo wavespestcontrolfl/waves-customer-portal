@@ -853,17 +853,12 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // the consent gate / deposit twin). A transient provider error does NOT
   // fall back — the invoice stays unstamped for the admin needs-receipt path.
   let emailDeterministicMiss = prefs?.email_enabled === false;
+  let emailDelivered = false;
   if (!receiptOptOut && !emailDeterministicMiss && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))) {
     try {
       const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
-      // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
-      // does) — so on an email-only channel, stamp it here. ONLY on a delivered
-      // or deduped result (both ok:true): a no-recipient / provider failure
-      // returns ok:false WITHOUT throwing, and stamping then would wrongly drop
-      // the paid fee invoice from the admin "needs receipt" retry path.
       if (emailResult?.ok) {
-        await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
-          .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
+        emailDelivered = true;
       } else if (emailResult?.error === 'No receipt recipient email') {
         emailDeterministicMiss = true;
       }
@@ -877,6 +872,17 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
     try {
       await require('./invoice').sendReceipt(invoice.id);
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
+  }
+  // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
+  // does) — stamp off a delivered email AFTER the SMS attempt: stamping
+  // before it made the unforced sendReceipt read 'already-sent' and skip the
+  // text a channel='both' customer asked for (codex P2 on 6b73a479). ONLY on
+  // a delivered/deduped result: stamping a no-recipient / provider failure
+  // would wrongly drop the paid fee invoice from the admin needs-receipt
+  // retry path. Idempotent via whereNull (the SMS leg may have stamped).
+  if (emailDelivered) {
+    await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+      .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
   }
 
   // Office heads-up so a "what's this charge?" call isn't a surprise.
