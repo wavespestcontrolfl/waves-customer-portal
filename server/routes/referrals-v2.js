@@ -3,6 +3,7 @@
  */
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -292,26 +293,62 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
 
-    // Can't invite your own address.
-    const promoterEmail = String(promoter.customer_email || '').trim().toLowerCase();
-    if (promoterEmail && promoterEmail === cleanEmail) {
+    // Can't invite your own address. promoter.customer_email is a snapshot
+    // taken at enrollment — also compare the CURRENT account email (mirrors
+    // submitReferral's fallback) so a promoter whose row predates an email
+    // change, or has a blank snapshot, can't self-invite.
+    const selfCustomer = await db('customers').where({ id: req.customerId }).first().catch(() => null);
+    const selfEmails = [promoter.customer_email, selfCustomer?.email]
+      .map((e) => String(e || '').trim().toLowerCase())
+      .filter(Boolean);
+    if (selfEmails.includes(cleanEmail)) {
       return res.status(400).json({ error: 'That’s your own email — invite a friend instead.' });
     }
 
-    // Rolling 24h cooldown: same promoter+email within 24 hours = no-op. This
-    // is a cheap fast-path (skips SendGrid) for spaced-apart re-taps; the
-    // idempotencyKey below is the ATOMIC guard for concurrent double-taps that
-    // both pass this read before either writes its referral_invites row.
+    // Rolling 24h cooldown, reserved ATOMICALLY before the send: the advisory
+    // xact lock serializes concurrent same-promoter+email submits, so the
+    // read-then-insert can't race — including double-taps that straddle UTC
+    // midnight, the hole a date-bucketed idempotency key alone leaves. The
+    // reservation is released on a failed send so a retry isn't locked out.
     const cooldownStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recent = await db('referral_invites')
-      .where({ promoter_id: promoter.id })
-      .whereRaw('LOWER(email) = ?', [cleanEmail])
-      .where('sent_at', '>=', cooldownStart)
-      .first()
-      .catch(() => null);
-    if (recent) {
-      return res.json({ success: true, deduped: true });
+    let reserved = false;
+    try {
+      const cooldownHit = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`referral-invite-email:${promoter.id}:${cleanEmail}`]);
+        const recent = await trx('referral_invites')
+          .where({ promoter_id: promoter.id })
+          .whereRaw('LOWER(email) = ?', [cleanEmail])
+          .where('sent_at', '>=', cooldownStart)
+          .first();
+        if (recent) return true;
+        await trx('referral_invites').insert({
+          promoter_id: promoter.id,
+          email: cleanEmail,
+          sent_at: new Date(),
+        });
+        return false;
+      });
+      if (cooldownHit) {
+        return res.json({ success: true, deduped: true });
+      }
+      reserved = true;
+    } catch (reserveErr) {
+      // referral_invites is a best-effort tracking table — if the reservation
+      // can't be taken (e.g. migration not applied yet), send without it; the
+      // idempotency key below still collapses same-day duplicates.
+      logger.warn(`[referrals-v2] invite-email cooldown reservation unavailable: ${reserveErr.message}`);
     }
+    // Cooldown passed, so the only row inside the window is the one we just
+    // wrote — safe to target by promoter+email+window.
+    const releaseReservation = () => {
+      if (!reserved) return Promise.resolve();
+      return db('referral_invites')
+        .where({ promoter_id: promoter.id })
+        .whereRaw('LOWER(email) = ?', [cleanEmail])
+        .where('sent_at', '>=', cooldownStart)
+        .del()
+        .catch(() => {});
+    };
 
     const friendly = friendName ? friendName.replace(/[<>]/g, '').trim() : '';
     const EmailTemplateLibrary = require('../services/email-template-library');
@@ -329,42 +366,42 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
         recipientType: 'referral_promoter',
         recipientId: promoter.id,
         categories: ['referral_invite'],
-        // Deterministic key = the atomic dedupe the cooldown read can't
-        // provide: email_messages.idempotency_key is uniquely indexed, so two
-        // concurrent sends collapse to one at the DB (the loser resolves
-        // against the winner / raises a retryable in-flight collision).
-        // Scoped to a UTC-day bucket so it blocks the concurrent window but a
-        // genuine next-day re-invite (past the 24h cooldown) still sends —
-        // >24h apart is always a different day, so no silent no-op.
-        idempotencyKey: `referral.friend_invite:${promoter.id}:${cleanEmail}:${new Date().toISOString().slice(0, 10)}`,
+        // Second guard behind the reservation, at the email_messages layer:
+        // uniquely indexed, so duplicates that slip past a failed reservation
+        // still collapse to one send. The address is digested because a raw
+        // 254-char email would push the key past the column's varchar(260).
+        // UTC-day bucket: blocks same-day dupes, never a >24h re-invite.
+        idempotencyKey: `referral.friend_invite:${promoter.id}:${crypto.createHash('sha256').update(cleanEmail).digest('hex').slice(0, 16)}:${new Date().toISOString().slice(0, 10)}`,
         // SendGrid 4xx bodies can echo the recipient address — keep provider
         // errors out of the logs (the redacted reason is logged below).
         suppressProviderErrorLog: true,
       });
     } catch (sendErr) {
-      // A concurrent request already reserved this key and is mid-flight —
-      // treat as a deduped success, not a failure (the other request sends it).
-      if (sendErr.code === 'EMAIL_SEND_IN_PROGRESS' || sendErr.status === 409) {
+      // ONLY the explicit in-flight collision is a deduped success (another
+      // request owns the send). Other 409s — e.g. EMAIL_TEMPLATE_DISABLED —
+      // are real failures and must surface, not read as "sent". The
+      // reservation is released either way: if the in-flight winner crashes,
+      // a retry must re-resolve against its row (terminal → clean dedupe,
+      // stale → the library reclaims it), not sit behind a 24h cooldown.
+      await releaseReservation();
+      if (sendErr.code === 'EMAIL_SEND_IN_PROGRESS') {
         return res.json({ success: true, deduped: true });
       }
       throw sendErr;
     }
 
-    if (result && result.sent === false && !result.deduped) {
+    if (result && result.sent === false) {
+      // Includes deduped-but-blocked (a prior same-day attempt hit
+      // suppression/bounce): deduped never means delivered — don't tell the
+      // customer a suppressed address got their invite.
+      await releaseReservation();
       logger.warn(`[referrals-v2] Friend invite email not sent for promoter ${promoter.id}: ${result.reason || 'blocked'}`);
       return res.status(422).json({ error: 'We couldn’t email that address. Double-check it and try again.' });
     }
 
-    // Best-effort log for the rolling-cooldown fast-path (mirrors the SMS
-    // /invite leg). Skip it on a deduped result so a re-send collision doesn't
-    // refresh the window off a message it didn't actually send.
+    // Skip the share-timestamp bump on a deduped result — this request didn't
+    // actually send anything. (The cooldown row is the pre-send reservation.)
     if (!result?.deduped) {
-      await db('referral_invites').insert({
-        promoter_id: promoter.id,
-        email: cleanEmail,
-        sent_at: new Date(),
-      }).catch(() => { /* table/column may not exist yet */ });
-
       await db('referral_promoters').where({ id: promoter.id }).update({
         last_share_at: new Date(),
         updated_at: new Date(),
