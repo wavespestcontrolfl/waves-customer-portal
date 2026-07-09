@@ -1721,6 +1721,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             background: "#fff",
             borderBottom: `1px solid ${D.border}`,
             padding: "14px 20px",
+            // Standalone/home-screen mode: keep the title/buttons below the
+            // iOS status bar (viewport-fit=cover lets content run under it).
+            paddingTop: "calc(14px + env(safe-area-inset-top, 0px))",
           }}
         >
           {" "}
@@ -3021,6 +3024,9 @@ export function ProtocolPanel({ service, onClose }) {
       <div
         style={{
           padding: "16px 20px",
+          // Full-height drawer runs under the iOS status bar in standalone
+          // mode — pad the header below it.
+          paddingTop: "calc(16px + env(safe-area-inset-top, 0px))",
           borderBottom: `1px solid ${D.border}`,
           display: "flex",
           justifyContent: "space-between",
