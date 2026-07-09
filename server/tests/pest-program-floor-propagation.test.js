@@ -321,3 +321,83 @@ describe('recurringServiceFirstVisitPrice — legacy first-application preview h
     expect(price).toBe(89);
   });
 });
+
+describe('normalizeClientPestFloorMetadata — totals correction (codex r5 P1)', () => {
+  // Full client-engine payload shape: 4-service Platinum bundle with pest at
+  // the client's 89 floor. ra 2645, full da 529, client lift 71.20 →
+  // savings 457.80, annualAfterDiscount 2187.20, monthly 182.27.
+  function clientEnginePayload() {
+    return {
+      result: {
+        results: {
+          pestTiers: [
+            { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly', floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+          ],
+          pest: { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly', floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+        },
+        recurring: {
+          discount: 0.20,
+          waveGuardTier: 'Platinum',
+          annualBeforeDiscount: 2645,
+          savings: 457.80,
+          annualAfterDiscount: 2187.20,
+          monthlyTotal: 182.27,
+          grandTotal: 182.27,
+          pestProgramFloorApplied: true,
+        },
+        totals: { year2: 2187.20, year2mo: 182.27, year1: 2187.20 },
+      },
+    };
+  }
+
+  test('DB floor below the client literal: baked 89-lift is replaced by the server lift', () => {
+    constants.PEST.floor = 79; // server floorAnn 316 → server lift 31.20, client lift 71.20, delta −40
+    const estData = clientEnginePayload();
+    normalizeClientPestFloorMetadata(estData);
+    const { recurring, totals, results } = estData.result;
+    expect(results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
+    expect(recurring.savings).toBe(497.80);
+    expect(recurring.annualAfterDiscount).toBe(2147.20);
+    expect(recurring.monthlyTotal).toBe(Math.round((2147.20 / 12) * 100) / 100);
+    expect(recurring.grandTotal).toBe(recurring.monthlyTotal);
+    expect(recurring.pestProgramFloorApplied).toBe(true);
+    expect(totals.year2).toBe(2147.20);
+    expect(totals.year2mo).toBe(recurring.monthlyTotal);
+    expect(totals.year1).toBe(2147.20);
+  });
+
+  test('kill switch off: the baked lift is fully removed and the flag clears', () => {
+    constants.PEST.enforceFloorPostDiscount = false;
+    const estData = clientEnginePayload();
+    normalizeClientPestFloorMetadata(estData);
+    const { recurring, totals } = estData.result;
+    expect(recurring.savings).toBe(529.00);
+    expect(recurring.annualAfterDiscount).toBe(2116.00);
+    expect(recurring.pestProgramFloorApplied).toBe(false);
+    expect(totals.year2).toBe(2116.00);
+  });
+
+  test('floor at the client literal: totals unchanged (delta 0)', () => {
+    // constants default floor 89 — client lift == server lift.
+    const estData = clientEnginePayload();
+    normalizeClientPestFloorMetadata(estData);
+    const { recurring } = estData.result;
+    expect(recurring.savings).toBe(457.80);
+    expect(recurring.annualAfterDiscount).toBe(2187.20);
+    expect(recurring.pestProgramFloorApplied).toBe(true);
+  });
+
+  test('server-priced payloads (no client flag) never get totals adjusted', () => {
+    constants.PEST.floor = 79;
+    const estData = clientEnginePayload();
+    delete estData.result.recurring.pestProgramFloorApplied;
+    // Server-stamped metadata (not the 89-literal basis) stays untouched too.
+    for (const row of [...estData.result.results.pestTiers, estData.result.results.pest]) {
+      row.floorPa = 78.32; row.floorAnn = 469.92; row.floorMo = 39.16; // v2-curve stamp
+    }
+    normalizeClientPestFloorMetadata(estData);
+    expect(estData.result.results.pest.floorPa).toBe(78.32);
+    expect(estData.result.recurring.savings).toBe(457.80);
+    expect(estData.result.recurring.annualAfterDiscount).toBe(2187.20);
+  });
+});
