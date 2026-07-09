@@ -644,15 +644,14 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         </p>
       ) : null}
       {(nameLine || contactLines.length) ? (
-        /* data-gt="" on every line: the glass auto-tier tags 12px text as
-           caption/fine and uppercases short names as eyebrows, which split
-           this block across three different faces — the block styles itself. */
+        /* One uniform block (owner 2026-07-09): email/phone/address align
+           with the name — same face, size, weight, and color. data-gt="" on
+           every line: the glass auto-tier tags small text as caption/fine
+           and uppercases short names as eyebrows, which split this block
+           across different faces — the block styles itself. */
         <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
-          {nameLine ? (
-            <div data-gt="" style={{ fontSize: 17, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.4 }}>{nameLine}</div>
-          ) : null}
-          {contactLines.map((line) => (
-            <div key={line} data-gt="" style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{line}</div>
+          {[nameLine, ...contactLines].filter(Boolean).map((line) => (
+            <div key={line} data-gt="" style={{ fontSize: 17, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.4 }}>{line}</div>
           ))}
         </div>
       ) : null}
