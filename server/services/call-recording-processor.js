@@ -3254,6 +3254,14 @@ const CallRecordingProcessor = {
               domain_evidence: arbiter.domainEvidence,
               ...(arbiter.confirmationQuestion ? { confirmation_question: arbiter.confirmationQuestion } : {}),
             };
+            // The Needs Review card renders only the TOP-LEVEL
+            // confirmation_question (TriageInboxTabV2) — lift the arbiter's
+            // question there for any verdict that keeps the card open, or a
+            // decoder-questionless quarantine would open a card with no
+            // read-back prompt.
+            if (arbiter.verdict !== 'adopt' && arbiter.confirmationQuestion) {
+              dictationEmailPayload.confirmation_question = arbiter.confirmationQuestion;
+            }
             // adopt_with_confirmation ALSO writes — owner ruling (2026-07-09):
             // a quarantined profile never ships email-less when a candidate
             // passes every hard gate; the promised first-touch email goes out

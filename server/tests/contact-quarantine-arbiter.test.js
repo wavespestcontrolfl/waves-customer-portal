@@ -30,6 +30,7 @@ const ENTRY = {
 const DNS_DEPS = {
   resolveMx: (d) => (d === 'gulfcoastshutterco.com' ? Promise.resolve([{ exchange: 'mx1', priority: 10 }]) : nxdomain()),
   resolve4: () => nxdomain(),
+  resolve6: () => nxdomain(),
 };
 
 const modelSaying = (json) => async () => ({
@@ -204,27 +205,44 @@ describe('gatherEmailDomainEvidence', () => {
     const out = await gatherEmailDomainEvidence(['a@apex-only.com'], {
       resolveMx: nxdomain,
       resolve4: () => Promise.resolve(['1.2.3.4']),
+      resolve6: nxdomain,
     });
     expect(out[0].deliverable).toBe(true);
     expect(out[0].dns_error).toBeNull();
   });
 
-  test('NXDOMAIN on both lookups is undeliverable with the error preserved', async () => {
-    const out = await gatherEmailDomainEvidence(['a@dead.example'], { resolveMx: nxdomain, resolve4: nxdomain });
+  test('AAAA record makes an IPv6-only apex deliverable (implicit MX)', async () => {
+    const out = await gatherEmailDomainEvidence(['a@v6-only.example'], {
+      resolveMx: nxdomain,
+      resolve4: nxdomain,
+      resolve6: () => Promise.resolve(['2001:db8::1']),
+    });
+    expect(out[0].deliverable).toBe(true);
+    expect(out[0].dns_error).toBeNull();
+  });
+
+  test('NXDOMAIN on all lookups is undeliverable with the error preserved', async () => {
+    const out = await gatherEmailDomainEvidence(['a@dead.example'], { resolveMx: nxdomain, resolve4: nxdomain, resolve6: nxdomain });
     expect(out[0].deliverable).toBe(false);
     expect(out[0].dns_error).toBe('ENOTFOUND');
   });
 
   test('transient resolver errors are unknown (null), never a negative', async () => {
     const servfail = () => { const e = new Error('queryMx ESERVFAIL'); e.code = 'ESERVFAIL'; return Promise.reject(e); };
-    const out = await gatherEmailDomainEvidence(['a@flaky.example'], { resolveMx: servfail, resolve4: servfail });
+    const out = await gatherEmailDomainEvidence(['a@flaky.example'], { resolveMx: servfail, resolve4: servfail, resolve6: servfail });
     expect(out[0].deliverable).toBeNull();
     expect(out[0].dns_error).toBe('ESERVFAIL');
   });
 
   test('mixed transient + authoritative stays unknown (cannot prove nonexistence)', async () => {
     const timeout = () => Promise.reject(new Error('timeout'));
-    const out = await gatherEmailDomainEvidence(['a@half-checked.example'], { resolveMx: timeout, resolve4: nxdomain });
+    const out = await gatherEmailDomainEvidence(['a@half-checked.example'], { resolveMx: timeout, resolve4: nxdomain, resolve6: nxdomain });
+    expect(out[0].deliverable).toBeNull();
+  });
+
+  test('transient IPv6 failure alone keeps the domain unknown', async () => {
+    const timeout = () => Promise.reject(new Error('timeout'));
+    const out = await gatherEmailDomainEvidence(['a@v6-flaky.example'], { resolveMx: nxdomain, resolve4: nxdomain, resolve6: timeout });
     expect(out[0].deliverable).toBeNull();
   });
 

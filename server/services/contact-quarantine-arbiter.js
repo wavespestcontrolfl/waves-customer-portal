@@ -88,6 +88,7 @@ const AUTHORITATIVE_NEGATIVE_CODES = new Set(['ENOTFOUND', 'ENODATA', 'NXDOMAIN'
 async function gatherEmailDomainEvidence(candidates, deps = {}) {
   const resolveMx = deps.resolveMx || ((d) => dns.resolveMx(d));
   const resolve4 = deps.resolve4 || ((d) => dns.resolve4(d));
+  const resolve6 = deps.resolve6 || ((d) => dns.resolve6(d));
   const byDomain = new Map();
   const evidence = [];
   for (const value of candidates) {
@@ -110,12 +111,26 @@ async function gatherEmailDomainEvidence(candidates, deps = {}) {
         mxError = err.code || err.message;
       }
       if (!mxRecords && !nullMx) {
-        // Mail can still deliver to an A record (implicit MX). Only a domain
-        // with neither is deliverability-dead.
+        // Mail can still deliver to an apex address record (implicit MX) —
+        // A or AAAA (an IPv6-only apex is still deliverable). Only a domain
+        // with none of them is deliverability-dead, and only when BOTH
+        // lookups answered authoritatively.
         try {
           aRecords = (await withTimeout(resolve4(domain), DNS_TIMEOUT_MS)).length;
         } catch (err) {
           aError = err.code || err.message;
+        }
+        if (!aRecords) {
+          try {
+            aRecords = (await withTimeout(resolve6(domain), DNS_TIMEOUT_MS)).length;
+            if (aRecords) aError = null;
+          } catch (err) {
+            // Keep the stricter signal: a transient error on EITHER family
+            // means we cannot prove nonexistence.
+            const code = err.code || err.message;
+            if (!AUTHORITATIVE_NEGATIVE_CODES.has(code)) aError = code;
+            else if (!aError) aError = code;
+          }
         }
       }
       const hasRecords = mxRecords > 0 || aRecords > 0;
