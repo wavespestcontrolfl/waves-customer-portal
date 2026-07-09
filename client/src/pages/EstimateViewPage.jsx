@@ -35,6 +35,7 @@ import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceBu
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
+import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
@@ -3552,6 +3553,7 @@ export default function EstimateViewPage() {
         <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
+        <DocumentActionBar shareTitle="Your Waves estimate" />
       </Page>
     );
   }
@@ -3618,6 +3620,7 @@ export default function EstimateViewPage() {
         <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
+        <DocumentActionBar shareTitle="Your Waves estimate" />
       </Page>
     );
   }
@@ -3869,6 +3872,11 @@ export default function EstimateViewPage() {
                 requestState={addServiceRequestState}
                 onRequest={handleAddServiceRequest}
               />
+              {/* Share / Print / Portal Login on every estimate (owner ask
+                  2026-07-09, live review screen) — same shared bar as the
+                  report/pay/contract/project pages. No public estimate PDF
+                  endpoint exists, so Download stays hidden (pdfUrl=null). */}
+              <DocumentActionBar shareTitle="Your Waves estimate" />
             </>
           ) : null}
         </>
@@ -3884,6 +3892,7 @@ export default function EstimateViewPage() {
           <ReportShowcaseCard variant={reportShowcaseVariant} />
           <CustomerReviews />
           <GoogleProfilesCard />
+          <DocumentActionBar shareTitle="Your Waves estimate" />
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
