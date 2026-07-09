@@ -163,6 +163,35 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     });
   });
 
+  test('reusing an open PaymentIntent clears stale surcharge-finalization metadata', async () => {
+    // A declined /finalize leaves surcharge_policy_version on the PI; Stripe
+    // metadata updates MERGE, so without an explicit '' clear the reused PI
+    // keeps the stale key and the webhook quarantine reads it as "finalized" —
+    // settling a base-only card confirm without the surcharge (audit P1).
+    invoiceRow.stripe_payment_intent_id = 'pi_open';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_open',
+      status: 'requires_payment_method',
+      metadata: {
+        waves_invoice_id: invoiceRow.id,
+        surcharge_policy_version: 'v3',
+        surcharge_rate_bps: '290',
+        card_funding: 'credit',
+      },
+    });
+
+    const StripeService = require('../services/stripe');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_open', expect.objectContaining({
+      metadata: expect.objectContaining({
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
+      }),
+    }));
+  });
+
   test('setup returns a client-safe conflict when a bound PaymentIntent is already in progress', async () => {
     invoiceRow.stripe_payment_intent_id = 'pi_processing';
     stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
@@ -518,6 +547,22 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
     ).rejects.toThrow(/does not belong/);
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('tender updates clear stale surcharge-finalization metadata (merge-delete via empty strings)', async () => {
+    // Same failure mode createStatementPaymentIntent fixed: a declined
+    // /finalize leaves surcharge_policy_version on the PI and a later reuse
+    // must delete it (empty string) or the webhook quarantine is disabled.
+    const StripeService = require('../services/stripe');
+    await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
+      metadata: expect.objectContaining({
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
+      }),
+    }));
   });
 
   test('tender switch blocked by an attached PM recreates the PaymentIntent for the new tender', async () => {

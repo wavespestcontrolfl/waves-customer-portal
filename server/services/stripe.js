@@ -1301,15 +1301,28 @@ const StripeService = {
         }
         logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
         try {
+          // Stamp the invoice link (and the declined PI when Stripe returned
+          // one): the obligation this attempt was collecting lives on the
+          // invoice row, which stays 'sent' — an unlinked failed row would be
+          // double-counted by billing-v2 /balance (invoice + failed attempt for
+          // the same debt) with nothing ever superseding it, since this path
+          // sets no next_retry_at for the retry sweep and no PI for /confirm
+          // to match.
+          const declinedPiId = err?.payment_intent?.id || err?.raw?.payment_intent?.id || null;
           await db('payments').insert({
             customer_id: invoice.customer_id,
             payment_method_id: card.id,
             processor: 'stripe',
+            stripe_payment_intent_id: declinedPiId,
             payment_date: etDateString(),
             amount: total,
             status: 'failed',
             description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
             failure_reason: err.message,
+            metadata: JSON.stringify({
+              invoice_id: invoice.id,
+              source: 'card_on_file_failed_attempt',
+            }),
           });
         } catch { /* non-fatal */ }
         throw new Error(err.message || 'Card charge failed');
@@ -1903,6 +1916,15 @@ const StripeService = {
             card_surcharge: '0',
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
+            // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+            // MERGE) so a reused PI that was previously finalized can't carry a
+            // stale surcharge_policy_version — which the webhook guard reads as
+            // "finalized" and would settle a later base-only card confirm without
+            // surcharge. Empty string deletes the key on update. Mirrors
+            // createStatementPaymentIntent, which fixed exactly this failure mode.
+            surcharge_policy_version: '',
+            surcharge_rate_bps: '',
+            card_funding: '',
           },
           payment_method_types: ['card'],
         };
@@ -2194,6 +2216,15 @@ const StripeService = {
         card_surcharge: '0',
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
+        // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+        // MERGE) — a declined /finalize leaves surcharge_policy_version on the
+        // PI, and the webhook's surcharge-bypass quarantine reads that stale key
+        // as "finalized", settling a later base-only card confirm without the
+        // surcharge. Empty string deletes the key on update. Mirrors
+        // createStatementPaymentIntent.
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
       },
     };
 
@@ -3193,6 +3224,21 @@ const StripeService = {
           && String(lockedInvoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
           throw new Error('Invoice has a different active payment');
         }
+        // Dispute guard (mirrors the webhook succeeded-handler): after a
+        // chargeback the payments row is 'disputed', the invoice is reopened
+        // 'overdue', and its PI is cleared — so a replayed /confirm with the old
+        // PI id passes every guard above (the PI still retrieves 'succeeded' at
+        // Stripe). Without this check it would flip the charged-back invoice
+        // back to paid, kill dunning, and overwrite the disputed row — erasing
+        // dispute_id/dispute_final, which also neutralizes the webhook's own
+        // late-replay guards. The money already went back via the chargeback:
+        // 'disputed' is terminal for this PI, refuse to settle on it.
+        const disputedRow = await trx('payments')
+          .where({ stripe_payment_intent_id: paymentIntentId, status: 'disputed' })
+          .first('id');
+        if (disputedRow) {
+          throw new Error('This payment was disputed after it succeeded — the invoice cannot be re-marked paid from the old payment session');
+        }
         if (paymentStatus === 'processing') {
           // Expected ACH amount prices from amount due (total − applied credit).
           const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), resolvedPaymentMethod);
@@ -3284,11 +3330,17 @@ const StripeService = {
           .orderBy('created_at', 'desc')
           .first();
         if (existingPayment) {
+          // Never clobber a terminal money row (webhook parity): paid/refunded/
+          // disputed rows are settled history — a conditional update means a row
+          // that flipped terminal between the read above and this write survives
+          // intact, and the pre-write dispute guard keeps this path from ever
+          // reaching a disputed row in the first place.
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
+            .whereNotIn('status', ['paid', 'refunded', 'disputed'])
             .update(paymentPayload)
             .returning('*');
-          return record;
+          return record || existingPayment;
         }
 
         const [record] = await trx('payments').insert(paymentPayload).returning('*');
