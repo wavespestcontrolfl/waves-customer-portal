@@ -10,12 +10,19 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
   const bookableCatalogBlock = bookableServiceNames.length
     ? `\nBOOKABLE SERVICE CATALOG — service_request.specific_service_name must be one of these names VERBATIM, or null:\n${bookableServiceNames.map((n) => `- ${n}`).join('\n')}\n`
     : '';
-  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties).
+  // Known-caller context (existing customer matched by ANI before extraction).
+  // Per-call variable like the transcript/phone/date — deliberately NOT part
+  // of the version hash, which hashes the empty-render template.
+  const knownCallerBlock = opts.knownCaller
+    ? `\nKNOWN CALLER: this number matches existing customer ${opts.knownCaller.name || '(name on file)'}${opts.knownCaller.hasUpcomingAppointment ? ' who has an UPCOMING appointment already on the schedule' : ''}. Calls from existing customers are often coordination about service they already have — apply the EXISTING APPOINTMENT rule below strictly.\n`
+    : '';
+  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
 
-Analyze this phone call transcript and extract structured data matching the JSON schema provided via response_schema. Every field must conform to the schema's type and enum constraints.
+Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
 Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
+${knownCallerBlock}
 
 Transcript:
 ${transcription}
@@ -24,10 +31,11 @@ ${transcription}
 
 SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
+  - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
+  - EXISTING APPOINTMENT: a caller who is re-confirming, double-checking, or coordinating an appointment that ALREADY EXISTS ("just checking — are we still on for Tuesday at 10?") is NOT booking. Status is "none" (or "reschedule_requested"/"canceled" if they change it) and you set the existing_appointment_coordination triage flag. "confirmed" is ONLY for a NEW visit agreed on this call.
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.
-- "confirmed": When confirmed, set confirmed_start_at to ISO 8601 with Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
-- "reschedule_requested": Caller wants to change an existing appointment.
+- "reschedule_requested": Caller wants to change an existing appointment. A reschedule that ENDS with a new agreed date+time stays "reschedule_requested" with confirmed_start_at set to the new slot — never plain "confirmed" (the office must move the existing visit, not add a second one).
 - "canceled": Caller wants to cancel an existing appointment or service.
 - "ambiguous": Scheduling was discussed but the outcome is unclear.
 - "none": No scheduling discussion occurred.
@@ -86,6 +94,7 @@ SECONDARY CONTACT (a SECOND person who is a party to the service):
 - role is this person's relationship to the TRANSACTION: the buyer a realtor is booking for is home_buyer (not real_estate_agent).
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — is false.
 - When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
+- other_parties_mentioned: true when the call named MORE people as parties to the service than the one secondary_contact you extracted (buyer + co-buyer + agent; tenant + owner + manager) — this tells the office to re-listen for the others. false/null when the secondary_contact (or nobody) was the only other party.
 - The SPELLED-OUT INPUT, TRANSCRIPT RELIABILITY, and EMAIL rules above apply to this person's fields exactly as they do to the caller's.
 
 SERVICE REQUEST:
@@ -119,7 +128,7 @@ VOICEMAIL & SPAM:
 
 SENTIMENT & LEAD:
 - sentiment: Match caller's emotional state.
-- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte counties.
+- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte/DeSoto counties.
 
 EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fields:
 - property.service_address (any component)
@@ -128,6 +137,10 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - property.hoa_common_area_service (when true)
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
+- scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
+- scheduling.follow_up_start_at (when set)
+- secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
+- service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).
 
 CONFIDENCE SCORES — Per-section scores in [0, 1]:
@@ -135,10 +148,10 @@ CONFIDENCE SCORES — Per-section scores in [0, 1]:
 - 0.7-0.9 = inferred with reasonable confidence
 - 0.5-0.7 = partial information, some guessing
 - <0.5 = very uncertain
-- overall = weighted average reflecting routing reliability
+- overall = the MINIMUM of the routing-critical section scores (service_address, scheduling_window, caller_identity) — the gate must reflect the weakest link, not an average that hides it.
 
 TRIAGE FLAGS — Set flags for situations requiring human review:
-- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte counties.
+- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte/DeSoto counties.
 - hoa_common_area_requires_approval: hoa_common_area_service is true.
 - commercial_requires_quote: Commercial property needing custom quote.
 - caller_not_authorized: Caller relationship != owner AND on_site_authorization is false.
@@ -150,6 +163,7 @@ TRIAGE FLAGS — Set flags for situations requiring human review:
 - cancellation_request: Caller wants to cancel service.
 - ambiguous_scheduling: Scheduling was discussed but outcome is unclear.
 - reschedule_or_cancel: Caller wants to reschedule or cancel.
+- existing_appointment_coordination: The caller was confirming, checking on, or coordinating an appointment that already exists (see the EXISTING APPOINTMENT rule). Holds any auto-booking for human review so the existing visit is never duplicated.
 - multi_property_call: The caller discussed service at more than one property (additional_properties is non-empty). Advisory — never blocks routing.
 - quote_promised: The agent committed to send a quote/estimate after the call (quote_promised is true). Advisory — never blocks routing.
 

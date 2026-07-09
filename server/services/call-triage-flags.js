@@ -159,9 +159,17 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       flags.push('out_of_service_area');
     } else if (avStatus === 'confirm_needed' || avStatus === 'missing_component' || avStatus === 'ambiguous') {
       flags.push('address_unverified');
+    } else if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
+      // AV accepted a REAL premise — but the model wasn't sure it heard the
+      // right street. "Palm Ave" misheard as "Park Ave" validates cleanly at
+      // the wrong (real) house; the model's low confidence was the only
+      // signal, and it used to be discarded here. Advisory: the call still
+      // auto-routes on AV's verdict, the office just reads the street back.
+      flags.push('address_readback');
     }
-    // validated_accept / corrected → clean, no address flag (the whole point:
-    // a corrected bad zip clears triage instead of holding the call).
+    // validated_accept / corrected → clean, no blocking address flag (the
+    // whole point: a corrected bad zip clears triage instead of holding the
+    // call).
   } else {
     if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
       flags.push('missing_service_address');
@@ -285,6 +293,10 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // Recovered-street read-back reminder — informs the callback, never blocks
   // routing (the recovered premise passed Address Validation).
   'address_recovered',
+  // AV accepted a real premise but the model's own address confidence was low
+  // (possible valid-but-wrong-street mishear) — read the street back on the
+  // confirmation call; never blocks the AV-approved routing.
+  'address_readback',
   // Caller discussed more than one property — the extra addresses are recorded
   // (customer_properties) / surfaced on the lead; the booked visit itself is fine.
   'multi_property_call',

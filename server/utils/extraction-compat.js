@@ -122,6 +122,8 @@ function mapServiceCategoryToLegacy(category) {
     stinging_insect: null,
     lawn_care: 'Lawn Care',
     palm_injection: 'Tree & Shrub Care',
+    bed_bug: 'Bed Bug Treatment',
+    wdo: 'WDO Inspection',
     exclusion: 'Rodent Control',
     inspection_only: null,
     bundled_waveguard: 'General Pest Control',

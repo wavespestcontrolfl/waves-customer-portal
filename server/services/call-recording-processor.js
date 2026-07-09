@@ -25,8 +25,9 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { isLikelyE164 } = require('../utils/phone');
 const { resolveLocation } = require('../config/locations');
-const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
@@ -41,6 +42,28 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
+// Boot-time flag audit — makes three silent operational traps visible:
+// (1) enforce mode is the OR of two env vars, so unsetting
+//     CALL_EXTRACTION_V2_DRIVES_ROUTING is a no-op while the legacy
+//     CALL_TRIAGE_ENFORCE_V2_GATES alias is still set;
+// (2) DRIVES_ROUTING without V2_ENABLED kills BOTH the enforce gate and the
+//     shadow bridge — bare legacy V1 routing, worse than either intended mode;
+// (3) enforce without ADDRESS_VALIDATION_ENABLED never suppresses the model's
+//     near-universal address_unverifiable flag → ~zero auto-routing.
+{
+  const aliasRaw = process.env.CALL_TRIAGE_ENFORCE_V2_GATES;
+  const drivesRaw = process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING;
+  console.log(`[call-proc] flags: v2Enabled=${CALL_EXTRACTION_V2_ENABLED} enforce=${CALL_EXTRACTION_V2_DRIVES_ROUTING} (DRIVES_ROUTING=${drivesRaw ?? 'unset'}, ENFORCE_V2_GATES alias=${aliasRaw ?? 'unset'}) av=${process.env.ADDRESS_VALIDATION_ENABLED ?? 'unset'}`);
+  if (aliasRaw === 'true' && drivesRaw !== 'true') {
+    console.warn('[call-proc] WARNING: enforce mode is pinned ON by the legacy CALL_TRIAGE_ENFORCE_V2_GATES alias — unsetting CALL_EXTRACTION_V2_DRIVES_ROUTING will NOT demote to shadow until the alias is also unset.');
+  }
+  if (CALL_EXTRACTION_V2_DRIVES_ROUTING && !CALL_EXTRACTION_V2_ENABLED) {
+    console.warn('[call-proc] WARNING: CALL_EXTRACTION_V2_DRIVES_ROUTING without CALL_EXTRACTION_V2_ENABLED — enforce gate AND shadow bridge are both dead; running bare legacy V1 routing.');
+  }
+  if (CALL_EXTRACTION_V2_DRIVES_ROUTING && process.env.ADDRESS_VALIDATION_ENABLED !== 'true') {
+    console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
+  }
+}
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
@@ -68,8 +91,15 @@ const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'ge
 // v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
 // v1.0.0 schema (better structured-output adherence + fewer hallucinations than
 // Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
-// pins temp 0.2 for determinism). Env-overridable for instant rollback.
+// pins temp 0 for determinism). Env-overridable for instant rollback.
+// NOTE: this var governs the V2 extractor ONLY — the dictation decoder and
+// street recovery have their own vars (GEMINI_CONTACT_DECODER_MODEL /
+// GEMINI_RECOVERY_MODEL) with literal defaults, so an extraction rollback no
+// longer silently degrades the mishear-recovery lanes.
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+// V1 (legacy) extractor model — historically hardcoded in the request URL,
+// which made V1 the only lane without a zero-deploy rollback lever.
+const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-2.5-flash';
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -167,31 +197,78 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
+// Blocked/anonymous caller-ID presentations. Twilio substitutes digit
+// sentinels for suppressed caller IDs — +266696687 spells ANONYMOUS,
+// +7378742833 spells RESTRICTED — and carriers pass literal words through.
+// toE164 returns these raw, and they LOOK usable downstream: the first named
+// blocked caller used to mint a customer keyed on the sentinel, and every
+// later blocked caller single-matched onto that one phantom record (strangers'
+// addresses, emails, and bookings merging onto it).
+const PHONE_SENTINELS = new Set(['266696687', '7378742833', '86282452253']);
+const PHONE_SENTINEL_WORDS = /^(anonymous|restricted|unavailable|unknown|blocked)$/i;
+function isUsableContactPhone(value) {
+  const v = String(value || '').trim();
+  if (!v || PHONE_SENTINEL_WORDS.test(v)) return false;
+  if (!isLikelyE164(v)) return false;
+  const digits = v.replace(/\D/g, '');
+  return !PHONE_SENTINELS.has(digits) && !PHONE_SENTINELS.has(digits.replace(/^1/, ''));
+}
+
 // Return the first candidate that is a real EXTERNAL number — i.e. not one of our
 // own lines AND not a staff forward/CSR cell. An INTERNAL number appearing as the
 // caller/callee is a call-forwarding artifact (a DNI tracking number masking the
 // true caller, or the staff cell the inbound <Dial> forwarded to), never a real
 // customer; keying a lead/customer on it collapses many callers onto one phantom
 // record (or onto a CSR). Skipping internal candidates (and returning null when
-// every candidate is internal) stops that at the source.
+// every candidate is internal or an anonymous sentinel) stops that at the source.
 function firstExternalPhone(...candidates) {
   for (const c of candidates) {
     const v = c && String(c).trim();
-    if (v && !TWILIO_NUMBERS.isInternalNumber(v)) return v;
+    if (v && !TWILIO_NUMBERS.isInternalNumber(v) && isUsableContactPhone(v)) return v;
   }
   return null;
+}
+
+// Hamming distance over the last 7 digits when both numbers share length —
+// a spoken callback number ONE OR TWO digits off the ANI is almost always the
+// caller misreciting (or the transcriber mishearing) their OWN number, not a
+// genuinely different callback line. Genuine "reach me on my husband's cell"
+// numbers differ wholesale and never trip this.
+function phoneNearMissOfAni(extracted, ani) {
+  const a = phoneKey(extracted);
+  const b = phoneKey(ani);
+  if (!a || !b || a === b) return false;
+  if (a.length !== b.length || a.length < 10) return false;
+  const a7 = a.slice(-7);
+  const b7 = b.slice(-7);
+  let diff = a.slice(0, -7) === b.slice(0, -7) ? 0 : Infinity;
+  if (!Number.isFinite(diff)) return false;
+  for (let i = 0; i < 7; i += 1) if (a7[i] !== b7[i]) diff += 1;
+  return diff > 0 && diff <= 2;
 }
 
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
   const extracted = String(extractedPhone || '').trim();
   if (isOutboundCall(call)) {
     if (extracted && !samePhone(extracted, call.from_phone)) {
+      if (phoneNearMissOfAni(extracted, call.to_phone)) {
+        logger.warn(`[call-proc] Extracted callback ${maskPhone(extracted)} is a near-miss of dialed ${maskPhone(call.to_phone)} — keeping the dialed number (likely mistranscribed digits)`);
+        return firstExternalPhone(call.to_phone, call.from_phone);
+      }
       return firstExternalPhone(extracted, call.to_phone, call.from_phone);
     }
     return firstExternalPhone(call.to_phone, extracted, call.from_phone);
   }
 
   if (extracted && !samePhone(extracted, call.to_phone)) {
+    // The verified ANI beats a spoken number that differs from it by only a
+    // digit or two — one misheard digit used to re-key the whole call
+    // (matching, the customer's stored phone, the confirmation SMS target)
+    // onto a stranger's number.
+    if (phoneNearMissOfAni(extracted, call.from_phone)) {
+      logger.warn(`[call-proc] Extracted callback ${maskPhone(extracted)} is a near-miss of ANI ${maskPhone(call.from_phone)} — keeping the ANI (likely mistranscribed digits)`);
+      return firstExternalPhone(call.from_phone, call.to_phone);
+    }
     return firstExternalPhone(extracted, call.from_phone, call.to_phone);
   }
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
@@ -405,6 +482,19 @@ async function persistCallSecondaryContact(customerId, contact) {
   const knownEmails = [customer.email, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.email])]
     .map(lowerEmail).filter(Boolean);
   if (contact.phone && knownPhones.includes(last10(contact.phone))) return 'skipped_phone_on_record';
+  // Cross-customer guard: a secondary phone that belongs to a DIFFERENT
+  // existing customer must never land in this customer's fan-out slots —
+  // customer B would start receiving customer A's appointment texts at
+  // service_contact_authorized trust. The call site escalates this to its own
+  // review flag so the office adjudicates the collision.
+  if (contact.phone) {
+    const otherCustomer = await db('customers')
+      .whereNull('deleted_at')
+      .whereNot('id', customerId)
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(contact.phone)])
+      .first('id');
+    if (otherCustomer) return 'skipped_phone_belongs_to_other_customer';
+  }
   // Email dedup runs INDEPENDENTLY of the phone: a contact with a new phone
   // but an email already on the record (primary or any slot) keeps the phone
   // and drops the duplicate email — otherwise the caller's own address gets
@@ -442,8 +532,13 @@ async function persistCallSecondaryContact(customerId, contact) {
   // buyer and myself" needs the WDO report too). A channel where a reachable
   // slot already existed keeps its existing admin-configured choice.
   const prefsToSet = {};
-  if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
-  if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
+  // Only default a notify-primary pref that has never been set: an admin's
+  // explicit false (deliberately keeping the primary out of a channel) must
+  // survive a later call-persisted contact — the unconditional merge used to
+  // re-enroll them.
+  const existingPrefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+  if (contact.phone && !hadSlotPhone && existingPrefs.appointment_notify_primary == null) prefsToSet.appointment_notify_primary = true;
+  if (slotEmail && !hadSlotEmail && existingPrefs.service_report_notify_primary == null) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
       .insert({ customer_id: customerId, ...prefsToSet })
@@ -555,7 +650,13 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const matches = await base().orderBy('updated_at', 'desc').limit(2);
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
-    logger.warn(`[call-proc] ${matches.length} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
+    // Exact count, not the limit(2)-capped fetch — a number forked five ways
+    // used to log as "2", hiding the badly-shared phones from ops review.
+    const shareCount = await Promise.resolve()
+      .then(() => base().count('* as n').first())
+      .then((r) => parseInt(r?.n || 0, 10) || matches.length)
+      .catch(() => matches.length);
+    logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
   }
   return null;
 }
@@ -786,6 +887,27 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     subscriberId: result.subscriber?.id || null,
     confirmationEmailSent,
   };
+}
+
+// V2 emits confirmed_start_at / follow_up_start_at as ISO 8601 with an ET
+// offset. The legacy parser wants a bare ET wall clock ("YYYY-MM-DDTHH:MM"),
+// and the old `.slice(0, 16)` trusted the wall clock blindly — a model that
+// emitted UTC ("...T14:00:00Z" for a 10 AM ET booking) or a wrong-season
+// offset booked 4-5 hours off. When the string carries ANY zone suffix,
+// trust the encoded INSTANT and render its ET wall clock (identity for a
+// correct ET offset). Zone-less strings pass through as wall clock.
+function v2IsoToEtWallClock(value) {
+  const raw = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      const p = etParts(parsed);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+    }
+  }
+  return raw.slice(0, 16);
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -1449,11 +1571,49 @@ ${text}`,
       logger.warn('[call-proc] OpenAI transcript labeling returned no Agent/Caller labels');
       return null;
     }
+    // The labeling pass re-emits the ENTIRE transcript, and both extractors
+    // read its output as evidence — a sampled word swap here ("do not want to
+    // cancel" losing its "not") corrupts every downstream decision. The model
+    // is only allowed to rewrite speaker prefixes, so after stripping the
+    // per-line "<label>:" prefix from both versions the spoken-word content
+    // must be identical. Any content drift → discard the labeled version and
+    // let callers fall back to the raw transcript (labels lost, words safe).
+    if (!labeledTranscriptPreservesWords(text, labeled)) {
+      logger.warn('[call-proc] OpenAI transcript labeling altered spoken words — discarding labeled version');
+      return null;
+    }
     return labeled;
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcript labeling error: ${err.message}`);
     return null;
   }
+}
+
+// Content-integrity check for the labeling pass: strip each line's speaker
+// prefix ("Agent:", "Caller:", "Speaker 1:", ...) from both versions, then
+// compare the remaining spoken-word token multisets. Exact equality required —
+// a tolerance would mask exactly the single-word corruption (a dropped "not")
+// this exists to catch. Reflowed turns are fine (multiset, not sequence).
+function labeledTranscriptPreservesWords(original, labeled) {
+  const contentTokens = (transcript) => {
+    const tokens = [];
+    for (const line of String(transcript || '').split('\n')) {
+      const content = line.replace(/^\s*[^:\n]{1,30}:\s*/, '');
+      for (const tok of content.toLowerCase().split(/[^a-z0-9']+/)) {
+        if (tok) tokens.push(tok);
+      }
+    }
+    return tokens;
+  };
+  const counts = new Map();
+  for (const tok of contentTokens(original)) counts.set(tok, (counts.get(tok) || 0) + 1);
+  for (const tok of contentTokens(labeled)) {
+    const n = counts.get(tok);
+    if (!n) return false;
+    if (n === 1) counts.delete(tok);
+    else counts.set(tok, n - 1);
+  }
+  return counts.size === 0;
 }
 
 // ── Primary transcription via OpenAI (multipart upload) ──
@@ -1746,9 +1906,9 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "first_name": "string or null",
   "last_name": "string or null",
   "email": "string or null",
-  "phone": "string — use caller phone if not stated",
+  "phone": "string or null — the callback number the caller STATES on the call; null when none is stated (the server falls back to caller ID — do NOT echo the caller ID here)",
   "address_line1": "street address or null",
-  "city": "string or null — must be a Florida city",
+  "city": "string or null — the city as stated, even when outside Florida (out-of-area calls need the real city for triage)",
   "state": "FL",
   "zip": "string or null",
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
@@ -1865,7 +2025,7 @@ IMPORTANT — customer contact rules:
 Return ONLY valid JSON.`;
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1873,7 +2033,7 @@ Return ONLY valid JSON.`;
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           response_mime_type: 'application/json',
-          temperature: 0.2, // keep extraction deterministic
+          temperature: 0, // closed-enum structured extraction — greedy decode; 0.2 was pure routing-gate noise
         },
       }),
     }
@@ -1975,6 +2135,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
     bookableServiceNames: opts.bookableServiceNames,
+    // Existing-customer hint — V1 has had this since the non-lead veto work;
+    // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
+    // booking (the duplicate-appointment path).
+    knownCaller: opts.knownCaller,
   });
 
   let rawText;
@@ -1988,7 +2152,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             response_mime_type: 'application/json',
-            temperature: 0.2,
+            // Greedy decode — this output feeds the routing gate directly;
+            // 0.2 sampling could flip a borderline scheduling.status between
+            // reprocesses of the same call.
+            temperature: 0,
           },
         }),
       }
@@ -2362,6 +2529,7 @@ const CallRecordingProcessor = {
           callStartedAt: call.created_at,
           callId: call.id,
           bookableServiceNames,
+          knownCaller,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -2982,7 +3150,14 @@ const CallRecordingProcessor = {
     // caller's email is simply unknown. Phone: only scrubbed when the ANI
     // disagrees — extracted.phone legitimately equals the ANI on most calls,
     // and resolveCallContactPhone falls back to the ANI once cleared.
-    if (callSecondaryContact) {
+    //
+    // GATED on the same flag as the slot persistence: the booking validator's
+    // email requirement is satisfied by the slot email the gated persistence
+    // writes, so scrubbing WITHOUT persisting (gate off) would re-skip the
+    // exact realtor-books-for-buyer booking this feature targets as
+    // missing_required_customer_fields. Kill state = honest full revert to
+    // pre-feature behavior (chimera risk returns while the gate is off).
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && callSecondaryContact) {
       const scrubLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       if (extracted.email && callSecondaryContact.email
           && String(extracted.email).toLowerCase() === String(callSecondaryContact.email).toLowerCase()) {
@@ -3375,6 +3550,21 @@ const CallRecordingProcessor = {
       try {
         const result = await persistCallSecondaryContact(customerId, callSecondaryContact);
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        if (result === 'skipped_phone_belongs_to_other_customer') {
+          // Distinct review card: the named contact's number is another
+          // customer's primary phone — the office decides whether it's the
+          // same household, a realtor's office line, or a mishear.
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'secondary_contact_is_existing_customer',
+              extraction: v2CanonicalExtraction || undefined,
+              extraPayload: { secondary_contact: callSecondaryContact },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore()
+            .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+        }
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
@@ -3887,11 +4077,20 @@ const CallRecordingProcessor = {
     // "YYYY-MM-DDTHH:MM" the legacy parser expects.
     if (v2ApprovedExtraction) {
       const v2Flat = flatView(v2ApprovedExtraction);
-      if (v2Flat.preferred_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.preferred_date_time)) {
-        extracted.preferred_date_time = v2Flat.preferred_date_time.slice(0, 16);
+      const v2WallClock = v2IsoToEtWallClock(v2Flat.preferred_date_time);
+      if (v2WallClock) {
+        extracted.preferred_date_time = v2WallClock;
       }
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
-      if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
+      // flatView.matched_service is the coarse category→legacy map ("Termite
+      // Inspection" for every termite call). Overwriting V1's specific label
+      // with it downgraded e.g. a pre-slab soil-treatment booking to a plain
+      // inspection whenever the catalog didn't anchor the request. Only adopt
+      // it when V2 anchored a catalog service (specific_service_name drives
+      // the booking then anyway) or V1 produced no label at all.
+      if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service)) {
+        extracted.matched_service = v2Flat.matched_service;
+      }
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
       // Catalog-anchored booking fields: the gate validated this extraction, so
       // the booking must use ITS specific service / quoted price / follow-up
@@ -3906,9 +4105,7 @@ const CallRecordingProcessor = {
       // writes ran, and a V2 null/false must not clear a V1 quote promise the
       // office was already notified about.
       extracted.follow_up_visit_mentioned = v2Flat.follow_up_visit_mentioned === true;
-      extracted.follow_up_date_time = (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time))
-        ? v2Flat.follow_up_date_time.slice(0, 16)
-        : null;
+      extracted.follow_up_date_time = v2IsoToEtWallClock(v2Flat.follow_up_date_time);
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
@@ -4004,7 +4201,8 @@ const CallRecordingProcessor = {
               const dateMatch = extracted.preferred_date_time.match(/(\w+day,?\s+\w+\s+\d+|\w+\s+\d+)/);
               const timeMatch = extracted.preferred_date_time.match(/(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))/);
               parsedDate = dateMatch ? dateMatch[1] : extracted.preferred_date_time;
-              parsedTime = timeMatch ? timeMatch[1] : '';
+              parsedTime = timeMatch ? timeMatch[1]
+                : (/\b(noon|midday)\b/i.test(extracted.preferred_date_time) ? '12:00 PM' : '');
             }
           } catch { parsedDate = extracted.preferred_date_time; }
 
@@ -4079,7 +4277,31 @@ const CallRecordingProcessor = {
                 if (t.includes('pm') && h < 12) h += 12;
                 if (t.includes('am') && h === 12) h = 0;
                 windowStart = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+              } else if (/\b(noon|midday)\b/i.test(extracted.preferred_date_time)) {
+                // hasSpecificTime accepts "noon"/"midday" but the am/pm regex
+                // above can't parse them — they used to fall through to the
+                // silent 09:00 default below.
+                windowStart = '12:00';
+              } else {
+                const t24 = extracted.preferred_date_time.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+                if (t24) windowStart = `${String(Number(t24[1])).padStart(2, '0')}:${t24[2]}`;
               }
+            }
+
+            // A "specific time required" path must never book a DEFAULT time.
+            // If no time parsed, hold for review instead of silently booking
+            // 09:00 (and texting the customer a confirmation with a blank
+            // time) for a caller who agreed to noon.
+            if (scheduledDate && !windowStart) {
+              logger.warn(`[call-proc] Could not parse a time from: ${extracted.preferred_date_time}; holding booking instead of defaulting 09:00`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'unparseable_time',
+              };
+              scheduledDate = null;
             }
 
             const callDateET = etDateString(call.created_at || new Date());
@@ -4279,6 +4501,32 @@ const CallRecordingProcessor = {
                   followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   return primaryRow;
                 }
+                // findExistingCallAppointment only sees THIS call's rows and
+                // same-run phone-call bookings — a customer merely
+                // re-confirming a visit booked through ANY other channel
+                // ("still on for Tuesday at 10?") would re-book it here, with
+                // duplicate reminders and a second confirmation SMS. Any live
+                // same-day parent visit for this customer means a human
+                // decides: hold instead of inserting a duplicate. (A genuine
+                // second same-day visit is rare enough that one review card
+                // beats a phantom double-dispatch.)
+                const sameDayExisting = await trx('scheduled_services')
+                  .where({ customer_id: customerId })
+                  .whereNull('parent_service_id')
+                  .where('scheduled_date', scheduledDate)
+                  .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+                  .orderBy('created_at', 'asc')
+                  .first();
+                if (sameDayExisting) {
+                  return {
+                    __held: {
+                      reason: 'existing_appointment_same_date',
+                      existingId: sameDayExisting.id,
+                      existingStatus: sameDayExisting.status,
+                      existingService: sameDayExisting.service_type,
+                    },
+                  };
+                }
                 const insertData = {
                   customer_id: customerId,
                   technician_id: defaultTechnicianId,
@@ -4367,6 +4615,21 @@ const CallRecordingProcessor = {
                 const existingByKey = await trx('scheduled_services')
                   .where({ idempotency_key: insertData.idempotency_key })
                   .first();
+                if (existingByKey && ['cancelled', 'rescheduled'].includes(existingByKey.status)) {
+                  // The office cancelled this exact auto-booking. Silently
+                  // "reusing" the cancelled row resurrected it (lead converted
+                  // + follow-up ensured off a dead visit), and re-inserting
+                  // would need a salted key — which re-opens the true
+                  // double-insert risk the key exists to close. A human books
+                  // it by hand if it's real.
+                  return {
+                    __held: {
+                      reason: 'auto_booking_previously_cancelled',
+                      existingId: existingByKey.id,
+                      existingStatus: existingByKey.status,
+                    },
+                  };
+                }
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
@@ -4386,6 +4649,21 @@ const CallRecordingProcessor = {
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
               });
+              if (svc && svc.__held) {
+                // Booking held for human review (same-day duplicate or a
+                // previously-cancelled auto-booking). No schedule row, no SMS,
+                // no side effects — the consolidated skip-triage below opens
+                // the review card.
+                appointmentResult = {
+                  service: serviceType,
+                  dateTime: extracted.preferred_date_time,
+                  scheduleCreated: false,
+                  smsSent: false,
+                  skippedReason: svc.__held.reason,
+                  existingScheduledServiceId: svc.__held.existingId || null,
+                };
+                logger.warn(`[call-proc] Held auto-booking for ${callSid}: ${svc.__held.reason} (existing ${svc.__held.existingId || 'n/a'}, status ${svc.__held.existingStatus || 'n/a'})`);
+              } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
                 logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
@@ -4403,15 +4681,16 @@ const CallRecordingProcessor = {
                   serviceType: svc.service_type,
                 });
               }
+              }
               if (followUpCreated) {
                 // Intentionally NO registerScheduleSideEffects here: the
                 // follow-up is pending and must not message the customer.
                 logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
               }
 
-            } else {
+            } else if (!appointmentResult) {
               logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}; skipping schedule + SMS`);
-              appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false };
+              appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false, skippedReason: 'unparseable_date' };
             }
           } catch (schedErr) {
             logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
@@ -4609,6 +4888,52 @@ const CallRecordingProcessor = {
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
         appointmentResult = { error: err.message };
+      }
+    }
+
+    // A gate-APPROVED booking the legacy insert chain then skipped (past
+    // date, missing customer email, unparseable time, same-day duplicate
+    // hold, no V1-resolved customer, ...) used to vanish: route_decisions
+    // recorded auto_route, no schedule row landed, and no review card ever
+    // opened. Every approved-but-unbooked confirmed call now opens ONE
+    // blocking review card and corrects the route decision's recorded action
+    // + forward-audit pointer.
+    if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
+      const bookedServiceId = appointmentResult?.scheduledServiceId || null;
+      if (!bookedServiceId) {
+        const skipReason = appointmentResult?.skippedReason
+          || appointmentResult?.scheduleError
+          || appointmentResult?.error
+          || (!customerId ? 'booked_call_without_customer' : 'auto_booking_not_created');
+        try {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'auto_booking_skipped_after_approval',
+              extraction: v2ApprovedExtraction,
+              extraPayload: {
+                skipped_reason: String(skipReason).slice(0, 300),
+                missing_fields: appointmentResult?.missingFields || null,
+                existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
+                preferred_date_time: extracted.preferred_date_time || null,
+                service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+              },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+        } catch (skipTriageErr) {
+          logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.message}`);
+        }
+      }
+      try {
+        await db('route_decisions')
+          .where({ call_log_id: call.id, decision_version: 'v2-1.0.0', mode: 'enforce' })
+          .update({
+            final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
+            ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
+          });
+      } catch (rdErr) {
+        logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }
     }
 
@@ -5062,6 +5387,10 @@ CallRecordingProcessor._test = {
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,
   persistCallSecondaryContact,
+  v2IsoToEtWallClock,
+  phoneNearMissOfAni,
+  isUsableContactPhone,
+  labeledTranscriptPreservesWords,
 };
 
 module.exports = CallRecordingProcessor;

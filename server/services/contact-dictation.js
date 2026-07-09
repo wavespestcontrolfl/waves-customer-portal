@@ -34,8 +34,10 @@ const logger = require('./logger');
 const { cleanValidEmailOrNull, looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 
 const ENABLED = () => process.env.CONTACT_DICTATION_ENABLED !== 'false';
+// Literal default (NOT chained to GEMINI_EXTRACTION_MODEL): the extraction
+// var is the documented instant-rollback lever for the V2 extractor, and a
+// rollback there must not silently downgrade the mishear-recovery decoder.
 const DECODER_MODEL = () => process.env.GEMINI_CONTACT_DECODER_MODEL
-  || process.env.GEMINI_EXTRACTION_MODEL
   || 'gemini-2.5-pro';
 // Adopt a decoded email only when the decoder returned exactly one usable
 // candidate at or above this confidence. Below it (or with 2+ candidates) the
@@ -45,8 +47,11 @@ const ADOPT_CONFIDENCE = 0.75;
 // ── Signal detection ─────────────────────────────────────────────────────────
 
 const EMAIL_SIGNAL_RE = /\b(e-?mail|at g ?mail|at gmail|gmail dot|yahoo dot|outlook dot|hotmail dot|dot com|dot net|dot org)\b/i;
-const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like) in [a-z]+)\b/i;
-const ADDRESS_SIGNAL_RE = /\b(address is|service address|street|avenue|boulevard|drive|trail|terrace|court|circle|lane|zip( code)?|unit \d|apartment)\b/i;
+const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like|for) in [a-z]+|[a-z] for [a-z]+)\b/i;
+// Suffix list covers the service area's actual street vocabulary — Fruitville
+// ROAD, Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
+// dictation-focused second STT pass never ran for those calls.
+const ADDRESS_SIGNAL_RE = /\b(address is|service address|street|avenue|boulevard|drive|road|way|loop|place|cove|point|parkway|run|bend|pass|glen|trail|terrace|court|circle|lane|zip( code)?|unit \d|apartment)\b/i;
 
 /**
  * Cheap gate for whether the call dictated contact info worth a decoder pass.
@@ -144,7 +149,7 @@ async function fetchDecoderResponse(prompt) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { response_mime_type: 'application/json', temperature: 0.2 },
+        generationConfig: { response_mime_type: 'application/json', temperature: 0 },
       }),
     }
   );

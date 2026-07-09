@@ -66,9 +66,18 @@ async function main() {
 
   const totalAttempted = parseInt((await baseQuery().count('* as n').first())?.n || 0, 10);
 
+  // PREFIX match, not equality: the processor stamps a catalog-suffixed
+  // version (`${PROMPT_HASH}-cat.<hash>`, see extractionPromptVersion) whenever
+  // the bookable catalog is non-empty — which it always is in prod — so an
+  // exact match on the bare hash matched ZERO rows and the gate reported "no
+  // shadow extractions" forever. Catalog-content cohorts are deliberately
+  // merged here: the base prompt+schema hash still fences real prompt changes,
+  // and the model column above fences model swaps.
   const rows = await baseQuery()
     .where('ai_extraction_model', CURRENT_MODEL)
-    .where('ai_extraction_prompt_version', CURRENT_PROMPT_VERSION)
+    .where((qb) => qb
+      .where('ai_extraction_prompt_version', CURRENT_PROMPT_VERSION)
+      .orWhereRaw('ai_extraction_prompt_version LIKE ?', [`${CURRENT_PROMPT_VERSION}-cat.%`]))
     .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction');
 
   const staleExcluded = totalAttempted - rows.length;

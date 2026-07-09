@@ -108,7 +108,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.2.0');
+    expect(SCHEMA_VERSION).toBe('1.3.0');
   });
 
   test('prompt hash is deterministic', () => {

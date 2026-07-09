@@ -243,8 +243,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.2.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.2.0');
+  test('current SCHEMA_VERSION is 1.3.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.3.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -293,10 +293,15 @@ describe('persistCallSecondaryContact', () => {
     wants_notifications: true, notes: null,
   };
 
-  function makeDb({ customer, updateRows = 1 }) {
+  function makeDb({ customer, updateRows = 1, otherCustomer = null, prefs = undefined }) {
     const writes = { updates: [], prefsMerges: [], whereFns: 0 };
     db.mockImplementation((table) => {
       if (table === 'customers') {
+        // One builder serves both queries against `customers`: the main
+        // `.where({id}).first()` fetch AND the cross-customer collision check
+        // (`.whereNull().whereNot().whereRaw().first('id')`) — the whereRaw
+        // call marks which query this is.
+        let isCollisionQuery = false;
         const b = {
           where: jest.fn((arg) => {
             // The conditional slot write chains .where(fn) emptiness guards —
@@ -309,19 +314,25 @@ describe('persistCallSecondaryContact', () => {
             }
             return b;
           }),
-          first: jest.fn(async () => customer),
+          whereNull: jest.fn(() => b),
+          whereNot: jest.fn(() => b),
+          whereRaw: jest.fn(() => { isCollisionQuery = true; return b; }),
+          first: jest.fn(async () => (isCollisionQuery ? otherCustomer : customer)),
           update: jest.fn(async (payload) => { writes.updates.push(payload); return updateRows; }),
         };
         return b;
       }
       if (table === 'notification_prefs') {
-        return {
+        const b = {
+          where: jest.fn(() => b),
+          first: jest.fn(async () => prefs),
           insert: jest.fn((payload) => ({
             onConflict: jest.fn(() => ({
               merge: jest.fn(async (mergePayload) => { writes.prefsMerges.push({ payload, mergePayload }); return 1; }),
             })),
           })),
         };
+        return b;
       }
       throw new Error(`unexpected table ${table}`);
     });
@@ -462,6 +473,25 @@ describe('persistCallSecondaryContact', () => {
     const writes = makeDb({ customer: full });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_slots_full');
     expect(writes.updates).toHaveLength(0);
+  });
+
+  test('a secondary phone that belongs to a DIFFERENT customer is never slotted (cross-account SMS guard)', async () => {
+    const writes = makeDb({ customer: bareCustomer, otherCustomer: { id: 'cust-2' } });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_belongs_to_other_customer');
+    expect(writes.updates).toHaveLength(0);
+    expect(writes.prefsMerges).toHaveLength(0);
+  });
+
+  test("an admin's explicit notify-primary FALSE survives a call-persisted contact", async () => {
+    const writes = makeDb({
+      customer: bareCustomer,
+      prefs: { customer_id: 'cust-1', appointment_notify_primary: false, service_report_notify_primary: null },
+    });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
+    // The phone channel's explicit false stands; only the never-set report
+    // flag defaults on.
+    expect(writes.prefsMerges).toHaveLength(1);
+    expect(writes.prefsMerges[0].mergePayload).toEqual({ service_report_notify_primary: true });
   });
 
   test('email-only contact dedups against emails on record', async () => {
