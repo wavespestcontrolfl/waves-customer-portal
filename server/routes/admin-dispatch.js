@@ -1185,7 +1185,17 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
     const svc = await db('scheduled_services as ss')
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .where('ss.id', req.params.serviceId)
-      .select('ss.id', 'ss.customer_id', 'c.latitude', 'c.longitude')
+      .select(
+        'ss.id',
+        'ss.customer_id',
+        // The zone-marking map must center on the BOOKED parcel: visit coords
+        // first; the primary home only for non-divergent stamps — a divergent
+        // stamp with no coords degrades to the map's missing_coordinates
+        // state rather than letting zones be drawn on the wrong parcel
+        // (codex round-7 P1).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`)
+      )
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
     return res.json(await buildPropertyMapPayload(svc.customer_id, Number(svc.latitude), Number(svc.longitude)));

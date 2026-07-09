@@ -7,6 +7,7 @@
 
 const router = require('express').Router();
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { stampedLine2Sql } = require('../services/stamped-address');
 
 let db;
 function getDb() {
@@ -138,7 +139,7 @@ function ruleBasedScore(job, driveMin = 12) {
 
 function toDispatchJob(row, index = 0) {
   const customerName = [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || 'Customer';
-  const address = [row.address_line1, row.city, row.state, row.zip].filter(Boolean).join(', ');
+  const address = [[row.address_line1, row.address_line2].filter(Boolean).join(' '), row.city, row.state, row.zip].filter(Boolean).join(', ');
   const job = {
     id: row.id,
     sheet_row_id: row.id,
@@ -184,6 +185,8 @@ async function canonicalJobs({ date, techId, status } = {}) {
       // /api/dispatch/jobs keep working (codex P1: this legacy reader was
       // missed by the admin-dispatch updates).
       dbConn.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+      // Unit line rides along (condo/duplex bookings — codex round-7 P2).
+      dbConn.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
       dbConn.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
       dbConn.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
       dbConn.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),

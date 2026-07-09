@@ -92,9 +92,15 @@ function stampedDivergesSql(sAlias, cAlias) {
 // The visit's unit line. A divergent stamp shows ONLY its own line2 (the
 // primary's unit belongs to a different property); a non-divergent stamp
 // falls back to the primary's unit — phone extractions often omit the unit
-// the customer record already knows (codex round-5 P2).
+// the customer record already knows (codex round-5 P2). EXCEPT when the
+// stamp already carries its unit inline in line1 ("100 Main St Apt 4"):
+// the divergence check strips that unit, so the primary's "Apt 3" would
+// otherwise append onto the wrong door (codex round-7 P2).
 function stampedLine2Sql(sAlias, cAlias) {
+  const sLine1 = `${sAlias}.service_address_line1`;
+  const inlineUnit = `${sLine1} ~* '\\s(apt|apartment|unit|ste|suite|#)\\.?\\s*[a-z0-9-]+\\s*$'`;
   return `CASE WHEN ${stampedDivergesSql(sAlias, cAlias)} THEN ${sAlias}.service_address_line2`
+    + ` WHEN ${sLine1} IS NOT NULL AND ${inlineUnit} THEN ${sAlias}.service_address_line2`
     + ` ELSE COALESCE(${sAlias}.service_address_line2, ${cAlias}.address_line2) END`;
 }
 
