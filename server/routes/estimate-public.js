@@ -383,7 +383,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const today = etDateString();
   if (!linkedId && !estimate.id) return null;
 
-  const q = conn('scheduled_services')
+  const baseQuery = () => conn('scheduled_services')
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', today)
     .where((builder) => {
@@ -397,15 +397,36 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       builder.whereNull('reservation_expires_at')
         .orWhereRaw('reservation_expires_at > NOW()');
     })
-    .where((builder) => {
-      if (linkedId) builder.where('id', linkedId);
-      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
-    })
     .orderBy('scheduled_date', 'asc')
     .orderBy('window_start', 'asc');
 
+  const q = baseQuery()
+    .where((builder) => {
+      if (linkedId) builder.where('id', linkedId);
+      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
+    });
+
   if (requestedId) q.where('id', requestedId);
-  const row = await q.first();
+  let row = await q.first();
+
+  // Customer-wide fallback (gated): a customer who already has ANY upcoming
+  // appointment shouldn't be pushed through the slot picker again — the
+  // acceptance contract swaps the scheduler for payment options instead.
+  // Estimate-linked rows always take precedence (query above). Restricted to
+  // rows this customer owns that no other estimate has claimed
+  // (source_estimate_id null) and that aren't an in-flight reservation hold,
+  // so an offered row can't 409 at accept time — the accept-path UPDATE
+  // requires these same conditions.
+  if (!row && estimate.customer_id
+    && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
+    const cw = baseQuery()
+      .where('customer_id', estimate.customer_id)
+      .whereNull('source_estimate_id')
+      .whereNull('reservation_expires_at');
+    if (requestedId) cw.where('id', requestedId);
+    row = await cw.first();
+  }
+
   if (!row) return null;
   if (requestedId && String(row.id) !== requestedId) return null;
   return row;
