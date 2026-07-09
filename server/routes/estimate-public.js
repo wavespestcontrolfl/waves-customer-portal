@@ -2967,13 +2967,16 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const treeShrubProfile = isTreeShrubOnly
     ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
     : null;
-  const complexity = prettySignalValue(
+  // Lawn-only estimates price off the treatable turf, so Pool/Lanai and
+  // landscape Complexity read as irrelevant noise there (owner ask 2026-07-09)
+  // — both tiles stay pest/other-mix only.
+  const complexity = isLawnOnly ? null : prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
     || inputs.landscapeComplexity
   );
-  const poolLanaiValue = poolLanaiMetricValue({
+  const poolLanaiValue = isLawnOnly ? null : poolLanaiMetricValue({
     pool: firstFeaturePresence(
       inputs.pool,
       inputs.hasPool,
@@ -4915,6 +4918,45 @@ ${shellTopBar()}
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
+
+  <div class="card transparency-card">
+    <h2>Watch every visit &mdash; right from your phone</h2>
+    <p class="ai-blurb">Live GPS, visit reports, and alerts you control &mdash; the Waves app keeps you in the loop from booking to done.</p>
+    <div class="app-shots">
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-tracking.webp" width="760" height="1647" loading="lazy" alt="Waves app visit screen with a live-GPS tech-en-route update before arrival"></div>
+        <figcaption><strong>See your tech coming</strong><span>Live GPS, the hour before arrival</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-visits.webp" width="760" height="1647" loading="lazy" alt="Waves app Visits screen listing upcoming and completed service visits"></div>
+        <figcaption><strong>Every visit &amp; report</strong><span>Upcoming, past, and what we did</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-alerts.webp" width="760" height="1647" loading="lazy" alt="Waves app notification settings, with each alert set to text, email, or both"></div>
+        <figcaption><strong>Alerts you control</strong><span>Text, email, or both</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-contacts.webp" width="760" height="1647" loading="lazy" alt="Waves app on-location contacts screen to add a spouse, tenant, or property manager"></div>
+        <figcaption><strong>Loop in your family</strong><span>Spouse, tenant, or property manager</span></figcaption>
+      </figure>
+    </div>
+    <div class="app-promo">
+      <span class="app-promo-head"><strong>It&rsquo;s all in the Waves app</strong><span>One login for your whole household &mdash; everything in one place.</span></span>
+      <div class="app-features">
+        <div class="app-feature"><span class="af-ico">${ICON_PIN}</span><span>Live tech tracking</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CHAT}</span><span>Text your tech</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_DOC}</span><span>Photo &amp; video reports</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_FAMILY}</span><span>Add family to alerts</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CARD}</span><span>Billing &amp; autopay</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CAL}</span><span>Reschedule &amp; history</span></div>
+      </div>
+      <span class="app-badges${APP_STORE_URL || PLAY_STORE_URL ? '' : ' is-coming-soon'}">
+        ${APP_STORE_URL || !PLAY_STORE_URL ? appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store') : ''}
+        ${PLAY_STORE_URL || !APP_STORE_URL ? appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play') : ''}
+        ${APP_STORE_URL || PLAY_STORE_URL ? '' : '<span class="app-badge-caption">Coming soon to iPhone &amp; Android</span>'}
+      </span>
+    </div>
+  </div>
 
   <div class="card">
     <h2>Customer reviews</h2>
@@ -9482,18 +9524,39 @@ function normalizeOneTimeBreakdown(estData) {
     });
   }
 
+  // An explicit WaveGuard setup row saved in the estimate's one-time items
+  // bypasses the synthesized-fee guard above — drop it for the same
+  // non-pest/mosquito mixes so a lawn-only estimate never shows the $99
+  // membership setup. estimate-converter's
+  // shouldIncludeWaveGuardSetupFeeForRecurring already refuses to CHARGE it
+  // for these mixes, so this keeps the page consistent with the invoice.
+  let suppressedExplicitSetupTotal = 0;
+  if (!hasRecurringPest && !hasRecurringMosquito) {
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      if (row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row)) {
+        suppressedExplicitSetupTotal += Number(row.amount) || 0;
+        rows.splice(i, 1);
+      }
+    }
+  }
+
   const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
   const rawExplicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
-  // If we suppressed the WaveGuard setup row above (non-pest/mosquito estimate
-  // with a stale membershipFee cached in oneTime.total), strip that fee from the
-  // explicit total so the difference logic doesn't resurface it as a generic
-  // "Other one-time services" charge.
-  const suppressedMembershipFee = Number.isFinite(membershipFee)
-    && membershipFee > 0
-    && !hasRecurringPest
-    && !hasRecurringMosquito
-    ? membershipFee
-    : 0;
+  // If we suppressed the WaveGuard setup above (non-pest/mosquito estimate
+  // with a stale membershipFee or explicit setup row cached in oneTime), strip
+  // that fee from the explicit total so the difference logic doesn't resurface
+  // it as a generic "Other one-time services" charge. Explicit rows win over
+  // the cached membershipFee (mirrors the add path, which only synthesizes the
+  // fee when no explicit row exists) so the fee is never subtracted twice.
+  const suppressedMembershipFee = suppressedExplicitSetupTotal > 0
+    ? suppressedExplicitSetupTotal
+    : (Number.isFinite(membershipFee)
+      && membershipFee > 0
+      && !hasRecurringPest
+      && !hasRecurringMosquito
+      ? membershipFee
+      : 0);
   const explicitTotal = Number.isFinite(rawExplicitTotal)
     ? Math.round((rawExplicitTotal - suppressedMembershipFee) * 100) / 100
     : rawExplicitTotal;
@@ -12465,8 +12528,63 @@ function normalizeBreakdownItemLabel(item = {}) {
   return mapped && mapped !== label ? { ...item, label: mapped } : item;
 }
 
+// Strip a stale WaveGuard setup fee from a pricing bundle whose recurring mix
+// has no pest/mosquito — the only mixes that carry the $99 membership setup.
+// normalizeOneTimeBreakdown already suppresses the fee when it builds a fresh
+// breakdown, but send-snapshot and cached bundles were frozen with the fee
+// baked into oneTimeBreakdown/firstVisitFees at send time, so the chokepoint
+// every bundle path returns through has to drop it too. Display-only
+// alignment: estimate-converter's shouldIncludeWaveGuardSetupFeeForRecurring
+// already refuses to charge the fee for these mixes.
+function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
+  const recurringServices = Array.isArray(result?.recurring?.services)
+    ? result.recurring.services
+    : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
+  const hasPestOrMosquito = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || ''))
+    || recurringServiceKey(s) === 'mosquito');
+  if (hasPestOrMosquito) return payload;
+
+  let next = payload;
+  const breakdown = payload.oneTimeBreakdown;
+  const isSetupRow = (row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {});
+  if (breakdown && Array.isArray(breakdown.items) && breakdown.items.some(isSetupRow)) {
+    let removedTotal = 0;
+    const kept = breakdown.items.filter((row) => {
+      if (!isSetupRow(row)) return true;
+      removedTotal += Number(row?.amount) || 0;
+      return false;
+    });
+    next = {
+      ...next,
+      oneTimeBreakdown: {
+        ...breakdown,
+        items: kept,
+        total: Number.isFinite(Number(breakdown.total))
+          ? Math.round((Number(breakdown.total) - removedTotal) * 100) / 100
+          : breakdown.total,
+      },
+    };
+  }
+  if (Array.isArray(payload.firstVisitFees) && payload.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) {
+    const firstVisitFees = payload.firstVisitFees.filter((fee) => fee?.service !== 'waveguard_setup');
+    next = {
+      ...next,
+      firstVisitFees,
+      setupFee: next.setupFee && next.setupFee.service === 'waveguard_setup'
+        ? (firstVisitFees.find((f) => f?.waivedWithPrepay) || null)
+        : next.setupFee,
+    };
+  } else if (next.setupFee && next.setupFee.service === 'waveguard_setup') {
+    next = { ...next, setupFee: null };
+  }
+  return next;
+}
+
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
-  const alignedPayload = alignOneTimeChoiceBreakdown(payload, estimate, estData);
+  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);

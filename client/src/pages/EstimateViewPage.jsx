@@ -33,6 +33,8 @@ import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
 import CustomerReviews from '../components/estimate/CustomerReviews';
+import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
+import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
@@ -364,6 +366,40 @@ function serviceKeysForEstimateSection(section = {}) {
   return keys;
 }
 
+// Which report the showcase card sells (owner ask 2026-07-09): lawn-only
+// estimates get the lawn report (health score + turf trends); any mix with
+// pest/mosquito keeps the pest report with the tech recap video front and
+// center.
+//
+// Deliberately NOT serviceKeysForEstimateSection: that helper scans marketing
+// copy (labels, descriptions, included lines) for substrings, which is the
+// right bias for estimateAddServiceOffer (never offer a service the customer
+// arguably has) but wrong here — the lawn program's own included line
+// "Chinch, sod webworm & turf pest response" would classify every lawn-only
+// estimate as pest. Only structural identity fields decide the variant.
+export function reportShowcaseVariantForServices(services = []) {
+  const keys = new Set();
+  const collectId = (id) => {
+    const text = String(id || '').toLowerCase();
+    if (!text) return;
+    if (text.includes('pest')) keys.add('pest_control');
+    if (text.includes('lawn')) keys.add('lawn_care');
+    if (text.includes('mosquito')) keys.add('mosquito');
+  };
+  (Array.isArray(services) ? services : []).forEach((section) => {
+    if (!section || typeof section !== 'object') return;
+    if (section.isPest) keys.add('pest_control');
+    [section.key, section.service, section.serviceKey].forEach(collectId);
+    (Array.isArray(section.memberKeys) ? section.memberKeys : []).forEach(collectId);
+    (Array.isArray(section.frequencies) ? section.frequencies : []).forEach((frequency) => {
+      collectId(frequency?.serviceCategory);
+    });
+  });
+  return keys.has('lawn_care') && !keys.has('pest_control') && !keys.has('mosquito')
+    ? 'lawn'
+    : 'pest';
+}
+
 export function estimateAddServiceOffer(services = [], serviceMode = 'recurring', membership = null) {
   if (serviceMode !== 'recurring') return null;
   const currentKeys = new Set();
@@ -648,7 +684,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
         </div>
         <h2 style={{
-                    fontSize: 24,
+          fontFamily: FONTS.serif,
+          fontSize: 24,
           fontWeight: 500,
           lineHeight: 1.2,
           color: ESTIMATE_TEXT,
@@ -713,7 +750,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                 {metric.label}
               </div>
               <div style={{
-                                fontSize: 18,
+                fontFamily: FONTS.serif,
+                fontSize: 18,
                 fontWeight: 500,
                 color: ESTIMATE_TEXT,
               }}>
@@ -775,7 +813,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                       {fact.label}
                     </div>
                     <div style={{
-                                            fontSize: 18,
+                      fontFamily: FONTS.serif,
+                      fontSize: 18,
                       fontWeight: 500,
                       color: ESTIMATE_TEXT,
                     }}>
@@ -1021,7 +1060,8 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           Ask Waves
         </div>
         <h2 style={{
-                    fontSize: 24,
+          fontFamily: FONTS.serif,
+          fontSize: 24,
           fontWeight: 500,
           lineHeight: 1.2,
           color: ESTIMATE_TEXT,
@@ -2628,6 +2668,7 @@ export default function EstimateViewPage() {
     () => estimateAddServiceOffer(services, serviceMode, data?.estimate?.membership),
     [services, serviceMode, data?.estimate?.membership]
   );
+  const reportShowcaseVariant = useMemo(() => reportShowcaseVariantForServices(services), [services]);
 
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
@@ -3507,6 +3548,8 @@ export default function EstimateViewPage() {
           appointmentServiceType={cta.terminalState === 'accepted' ? existingAppointment?.serviceType || null : null}
         />
         {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
+        <AppShowcaseCard />
+        <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -3571,6 +3614,8 @@ export default function EstimateViewPage() {
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
+        <AppShowcaseCard />
+        <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -3804,7 +3849,12 @@ export default function EstimateViewPage() {
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
                   : null}
               />
+              {/* GBP proof directly after the review quotes; the report
+                  showcase directly after the app card it extends. This
+                  branch's approved reviews-before-app order is preserved. */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
+              <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
+              <ReportShowcaseCard variant={reportShowcaseVariant} />
               {/* GBP proof directly above Ask Waves (owner 2026-07-06). */}
               <GoogleProfilesCard />
               <EstimateAskBar
@@ -3830,6 +3880,8 @@ export default function EstimateViewPage() {
           tail above, so only the contact hatch + guarantee remain here. */}
       {glassContent && !(ctaPhase === 'review' && reservation) ? null : (
         <>
+          <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
+          <ReportShowcaseCard variant={reportShowcaseVariant} />
           <CustomerReviews />
           <GoogleProfilesCard />
         </>

@@ -44,7 +44,7 @@ const PAGE_BG = ['rgb(250, 248, 243)', 'rgb(250, 250, 250)', 'rgb(248, 250, 251)
 // Section titles that render as styled divs rather than real h2/h3 — the
 // theme normalizes them onto the heading scale (visual only; text untouched).
 const DIV_H2 = new Set(['Find a date & time that works for you', "Skip parts you don't need", 'Skip parts you don’t need']);
-const DIV_H3 = new Set(['Add Lawn Care and save more']);
+const DIV_H3 = new Set(['It’s all in the Waves app', "It's all in the Waves app", 'Add Lawn Care and save more']);
 
 const ownText = (el) => {
   let s = '';
