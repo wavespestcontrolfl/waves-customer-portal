@@ -80,17 +80,18 @@ describe('getLotCategory NaN guard', () => {
 });
 
 describe('calculatePropertyProfile missing-lot semantics', () => {
-  test('missing lot yields null lotCategory, zero treatable area, explicit ACRE mosquito bucket', () => {
+  test('missing lot yields null lotCategory, UNSET treatable area, explicit ACRE mosquito bucket', () => {
     const profile = calculatePropertyProfile({ homeSqFt: 2000, stories: 1 });
     expect(profile.lotCategory).toBe(null);
-    expect(profile.mosquitoTreatableSqFt).toBe(0);
-    expect(Number.isNaN(profile.mosquitoTreatableSqFt)).toBe(false);
+    // Not 0: an explicit zero would suppress the ACRE proxy downstream and
+    // drop cost math / one-time mosquito to the smallest bucket (codex P2).
+    expect(profile.mosquitoTreatableSqFt).toBe(undefined);
     // Fail-expensive direction preserved from the old NaN fall-through —
     // changing this direction is an owner policy call.
     expect(profile.mosquitoLotCategory).toBe('ACRE');
   });
 
-  test('missing-lot mosquito still prices the ACRE bucket and flags review', () => {
+  test('missing-lot mosquito still prices the ACRE bucket off the 43,560 proxy and flags review', () => {
     const estimate = generateEstimate({
       homeSqFt: 2000,
       stories: 1,
@@ -99,6 +100,9 @@ describe('calculatePropertyProfile missing-lot semantics', () => {
     const mq = estimate.lineItems.find((item) => item.service === 'mosquito');
     expect(mq.lotCategory).toBe('ACRE');
     expect(mq.annual).toBeGreaterThan(0);
+    // The proxy area (not 0) reaches the line item so product-cost math and
+    // one-time mosquito keep pricing the full ACRE bucket.
+    expect(mq.mosquitoTreatableSqFt).toBe(43560);
     expect(mq.manualReviewReasons).toContain('missing_mosquito_treatable_area');
     expect(estimate.pricingMetadata.manualReviewReasons).toContain('missing_mosquito_treatable_area');
   });
@@ -197,7 +201,11 @@ describe('per-line review hoisting (P4) and stories flag (P9)', () => {
     const bait = estimate.lineItems.find((i) => i.service === 'termite_bait');
     expect(bait.perimeterSource).toBe('computed_from_footprint');
     expect(bait.manualReviewReasons).toContain('stories_estimated');
-    expect(bait.requiresManualReview).toBe(true);
+    // Metadata-only: requiresManualReview stays false on a priced line —
+    // estimate-converter drops recurring lines flagged requiresManualReview,
+    // which would silently omit the priced termite program (codex P1).
+    expect(bait.requiresManualReview).toBe(false);
+    expect(bait.annual).toBeGreaterThan(0);
     expect(estimate.pricingMetadata.manualReviewReasons).toContain('stories_estimated');
   });
 

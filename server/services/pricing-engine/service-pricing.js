@@ -3893,9 +3893,12 @@ function priceTermiteBait(property, options = {}) {
     },
     measurementWarnings,
     requiresMeasurement: false,
-    requiresManualReview: measurementState.requiresManualReview ||
-      measurementWarnings.length > 0 ||
-      manualReviewReasons.length > 0,
+    // stories_estimated stays OUT of requiresManualReview on a priced line:
+    // estimate-converter drops recurring lines flagged requiresManualReview,
+    // so promoting the note here would silently omit a priced termite program
+    // from conversion/scheduling (codex P1). The reason rides in
+    // manualReviewReasons (hoisted to estimate-level metadata) only.
+    requiresManualReview: measurementState.requiresManualReview || measurementWarnings.length > 0,
     manualReviewReasons,
     inputSourceSummary: {
       footprintSqFt: footprintResolution.source,

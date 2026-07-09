@@ -606,13 +606,17 @@ function calculatePropertyProfile(input) {
   const perimeterSource = explicitPerimeter ? 'property_perimeter' : 'computed_from_footprint';
   const hasFiniteLot = Number.isFinite(Number(input.lotSqFt));
   const lotCategory = getLotCategory(input.lotSqFt);
+  // Missing lot keeps the longstanding fail-expensive mosquito direction
+  // (ACRE proxy) — previously reached accidentally via the NaN→'ACRE'
+  // comparison fall-through, now explicit. Treatable sqft stays UNSET (not
+  // 0): an explicit zero would suppress the mosquitoLotCategory proxy in
+  // resolveMosquitoTreatableArea and drop cost math / one-time mosquito to
+  // the smallest bucket (codex P2) — undefined lets the ACRE proxy carry
+  // the same 43,560 sq ft it always has. Whether missing-lot mosquito
+  // should instead fail cheap or hard quote-require is an owner policy call.
   const mosquitoTreatableSqFt = hasFiniteLot
     ? Math.max(0, input.lotSqFt - footprint - hardscape)
-    : 0;
-  // Missing lot keeps the longstanding fail-expensive mosquito direction
-  // (ACRE bucket) — previously reached accidentally via the NaN→'ACRE'
-  // comparison fall-through, now explicit. Whether missing-lot mosquito
-  // should instead fail cheap or hard quote-require is an owner policy call.
+    : undefined;
   const mosquitoLotCategory = hasFiniteLot
     ? getMosquitoTreatableCategory(mosquitoTreatableSqFt, lotCategory)
     : 'ACRE';
