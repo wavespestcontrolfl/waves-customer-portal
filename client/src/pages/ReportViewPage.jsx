@@ -1763,8 +1763,6 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
   return (
     <section data-glass="card" className="report-action-bar" aria-label="Report tools">
       <div className="section-eyebrow">Report Tools</div>
-      <h2 className="report-action-title">Download, share, or print</h2>
-      <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
         {pdfUrl
           ? <a
