@@ -7075,12 +7075,14 @@ export default function EstimateToolViewV2({
                         {E.fieldVerify?.length > 0 && (
                           <div className="bg-alert-bg border-hairline border-alert-fg rounded-sm px-4 py-3 mb-5 text-13 text-alert-fg">
                             {" "}
-                            <strong>Field Verify:</strong>
+                            <strong>Field Verify:</strong>{" "}
                             {E.fieldVerify
                               .map((f) =>
-                                typeof f === "string"
-                                  ? f
-                                  : f.field || f.name || JSON.stringify(f),
+                                humanizeQuoteReason(
+                                  typeof f === "string"
+                                    ? f
+                                    : f.field || f.name || JSON.stringify(f),
+                                ),
                               )
                               .join(", ")}{" "}
                             — estimated from satellite data, tech should confirm
@@ -7245,6 +7247,17 @@ export default function EstimateToolViewV2({
                               </Tag>
                               {R.lawnMeta?.grassName && (
                                 <Tag>{R.lawnMeta.grassName}</Tag>
+                              )}
+                              {R.lawnMeta?.turfConfidence &&
+                                R.lawnMeta.turfConfidence !== "HIGH" && (
+                                  <Tag>
+                                    {R.lawnMeta.turfConfidence === "LOW"
+                                      ? "Low-confidence turf"
+                                      : "Estimated turf"}
+                                  </Tag>
+                                )}
+                              {R.lawnMeta?.turfConfidence === "LOW" && (
+                                <FieldVerifyTag>FIELD VERIFY</FieldVerifyTag>
                               )}
                             </SectionTitle>{" "}
                             <TierGridV2>
@@ -7759,7 +7772,7 @@ export default function EstimateToolViewV2({
                         E.pricingMetadata.warnings?.length > 0 ||
                         E.pricingMetadata.manualReviewReasons?.length > 0) && (
                         <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm text-12 text-zinc-900">
-                          <div className="font-semibold mb-1">Roach Routing Notes</div>
+                          <div className="font-semibold mb-1">Pricing Review Notes</div>
                           {(E.pricingMetadata.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"

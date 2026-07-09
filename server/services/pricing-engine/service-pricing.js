@@ -3786,10 +3786,18 @@ function priceTermiteBait(property, options = {}) {
     ...constructionMult.warnings,
     ...foundationAdj.warnings,
   ]);
+  const storiesSourceForBait = String(property.storiesSource || '').toLowerCase();
   const manualReviewReasons = uniqueList([
     ...measurementState.manualReviewReasons,
     ...constructionMult.warnings,
     ...foundationAdj.warnings,
+    // Perimeter derived from a footprint whose stories count was a guess —
+    // a 2-story home defaulted to 1 story doubles the footprint and inflates
+    // the station count. Review-surfacing only; the price is unchanged.
+    ...((storiesSourceForBait === 'default' || storiesSourceForBait === 'estimated') &&
+      perimeterResolution.source === 'computed_from_footprint'
+      ? ['stories_estimated']
+      : []),
   ]);
   const mon = TERMITE.monitoring[selectedMonitoringTier] || TERMITE.monitoring.basic;
 
@@ -3885,6 +3893,11 @@ function priceTermiteBait(property, options = {}) {
     },
     measurementWarnings,
     requiresMeasurement: false,
+    // stories_estimated stays OUT of requiresManualReview on a priced line:
+    // estimate-converter drops recurring lines flagged requiresManualReview,
+    // so promoting the note here would silently omit a priced termite program
+    // from conversion/scheduling (codex P1). The reason rides in
+    // manualReviewReasons (hoisted to estimate-level metadata) only.
     requiresManualReview: measurementState.requiresManualReview || measurementWarnings.length > 0,
     manualReviewReasons,
     inputSourceSummary: {

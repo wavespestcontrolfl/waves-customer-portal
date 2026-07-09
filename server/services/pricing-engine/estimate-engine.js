@@ -464,6 +464,10 @@ function generateEstimate(input) {
     lawnSqFt: input.lawnSqFt,
     measuredTurfSf: input.measuredTurfSf,
     estimatedTurfSf: input.estimatedTurfSf,
+    turfSource: input.turfSource,
+    countyTurfPriorSf: input.countyTurfPriorSf,
+    countyTurfCeilingSf: input.countyTurfCeilingSf,
+    turfCappedToParcel: input.turfCappedToParcel,
     imperviousSurfacePercent: input.imperviousSurfacePercent,
     imperviosSurfacePercent: input.imperviosSurfacePercent,
     estimatedBedAreaSf: input.estimatedBedAreaSf,
@@ -1646,6 +1650,15 @@ function generateEstimate(input) {
     Number.isFinite(i.renewal)
   ))?.renewal || 0;
   const year2WithRenewal = year2Total + trenchingRenewal;
+
+  // ── 6b. Hoist per-line review reasons to the estimate level ─
+  // Historically only dethatching hoisted its reasons, so missing-footprint,
+  // proxy-mosquito, and fallback-bed reviews stayed buried on the line item
+  // and never reached pricingMetadata (admin routing-notes box, win/loss
+  // slicing). Surfacing metadata only — accept gating is unchanged.
+  lineItems.forEach((item) => {
+    (item.manualReviewReasons || []).forEach(addManualReviewReason);
+  });
 
   // ── 7. Validate margins ────────────────────────────────────
   const marginWarnings = [

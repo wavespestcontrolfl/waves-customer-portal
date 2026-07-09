@@ -5320,7 +5320,7 @@ function EstimateToolView() {
                             color: C.ink,
                           }}
                         >
-                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Roach Routing Notes</div>
+                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Pricing Review Notes</div>
                           {(E.pricingMetadata.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} style={{ color: C.muted }}>
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
