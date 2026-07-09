@@ -10,13 +10,15 @@ jest.mock('../models/db', () => mockDb);
 
 const { cleanStoredName, resolveEstimateContactFields } = require('../routes/estimate-public');
 
-// Minimal knex-ish stub: conn(table).where(...).orderBy(...).first(...) resolves
-// to the fixture row for that table (or null). Tracks which tables were queried.
-function makeConn(tables, queried = []) {
+// Minimal knex-ish stub: conn(table).where(...).whereNull(...).orderBy(...)
+// .first(...) resolves to the fixture row for that table (or null). Tracks
+// which tables were queried and which columns got whereNull filters.
+function makeConn(tables, queried = [], whereNullCols = []) {
   return (tableName) => {
     queried.push(tableName);
     const chain = {
       where: () => chain,
+      whereNull: (col) => { whereNullCols.push(`${tableName}.${col}`); return chain; },
       orderBy: () => chain,
       first: async () => (tables[tableName] === undefined ? null : tables[tableName]),
     };
@@ -98,6 +100,33 @@ describe('resolveEstimateContactFields', () => {
       customerPhone: '9415550000',
       address: '123 Palm Ave, Venice, FL 34285',
     });
+  });
+
+  test('street-less customer address (default city/state only) does not block the lead fallback', async () => {
+    const out = await resolveEstimateContactFields({
+      id: 'est-1', customer_id: 'cust-1',
+      customer_name: 'Deborah', customer_email: null, customer_phone: null, address: null,
+    }, {
+      database: makeConn({
+        customers: { ...CUSTOMER, address_line1: '   ', city: 'Bradenton', state: 'FL', zip: null },
+        leads: {
+          first_name: 'Deborah', last_name: null,
+          email: null, phone: null,
+          address: '55 Shell Rd, Bradenton, FL 34205',
+        },
+      }),
+    });
+    expect(out.address).toBe('55 Shell Rd, Bradenton, FL 34205');
+    expect(out.customerEmail).toBe('deb@example.com');
+  });
+
+  test('lead fallback excludes soft-deleted leads', async () => {
+    const whereNullCols = [];
+    await resolveEstimateContactFields({
+      id: 'est-1', customer_id: null,
+      customer_name: null, customer_email: null, customer_phone: null, address: null,
+    }, { database: makeConn({ leads: null }, [], whereNullCols) });
+    expect(whereNullCols).toContain('leads.deleted_at');
   });
 
   test('stored "First undefined" estimate name is cleaned even with no linked records', async () => {

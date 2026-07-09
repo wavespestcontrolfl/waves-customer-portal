@@ -478,22 +478,30 @@ async function resolveEstimateContactFields(estimate = {}, opts = {}) {
         .where({ id: estimate.customer_id })
         .first('first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip');
       if (customer) {
+        // Region-only output ("Venice, FL 34285" with no street) is worse
+        // than leaving the gap for the lead fallback below — customers rows
+        // minted with default city/state but a blank street must not block
+        // the lead's complete address. Street line required.
+        const customerStreet = String(customer.address_line1 || '').trim();
         fillFrom({
           name: [cleanStoredName(customer.first_name), cleanStoredName(customer.last_name)].filter(Boolean).join(' '),
           email: customer.email,
           phone: customer.phone,
-          address: formatAddress({
-            line1: [customer.address_line1, customer.address_line2].map((v) => String(v || '').trim()).filter(Boolean).join(', '),
-            city: customer.city,
-            state: customer.state,
-            zip: customer.zip,
-          }),
+          address: customerStreet
+            ? formatAddress({
+              line1: [customerStreet, String(customer.address_line2 || '').trim()].filter(Boolean).join(', '),
+              city: customer.city,
+              state: customer.state,
+              zip: customer.zip,
+            })
+            : null,
         });
       }
     }
     if (!complete() && estimate.id) {
       const lead = await conn('leads')
         .where({ estimate_id: estimate.id })
+        .whereNull('deleted_at')
         .orderBy('created_at', 'desc')
         .first('first_name', 'last_name', 'email', 'phone', 'address');
       if (lead) {
