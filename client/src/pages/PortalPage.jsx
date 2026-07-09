@@ -20,8 +20,8 @@ import {
   setupIntentIncompleteMessage,
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
-import { isNativeApp } from '../native/platform';
-import { saveBlobNative } from '../native/nativeFile';
+import { isNativeApp, nativePlatform } from '../native/platform';
+import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
@@ -53,6 +53,59 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   a.click();
   a.remove();
   URL.revokeObjectURL(blobUrl);
+}
+
+// Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
+// into a readable error. Shared by the Documents + Visits report flows.
+async function fetchAuthedPdfBlob(url) {
+  const token = localStorage.getItem('waves_token');
+  let abs = url;
+  try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const contentType = r.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.message || body?.error || 'This document is not ready to download yet.');
+  }
+  return r.blob();
+}
+
+// In-app report preview state for the Capacitor shell (rendered by
+// DocumentPreviewOverlay). Page previews iframe a report route directly;
+// PDF previews fetch Bearer-only endpoints into a blob URL first. The doc
+// passed in needs { id, title, fileName?, pdfUrl? } — pdfUrl drives the
+// overlay's Save-to-share-sheet button.
+function useReportPreview(onError) {
+  const [preview, setPreview] = useState(null); // { doc, src, blob?, blobUrl?, loading? }
+
+  const closePreview = () => {
+    setPreview(p => {
+      if (p?.blobUrl) URL.revokeObjectURL(p.blobUrl);
+      return null;
+    });
+  };
+
+  const openPagePreview = (doc, src) => setPreview({ doc, src });
+
+  const openPdfPreview = (doc, url) => {
+    setPreview({ doc, src: null, loading: true });
+    fetchAuthedPdfBlob(url)
+      .then(blob => {
+        const blobUrl = URL.createObjectURL(blob);
+        setPreview(p => {
+          if (!p || p.doc.id !== doc.id) { URL.revokeObjectURL(blobUrl); return p; }
+          return { doc, src: blobUrl, blob, blobUrl };
+        });
+      })
+      .catch(err => {
+        console.error(err);
+        setPreview(p => (p && p.doc.id === doc.id ? null : p));
+        onError?.(err);
+      });
+  };
+
+  return { preview, openPagePreview, openPdfPreview, closePreview };
 }
 
 // The arrival window quoted to customers is ALWAYS window_start + 2 hours
@@ -1761,6 +1814,9 @@ function ServicesTab() {
   const [photoMap, setPhotoMap] = useState({});
   const [lightbox, setLightbox] = useState(null);
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
+  const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
+    (err) => alert(err?.message || 'Could not open this report. Please try again.')
+  );
 
   const loadServices = useCallback(() => {
     setLoading(true);
@@ -2259,26 +2315,60 @@ function ServicesTab() {
                                 fallback generator 404s for internal-only records. */}
                             {(s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false) && (
                               s.reportUrl ? (
-                                <a
-                                  href={s.reportUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  data-glass-accent="" style={{
-                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
-                                    textDecoration: 'none',
-                                    borderRadius: 8,
-                                  }}
-                                >
-                                  <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
-                                </a>
+                                isNativeApp() ? (
+                                  // Capacitor shell: target=_blank replaces the
+                                  // SPA with no back control (F-017) — render the
+                                  // report in the in-app overlay instead.
+                                  <button
+                                    type="button"
+                                    data-glass-accent=""
+                                    onClick={() => openPagePreview({
+                                      id: s.id,
+                                      title: `Visit Report — ${s.type}`,
+                                      fileName: `Service_Report_${s.date}.pdf`,
+                                      pdfUrl: s.isProjectCompletion ? null : s.reportPdfUrl,
+                                    }, s.reportUrl)}
+                                    style={{
+                                      ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                      borderRadius: 8, cursor: 'pointer',
+                                    }}
+                                  >
+                                    <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                  </button>
+                                ) : (
+                                  <a
+                                    href={s.reportUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    data-glass-accent="" style={{
+                                      ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                      textDecoration: 'none',
+                                      borderRadius: 8,
+                                    }}
+                                  >
+                                    <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                  </a>
+                                )
                               ) : (
                                 // No public reportUrl — the fallback endpoint is
                                 // Bearer-only, so a bare anchor opened a raw 401
                                 // JSON page. Download through authed fetch instead.
+                                // Native (non-Android): render the PDF in the
+                                // in-app overlay; Android's webview can't show
+                                // PDFs inline, so it keeps the share-sheet path.
                                 <button
                                   type="button"
                                   data-glass-accent=""
                                   onClick={() => {
+                                    if (isNativeApp() && nativePlatform() !== 'android') {
+                                      openPdfPreview({
+                                        id: s.id,
+                                        title: `Visit Report — ${s.type}`,
+                                        fileName: `Service_Report_${s.date}.pdf`,
+                                        pdfUrl: api.getServiceReportUrl(s.id),
+                                      }, api.getServiceReportUrl(s.id));
+                                      return;
+                                    }
                                     downloadAuthedPdf(api.getServiceReportUrl(s.id)).catch(() => {
                                       alert('Could not download this report. Please try again.');
                                     });
@@ -2288,7 +2378,7 @@ function ServicesTab() {
                                     borderRadius: 8, cursor: 'pointer',
                                   }}
                                 >
-                                  <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> {isNativeApp() && nativePlatform() !== 'android' ? 'View report' : 'Download PDF'}
                                 </button>
                               )
                             )}
@@ -2304,6 +2394,13 @@ function ServicesTab() {
           </div>
         );
       })}
+      {preview && (
+        <DocumentPreviewOverlay
+          preview={preview}
+          onClose={closePreview}
+          onError={(err) => alert(err?.message || 'Could not save this report. Please try again.')}
+        />
+      )}
       {lightbox && (
         <div onClick={() => setLightbox(null)}
           style={{
@@ -9344,6 +9441,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [notice, setNotice] = useState(null);
   const [shareStatus, setShareStatus] = useState({}); // { docId: 'copying' | 'copied' | shareLink }
+  const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
+    (err) => flash(err?.message || 'Could not open this document. Please try again.', 'error')
+  );
 
   const card = {
     background: B.white,
@@ -9430,7 +9530,31 @@ function DocumentsTab({ customer, onSwitchTab }) {
     URL.revokeObjectURL(blobUrl);
   };
 
+  // PDF endpoint for auto-generated service reports (V1 infographic PDFs are
+  // public token routes; legacy summaries are Bearer-only fallbacks). Project
+  // reports and uploaded documents have no PDF endpoint — returns null.
+  const serviceReportPdfUrl = (doc) =>
+    doc.isAutoGenerated && !doc.isProjectReport && doc.linkedServiceRecordId
+      ? (doc.pdfUrl || api.getServiceReportUrl(doc.linkedServiceRecordId))
+      : null;
+
   const handleDownload = (doc) => {
+    // Capacitor shell: window.open(_blank) and <a download> are both dead
+    // ends in the webview (F-017/F-046) — render the report itself in an
+    // in-app overlay instead. Android's webview can't display PDFs inline,
+    // so PDF-only docs there fall through to the share-sheet download path.
+    if (isNativeApp()) {
+      if (doc.viewUrl || doc.isProjectReport) {
+        openPagePreview({ ...doc, pdfUrl: serviceReportPdfUrl(doc) }, absoluteUrl(doc.viewUrl || doc.downloadUrl));
+        return;
+      }
+      const pdfUrl = serviceReportPdfUrl(doc);
+      if (pdfUrl && nativePlatform() !== 'android') {
+        openPdfPreview({ ...doc, pdfUrl }, pdfUrl);
+        return;
+      }
+    }
+
     if (doc.viewUrl || doc.isProjectReport) {
       window.open(absoluteUrl(doc.viewUrl || doc.downloadUrl), '_blank', 'noopener,noreferrer');
       return;
@@ -9445,17 +9569,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       return;
     }
 
-    const token = localStorage.getItem('waves_token');
-    fetch(absoluteUrl(url), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then(async r => {
-        if (!r.ok) throw new Error(`Download failed (${r.status})`);
-        const contentType = r.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const body = await r.json().catch(() => null);
-          throw new Error(body?.message || body?.error || 'This document is not ready to download yet.');
-        }
-        return r.blob();
-      })
+    fetchAuthedPdfBlob(url)
       .then(blob => downloadBlob(blob, doc.fileName || `${doc.title || 'Waves_Document'}.pdf`))
       .catch(err => {
         console.error(err);
@@ -9466,9 +9580,27 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const handleShare = async (doc) => {
     setShareStatus(prev => ({ ...prev, [doc.id]: 'copying' }));
     try {
+      // Native shell: share the report file itself when a PDF exists — the
+      // OS share sheet previews the document and the recipient receives the
+      // report, not a bare link. Link-only docs (project reports, uploaded
+      // files) go through the Share plugin with a URL; the clipboard path
+      // below is unreliable in the webview. Old binaries without the plugins
+      // fall through to clipboard.
+      if (isNativeApp() && canSaveNative()) {
+        const pdfUrl = serviceReportPdfUrl(doc);
+        if (pdfUrl) {
+          await saveUrlNative(pdfUrl, doc.fileName || `${doc.title || 'Waves_Document'}.pdf`);
+          setShareStatus(prev => ({ ...prev, [doc.id]: null }));
+          return;
+        }
+      }
       const shareLink = doc.viewUrl || doc.isProjectReport
         ? absoluteUrl(doc.viewUrl || doc.downloadUrl)
         : (await api.shareDocument(doc.id)).shareLink;
+      if (isNativeApp() && await shareUrlNative(shareLink, doc.title)) {
+        setShareStatus(prev => ({ ...prev, [doc.id]: null }));
+        return;
+      }
       await navigator.clipboard?.writeText(shareLink);
       setShareStatus(prev => ({ ...prev, [doc.id]: 'copied' }));
       setTimeout(() => setShareStatus(prev => ({ ...prev, [doc.id]: null })), 3000);
@@ -9903,6 +10035,84 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </a>
         </div>
       </section>
+
+      {preview && (
+        <DocumentPreviewOverlay
+          preview={preview}
+          onClose={closePreview}
+          onError={(err) => flash(err?.message || 'Could not save this document. Please try again.', 'error')}
+        />
+      )}
+    </div>
+  );
+}
+
+// Full-screen in-app viewer for the Capacitor shell: the webview has no new
+// tab and no download UI, so "Open"/"Download" render the report itself here
+// instead (report pages via their token route, legacy PDFs via a blob URL —
+// WKWebView displays PDFs inline). Save hands the bytes to the OS share sheet.
+function DocumentPreviewOverlay({ preview, onClose, onError }) {
+  useLockBodyScroll(true);
+  const { doc, src, loading } = preview;
+  const canSave = canSaveNative() && Boolean(preview.blob || doc.pdfUrl);
+  const handleSave = async () => {
+    const fileName = doc.fileName || `${doc.title || 'Waves_Document'}.pdf`;
+    try {
+      if (preview.blob && await saveBlobNative(preview.blob, fileName)) return;
+      if (doc.pdfUrl && await saveUrlNative(doc.pdfUrl, fileName)) return;
+      throw new Error('Could not save this document. Please try again.');
+    } catch (err) {
+      console.error(err);
+      onError?.(err);
+    }
+  };
+  const headerButton = {
+    ...PORTAL_BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #D8D0C0',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '8px 12px',
+    fontSize: 14,
+    minHeight: 38,
+    letterSpacing: 0,
+  };
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} style={{
+      position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: 'calc(env(safe-area-inset-top, 0px) + 10px) 14px 10px',
+        background: B.white, borderBottom: '1px solid #E7E2D7', flexShrink: 0,
+      }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {doc.title || 'Document'}
+        </div>
+        {canSave && (
+          <button type="button" onClick={handleSave} style={headerButton} aria-label="Save or share this document">
+            <Icon name="download" size={15} strokeWidth={2} style={{ marginRight: 5 }} />
+            Save
+          </button>
+        )}
+        <button type="button" onClick={onClose} style={{ ...headerButton, padding: '8px 10px' }} aria-label="Close preview">
+          <Icon name="x" size={16} strokeWidth={2} />
+        </button>
+      </div>
+      {src ? (
+        <iframe
+          src={src}
+          title={doc.title || 'Document preview'}
+          style={{ flex: 1, width: '100%', border: 'none', background: '#fff' }}
+        />
+      ) : (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#475569', fontSize: 14 }}>
+          {loading ? 'Loading your report…' : 'This document is not ready yet.'}
+        </div>
+      )}
     </div>
   );
 }
