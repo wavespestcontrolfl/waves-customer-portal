@@ -1600,6 +1600,13 @@ export default function PayPageV2() {
       .then((body) => {
         if (cancelled) return;
         if (body.alreadyChargeable) {
+          // settled:false = the held credit no longer fully covers — the
+          // invoice is still payable; re-derive real state instead of
+          // showing "covered, nothing due" (Codex #2507 round-9).
+          if (body.settled === false) {
+            window.location.replace(window.location.pathname);
+            return;
+          }
           setSetupCapture({ status: 'done' });
           setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
           return;

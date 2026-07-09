@@ -880,6 +880,21 @@ router.post('/:token/consent', async (req, res, next) => {
       userAgent: req.get('user-agent') || null,
     });
 
+    // An ACH debit that is still PROCESSING must not enroll yet (Codex
+    // #2507 round-9 P2): the status guard above deliberately admits
+    // 'processing' so the consent snapshot is recorded while the customer
+    // is present, but enrolling now would make a brand-new bank account
+    // the default autopay method days before its FIRST debit has cleared
+    // — completion/cron charges could stack debits on an account that
+    // may still bounce. The consent row is durable; the succeeded
+    // webhook's save-card mirror finds it (hasConsentFor) and completes
+    // enrollment after the money actually lands. Cards never sit in
+    // 'processing', so this defers bank tenders only.
+    if (verifiedMethodType === 'us_bank_account' && pi.status !== 'succeeded') {
+      logger.info(`[pay-v2] Consent recorded for processing ACH PI ${pi.id} (invoice ${invoice.id}) — enrollment deferred to the succeeded webhook`);
+      return res.json({ success: true, consentId: row.id, version: row.consent_text_version, enrollmentDeferred: true });
+    }
+
     // Complete consent-gated autopay enrollment (Codex #2507 P1): when
     // Stripe's payment_intent.succeeded beat this POST the method sits
     // saved-but-unenrolled — this call is then the ONLY path that flips
@@ -945,8 +960,15 @@ router.post('/:token/capture-setup', async (req, res) => {
     if (!(await invoiceCaptureNeeded(invoice))) {
       // A chargeable method landed since /setup held the coverage (webhook
       // race, another tab) — the capture step is moot but the held credit
-      // still has to settle the invoice, or it stays open forever.
-      if (heldCoverage) await StripeService.settleHeldCoverage(invoice.id);
+      // still has to settle the invoice, or it stays open forever. Surface
+      // the settle result like /setup-complete does (Codex #2507 round-9
+      // P2): settled:false = the credit shrank after the hold and the
+      // invoice is still payable — the client must reload into the pay
+      // flow, never show "nothing due" against a collectible invoice.
+      if (heldCoverage) {
+        const settle = await StripeService.settleHeldCoverage(invoice.id);
+        return res.json({ alreadyChargeable: true, settled: settle.settled || settle.alreadySettled });
+      }
       return res.json({ alreadyChargeable: true });
     }
     // An unhealthy customer-level ACH state (needs_verification/suspended)
