@@ -131,10 +131,12 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
             's.lng as service_lng',
             's.service_address_line1',
             's.service_address_zip',
+            's.service_address_city',
             'c.latitude',
             'c.longitude',
             'c.address_line1 as customer_address_line1',
-            'c.zip as customer_zip'
+            'c.zip as customer_zip',
+            'c.city as customer_city'
           )
         : db('customers')
           .where({ id: customerId })

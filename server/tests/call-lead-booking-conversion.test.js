@@ -312,6 +312,21 @@ describe('findReusableCallLead', () => {
     expect(database._calls.orWhere).toHaveLength(0);
   });
 
+  test('shared-phone ambiguity (unclaimedOnly) reuses UNCLAIMED leads only', async () => {
+    // The call could belong to ANY of the shared-phone candidates — it must
+    // never enrich a lead one of them owns (codex round-6 P2).
+    const database = makeLookupDb({ id: 'lead-9' });
+
+    const lead = await findReusableCallLead(database, {
+      phone: PHONE, customerId: null, workableUnnamedLead: true, unclaimedOnly: true,
+    });
+
+    expect(lead).toEqual({ id: 'lead-9' });
+    expect(database._calls.whereNull).toContain('customer_id');
+    // Unclaimed-only replaces the ownership group entirely.
+    expect(database._calls.orWhere).toHaveLength(0);
+  });
+
   test('no phone → no lookup at all', async () => {
     const database = makeLookupDb({ id: 'never' });
 

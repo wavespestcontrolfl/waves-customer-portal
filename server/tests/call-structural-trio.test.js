@@ -189,7 +189,10 @@ describe('findCustomerForCallContact cascade', () => {
       service_contact_phone: PHONE, service_contact_name: 'Terry Tenant',
       service_contact_role: 'tenant',
     };
-    mockDbQueue({ customers: [[householdSlot]] });
+    // Round-6: a name-agreeing slot match DEFERS past the fast path (so a
+    // sole primary owner could win) and links via the single-match leg —
+    // the named query and the phone-only fetch each consume a queued result.
+    mockDbQueue({ customers: [[householdSlot], [householdSlot]] });
     expect((await findCustomerForCallContact(PHONE, { first_name: 'Karen' }))?.id).toBe('landlord');
   });
 
@@ -204,6 +207,51 @@ describe('findCustomerForCallContact cascade', () => {
     // V1 Matt won the identity conflict; V2's rejected Sarah must NOT come
     // back as an "additional" contact — only the genuinely-different Rita.
     expect(out.map((c) => c.first_name)).toEqual(['Matt', 'Rita']);
+  });
+
+  test('name fast path defers a slot match so the sole primary owner wins (round-6 P2)', async () => {
+    // Caller "Karen": customer A holds the number in a household slot AND has
+    // a matching account first name; customer B OWNS the number as primary.
+    // The documented cascade prefers the primary owner — the fast path must
+    // not return A before leg (a) can see B.
+    const slotAcct = {
+      id: 'karen-acct', first_name: 'Karen', phone: '+19415559999',
+      service_contact_phone: PHONE, service_contact_name: 'Terry Tenant',
+      service_contact_role: 'tenant', updated_at: '2026-07-09',
+    };
+    const owner = { id: 'owner', first_name: 'Bob', phone: PHONE };
+    mockDbQueue({ customers: [[slotAcct], [slotAcct, owner], [{ n: 2 }]] });
+    expect((await findCustomerForCallContact(PHONE, { first_name: 'Karen' }))?.id).toBe('owner');
+  });
+
+  test('deferred slot match still links when NO primary owner exists (leg a2)', async () => {
+    const slotAcct = {
+      id: 'karen-acct', first_name: 'Karen', phone: '+19415559999',
+      service_contact_phone: PHONE, service_contact_name: 'Terry Tenant',
+      service_contact_role: 'tenant',
+    };
+    const otherSlot = {
+      id: 'other', first_name: 'Zed', phone: '+19415558888',
+      service_contact2_phone: PHONE, service_contact2_name: 'Rhonda Realtor',
+      service_contact2_role: 'real_estate_agent',
+    };
+    mockDbQueue({ customers: [[slotAcct], [slotAcct, otherSlot], [{ n: 2 }]] });
+    expect((await findCustomerForCallContact(PHONE, { first_name: 'Karen' }))?.id).toBe('karen-acct');
+  });
+
+  test('plural list dedups the same person across DIFFERENT identifiers (round-6 P2)', () => {
+    // The merged primary carries a phone; V2's mirror of the same person has
+    // only a name. A single-priority key would count them as two parties and
+    // burn a slot — the real third person must survive.
+    const v1Sarah = { first_name: 'Sarah', last_name: 'Miller', phone: '+19415550101', email: null, role: 'home_buyer', wants_notifications: true, notes: null };
+    const v2SarahNameOnly = { name_full: 'Sarah Miller', first_name: 'Sarah', last_name: 'Miller', phone_e164: null, phone_raw_spoken: null, email: null, role: 'home_buyer', wants_notifications: true, notes: null };
+    const v2Rita = { name_full: 'Rita Doyle', first_name: 'Rita', last_name: 'Doyle', phone_e164: '+19415550303', phone_raw_spoken: null, email: null, role: 'home_seller', wants_notifications: false, notes: null };
+    const v2Tom = { name_full: 'Tom Jones', first_name: 'Tom', last_name: 'Jones', phone_e164: '+19415550404', phone_raw_spoken: null, email: null, role: 'other', wants_notifications: false, notes: null };
+    const out = resolveCallSecondaryContacts(
+      { secondary_contact: v1Sarah },
+      { secondary_contact: v2SarahNameOnly, secondary_contacts: [v2SarahNameOnly, v2Rita, v2Tom] },
+    );
+    expect(out.map((c) => c.first_name)).toEqual(['Sarah', 'Rita', 'Tom']);
   });
 
   test('leg (a): exactly one candidate OWNS the number as primary → linked', async () => {
@@ -350,5 +398,30 @@ describe('stampedAddressDiverges', () => {
 
   test('stamped visit for a customer with no primary on file diverges (no valid fallback)', () => {
     expect(stampedAddressDiverges({ service_address_line1: '456 Rental Ave' })).toBe(true);
+  });
+
+  test('same street in a DIFFERENT city diverges even without ZIPs (round-6 P2)', () => {
+    expect(stampedAddressDiverges({
+      service_address_line1: '100 Main St', service_address_city: 'Sarasota',
+      customer_address_line1: '100 Main St', customer_city: 'Bradenton',
+    })).toBe(true);
+    // Same city (formatting differences fold) → no divergence.
+    expect(stampedAddressDiverges({
+      service_address_line1: '100 Main St', service_address_city: 'Lakewood Ranch ',
+      customer_address_line1: '100 Main St', customer_city: 'lakewood ranch',
+    })).toBe(false);
+    // Missing city on either side is unknown, not different.
+    expect(stampedAddressDiverges({
+      service_address_line1: '100 Main St', service_address_city: 'Sarasota',
+      customer_address_line1: '100 Main St',
+    })).toBe(false);
+  });
+
+  test('inline trailing unit keys the same street (round-6 P2)', () => {
+    // JS streetKey strips the trailing unit; the SQL mirror must agree.
+    expect(stampedAddressDiverges({
+      service_address_line1: '100 Main St Apt 4',
+      customer_address_line1: '100 Main St',
+    })).toBe(false);
   });
 });

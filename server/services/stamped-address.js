@@ -23,15 +23,24 @@
 
 const { streetKey, normalizeZip } = require('./customer-properties');
 
+const cityKey = (v) => String(v == null ? '' : v).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+
 // JS form. Expects row keys: service_address_line1, service_address_zip,
-// customer_address_line1, customer_zip.
+// service_address_city, customer_address_line1, customer_zip, customer_city.
+// ZIP and city legs each require BOTH sides present — a missing value is
+// unknown, not different. City matters when ZIPs can't disambiguate:
+// "100 Main St, Sarasota" vs "100 Main St, Bradenton" are different houses
+// (codex round-6 P2).
 function stampedAddressDiverges(row = {}) {
   const stamped = streetKey(row.service_address_line1);
   if (!stamped) return false;
   if (stamped !== streetKey(row.customer_address_line1)) return true;
   const sZip = normalizeZip(row.service_address_zip);
   const cZip = normalizeZip(row.customer_zip);
-  return !!(sZip && cZip && sZip !== cZip);
+  if (sZip && cZip && sZip !== cZip) return true;
+  const sCity = cityKey(row.service_address_city);
+  const cCity = cityKey(row.customer_city);
+  return !!(sCity && cCity && sCity !== cCity);
 }
 
 // SQL mirror of streetKey's suffix canonicalization: abbreviations EXPAND to
@@ -46,8 +55,14 @@ const SQL_SUFFIX_CANON = [
 ];
 
 function sqlStreetKey(col) {
-  // lowercase + punctuation to spaces, matching canonicalizeAddress()
-  let expr = `LOWER(regexp_replace(COALESCE(${col}, ''), '[.,#]', ' ', 'g'))`;
+  // lowercase, then strip a trailing inline unit BEFORE punctuation folds —
+  // mirrors streetKey()'s stripTrailingUnit so "100 Main St Apt 4" keys the
+  // same street as "100 Main St" (codex round-6 P2: JS/SQL drift here
+  // suppressed fallbacks for ordinary primary-unit bookings).
+  let expr = `LOWER(COALESCE(${col}, ''))`;
+  expr = `regexp_replace(${expr}, '\\s+(apt|apartment|unit|ste|suite|#)\\.?\\s*[a-z0-9-]+\\s*$', '')`;
+  // punctuation to spaces, matching canonicalizeAddress()
+  expr = `regexp_replace(${expr}, '[.,#]', ' ', 'g')`;
   for (const [abbr, full] of SQL_SUFFIX_CANON) {
     // \m / \M are Postgres word boundaries — "st" the word, not "st" in "castle"
     expr = `regexp_replace(${expr}, '\\m${abbr}\\M', '${full}', 'g')`;
@@ -56,6 +71,7 @@ function sqlStreetKey(col) {
 }
 
 const sqlZip5 = (col) => `substring(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') from 1 for 5)`;
+const sqlCityKey = (col) => `regexp_replace(LOWER(COALESCE(${col}, '')), '[^a-z0-9]', '', 'g')`;
 
 // SQL form of the same predicate, for query-time coordinate guards.
 // sAlias/cAlias are the scheduled_services / customers table aliases.
@@ -64,9 +80,12 @@ function stampedDivergesSql(sAlias, cAlias) {
   const cLine1 = `${cAlias}.address_line1`;
   const sZip = `${sAlias}.service_address_zip`;
   const cZip = `${cAlias}.zip`;
+  const sCity = `${sAlias}.service_address_city`;
+  const cCity = `${cAlias}.city`;
   return `(${sLine1} IS NOT NULL AND NULLIF(${sqlStreetKey(sLine1)}, '') IS NOT NULL AND (`
     + `${sqlStreetKey(sLine1)} <> ${sqlStreetKey(cLine1)}`
     + ` OR (NULLIF(${sqlZip5(sZip)}, '') IS NOT NULL AND NULLIF(${sqlZip5(cZip)}, '') IS NOT NULL AND ${sqlZip5(sZip)} <> ${sqlZip5(cZip)})`
+    + ` OR (NULLIF(${sqlCityKey(sCity)}, '') IS NOT NULL AND NULLIF(${sqlCityKey(cCity)}, '') IS NOT NULL AND ${sqlCityKey(sCity)} <> ${sqlCityKey(cCity)})`
     + `))`;
 }
 

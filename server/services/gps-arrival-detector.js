@@ -277,8 +277,10 @@ async function loadCurrentService(currentJobId) {
       's.lng as service_lng',
       's.service_address_line1 as service_address_line1',
       's.service_address_zip as service_address_zip',
+      's.service_address_city as service_address_city',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
+      'c.city as customer_city',
       'c.latitude as customer_latitude',
       'c.longitude as customer_longitude'
     );

@@ -653,21 +653,24 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
       || (!c.phone && !c.email && norm(c.first_name) === norm(v2Single.first_name) && norm(c.last_name || '') === norm(v2Single.last_name || ''))
     ));
   }
-  const keyOf = (c) => {
-    const digits = String(c.phone || '').replace(/\D/g, '').slice(-10);
-    if (digits) return `p:${digits}`;
-    const email = String(c.email || '').trim().toLowerCase();
-    if (email) return `e:${email}`;
-    const name = [c.first_name, c.last_name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ');
-    return name ? `n:${name}` : null;
-  };
+  // Dedup by ANY shared identifier, not a single priority key: the merged
+  // primary entry may carry a phone while V2's mirror of the same person has
+  // only an email/name — a one-key scheme gives them different keys and the
+  // duplicate burns one of the three slots, dropping a real third party
+  // (codex round-6 P2).
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const nameOf = (c) => [c.first_name, c.last_name].map(norm).filter(Boolean).join(' ');
+  const sameParty = (a, b) => (
+    (last10(a.phone) && last10(a.phone) === last10(b.phone))
+    || (norm(a.email) && norm(a.email) === norm(b.email))
+    || (nameOf(a) && nameOf(a) === nameOf(b))
+  );
   const out = [];
-  const seen = new Set();
   for (const candidate of [primary, ...v2List]) {
     if (!candidate) continue;
-    const key = keyOf(candidate);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
+    if (!last10(candidate.phone) && !norm(candidate.email) && !nameOf(candidate)) continue;
+    if (out.some((c) => sameParty(c, candidate))) continue;
     out.push(candidate);
     if (out.length >= 3) break;
   }
@@ -892,6 +895,9 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     if (preferred && customerPhoneMatches(phone, preferred)) return preferred;
   }
 
+  // A name-agreeing slot match found by the fast path but deferred until the
+  // sole-primary-owner check can run (codex round-6 P2).
+  let deferredSlotNamed = null;
   const firstName = normalizeNamePart(extracted.first_name);
   if (firstName) {
     // Nickname-tolerant: "Bob" matches a record filed as "Robert" — the phone
@@ -916,10 +922,13 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     // phone. A slot-phone hit (base() searches those too) whose account
     // first name happens to match the caller must still pass the slot-role
     // gating below — a realtor stored on a same-named customer would
-    // otherwise link and book on the old account (codex round-2 P1).
+    // otherwise link and book on the old account (codex round-2 P1). And
+    // even a role-passing slot match must not outrank the number's sole
+    // PRIMARY owner (cascade leg (a)) — defer it into the multi-match
+    // branch so the owner check runs first (codex round-6 P2).
     if (named && extractedNameMatchesCustomer(extracted, named)) {
       if (matchedViaPrimary(named)) return named;
-      if (slotOnlyLinkAllowed(named, phone, extracted)) return named;
+      if (slotOnlyLinkAllowed(named, phone, extracted)) deferredSlotNamed = named;
     }
     // No name match — but the AI-extracted name is frequently wrong (it can pick
     // up the technician's name from the call audio, e.g. "Adam"). Returning null
@@ -955,6 +964,11 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     //     merely hold it in a service-contact slot): the primary owns it.
     const primaryOwners = matches.filter(matchedViaPrimary);
     if (primaryOwners.length === 1) return primaryOwners[0];
+    // (a2) No sole primary owner — a fast-path slot match whose account name
+    //      agrees with the caller AND whose slot role passes the household
+    //      gating is the next-strongest signal (deferred from above so leg
+    //      (a) could run first; codex round-6 P2).
+    if (deferredSlotNamed) return deferredSlotNamed;
     // (A unique slot-only hit already returned at matches.length === 1 —
     // the slot columns are part of base(). Two customers holding the same
     // number in slots stays ambiguous on purpose: realtors/property managers
@@ -1047,13 +1061,19 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead }) {
+async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead, unclaimedOnly }) {
   if (!phone) return null;
   let query = database('leads').where('phone', phone).whereNull('deleted_at');
   if (workableUnnamedLead) {
     query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
-  if (customerId) {
+  if (unclaimedOnly) {
+    // Shared-phone ambiguity: the call could belong to ANY of the candidate
+    // customers, so it must never reuse (and enrich) a lead one of them owns
+    // — another caller's transcript would land on the wrong customer's lead
+    // while the office adjudicates (codex round-6 P2).
+    query = query.whereNull('customer_id');
+  } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   return query.orderBy('created_at', 'desc').first();
@@ -4098,8 +4118,15 @@ const CallRecordingProcessor = {
         // for the per-path filters: soft-deleted excluded always; active-only
         // on the customer-less recovery path; unclaimed-or-ours on the
         // customer-attached path, so a shared-phone lead owned by another
-        // customer is never reused/overwritten).
-        const existingLead = await findReusableCallLead(db, { phone, customerId, workableUnnamedLead });
+        // customer is never reused/overwritten; UNCLAIMED-only when the phone
+        // is ambiguous across customers — this call must not enrich a lead
+        // one of the candidates owns while the office adjudicates).
+        const existingLead = await findReusableCallLead(db, {
+          phone,
+          customerId,
+          workableUnnamedLead,
+          unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+        });
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.

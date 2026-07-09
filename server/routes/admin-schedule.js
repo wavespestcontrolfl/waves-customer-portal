@@ -2732,8 +2732,10 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.payer_id', 'scheduled_services.po_number',
         'customers.first_name', 'customers.last_name',
         // Stamped visit-specific address wins over the primary mirror here
-        // too — this list is a display surface for the booked property.
-        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address'),
+        // too — this list is a display surface for the booked property. The
+        // unit line rides along (condo/duplex visits are indistinguishable
+        // by street alone — codex round-6 P2).
+        db.raw(`TRIM(CONCAT(COALESCE(scheduled_services.service_address_line1, customers.address_line1), ' ', COALESCE(${stampedLine2Sql('scheduled_services', 'customers')}, ''))) as address`),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
