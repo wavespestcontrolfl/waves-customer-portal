@@ -98,7 +98,8 @@ function enqueue(table, cfg) {
   (queues[table] = queues[table] || []).push(cfg);
 }
 
-// 11:00 ET on a Wednesday — inside the 9a-5p send window.
+// 11:00 ET on a Wednesday. (The global quiet-hours send guard was removed
+// on main — sends fire whenever the cron ticks.)
 const NOW = new Date('2026-06-10T15:00:00Z');
 
 function baseEstimate(overrides = {}) {
@@ -251,15 +252,6 @@ describe('questions touch (touch 1)', () => {
     ]);
   });
 
-  test('quiet hours skip: never texts outside 9a-5p ET', async () => {
-    enqueue('estimates', { rows: [baseEstimate()] });
-
-    const sent = await _private.checkQuestionsTouch(new Date('2026-06-10T23:30:00Z'));
-
-    expect(sent).toBe(0);
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(updates).toEqual([]);
-  });
 });
 
 describe('day-5 check-in (touch 2 — the offer slot)', () => {

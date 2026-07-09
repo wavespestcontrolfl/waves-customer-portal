@@ -1,0 +1,476 @@
+/* Liquid-glass theme for the customer estimate page (PR A — visual only).
+   Active only when EstimateGlassTheme is mounted (?glass=1); every rule is
+   scoped under html[data-glass-theme] so nothing leaks when the gate is off.
+   Spec: docs/design/estimate-glass-plan.md (owner-approved 2026-07-04). */
+
+html[data-glass-theme] {
+  --glass-bg: rgba(255, 255, 255, 0.32);
+  --glass-border: rgba(255, 255, 255, 0.62);
+  --glass-blur: 32px;
+  --glass-sat: 185%;
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --accent: 10, 126, 194;
+  --brand: #04395e;
+  --ts: rgba(12, 21, 40, 0.7);
+  /* .66 (was .52): AA-safe on white AND the translucent cards. */
+  --tt: rgba(12, 21, 40, 0.66);
+  scroll-behavior: smooth;
+  background-attachment: fixed;
+  /* Brand-token chrome (WavesShell pages): the page wash drops so the
+     scene shows through — same effect the estimate walker gets by
+     matching computed page colors. */
+  --page: transparent;
+  /* The remaining warm/marketing brand tokens remap to the glass system
+     while the theme is mounted — otherwise WavesShell chrome and every
+     var(--text)/var(--border) consumer keeps rendering the old navy
+     #1B2C5B ink and warm #E7E2D7 hairlines over the scene. --surface
+     stays white (cards carry data-glass) and status colors stay reserved. */
+  --text: #04395e;
+  --border: rgba(4, 57, 94, 0.16);
+  --border-strong: rgba(4, 57, 94, 0.24);
+  --brand-soft: rgba(4, 57, 94, 0.08);
+  --brand-ring: rgba(4, 57, 94, 0.18);
+}
+
+/* ---------- native-markup helpers ----------
+   Attribute hooks for surfaces that author data-glass markup natively
+   (no classify() walker). Inert without html[data-glass-theme]. */
+/* Glass hosts anchor their own ::before/::after sheen overlays (and any
+   absolutely-positioned children). The classifier set position:relative
+   inline on every element it tagged; native surfaces get it here. In
+   browsers with backdrop-filter this is a no-op — the filter already
+   makes each glass element a containing block — but where the filter is
+   unsupported the sheen must not spill outside the card. Inline
+   position styles (fixed scrims, sticky headers) still win over this. */
+html[data-glass-theme] [data-glass] {
+  position: relative;
+}
+/* Warm/wash panels that should let the scene through under glass. */
+html[data-glass-theme] [data-glass-clear] {
+  background: transparent !important;
+}
+/* Small interactive chips read as pills under glass (walker parity for
+   buttons/links up to ~56px tall). */
+html[data-glass-theme] [data-glass-pill] {
+  border-radius: 999px !important;
+}
+/* Dark brand panels deliberately preserved under glass (newsletter hero,
+   dark banners): the global heading repaint to var(--brand) would render
+   navy-on-navy inside them. Container opt-out restores light ink. */
+html[data-glass-theme] [data-glass-ink="light"] h1,
+html[data-glass-theme] [data-glass-ink="light"] h2,
+html[data-glass-theme] [data-glass-ink="light"] h3,
+html[data-glass-theme] [data-glass-ink="light"] h4 {
+  color: #fff !important;
+}
+
+/* ---------- type system ---------- */
+html[data-glass-theme] *:not(svg):not(path) {
+  /* Owner-approved stack 2026-07-06 — the ONLY customer type family;
+     serif declarations were removed from the estimate components to match. */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+html[data-glass-theme] h1 {
+  font-size: clamp(2.125rem, 4.5vw, 3.3rem) !important;
+  font-weight: 700 !important;
+  line-height: 1.04 !important;
+  letter-spacing: -0.035em !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] h2 {
+  font-size: clamp(1.6rem, 2.6vw, 2rem) !important;
+  font-weight: 600 !important;
+  line-height: 1.1 !important;
+  letter-spacing: -0.03em !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] h3,
+html[data-glass-theme] h4 {
+  font-weight: 600 !important;
+  line-height: 1.18 !important;
+  letter-spacing: -0.02em !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] button,
+html[data-glass-theme] button * {
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+}
+/* Anchor CTAs styled as buttons (gold accents, chips) get the same type
+   normalization as real buttons — mixed inline weights (700/800/850) read
+   as different fonts when they sit side by side. */
+html[data-glass-theme] a[data-glass-accent],
+html[data-glass-theme] a[data-glass-accent] *,
+html[data-glass-theme] a[data-glass="chip"],
+html[data-glass-theme] a[data-glass="chip"] * {
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+}
+html[data-glass-theme] [data-gt="eyebrow"] {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.11em !important;
+  line-height: 1.2 !important;
+  color: var(--ts) !important;
+  text-transform: uppercase;
+}
+html[data-glass-theme] [data-gt="metric"] {
+  font-weight: 700 !important;
+  letter-spacing: -0.035em !important;
+  line-height: 1 !important;
+  font-variant-numeric: tabular-nums !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] [data-gt="fine"] {
+  font-size: 12px !important; /* 12px floor (was 11.5) — a11y pass 2026-07-06 */
+  line-height: 1.45 !important;
+  font-weight: 400 !important;
+  letter-spacing: 0.005em !important;
+  color: var(--tt) !important;
+}
+html[data-glass-theme] [data-gt="body"] {
+  line-height: 1.5 !important;
+  letter-spacing: -0.005em !important;
+}
+html[data-glass-theme] [data-gt="h2x"] {
+  font-size: clamp(1.6rem, 2.6vw, 2rem) !important;
+  font-weight: 600 !important;
+  line-height: 1.1 !important;
+  letter-spacing: -0.03em !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] [data-gt="h3x"] {
+  font-size: 1.35rem !important;
+  font-weight: 600 !important;
+  line-height: 1.18 !important;
+  letter-spacing: -0.02em !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] [data-g-contact],
+html[data-glass-theme] [data-g-contact] * {
+  font-weight: 700 !important;
+}
+html[data-glass-theme] [data-g-stattile] * {
+  font-size: 15px !important;
+}
+html[data-glass-theme] [data-g-stattile] [data-gt="eyebrow"] {
+  font-size: 11px !important;
+}
+html[data-glass-theme] [data-g-pricerow] {
+  display: flex !important;
+  align-items: baseline !important;
+  gap: 0.4em;
+  flex-wrap: wrap;
+}
+html[data-glass-theme] [data-g-footer],
+html[data-glass-theme] [data-g-footer] * {
+  color: var(--brand) !important;
+}
+html[data-glass-theme] [data-g-footer] svg,
+html[data-glass-theme] [data-g-footer] svg * {
+  fill: var(--brand) !important;
+}
+
+/* ---------- glass surfaces ---------- */
+html[data-glass-theme] [data-glass] {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.08)),
+    var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) !important;
+  transition: transform 480ms var(--spring), box-shadow 480ms var(--spring),
+    border-color 320ms ease, background 320ms ease !important;
+  box-shadow: 0 28px 90px rgba(4, 57, 94, 0.18), 0 5px 18px rgba(4, 57, 94, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.52), inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+    inset 1px 1px 0 rgba(175, 225, 255, 0.32), inset -1px -1px 0 rgba(255, 210, 160, 0.2) !important;
+}
+html[data-glass-theme] [data-glass="soft"] {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.15)),
+    var(--glass-bg) !important;
+  backdrop-filter: blur(18px) saturate(165%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(165%) !important;
+  box-shadow: 0 8px 26px rgba(4, 57, 94, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    inset 1px 1px 0 rgba(175, 225, 255, 0.22), inset -1px -1px 0 rgba(255, 210, 160, 0.14) !important;
+}
+html[data-glass-theme] [data-glass="chip"] {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.1)),
+    rgba(255, 255, 255, 0.22) !important;
+  backdrop-filter: blur(18px) saturate(170%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(170%) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42), 0 8px 22px rgba(4, 57, 94, 0.1),
+    inset 1px 1px 0 rgba(175, 225, 255, 0.24) !important;
+}
+html[data-glass-theme] [data-glass]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(280px circle at var(--mx, 22%) var(--my, -8%),
+    rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.1) 22%, transparent 50%);
+  opacity: 0;
+  transition: opacity 240ms ease;
+  z-index: 1;
+}
+html[data-glass-theme] [data-glass]:hover::before {
+  opacity: 0.65;
+}
+html[data-glass-theme] [data-glass]::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.42), transparent 22%,
+    transparent 70%, rgba(255, 255, 255, 0.14));
+  mix-blend-mode: screen;
+  opacity: 0.55;
+  z-index: 1;
+}
+html[data-glass-theme] [data-glass="card"]:hover {
+  transform: translateY(-4px) scale(1.016);
+  border-color: rgba(255, 255, 255, 0.8) !important;
+  box-shadow: 0 36px 110px rgba(4, 57, 94, 0.24), 0 0 44px rgba(var(--accent), 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.62), inset 1px 1px 0 rgba(175, 225, 255, 0.4) !important;
+}
+/* hover feedback localizes to what the pointer is actually over */
+html[data-glass-theme] [data-glass="card"]:hover:has(button:hover, a:hover, select:hover, input:hover, [data-glass]:hover) {
+  transform: none;
+  border-color: var(--glass-border) !important;
+  box-shadow: 0 28px 90px rgba(4, 57, 94, 0.18), 0 5px 18px rgba(4, 57, 94, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.52), inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+    inset 1px 1px 0 rgba(175, 225, 255, 0.32), inset -1px -1px 0 rgba(255, 210, 160, 0.2) !important;
+}
+html[data-glass-theme] [data-glass="card"]:hover:has(button:hover, a:hover, select:hover, input:hover, [data-glass]:hover)::before {
+  opacity: 0;
+}
+html[data-glass-theme] [data-glass="chip"]:hover {
+  transform: translateY(-1px);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.44), rgba(255, 255, 255, 0.16)),
+    rgba(255, 255, 255, 0.3) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 10px 26px rgba(4, 57, 94, 0.13),
+    0 0 22px rgba(var(--accent), 0.2) !important;
+}
+html[data-glass-theme] [data-glass="chip"]:active {
+  transform: scale(0.97);
+}
+html[data-glass-theme] [data-glass="card"]:active {
+  transform: translateY(-1px) scale(0.994);
+}
+html[data-glass-theme] [data-glass]:focus-visible {
+  outline: 2px solid rgba(var(--accent), 0.9);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 5px rgba(var(--accent), 0.18), 0 16px 48px rgba(4, 57, 94, 0.16) !important;
+}
+html[data-glass-theme] button:not([data-glass]):not([data-glass-accent]) {
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+html[data-glass-theme] button:not([data-glass]):not([data-glass-accent]):hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+/* ---------- gold accent CTAs ---------- */
+html[data-glass-theme] [data-glass-accent] {
+  background: linear-gradient(135deg, rgba(255, 222, 120, 0.6), rgba(244, 176, 20, 0.45)),
+    rgba(240, 165, 0, 0.38) !important;
+  border: 1px solid rgba(255, 238, 180, 0.92) !important;
+  backdrop-filter: blur(18px) saturate(175%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(175%) !important;
+  box-shadow: 0 10px 26px rgba(180, 110, 0, 0.22), 0 0 18px rgba(240, 165, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32), inset 0 -2px 8px rgba(180, 110, 0, 0.18),
+    inset 1px 1px 0 rgba(255, 246, 210, 0.24) !important;
+  overflow: hidden;
+  transition: transform 300ms var(--spring), box-shadow 300ms ease !important;
+  position: relative;
+}
+html[data-glass-theme] [data-glass-accent],
+html[data-glass-theme] [data-glass-accent] * {
+  color: #1b2c5b !important;
+  fill: #1b2c5b;
+}
+html[data-glass-theme] [data-glass-accent]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(240px circle at var(--mx, 25%) var(--my, -10%),
+    rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.07) 24%, transparent 50%);
+  opacity: 0;
+  transition: opacity 240ms ease;
+}
+html[data-glass-theme] [data-glass-accent]:hover::before {
+  opacity: 0.4;
+}
+html[data-glass-theme] [data-glass-accent]::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.22), transparent 38%);
+  opacity: 0.35;
+}
+html[data-glass-theme] [data-glass-accent]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(180, 110, 0, 0.18), 0 0 14px rgba(240, 165, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
+}
+html[data-glass-theme] [data-glass-accent]:active {
+  transform: scale(0.97);
+}
+html[data-glass-theme] [data-glass-accent]:disabled {
+  opacity: 0.55;
+  box-shadow: 0 6px 18px rgba(180, 110, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.5) !important;
+}
+
+/* ---------- payment dialogs ---------- */
+/* Modals carry the strongest glass — the user is making the decision here,
+   so the surface gets more opacity for focus (master-prompt modal ratios). */
+html[data-glass-theme] [data-glass="modal"] {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.28)),
+    rgba(255, 255, 255, 0.5) !important;
+  backdrop-filter: blur(36px) saturate(190%) !important;
+  -webkit-backdrop-filter: blur(36px) saturate(190%) !important;
+  border: 1px solid rgba(255, 255, 255, 0.75) !important;
+  border-radius: 24px !important;
+  box-shadow: 0 40px 120px rgba(4, 57, 94, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 1px 1px 0 rgba(175, 225, 255, 0.35) !important;
+}
+html[data-glass-theme] [data-glass-scrim] {
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.08), transparent 45%),
+    rgba(4, 57, 94, 0.38) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* ---------- pro variant (invoices / receipts / statements) ---------- */
+/* Financial documents keep the glass material but drop the theatrics: no
+   specular shine, no hover lift, flatter shadows, quieter scene. */
+html[data-glass-theme="pro"] [data-glass]::before {
+  display: none;
+}
+html[data-glass-theme="pro"] [data-glass="card"]:hover,
+html[data-glass-theme="pro"] [data-glass="chip"]:hover,
+html[data-glass-theme="pro"] [data-glass="card"]:active,
+html[data-glass-theme="pro"] [data-glass="chip"]:active {
+  transform: none;
+}
+html[data-glass-theme="pro"] [data-glass] {
+  box-shadow: 0 12px 36px rgba(4, 57, 94, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.5) !important;
+  transition: box-shadow 240ms ease, border-color 240ms ease !important;
+}
+html[data-glass-theme="pro"] [data-glass="soft"] {
+  box-shadow: 0 4px 14px rgba(4, 57, 94, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.45) !important;
+}
+html[data-glass-theme="pro"] [data-glass-accent]:hover {
+  transform: none;
+}
+html[data-glass-theme="pro"] h1 {
+  font-size: clamp(1.9rem, 3.4vw, 2.4rem) !important;
+}
+
+/* ---------- scene layers / misc ---------- */
+html[data-glass-theme] .glass-scene-orbs {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+html[data-glass-theme] .glass-scene-grain {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background-size: 180px 180px;
+  opacity: 0.6;
+}
+html[data-glass-theme] input,
+html[data-glass-theme] select,
+html[data-glass-theme] textarea {
+  position: relative;
+  z-index: 2;
+}
+html[data-glass-theme] [data-glass].glass-reveal-pending {
+  opacity: 0 !important;
+  transform: translateY(16px) !important;
+}
+html[data-glass-theme] [data-glass].glass-reveal-in {
+  transition: transform 0.6s var(--spring), box-shadow 0.5s var(--spring),
+    opacity 0.6s ease, border-color 0.3s ease !important;
+}
+
+@media (max-width: 640px) {
+  html[data-glass-theme] {
+    --glass-blur: 20px;
+  }
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="chip"] {
+    backdrop-filter: blur(14px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(14px) saturate(165%) !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass-accent] {
+    transition: none !important;
+  }
+  html[data-glass-theme] [data-glass]:hover,
+  html[data-glass-theme] [data-glass-accent]:hover {
+    transform: none !important;
+  }
+  html[data-glass-theme] [data-glass].glass-reveal-pending {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="chip"] {
+    background: rgba(255, 255, 255, 0.93) !important;
+  }
+}
+
+/* ---------- print (a11y/design audit 2026-07-06) ----------
+   Estimates had NO print path: grain printed over content, sticky bars
+   repeated every page, translucent cards collapsed to faint washes. */
+@media print {
+  .glass-scene-orbs,
+  .glass-scene-grain,
+  .gc-mbb,
+  html[data-glass-theme] .gc-mbb,
+  [data-waves-shell-header] {
+    display: none !important;
+    visibility: hidden !important;
+  }
+  /* Below-fold cards are opacity:0 until the reveal IntersectionObserver
+     fires — nothing scrolls in print, so without this everything below the
+     first viewport prints BLANK (verified via print-to-pdf 2026-07-07). */
+  html[data-glass-theme] [data-glass].glass-reveal-pending {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  [data-glass] {
+    break-inside: avoid;
+  }
+  html[data-glass-theme],
+  html[data-glass-theme] body {
+    background: #fff !important;
+  }
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass-clear],
+  html[data-glass-theme] [data-g-footer] {
+    background: #fff !important;
+    box-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border-color: #d7d2c4 !important;
+  }
+}

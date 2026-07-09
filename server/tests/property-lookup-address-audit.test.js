@@ -1,0 +1,521 @@
+/**
+ * House-number audit: when every property provider comes back empty, the
+ * lookup checks the typed house number against the county roll's situs
+ * addresses for the same street, so the data-quality panel can say "house
+ * number not on the county roll — nearest existing: N" (typo / misheard call
+ * transcription) instead of an unexplained all-zeros panel.
+ *
+ * Real case this encodes: a voice transcription produced "4867 Tober Morey
+ * Way" — Google geocodes the nonexistent 4867 happily, every provider fails
+ * closed, and the actual parcel (deed on file) is 4857 Tobermory Way.
+ */
+
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+
+const { auditAddressHouseNumber, hasCountyEvidence } = require('../services/property-lookup/ai-property-lookup');
+const { queryStreetSitusAddresses } = require('../services/property-lookup/county-parcel-gis');
+const { buildFieldVerifyFlags, typedNumberDisagreesWithRecord } = require('../routes/property-lookup-v2')._private;
+
+// Manatee layer response shape; multi-situs strings (paired villas share a
+// parcel) carry several addresses in one field, semicolon-delimited.
+const TOBERMORY_SITUS = [
+  ';4834 TOBERMORY WAY;4836 TOBERMORY WAY;',
+  '4853 TOBERMORY WAY',
+  '4857 TOBERMORY WAY',
+  '4903 TOBERMORY WAY',
+];
+
+function mockSitusResponse(situsList) {
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      features: situsList.map((s) => ({ attributes: { SITUS_ADDRESS: s } })),
+    }),
+  });
+}
+
+const realFetch = global.fetch;
+afterEach(() => {
+  global.fetch = realFetch;
+  jest.clearAllMocks();
+  delete process.env.COUNTY_PARCEL_GIS_DISABLED;
+});
+
+// Zip 34211 opens the Manatee gate without needing a geocode.
+const BAD_ADDRESS = '4867 Tobermory Way, Bradenton, FL 34211, USA';
+const GOOD_ADDRESS = '4857 Tobermory Way, Bradenton, FL 34211, USA';
+
+describe('auditAddressHouseNumber', () => {
+  test('nonexistent house number on an existing street → nearest numbers', async () => {
+    mockSitusResponse(TOBERMORY_SITUS);
+
+    const audit = await auditAddressHouseNumber(BAD_ADDRESS);
+
+    expect(audit).toMatchObject({
+      county: 'Manatee',
+      houseNumber: 4867,
+      streetLabel: 'TOBERMORY WAY',
+      streetExists: true,
+      hasExactMatch: false,
+      parcelCount: 4,
+    });
+    // 4857 (Δ10) and 4853 (Δ14) beat the paired-villa numbers (Δ31+)
+    expect(audit.nearestNumbers).toContain(4857);
+    expect(audit.nearestNumbers).toContain(4853);
+    expect(audit.nearestNumbers).not.toContain(4867);
+  });
+
+  test('existing house number → exact match, no nearest list', async () => {
+    mockSitusResponse(TOBERMORY_SITUS);
+
+    const audit = await auditAddressHouseNumber(GOOD_ADDRESS);
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+    expect(audit.nearestNumbers).toEqual([]);
+  });
+
+  test('a GIS failure yields NO audit — an outage must not read as "street missing"', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('gis down'));
+
+    const audit = await auditAddressHouseNumber(BAD_ADDRESS);
+
+    expect(audit).toBeNull();
+  });
+
+  test('roll answered with zero matches → streetExists false (misspelling / new plat)', async () => {
+    mockSitusResponse([]);
+
+    const audit = await auditAddressHouseNumber('4867 Tober Morey Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({
+      county: 'Manatee',
+      streetExists: false,
+      hasExactMatch: false,
+      parcelCount: 0,
+    });
+  });
+
+  test('LP↔LOOP live miss: typed "Lp" audits against a roll that spells LOOP', async () => {
+    // 2026-07-08: "14384 Skipping Stone Lp, Parrish" — the street IS on the
+    // Manatee roll (178 LOOP parcels) but the pre-fix suffix tables knew
+    // neither LP nor LOOP, so the audit reported street-not-found instead of
+    // "number missing — nearest 14383/14388" (the actionable verdict: 14384
+    // is a brand-new Canoe Creek lot not yet on the roll).
+    mockSitusResponse([
+      '14375 SKIPPING STONE LOOP',
+      '14380 SKIPPING STONE LOOP',
+      '14383 SKIPPING STONE LOOP',
+      '14388 SKIPPING STONE LOOP',
+    ]);
+
+    const audit = await auditAddressHouseNumber('14384 Skipping Stone Lp, Parrish, FL 34219, USA');
+
+    expect(audit).toMatchObject({
+      county: 'Manatee',
+      houseNumber: 14384,
+      streetLabel: 'SKIPPING STONE LOOP',
+      streetExists: true,
+      hasExactMatch: false,
+      parcelCount: 4,
+    });
+    expect(audit.nearestNumbers).toContain(14383);
+    expect(audit.nearestNumbers).toContain(14388);
+  });
+
+  test('address outside every serviced county gate → null', async () => {
+    mockSitusResponse(TOBERMORY_SITUS);
+
+    const audit = await auditAddressHouseNumber('100 Biscayne Blvd, Miami, FL 33132');
+
+    expect(audit).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('address without a leading house number → null', async () => {
+    mockSitusResponse(TOBERMORY_SITUS);
+
+    const audit = await auditAddressHouseNumber('Tobermory Way, Bradenton, FL 34211');
+
+    expect(audit).toBeNull();
+  });
+
+  test('unit designators are stripped before auditing the street', async () => {
+    mockSitusResponse(['123 MAIN ST', '125 MAIN ST']);
+
+    const audit = await auditAddressHouseNumber('123 Main St Apt 4, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetLabel: 'MAIN ST', streetExists: true, hasExactMatch: true });
+  });
+
+  test('relaxed matcher does not treat a longer street name as this street', async () => {
+    // Typed "100 Pine Way"; roll only has "Pine Ridge Way". The relaxed
+    // fallback must not collect 100 from the longer street and fake an
+    // exact match — the correct verdict is street-not-found.
+    mockSitusResponse(['100 PINE RIDGE WAY', '104 PINE RIDGE WAY']);
+
+    const audit = await auditAddressHouseNumber('100 Pine Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test('a truncated (2000-row-capped) page triggers a targeted exact-number recheck', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '100 TOBERMORY WAY' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }],
+        }),
+      });
+
+    const audit = await auditAddressHouseNumber(GOOD_ADDRESS);
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+
+  test('a typed post-suffix direction is pinned — 17th St E is not 17th St W', async () => {
+    mockSitusResponse(['123 17TH ST W', '125 17TH ST W']);
+
+    const audit = await auditAddressHouseNumber('123 17th St E, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test("'Apt #4' strips cleanly — no phantom 'MAIN ST APT' street", async () => {
+    mockSitusResponse(['123 MAIN ST', '125 MAIN ST']);
+
+    const audit = await auditAddressHouseNumber('123 Main St Apt #4, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetLabel: 'MAIN ST', streetExists: true, hasExactMatch: true });
+  });
+
+  test('the ORIGINALLY TYPED house number is audited even when Google corrected it', async () => {
+    mockSitusResponse(TOBERMORY_SITUS);
+
+    // Google snapped the nonexistent 4867 to 4857 in the canonical address;
+    // the audit must still flag the customer's typed 4867.
+    const audit = await auditAddressHouseNumber(
+      '4857 Tobermory Way, Bradenton, FL 34211, USA',
+      null,
+      { typedAddress: '4867 Tobermory Way, Bradenton, FL 34211' },
+    );
+
+    expect(audit).toMatchObject({ houseNumber: 4867, streetExists: true, hasExactMatch: false });
+    expect(audit.nearestNumbers).toContain(4857);
+  });
+
+  test('a typed suffix must match the roll suffix — PINE WAY is not PINE RD', async () => {
+    mockSitusResponse(['100 PINE RD', '104 PINE RD']);
+
+    const audit = await auditAddressHouseNumber('100 Pine Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test('bare # unit markers are stripped before the street is derived', async () => {
+    mockSitusResponse(['123 MAIN ST', '125 MAIN ST']);
+
+    const audit = await auditAddressHouseNumber('123 Main St #4, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetLabel: 'MAIN ST', streetExists: true, hasExactMatch: true });
+  });
+
+  test('the targeted truncation recheck requires the typed number itself, not any LIKE hit', async () => {
+    // Typed 57; the street page is truncated and the targeted '%57 TOBERMORY%'
+    // query LIKE-matches 4857 — which is NOT number 57, so no exact match.
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }] }),
+      });
+
+    const audit = await auditAddressHouseNumber('57 Tobermory Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: false });
+    expect(audit.nearestNumbers).toContain(4857);
+  });
+
+  test('ANY candidate county failure suppresses negative verdicts (fail-open)', async () => {
+    // Geocoded Sarasota fails; the Manatee zip gate answers empty. The street
+    // could have lived on the failed county's roll — no verdict at all.
+    global.fetch = jest.fn()
+      .mockRejectedValueOnce(new Error('sarasota gis down'))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [] }) });
+
+    const audit = await auditAddressHouseNumber(BAD_ADDRESS, {
+      state: 'FL', county: 'Sarasota', partialMatch: false,
+    });
+
+    expect(audit).toBeNull();
+  });
+
+  test('a later candidate county with the exact number beats an earlier missing verdict', async () => {
+    // Geocoded Sarasota (candidate 1) has the street but not the number;
+    // the zip gate also opens Manatee (candidate 2), whose roll has it.
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { fulladdress: '100 TOBERMORY WAY' } }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }] }),
+      });
+
+    const audit = await auditAddressHouseNumber(GOOD_ADDRESS, {
+      state: 'FL', county: 'Sarasota', partialMatch: false,
+    });
+
+    expect(audit).toMatchObject({ county: 'Manatee', streetExists: true, hasExactMatch: true });
+  });
+});
+
+describe('round-4 matcher hardening', () => {
+  test('strict match is end-pinned — MAIN ST is not MAIN ST CIR', async () => {
+    mockSitusResponse(['123 MAIN ST CIR', '125 MAIN ST CIR']);
+
+    const audit = await auditAddressHouseNumber('123 Main St, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: false, hasExactMatch: false });
+  });
+
+  test('roll rows with spelled-out suffixes/directions are normalized before matching', async () => {
+    mockSitusResponse(['123 MAIN STREET', '125 MAIN STREET']);
+    expect(await auditAddressHouseNumber('123 Main St, Bradenton, FL 34211'))
+      .toMatchObject({ streetExists: true, hasExactMatch: true });
+
+    mockSitusResponse(['123 17TH STREET EAST']);
+    expect(await auditAddressHouseNumber('123 17th St E, Bradenton, FL 34211'))
+      .toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+});
+
+describe('round-5 hardening', () => {
+  test('roll rows carrying their own unit designators still match the street', async () => {
+    mockSitusResponse(['123 MAIN ST APT 4', '125 MAIN ST APT 2']);
+
+    const audit = await auditAddressHouseNumber('123 Main St, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+
+  test('a truncated page with NO matched rows is inconclusive, never street-not-found', async () => {
+    // First page: 2000 similarly-named rows, none on the typed street; the
+    // targeted recheck answers empty → no verdict at all (fail-open).
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '100 PINE RIDGE WAY' } }],
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [] }) });
+
+    const audit = await auditAddressHouseNumber('100 Pine Way, Bradenton, FL 34211');
+
+    expect(audit).toBeNull();
+  });
+
+  test('a truncated no-match page still finds the number via the targeted recheck', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '100 PINE RIDGE WAY' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '100 PINE WAY' } }] }),
+      });
+
+    const audit = await auditAddressHouseNumber('100 Pine Way, Bradenton, FL 34211');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+});
+
+describe('typedNumberDisagreesWithRecord (snapped-parcel gate)', () => {
+  test('disagreeing leading numbers → both numbers returned (audit runs despite county evidence)', () => {
+    expect(typedNumberDisagreesWithRecord(
+      '4867 Tobermory Way, Bradenton, FL 34211',
+      { addressLine1: '4857 TOBERMORY WAY', _source: 'county' },
+    )).toEqual({ typed: 4867, record: 4857 });
+  });
+
+  test('agreeing numbers, missing numbers, or no record → null', () => {
+    expect(typedNumberDisagreesWithRecord('4857 Tobermory Way', { addressLine1: '4857 TOBERMORY WAY' })).toBeNull();
+    expect(typedNumberDisagreesWithRecord('Tobermory Way', { addressLine1: '4857 TOBERMORY WAY' })).toBeNull();
+    expect(typedNumberDisagreesWithRecord('4867 Tobermory Way', { _parcel: { situsAddress: ';4834 X;4836 X;' } })).toBeNull();
+    expect(typedNumberDisagreesWithRecord('4867 Tobermory Way', null)).toBeNull();
+  });
+});
+
+describe('buildFieldVerifyFlags snapped-record flag (P1: snapped to a different EXISTING premise)', () => {
+  test('fires even when the typed number is roll-confirmed — the record still describes the snapped building', () => {
+    const flags = buildFieldVerifyFlags({ _source: 'county' }, null, {
+      county: 'Manatee', houseNumber: 123, streetLabel: 'MAIN ST',
+      streetExists: true, hasExactMatch: true, parcelCount: 50, nearestNumbers: [],
+      snappedRecord: { typed: 123, record: 125 },
+    });
+
+    const addr = flags.find((f) => f.field === 'address');
+    expect(addr.priority).toBe('HIGH');
+    expect(addr.reason).toContain('123');
+    expect(addr.reason).toContain('125');
+    expect(addr.reason).toContain('Both numbers exist');
+  });
+
+  test('carries the nearest numbers when the typed number is NOT on the roll', () => {
+    const flags = buildFieldVerifyFlags({ _source: 'county' }, null, {
+      county: 'Manatee', houseNumber: 4867, streetLabel: 'TOBERMORY WAY',
+      streetExists: true, hasExactMatch: false, parcelCount: 111, nearestNumbers: [4853, 4857],
+      snappedRecord: { typed: 4867, record: 4857 },
+    });
+
+    const addr = flags.filter((f) => f.field === 'address');
+    expect(addr).toHaveLength(1); // replaces, not duplicates, the ordinary audit flag
+    expect(addr[0].reason).toContain('snapped');
+    expect(addr[0].reason).toContain('4853, 4857');
+  });
+
+  test('a failed audit still surfaces the mismatch via the synthesized marker', () => {
+    const flags = buildFieldVerifyFlags({ _source: 'county' }, null, {
+      county: null, houseNumber: 123, streetLabel: null,
+      streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [],
+      snappedRecord: { typed: 123, record: 125 },
+    });
+
+    const addr = flags.find((f) => f.field === 'address');
+    expect(addr.reason).toContain('snapped');
+    expect(addr.reason).toContain('Verify the address');
+  });
+});
+
+describe('queryStreetSitusAddresses', () => {
+  test('sanitizes the street text before building the where clause', async () => {
+    mockSitusResponse(['4857 TOBERMORY WAY']);
+
+    await queryStreetSitusAddresses('Manatee', "TOBER'MORY; DROP TABLE--");
+
+    const url = new URL(global.fetch.mock.calls[0][0]);
+    expect(url.searchParams.get('where')).toBe("UPPER(SITUS_ADDRESS) LIKE '%TOBER MORY DROP TABLE%'");
+  });
+
+  test('returns null (not answered-empty) on an HTTP error so failure is distinguishable', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+
+    expect(await queryStreetSitusAddresses('Manatee', 'TOBERMORY')).toBeNull();
+  });
+
+  test('unknown county → null without a network call', async () => {
+    mockSitusResponse([]);
+
+    expect(await queryStreetSitusAddresses('Broward', 'TOBERMORY')).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('surfaces the ArcGIS page-cap flag as truncated', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        exceededTransferLimit: true,
+        features: [{ attributes: { SITUS_ADDRESS: '100 TOBERMORY WAY' } }],
+      }),
+    });
+
+    const out = await queryStreetSitusAddresses('Manatee', 'TOBERMORY');
+
+    expect(out).toEqual({ situs: ['100 TOBERMORY WAY'], truncated: true });
+  });
+
+  test('Charlotte queries and extracts BOTH address fields', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: [
+          { attributes: { FullPropertyAddress: null, propertyaddress: '200 HARBOR BLVD' } },
+          { attributes: { FullPropertyAddress: '204 HARBOR BLVD', propertyaddress: null } },
+        ],
+      }),
+    });
+
+    const out = await queryStreetSitusAddresses('Charlotte', 'HARBOR');
+
+    const url = new URL(global.fetch.mock.calls[0][0]);
+    expect(url.searchParams.get('where'))
+      .toBe("UPPER(FullPropertyAddress) LIKE '%HARBOR%' OR UPPER(propertyaddress) LIKE '%HARBOR%'");
+    expect(out.situs).toEqual(['200 HARBOR BLVD', '204 HARBOR BLVD']);
+  });
+});
+
+describe('hasCountyEvidence', () => {
+  test.each([
+    [null, false],
+    [{ _source: 'ai' }, false],
+    [{ _source: 'county' }, true],
+    [{ _source: 'hybrid' }, true],
+    [{ _source: 'cadastral' }, true],
+    [{ _source: 'ai', _parcel: { parcelId: '579428409' } }, true],
+  ])('%o → %s', (rc, expected) => {
+    expect(hasCountyEvidence(rc)).toBe(expected);
+  });
+});
+
+describe('buildFieldVerifyFlags address flag', () => {
+  test('house-number miss renders first, HIGH, with the nearest numbers', () => {
+    const flags = buildFieldVerifyFlags(null, null, {
+      county: 'Manatee', houseNumber: 4867, streetLabel: 'TOBERMORY WAY',
+      streetExists: true, hasExactMatch: false, parcelCount: 111, nearestNumbers: [4853, 4857],
+    });
+
+    expect(flags[0].field).toBe('address');
+    expect(flags[0].priority).toBe('HIGH');
+    expect(flags[0].reason).toContain('4867');
+    expect(flags[0].reason).toContain('4857');
+    expect(flags[0].reason).toContain('TOBERMORY WAY');
+  });
+
+  test('street-not-found phrasing when the roll answered empty', () => {
+    const flags = buildFieldVerifyFlags(null, null, {
+      county: 'Manatee', houseNumber: 4867, streetLabel: 'TOBER MOREY WAY',
+      streetExists: false, hasExactMatch: false, parcelCount: 0, nearestNumbers: [],
+    });
+
+    expect(flags[0].field).toBe('address');
+    expect(flags[0].reason).toContain('not found');
+  });
+
+  test('no audit → no address flag (existing flags unchanged)', () => {
+    const flags = buildFieldVerifyFlags(null, null, null);
+    expect(flags.some((f) => f.field === 'address')).toBe(false);
+  });
+
+  test('exact match → no address flag', () => {
+    const flags = buildFieldVerifyFlags(null, null, {
+      county: 'Manatee', houseNumber: 4857, streetLabel: 'TOBERMORY WAY',
+      streetExists: true, hasExactMatch: true, parcelCount: 111, nearestNumbers: [],
+    });
+    expect(flags.some((f) => f.field === 'address')).toBe(false);
+  });
+});
