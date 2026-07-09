@@ -449,3 +449,21 @@ describe('stampedAddressDiverges', () => {
     })).toBe(false);
   });
 });
+
+describe('SQL helpers are knex-binding safe (dispatch board regression)', () => {
+  const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+
+  // These snippets get interpolated into db.raw() SQL. When the surrounding
+  // query also passes a bindings array (e.g. /api/admin/dispatch/board binds
+  // [today] for `scheduled_date = ?`), knex counts EVERY literal ? in the SQL
+  // as a positional placeholder — a ? regex quantifier inside a helper blew
+  // up the board with "Expected 1 bindings, saw 11". Quantifiers must use
+  // {0,1} instead of ?.
+  test('stampedDivergesSql output contains no ? characters', () => {
+    expect(stampedDivergesSql('s', 'c')).not.toContain('?');
+  });
+
+  test('stampedLine2Sql output contains no ? characters', () => {
+    expect(stampedLine2Sql('s', 'c')).not.toContain('?');
+  });
+});
