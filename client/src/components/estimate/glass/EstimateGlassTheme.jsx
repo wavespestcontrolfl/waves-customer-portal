@@ -24,7 +24,7 @@
  * observers, listeners. Stray data attributes are inert without the html
  * attribute, so they are left in place rather than walked again.
  */
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 import {
   applyGlassScene,
   attachGlassPointerFx,
@@ -227,7 +227,10 @@ function classify(revealIO, statIO, pro) {
  * mounting the component in every branch.
  */
 export function useGlassTheme(active, variant = 'full') {
-  useEffect(() => {
+  // Layout effect, not effect: the scene attribute + first classify() must
+  // land before the browser paints, or the page flashes its untagged legacy
+  // inline styles for a frame (owner saw the old theme pop on draft previews).
+  useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const { orbs, cleanup: sceneCleanup } = applyGlassScene(variant);
@@ -270,11 +273,25 @@ export function useGlassTheme(active, variant = 'full') {
     // attributeFilter ['style'] covers in-place selection changes (Codex rd2).
     // classify() itself writes styles/attributes, so after each run the
     // records it produced are flushed with takeRecords() to avoid a loop.
+    // Leading-edge run: MutationObserver callbacks fire as microtasks before
+    // the browser paints, so re-tagging synchronously here keeps a fresh
+    // commit (e.g. skeleton → loaded estimate) from painting untagged — the
+    // old debounce-only version showed the legacy styles for ~150ms. Rapid
+    // follow-up mutations (slider drags) still coalesce onto the trailing
+    // timer so classify()'s full getComputedStyle walk stays throttled.
     let retagTimer = 0;
+    let lastRun = performance.now();
     const mo = new MutationObserver(() => {
+      if (performance.now() - lastRun >= 150) {
+        lastRun = performance.now();
+        run();
+        mo.takeRecords();
+        return;
+      }
       if (retagTimer) return;
       retagTimer = window.setTimeout(() => {
         retagTimer = 0;
+        lastRun = performance.now();
         run();
         mo.takeRecords();
       }, 150);
