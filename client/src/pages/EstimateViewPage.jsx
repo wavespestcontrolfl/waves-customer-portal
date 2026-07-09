@@ -3547,13 +3547,14 @@ export default function EstimateViewPage() {
       return (
         <Page>
           {adminDraftPreview ? <DraftPreviewBanner /> : null}
+          {/* Doc tools ABOVE the hero on every estimate (owner 2026-07-09). */}
+          {estimateActionBar}
           <Header
             customerFirstName={estimate.customerFirstName}
             serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, estimate.acceptedServiceMode || null)}
             headline={stateHero?.h1 || headline}
             eyebrowOverride={stateHero ? stateHero.eyebrow : null}
           />
-          {estimateActionBar}
           <TerminalStateCard
             state="accepted"
             customerFirstName={estimate.customerFirstName}
@@ -3574,13 +3575,13 @@ export default function EstimateViewPage() {
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
-        {estimateActionBar}
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
@@ -3611,6 +3612,7 @@ export default function EstimateViewPage() {
   if (ctaPhase === 'success') {
     return (
       <Page>
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
@@ -3618,7 +3620,6 @@ export default function EstimateViewPage() {
           headline={TERMINAL_HERO.accepted.h1}
           eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
-        {estimateActionBar}
         <SuccessCard acceptResult={acceptResult} />
       </Page>
     );
@@ -3657,6 +3658,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
@@ -3664,7 +3666,6 @@ export default function EstimateViewPage() {
           eyebrowOverride={glassPack?.eyebrow || null}
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
-        {estimateActionBar}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -3679,6 +3680,7 @@ export default function EstimateViewPage() {
   return (
     <Page>
       {adminDraftPreview ? <DraftPreviewBanner /> : null}
+      {estimateActionBar}
       <Header
         {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
@@ -3688,7 +3690,6 @@ export default function EstimateViewPage() {
         // the table — terminal and success states keep the plain hero.
         subline={fillGlassTokens(glassPack?.heroSub) || null}
       />
-      {estimateActionBar}
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner
