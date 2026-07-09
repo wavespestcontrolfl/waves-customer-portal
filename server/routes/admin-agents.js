@@ -381,7 +381,7 @@ async function loadOperatorInboxTasks() {
           this.where('status', 'snoozed').where('snoozed_until', '<=', db.fn.now());
         });
     })
-    .select('id', 'source', 'channel', 'priority', 'needs_reply', 'at_risk', 'title', 'summary', 'occurred_at', 'created_at')
+    .select('id', 'source', 'channel', 'priority', 'needs_reply', 'at_risk', 'title', 'summary', 'occurred_at', 'created_at', 'metadata')
     .orderBy('occurred_at', 'desc')
     .limit(12);
 
@@ -397,6 +397,11 @@ async function loadOperatorInboxTasks() {
       sourceLabel: 'Operator Inbox',
       sourceId: row.id,
       createdAt: row.occurred_at || row.created_at,
+      // metadata is part of the task fingerprint — attach it ONLY for
+      // ai_report rows (none can predate the constraint migration), so
+      // existing tasks' fingerprints and their handled-state overlays
+      // stay stable.
+      metadata: row.source === 'ai_report' ? (row.metadata || {}) : undefined,
       actionUrl: '/admin/communications',
       actionLabel: 'Open Inbox',
       impact: row.needs_reply ? 'Needs reply' : null,

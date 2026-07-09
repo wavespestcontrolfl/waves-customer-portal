@@ -211,6 +211,9 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
           metadata: JSON.stringify({
             escalation_id: escalation?.id || escalation || null,
             conversation_id: conversation?.id || null,
+            // Full reply for the Agent Ops disclosure — the card compacts
+            // summary to 220 chars, and nothing else links the full text.
+            reported_content: messageContent,
           }),
         }).onConflict(['source', 'source_id']).ignore();
       }
