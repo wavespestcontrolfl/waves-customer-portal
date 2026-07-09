@@ -126,6 +126,7 @@ function buildTriageItem({
     address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
+    shared_phone_ambiguous: 'customer_field_conflict',
     unassigned_auto_booking: 'time_ambiguous',
   };
 
@@ -140,8 +141,11 @@ function buildTriageItem({
   const flagPayload = (flag === 'secondary_contact_captured' && extraction?.secondary_contact)
     ? {
       secondary_contact: extraction.secondary_contact,
-      // The call may have named MORE parties than the one contact captured —
-      // cue the office to re-listen instead of assuming the card is complete.
+      // Full multi-party list (1.4.0) so the card shows EVERY named party.
+      ...(Array.isArray(extraction?.secondary_contacts) && extraction.secondary_contacts.length > 1
+        ? { secondary_contacts: extraction.secondary_contacts }
+        : {}),
+      // 4th+ parties exist beyond the array — cue the office to re-listen.
       ...(extraction?.other_parties_mentioned === true ? { other_parties_mentioned: true } : {}),
     }
     : {};

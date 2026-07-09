@@ -85,17 +85,34 @@ export function ConfirmEvidence({ payload }) {
   // from the deterministic-flags insert or the flat shape (phone) from the
   // processor's payload-rich insert — render either.
   const sc = p.secondary_contact && typeof p.secondary_contact === "object" ? p.secondary_contact : null;
-  const scValue = sc
-    ? [
-        sc.name_full || [sc.first_name, sc.last_name].filter(Boolean).join(" ") || null,
-        sc.role && sc.role !== "unknown" ? `(${sc.role.replace(/_/g, " ")})` : null,
-        sc.phone || sc.phone_e164 || null,
-        sc.email || null,
-      ].filter(Boolean).join(" · ")
-      + (sc.wants_notifications === true ? " — caller asked they get notifications" : "")
-    : "";
+  const fmtContact = (c) =>
+    [
+      c.name_full || [c.first_name, c.last_name].filter(Boolean).join(" ") || null,
+      c.role && c.role !== "unknown" ? `(${c.role.replace(/_/g, " ")})` : null,
+      c.phone || c.phone_e164 || null,
+      c.email || null,
+    ].filter(Boolean).join(" · ")
+      + (c.wants_notifications === true ? " — caller asked they get notifications" : "");
+  const scValue = sc ? fmtContact(sc) : "";
+  // 1.4.0 multi-party calls: every ADDITIONAL named party after the first —
+  // without these rows the office could only see them in raw JSON.
+  const extraContacts = Array.isArray(p.secondary_contacts)
+    ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
+    : [];
   const rows = [
     scValue && { label: "Second contact", value: scValue },
+    ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
+    // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
+    // three — without a row the card looks complete and nobody re-listens.
+    p.other_parties_mentioned === true && { label: "More parties", value: "Caller named more people than captured — re-listen to the call" },
+    // shared_phone_ambiguous: the office adjudicates WHICH customer this call
+    // belongs to — without the candidate names they'd have to search the
+    // number by hand (the payload already carries them).
+    Array.isArray(p.candidates) && p.candidates.length > 0 && {
+      label: "Shared phone",
+      value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
+        + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

@@ -10,6 +10,7 @@ const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, for
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
@@ -1099,6 +1100,11 @@ router.get('/:serviceId/completion-profile', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// SQL NULL must reach buildPropertyMapPayload as NaN, not Number(null)=0 —
+// 0 is finite, so a coordless row would render an "available" map centered
+// at 0,0 instead of the missing_coordinates state (codex round-9 P2).
+const coordOrNaN = (v) => (v == null ? NaN : Number(v));
+
 // Satellite basemap + the customer's existing zones for the zone-marking
 // surfaces (completion-flow capture step and the office desk-backfill flow).
 // The image params (center / zoom / 640x340) are built through the SAME
@@ -1184,10 +1190,22 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
     const svc = await db('scheduled_services as ss')
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .where('ss.id', req.params.serviceId)
-      .select('ss.id', 'ss.customer_id', 'c.latitude', 'c.longitude')
+      .select(
+        'ss.id',
+        'ss.customer_id',
+        // The zone-marking map must center on the BOOKED parcel: visit coords
+        // first; the primary home only for non-divergent stamps — a divergent
+        // stamp with no coords degrades to the map's missing_coordinates
+        // state rather than letting zones be drawn on the wrong parcel
+        // (codex round-7 P1).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`)
+      )
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
-    return res.json(await buildPropertyMapPayload(svc.customer_id, Number(svc.latitude), Number(svc.longitude)));
+    // Number(null) is 0 — a finite value that would sail past the payload's
+    // missing_coordinates check and center the map at 0,0 (codex round-9 P2).
+    return res.json(await buildPropertyMapPayload(svc.customer_id, coordOrNaN(svc.latitude), coordOrNaN(svc.longitude)));
   } catch (err) { next(err); }
 });
 
@@ -1201,7 +1219,8 @@ router.get('/customers/:customerId/property-map', requireAdmin, async (req, res,
       .select('id', 'latitude', 'longitude')
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    return res.json(await buildPropertyMapPayload(customer.id, Number(customer.latitude), Number(customer.longitude)));
+    // Same Number(null)=0 trap as the service-scoped handler above.
+    return res.json(await buildPropertyMapPayload(customer.id, coordOrNaN(customer.latitude), coordOrNaN(customer.longitude)));
   } catch (err) { next(err); }
 });
 
@@ -1324,7 +1343,16 @@ router.get('/:date?', async (req, res, next) => {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific address (stamped at booking for property-aware
+        // visits, e.g. a customer's rental) wins over the customer's primary
+        // mirror — same output field names, so every consumer keeps working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // Divergent stamps keep THEIR unit line; non-divergent stamps fall
+        // back to the primary's unit (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.autopay_enabled', 'customers.autopay_paused_until',
         'customers.autopay_payment_method_id',
@@ -1400,7 +1428,7 @@ router.get('/:date?', async (req, res, next) => {
         customerName: `${s.first_name} ${s.last_name}`,
         customerId: s.customer_id,
         customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: s.service_type,
         scheduledDate: s.scheduled_date,
@@ -2238,7 +2266,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Report application-conditions (weather) capture at the TREATED
+        // parcel: stamped visit coords first, the primary home only for
+        // non-divergent stamps (codex round-10 P2).
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
         ...(billingModeColumnsExist
@@ -6879,8 +6911,8 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.id,
         s.technician_id,
         s.customer_id,
-        COALESCE(s.lat, c.latitude)  AS lat,
-        COALESCE(s.lng, c.longitude) AS lng,
+        COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END)  AS lat,
+        COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng,
         s.status,
         s.service_type,
         s.scheduled_date,
@@ -6888,11 +6920,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.window_end,
         c.first_name,
         c.last_name,
-        c.address_line1,
-        c.address_line2,
-        c.city,
-        c.state,
-        c.zip
+        COALESCE(s.service_address_line1, c.address_line1) AS address_line1,
+        ${stampedLine2Sql('s', 'c')} AS address_line2,
+        COALESCE(s.service_address_city, c.city) AS city,
+        COALESCE(s.service_address_state, c.state) AS state,
+        COALESCE(s.service_address_zip, c.zip) AS zip
       FROM scheduled_services s
       INNER JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date = ?
@@ -7021,13 +7053,17 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         'c.last_name as cust_last_name',
         'c.phone as cust_phone',
         'c.email as cust_email',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
-        'c.latitude as cust_lat',
-        'c.longitude as cust_lng'
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+        // A visit whose stamp DIVERGES from the primary must never fall back
+        // to the customer's PRIMARY geocode — a null pin beats navigating to
+        // the wrong (real) house (codex P1). Non-divergent stamps (ordinary
+        // primary-address phone bookings) keep the fallback (round-4 P1).
+        db.raw(`CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END as cust_lat`),
+        db.raw(`CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END as cust_lng`)
       );
 
     if (!row) return res.status(404).json({ error: 'Job not found' });
@@ -7119,11 +7155,11 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
         's.window_end',
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip'
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip')
       );
 
     const completed = routeRows.filter((r) => r.status === 'completed').length;

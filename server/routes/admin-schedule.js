@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -1206,7 +1207,17 @@ router.get('/', async (req, res, next) => {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific stamped address (call bookings for a secondary/
+        // rental property) wins over the customer's primary mirror — same
+        // field names, so the schedule/tech-home consumers keep working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // Divergent stamps keep THEIR unit line (condo/duplex bookings need
+        // their door); non-divergent stamps fall back to the primary's unit
+        // (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
         'customers.service_preferences',
@@ -1306,7 +1317,7 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
@@ -2719,7 +2730,14 @@ router.get('/list', async (req, res, next) => {
         // blank payerId/poNumber and silently clears an existing per-job payer/PO
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
-        'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
+        'customers.first_name', 'customers.last_name',
+        // Stamped visit-specific address wins over the primary mirror here
+        // too — this list is a display surface for the booked property. The
+        // unit line rides along (condo/duplex visits are indistinguishable
+        // by street alone — codex round-6 P2).
+        db.raw(`TRIM(CONCAT(COALESCE(scheduled_services.service_address_line1, customers.address_line1), ' ', COALESCE(${stampedLine2Sql('scheduled_services', 'customers')}, ''))) as address`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
       )
       .orderBy('scheduled_services.scheduled_date')
@@ -5331,9 +5349,15 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -5422,9 +5446,15 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 

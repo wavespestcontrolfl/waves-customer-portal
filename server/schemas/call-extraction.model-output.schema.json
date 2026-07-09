@@ -134,6 +134,34 @@
       }
     },
 
+    "secondary_contacts": {
+      "type": ["array", "null"],
+      "maxItems": 3,
+      "description": "ALL other people named as parties to the service, most notification-central first (up to 3). The FIRST entry must also mirror into secondary_contact for older readers. []/null when no other party was named. 1.4.0 additive - absent in older payloads.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "wants_notifications"],
+        "properties": {
+          "name_full": { "type": ["string", "null"] },
+          "first_name": { "type": ["string", "null"] },
+          "last_name": { "type": ["string", "null"] },
+          "phone_e164": { "type": ["string", "null"], "description": "Callback number stated for this person, E.164 preferred. Server re-validates." },
+          "phone_raw_spoken": { "type": ["string", "null"] },
+          "email": { "type": ["string", "null"], "description": "Only when clearly said or spelled in full. Server re-validates." },
+          "role": {
+            "type": "string",
+            "enum": [
+              "home_buyer", "home_seller", "tenant", "landlord", "spouse_partner",
+              "family_member", "real_estate_agent", "property_manager", "other", "unknown"
+            ]
+          },
+          "wants_notifications": { "type": "boolean", "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person." },
+          "notes": { "type": ["string", "null"] }
+        }
+      }
+    },
+
     "consent": {
       "type": "object",
       "description": "TCPA-relevant consent capture. SMS dispatch MUST check sms_consent_given=true and do_not_contact_request=false before firing.",

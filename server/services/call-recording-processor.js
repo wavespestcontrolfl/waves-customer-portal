@@ -284,11 +284,172 @@ function normalizeNamePart(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Common NANP nickname/diminutive groups — "Bob" calling from a line whose
+// record says "Robert" is the same person for phone-scoped matching (the
+// phone already narrows candidates to one household/office; last-name
+// agreement is still enforced where both are known).
+const NICKNAME_GROUPS = [
+  ['robert', 'rob', 'bob', 'bobby', 'robbie'],
+  ['william', 'will', 'bill', 'billy', 'willie', 'liam'],
+  ['michael', 'mike', 'mikey', 'mick'],
+  ['james', 'jim', 'jimmy', 'jamie'],
+  ['thomas', 'tom', 'tommy'],
+  ['david', 'dave', 'davey'],
+  ['daniel', 'dan', 'danny'],
+  ['christopher', 'chris', 'topher'],
+  ['christine', 'christina', 'chris', 'chrissy', 'tina'],
+  ['katherine', 'catherine', 'kate', 'kathy', 'cathy', 'katie', 'kat', 'kitty'],
+  ['elizabeth', 'liz', 'beth', 'lizzie', 'eliza', 'betsy'],
+  ['margaret', 'peggy', 'meg', 'maggie', 'marge'],
+  ['john', 'jack', 'johnny', 'jon'],
+  ['jonathan', 'jon', 'johnny'],
+  ['richard', 'rick', 'rich', 'dick', 'ricky'],
+  ['anthony', 'tony'],
+  ['steven', 'stephen', 'steve'],
+  ['joseph', 'joe', 'joey'],
+  ['samuel', 'sam', 'sammy'],
+  ['samantha', 'sam', 'sammy'],
+  ['alexander', 'alex', 'al'],
+  ['alexandra', 'alex', 'lexi', 'sandra'],
+  ['matthew', 'matt'],
+  ['andrew', 'andy', 'drew'],
+  ['gregory', 'greg'],
+  ['jeffrey', 'jeff'],
+  ['edward', 'ed', 'eddie', 'ted', 'ned'],
+  ['ronald', 'ron', 'ronnie'],
+  ['donald', 'don', 'donnie'],
+  ['kenneth', 'ken', 'kenny'],
+  ['lawrence', 'larry'],
+  ['gerald', 'jerry'],
+  ['terrence', 'terry'],
+  ['patrick', 'pat', 'paddy'],
+  ['patricia', 'pat', 'patty', 'trish', 'tricia'],
+  ['susan', 'sue', 'susie', 'suzy'],
+  ['deborah', 'debra', 'deb', 'debbie'],
+  ['barbara', 'barb', 'babs'],
+  ['jennifer', 'jen', 'jenny'],
+  ['jessica', 'jess', 'jessie'],
+  ['victoria', 'vicky', 'tori'],
+  ['nicholas', 'nick', 'nicky'],
+  ['timothy', 'tim', 'timmy'],
+  ['benjamin', 'ben', 'benny'],
+  ['charles', 'charlie', 'chuck', 'chas'],
+  ['frederick', 'fred', 'freddie'],
+  ['raymond', 'ray'],
+  ['walter', 'walt', 'wally'],
+  ['harold', 'hal', 'harry'],
+  ['henry', 'hank', 'harry'],
+  ['francis', 'frank', 'frankie'],
+  ['frances', 'fran', 'frannie'],
+  ['dorothy', 'dot', 'dottie'],
+  ['florence', 'flo'],
+  ['virginia', 'ginny', 'ginger'],
+  ['pamela', 'pam'],
+  ['cynthia', 'cindy'],
+  ['sandra', 'sandy'],
+  ['linda', 'lindy'],
+  ['rebecca', 'becky', 'becca'],
+  ['kimberly', 'kim'],
+  ['michelle', 'shelly'],
+  ['stephanie', 'steph'],
+  ['melissa', 'mel', 'missy'],
+  ['amanda', 'mandy'],
+  ['abigail', 'abby'],
+  ['gabriel', 'gabe'],
+  ['gabriella', 'gabby'],
+  ['isabella', 'izzy', 'bella'],
+  ['zachary', 'zach', 'zack'],
+  ['joshua', 'josh'],
+  ['nathaniel', 'nathan', 'nate', 'nat'],
+  ['leonard', 'leo', 'lenny'],
+  ['theodore', 'ted', 'theo', 'teddy'],
+  ['albert', 'al', 'bert'],
+  ['arthur', 'art', 'artie'],
+  ['eugene', 'gene'],
+  ['vincent', 'vince', 'vinny'],
+  ['peter', 'pete'],
+  ['philip', 'phil'],
+  ['douglas', 'doug'],
+  ['russell', 'russ', 'rusty'],
+  ['martin', 'marty'],
+  ['stanley', 'stan'],
+  ['norman', 'norm'],
+  ['dennis', 'denny'],
+  ['glenn', 'glen'],
+  ['carolyn', 'caroline', 'carol', 'carrie'],
+  ['eleanor', 'ellie', 'nora'],
+  ['emily', 'em', 'emmy'],
+  ['natalie', 'nat'],
+  ['angela', 'angie'],
+  ['brenda', 'bren'],
+  ['sharon', 'shari'],
+  ['diane', 'diana', 'di'],
+  ['janet', 'jan'],
+  ['janice', 'jan'],
+  ['judith', 'judy'],
+  ['carol', 'carole'],
+  ['ann', 'anne', 'annie', 'anna'],
+  ['mary', 'marie', 'maria', 'molly', 'polly'],
+  ['martha', 'marty', 'mattie'],
+  ['helen', 'nell', 'nellie'],
+  ['ruth', 'ruthie'],
+  ['gerald', 'gerry'],
+  ['gordon', 'gordy'],
+  ['leslie', 'les'],
+  ['wesley', 'wes'],
+  ['curtis', 'curt'],
+  ['calvin', 'cal'],
+  ['bernard', 'bernie'],
+  ['clifford', 'cliff'],
+  ['duane', 'dwayne'],
+  ['randall', 'randy'],
+  ['rodney', 'rod'],
+  ['roger', 'rodge'],
+  ['bradley', 'brad'],
+  ['brandon', 'bran'],
+  ['jacob', 'jake'],
+  ['lucas', 'luke'],
+  ['maxwell', 'max'],
+  ['oliver', 'ollie'],
+  ['sebastian', 'seb'],
+  ['veronica', 'ronnie'],
+  ['gwendolyn', 'gwen'],
+  ['jacqueline', 'jackie'],
+  ['josephine', 'jo', 'josie'],
+  ['kathleen', 'kathy', 'kate'],
+  ['lillian', 'lily'],
+  ['madeline', 'maddie'],
+  ['penelope', 'penny'],
+  ['priscilla', 'cilla'],
+  ['rosemary', 'rose', 'rosie'],
+  ['suzanne', 'sue', 'suzy'],
+  ['valerie', 'val'],
+  ['yvonne', 'vonnie'],
+];
+const NICKNAME_LOOKUP = new Map();
+for (const group of NICKNAME_GROUPS) {
+  for (const name of group) {
+    const set = NICKNAME_LOOKUP.get(name) || new Set();
+    for (const variant of group) set.add(variant);
+    NICKNAME_LOOKUP.set(name, set);
+  }
+}
+function firstNameVariants(normalizedFirst) {
+  const variants = NICKNAME_LOOKUP.get(normalizedFirst);
+  return variants ? [...variants] : [normalizedFirst];
+}
+function sameFirstName(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const variants = NICKNAME_LOOKUP.get(a);
+  return !!variants && variants.has(b);
+}
+
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (extractedFirst !== customerFirst) return false;
+  if (!sameFirstName(extractedFirst, customerFirst)) return false;
 
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
@@ -458,6 +619,64 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
   };
 }
 
+// Ordered, deduped list of ALL other parties on the call (up to 3, the slot
+// budget). Entry 1 = the single-contact V1/V2 resolution above (identity-
+// conflict rule intact); entries 2+ = the V2 array's additional people (V1
+// only ever emits one). Dedupe key: phone last-10, else email, else full name.
+function identityConflicts(a, b) {
+  if (!a || !b) return false;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  return (a.phone && b.phone && last10(a.phone) !== last10(b.phone))
+    || (a.email && b.email && norm(a.email) !== norm(b.email))
+    || (a.first_name && b.first_name && norm(a.first_name) !== norm(b.first_name))
+    || (a.last_name && b.last_name && norm(a.last_name) !== norm(b.last_name));
+}
+
+function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
+  const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const primary = resolveCallSecondaryContact(extracted, v2Extraction);
+  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
+  // When the single-contact resolver rejected V2's person on an identity
+  // conflict (V1 wins unmerged), that same person is REQUIRED to lead the V2
+  // array as the mirror entry — appending it here would resurrect the
+  // rejected identity as an "additional" contact and fan notifications out
+  // to it (codex P1). Drop the conflicting mirror; genuinely-different
+  // extra parties (entries 2+) stay.
+  const v2Single = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  if (primary && v2Single && identityConflicts(primary, v2Single)) {
+    const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    v2List = v2List.filter((c) => !(
+      (c.phone && v2Single.phone && last10(c.phone) === last10(v2Single.phone))
+      || (c.email && v2Single.email && norm(c.email) === norm(v2Single.email))
+      || (!c.phone && !c.email && norm(c.first_name) === norm(v2Single.first_name) && norm(c.last_name || '') === norm(v2Single.last_name || ''))
+    ));
+  }
+  // Dedup by ANY shared identifier, not a single priority key: the merged
+  // primary entry may carry a phone while V2's mirror of the same person has
+  // only an email/name — a one-key scheme gives them different keys and the
+  // duplicate burns one of the three slots, dropping a real third party
+  // (codex round-6 P2).
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const nameOf = (c) => [c.first_name, c.last_name].map(norm).filter(Boolean).join(' ');
+  const sameParty = (a, b) => (
+    (last10(a.phone) && last10(a.phone) === last10(b.phone))
+    || (norm(a.email) && norm(a.email) === norm(b.email))
+    || (nameOf(a) && nameOf(a) === nameOf(b))
+  );
+  const out = [];
+  for (const candidate of [primary, ...v2List]) {
+    if (!candidate) continue;
+    if (!last10(candidate.phone) && !norm(candidate.email) && !nameOf(candidate)) continue;
+    if (out.some((c) => sameParty(c, candidate))) continue;
+    out.push(candidate);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 // Persist a call's secondary contact into the customer's first EMPTY
 // service-contact slot so the existing appointment fan-out
 // (customer-contact.js getAppointmentContacts: confirmation, en-route,
@@ -487,7 +706,30 @@ async function persistCallSecondaryContact(customerId, contact) {
     .map(last10).filter(Boolean);
   const knownEmails = [customer.email, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.email])]
     .map(lowerEmail).filter(Boolean);
-  if (contact.phone && knownPhones.includes(last10(contact.phone))) return 'skipped_phone_on_record';
+  // Role backfill on a known number: the person already sits in a slot
+  // (pre-migration write or admin-entered) whose role column is empty —
+  // record the relationship the call just identified, or future calls from
+  // that number can't pass the household-role matching gate unless the
+  // caller also repeats a matching first name (codex round-8 P2). The
+  // customer's OWN phone matches nothing here (no slot to backfill).
+  const backfillSlotRole = async () => {
+    const roleToRecord = String(contact.role || '').trim().toLowerCase();
+    if (!roleToRecord || roleToRecord === 'unknown') return false;
+    const matched = SERVICE_CONTACT_SLOTS.find((s) => (
+      (contact.phone && last10(customer[s.phone]) && last10(customer[s.phone]) === last10(contact.phone))
+      || (contact.email && lowerEmail(customer[s.email]) && lowerEmail(customer[s.email]) === lowerEmail(contact.email))
+    ));
+    if (!matched || String(customer[matched.roleCol] || '').trim()) return false;
+    const wrote = await db('customers')
+      .where({ id: customerId })
+      .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
+      .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
+    return !!wrote;
+  };
+  if (contact.phone && knownPhones.includes(last10(contact.phone))) {
+    if (await backfillSlotRole()) return 'skipped_phone_on_record_role_backfilled';
+    return 'skipped_phone_on_record';
+  }
   // Cross-customer guard: a secondary phone that belongs to a DIFFERENT
   // existing customer must never land in this customer's fan-out slots —
   // customer B would start receiving customer A's appointment texts at
@@ -507,7 +749,10 @@ async function persistCallSecondaryContact(customerId, contact) {
   // re-filed under the buyer/tenant's name and future appointment emails
   // reach it mislabeled. Email-only contacts with a known email are a no-op.
   const emailOnRecord = contact.email && knownEmails.includes(lowerEmail(contact.email));
-  if (!contact.phone && emailOnRecord) return 'skipped_email_on_record';
+  if (!contact.phone && emailOnRecord) {
+    if (await backfillSlotRole()) return 'skipped_email_on_record_role_backfilled';
+    return 'skipped_email_on_record';
+  }
   const slotEmail = emailOnRecord ? null : (contact.email || null);
 
   const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()
@@ -562,10 +807,14 @@ async function persistCallSecondaryContact(customerId, contact) {
   for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
+  const contactRole = String(contact.role || '').trim().toLowerCase();
   const updated = await write.update({
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
     [emptySlot.phone]: contact.phone || null,
     [emptySlot.email]: slotEmail,
+    // The extracted relationship (home_buyer/tenant/...) — recorded so
+    // role-aware recipient selection is possible later; 'unknown' stays null.
+    [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
   });
   if (!updated) return 'skipped_slot_race';
   return 'written';
@@ -612,17 +861,90 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
 
+// Phone columns consulted for inbound identity: the customer's own number
+// PLUS the three service-contact slot phones — the pipeline itself records
+// spouses/tenants into those slots, and matching that ignored them forked a
+// duplicate customer the next time that person called (audit #7/F1).
+const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+// Slot roles that identify the HOUSEHOLD/account vs people who serve many
+// accounts and must never auto-link on a slot-phone hit alone.
+const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
+const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager']);
+// Slot-only match gating: the number belongs to a person STORED ON this
+// account (tenant/spouse/buyer/agent). Household-type roles identify the
+// account; agent-type people (realtor, property manager) serve MANY accounts
+// — a realtor's next call is usually about a DIFFERENT buyer, so an
+// unconditional link would book the new visit on the old customer. Household
+// role or a first-name agreement with the slot's OWN name links.
+function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
+  const slotEntry = matchedSlotEntry(customer, phone);
+  const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
+  if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return false;
+  if (HOUSEHOLD_SLOT_ROLES.has(slotRole)) return true;
+  const extractedFirst = normalizeNamePart(extracted.first_name);
+  const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
+  return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
+}
+
+function matchedSlotEntry(customer, phone) {
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  for (const slot of SERVICE_CONTACT_SLOTS) {
+    if (samePhone(phone, customer[slot.phone])) {
+      return { name: customer[slot.name] || null, contactRole: customer[slot.roleCol] || null };
+    }
+  }
+  return null;
+}
+
+// Disambiguation leg (b): an AV-DECISIVE call address that matches exactly
+// one candidate's mirror address or active property is a deterministic
+// second signal. Shared by the single-match branch (an agent-role slot hit
+// calling about the very property they're stored on must attach, not
+// duplicate the customer — codex round-9 P2) and the multi-match cascade.
+// Returns the owning candidate or null; never throws.
+async function avAddressUniqueOwner(matches, opts) {
+  if (!opts.avDecisive || !opts.callAddress?.address_line1) return null;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const callKey = addressKey(opts.callAddress);
+    if (!callKey) return null;
+    const candidateIds = matches.map((m) => m.id);
+    const props = await db('customer_properties')
+      .whereIn('customer_id', candidateIds)
+      .where({ active: true })
+      .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
+    const owners = new Set();
+    for (const m of matches) {
+      if (addressKey(m) === callKey) owners.add(m.id);
+    }
+    for (const p of props) {
+      if (addressKey(p) === callKey) owners.add(p.customer_id);
+    }
+    if (owners.size !== 1) return null;
+    const ownerId = [...owners][0];
+    return matches.find((m) => m.id === ownerId) || null;
+  } catch (e) {
+    logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
+    return null;
+  }
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
 
+  const predicateFor = (col) => (contactKey.length === 10
+    ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+    : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
   const base = () => {
     const query = db('customers').whereNull('deleted_at');
-    if (contactKey.length === 10) {
-      return query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [contactKey]);
-    }
-    return query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [contactKey]);
+    return query.where(function orPhones() {
+      for (const col of CONTACT_MATCH_PHONE_COLS) {
+        this.orWhereRaw(predicateFor(col), [contactKey]);
+      }
+    });
   };
+  const matchedViaPrimary = (c) => samePhone(phone, c.phone);
 
   if (opts.preferredCustomerId) {
     const preferred = await db('customers')
@@ -632,10 +954,19 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     if (preferred && customerPhoneMatches(phone, preferred)) return preferred;
   }
 
+  // A name-agreeing slot match found by the fast path but deferred until the
+  // sole-primary-owner check can run (codex round-6 P2).
+  let deferredSlotNamed = null;
   const firstName = normalizeNamePart(extracted.first_name);
   if (firstName) {
+    // Nickname-tolerant: "Bob" matches a record filed as "Robert" — the phone
+    // already scopes candidates to one household/office, and the last-name
+    // ordering below still prefers a full-name agreement.
     let namedQuery = base()
-      .whereRaw("LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [firstName]);
+      .whereRaw(
+        `LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ANY(?)`,
+        [firstNameVariants(firstName)]
+      );
 
     const lastName = normalizeNamePart(extracted.last_name);
     if (lastName) {
@@ -646,7 +977,18 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     }
 
     const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
-    if (named && extractedNameMatchesCustomer(extracted, named)) return named;
+    // The name fast path is only safe when the number is the customer's OWN
+    // phone. A slot-phone hit (base() searches those too) whose account
+    // first name happens to match the caller must still pass the slot-role
+    // gating below — a realtor stored on a same-named customer would
+    // otherwise link and book on the old account (codex round-2 P1). And
+    // even a role-passing slot match must not outrank the number's sole
+    // PRIMARY owner (cascade leg (a)) — defer it into the multi-match
+    // branch so the owner check runs first (codex round-6 P2).
+    if (named && extractedNameMatchesCustomer(extracted, named)) {
+      if (matchedViaPrimary(named)) return named;
+      if (slotOnlyLinkAllowed(named, phone, extracted)) deferredSlotNamed = named;
+    }
     // No name match — but the AI-extracted name is frequently wrong (it can pick
     // up the technician's name from the call audio, e.g. "Adam"). Returning null
     // here makes the caller spawn a NEW customer even when the phone already maps
@@ -656,16 +998,77 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     // active customer") and keeps the genuine shared-phone case (2+ matches) safe.
   }
 
-  const matches = await base().orderBy('updated_at', 'desc').limit(2);
-  if (matches.length === 1) return matches[0];
+  const matches = await base().orderBy('updated_at', 'desc').limit(25);
+  if (matches.length === 1) {
+    const only = matches[0];
+    if (matchedViaPrimary(only)) return only;
+    if (slotOnlyLinkAllowed(only, phone, extracted)) return only;
+    // The slot-role gate blocks agent-type roles because a realtor/property
+    // manager calls about MANY properties — but when the AV-decisive call
+    // address matches THIS customer's mirror or active property, the call is
+    // about this account and must attach rather than spawn a duplicate
+    // customer (codex round-9 P2). Same deterministic second signal as
+    // multi-match leg (b).
+    if (await avAddressUniqueOwner(matches, opts)) return only;
+    // Anything weaker falls through to the legacy create/lead path exactly
+    // as before slot matching existed.
+    return null;
+  }
   if (matches.length > 1) {
-    // Exact count, not the limit(2)-capped fetch — a number forked five ways
-    // used to log as "2", hiding the badly-shared phones from ops review.
+    // Exact population first: uniqueness decisions on a CAPPED sample would
+    // auto-link when the tie-breaking row sits beyond the cap (codex P2).
     const shareCount = await Promise.resolve()
       .then(() => base().count('* as n').first())
       .then((r) => parseInt(r?.n || 0, 10) || matches.length)
       .catch(() => matches.length);
-    logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
+    const cascadeSound = shareCount === matches.length;
+    // ── Multi-match disambiguation cascade (audit #7) — each leg is a
+    // deterministic second signal; anything weaker stays ambiguous. Legs run
+    // only when the fetched set IS the full population. ──
+    if (cascadeSound) {
+    // (a) The number is exactly ONE candidate's own primary phone (the others
+    //     merely hold it in a service-contact slot): the primary owns it.
+    const primaryOwners = matches.filter(matchedViaPrimary);
+    if (primaryOwners.length === 1) return primaryOwners[0];
+    // (a2) No sole primary owner — a fast-path slot match whose account name
+    //      agrees with the caller AND whose slot role passes the household
+    //      gating is the next-strongest signal (deferred from above so leg
+    //      (a) could run first; codex round-6 P2).
+    if (deferredSlotNamed) return deferredSlotNamed;
+    // (A unique slot-only hit already returned at matches.length === 1 —
+    // the slot columns are part of base(). Two customers holding the same
+    // number in slots stays ambiguous on purpose: realtors/property managers
+    // sit in many customers' slots.)
+    // (b) AV-validated call address matches exactly one candidate (their
+    //     mirror address or one of their active properties). Gated on a
+    //     decisive AV verdict so a raw mis-transcribed street can't link.
+    {
+      const owner = await avAddressUniqueOwner(matches, opts);
+      if (owner) return owner;
+    }
+    // (c) All candidates share one address key — a household sharing a line;
+    //     any of them is the household, most-recently-active wins.
+    try {
+      const { addressKey } = require('./customer-properties');
+      const keys = new Set(matches.map((m) => addressKey(m)).filter(Boolean));
+      if (keys.size === 1 && matches.every((m) => addressKey(m))) {
+        logger.info(`[call-proc] Shared phone maps to one household (${matches.length} records); linking most recent`);
+        return matches[0];
+      }
+    } catch { /* fall through to ambiguous */ }
+    }
+
+    logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without a second deterministic signal`);
+    // Surface the ambiguity to callers that can act on it (Step 3 suppresses
+    // the new-customer create and opens a review card) without changing the
+    // null contract for the ones that can't.
+    if (opts.multiMatchOut && typeof opts.multiMatchOut === 'object') {
+      opts.multiMatchOut.candidates = matches.map((m) => ({
+        id: m.id,
+        name: [m.first_name, m.last_name].filter(Boolean).join(' ') || null,
+      }));
+      opts.multiMatchOut.shareCount = shareCount;
+    }
   }
   return null;
 }
@@ -701,13 +1104,19 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead }) {
+async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead, unclaimedOnly }) {
   if (!phone) return null;
   let query = database('leads').where('phone', phone).whereNull('deleted_at');
   if (workableUnnamedLead) {
     query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
-  if (customerId) {
+  if (unclaimedOnly) {
+    // Shared-phone ambiguity: the call could belong to ANY of the candidate
+    // customers, so it must never reuse (and enrich) a lead one of them owns
+    // — another caller's transcript would land on the wrong customer's lead
+    // while the office adjudicates (codex round-6 P2).
+    query = query.whereNull('customer_id');
+  } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   return query.orderBy('created_at', 'desc').first();
@@ -924,6 +1333,54 @@ function v2IsoToEtWallClock(value) {
     }
   }
   return raw.slice(0, 16);
+}
+
+// Resolve the booked visit's OWN address (the call's post-AV service address)
+// and, when it exactly key-matches one of the customer's known properties,
+// that property's id. Exact addressKey match only — a booking must never be
+// GUESSED onto a property. Returns nulls when the call carried no address
+// (readers COALESCE back to the customer mirror, i.e. today's behavior).
+async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db) {
+  const clean = (v, max) => {
+    const s = String(v == null ? '' : v).trim();
+    return s ? s.slice(0, max) : null;
+  };
+  const address = {
+    line1: clean(extracted.address_line1, 200),
+    line2: clean(extracted.address_line2, 100),
+    city: clean(extracted.city, 50),
+    state: clean(extracted.state, 2),
+    zip: clean(extracted.zip, 10),
+  };
+  if (!address.line1) return { propertyId: null, address: null, lat: null, lng: null };
+  let propertyId = null;
+  let lat = null;
+  let lng = null;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const callKey = addressKey({
+      address_line1: address.line1, address_line2: address.line2, city: address.city, zip: address.zip,
+    });
+    if (callKey) {
+      const props = await trx('customer_properties')
+        .where({ customer_id: customerId, active: true })
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude');
+      const matches = props.filter((p) => addressKey(p) === callKey);
+      if (matches.length === 1) {
+        propertyId = matches[0].id;
+        // The property's own geocode rides along — without it the visit's
+        // map pin would fall back to the customer's PRIMARY coordinates
+        // while the text shows the rental (codex P1).
+        if (matches[0].latitude != null && matches[0].longitude != null) {
+          lat = matches[0].latitude;
+          lng = matches[0].longitude;
+        }
+      }
+    }
+  } catch (e) {
+    logger.warn(`[call-proc] property-linkage resolution failed (booking proceeds unlinked): ${e.code || e.message}`);
+  }
+  return { propertyId, address, lat, lng };
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -3156,7 +3613,8 @@ const CallRecordingProcessor = {
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
-    const callSecondaryContact = resolveCallSecondaryContact(extracted, v2CanonicalExtraction);
+    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    const callSecondaryContact = callSecondaryContacts[0] || null;
 
     // Deterministic backstop for the exact chimera this feature exists to
     // prevent: when the model leaves the SECOND person's email/phone in the
@@ -3173,19 +3631,21 @@ const CallRecordingProcessor = {
     // exact realtor-books-for-buyer booking this feature targets as
     // missing_required_customer_fields. Kill state = honest full revert to
     // pre-feature behavior (chimera risk returns while the gate is off).
-    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && callSecondaryContact) {
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && callSecondaryContacts.length) {
       const scrubLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      if (extracted.email && callSecondaryContact.email
-          && String(extracted.email).toLowerCase() === String(callSecondaryContact.email).toLowerCase()) {
-        extracted.email = null;
-        logger.info(`[call-proc] Scrubbed secondary contact's email off the caller fields for ${maskSid(callSid)}`);
-      }
       const aniLast10 = scrubLast10(call.from_phone);
-      if (extracted.phone && callSecondaryContact.phone
-          && scrubLast10(extracted.phone) === scrubLast10(callSecondaryContact.phone)
-          && aniLast10 && scrubLast10(extracted.phone) !== aniLast10) {
-        extracted.phone = null;
-        logger.info(`[call-proc] Scrubbed secondary contact's phone off the caller fields for ${maskSid(callSid)}`);
+      for (const secondary of callSecondaryContacts) {
+        if (extracted.email && secondary.email
+            && String(extracted.email).toLowerCase() === String(secondary.email).toLowerCase()) {
+          extracted.email = null;
+          logger.info(`[call-proc] Scrubbed secondary contact's email off the caller fields for ${maskSid(callSid)}`);
+        }
+        if (extracted.phone && secondary.phone
+            && scrubLast10(extracted.phone) === scrubLast10(secondary.phone)
+            && aniLast10 && scrubLast10(extracted.phone) !== aniLast10) {
+          extracted.phone = null;
+          logger.info(`[call-proc] Scrubbed secondary contact's phone off the caller fields for ${maskSid(callSid)}`);
+        }
       }
     }
 
@@ -3213,11 +3673,27 @@ const CallRecordingProcessor = {
       }
     }
 
+    const sharedPhoneAmbiguity = {};
     if (!customerId && phone) {
       // Try to find an existing customer by the external contact phone.
-      // Name match wins; phone-only matching is allowed only when the number
-      // maps to a single active customer.
-      const existing = await findCustomerForCallContact(phone, extracted);
+      // Name match wins; phone-only matching needs a second deterministic
+      // signal (single owner / AV-address / household) — see the cascade.
+      const existing = await findCustomerForCallContact(phone, extracted, {
+        multiMatchOut: sharedPhoneAmbiguity,
+        callAddress: {
+          address_line1: extracted.address_line1,
+          address_line2: extracted.address_line2 || null,
+          city: extracted.city,
+          zip: extracted.zip,
+        },
+        // Keyed on the same effective (recovery-aware) verdict the routing
+        // gate consumes: when street recovery found a single validated
+        // premise, extracted already carries the recovered address, so the
+        // address-disambiguation leg must see it as decisive too — otherwise
+        // an agent-role slot caller about the recovered property minted a
+        // duplicate customer (codex round-10 P2).
+        avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
+      });
       if (existing) {
         customerId = existing.id;
         // Update with any new info
@@ -3231,6 +3707,27 @@ const CallRecordingProcessor = {
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
+      } else if (sharedPhoneAmbiguity.candidates) {
+        // Shared phone, no deterministic tiebreak: minting ANOTHER customer
+        // on this number would make it permanently multi-match (the duplicate
+        // flywheel, audit #7). Keep the call customer-less — the workable-lead
+        // path below still captures the prospect — and open a blocking review
+        // card so the office attaches it to the right record (or a new one).
+        logger.warn(`[call-proc] Suppressing customer create for ${maskSid(callSid)}: shared phone matches ${sharedPhoneAmbiguity.shareCount} customers`);
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'shared_phone_ambiguous',
+            extraction: v2CanonicalExtraction || undefined,
+            extraPayload: {
+              share_count: sharedPhoneAmbiguity.shareCount,
+              candidates: sharedPhoneAmbiguity.candidates,
+              extracted_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+            },
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore()
+          .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
       } else if (extracted.first_name && phone && !extracted.is_voicemail) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -3562,9 +4059,13 @@ const CallRecordingProcessor = {
     // BEFORE the appointment step so a booking made on this same call already
     // fans its confirmation out to the new contact. Kill switch = unset the gate;
     // the triage item + lead extracted_data still carry the contact either way.
-    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContact) {
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
+      // Every extracted party (up to 3), in notification-centrality order —
+      // each entry passes the SAME per-contact gates (wants_notifications,
+      // dedup, cross-customer, empty slot). Stop early when slots run out.
+      for (const secondaryEntry of callSecondaryContacts) {
       try {
-        const result = await persistCallSecondaryContact(customerId, callSecondaryContact);
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry);
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
@@ -3575,15 +4076,17 @@ const CallRecordingProcessor = {
               callLogId: call.id,
               flag: 'secondary_contact_is_existing_customer',
               extraction: v2CanonicalExtraction || undefined,
-              extraPayload: { secondary_contact: callSecondaryContact },
+              extraPayload: { secondary_contact: secondaryEntry },
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore()
             .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
         }
+        if (result === 'skipped_slots_full') break;
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+      }
       }
     }
 
@@ -3664,8 +4167,15 @@ const CallRecordingProcessor = {
         // for the per-path filters: soft-deleted excluded always; active-only
         // on the customer-less recovery path; unclaimed-or-ours on the
         // customer-attached path, so a shared-phone lead owned by another
-        // customer is never reused/overwritten).
-        const existingLead = await findReusableCallLead(db, { phone, customerId, workableUnnamedLead });
+        // customer is never reused/overwritten; UNCLAIMED-only when the phone
+        // is ambiguous across customers — this call must not enrich a lead
+        // one of the candidates owns while the office adjudicates).
+        const existingLead = await findReusableCallLead(db, {
+          phone,
+          customerId,
+          workableUnnamedLead,
+          unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+        });
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -4425,6 +4935,17 @@ const CallRecordingProcessor = {
                         .insert({
                           customer_id: customerId,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          // Visit 2 treats the same property as visit 1 —
+                          // coordinates included, or the stamped child would
+                          // render the right address with no map pin.
+                          property_id: primaryRow.property_id || null,
+                          lat: primaryRow.lat ?? null,
+                          lng: primaryRow.lng ?? null,
+                          service_address_line1: primaryRow.service_address_line1 || null,
+                          service_address_line2: primaryRow.service_address_line2 || null,
+                          service_address_city: primaryRow.service_address_city || null,
+                          service_address_state: primaryRow.service_address_state || null,
+                          service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
                           window_start: fuStart,
                           window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
@@ -4550,9 +5071,32 @@ const CallRecordingProcessor = {
                     },
                   };
                 }
+                // Which property is this visit FOR? Stamp the call's own
+                // (post-AV) address + the exact-match property id so dispatch
+                // and the tech portal render the booked property, not the
+                // customer's primary mirror (a rental booking used to
+                // dispatch to the customer's home).
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {
+                  ...extracted,
+                  // flatView historically dropped street_line_2; a condo unit
+                  // must survive into the stamp/key (codex P2).
+                  address_line2: extracted.address_line2
+                    || v2ApprovedExtraction?.property?.service_address?.street_line_2
+                    || v2CanonicalExtraction?.property?.service_address?.street_line_2
+                    || null,
+                }, trx);
                 const insertData = {
                   customer_id: customerId,
                   technician_id: defaultTechnicianId,
+                  property_id: propertyLinkage.propertyId,
+                  ...(propertyLinkage.lat != null && propertyLinkage.lng != null
+                    ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
+                    : {}),
+                  service_address_line1: propertyLinkage.address?.line1 || null,
+                  service_address_line2: propertyLinkage.address?.line2 || null,
+                  service_address_city: propertyLinkage.address?.city || null,
+                  service_address_state: propertyLinkage.address?.state || null,
+                  service_address_zip: propertyLinkage.address?.zip || null,
                   scheduled_date: scheduledDate,
                   window_start: windowStart || '09:00',
                   window_end: windowEnd || '10:00',
@@ -5445,7 +5989,11 @@ CallRecordingProcessor._test = {
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,
+  resolveCallSecondaryContacts,
   persistCallSecondaryContact,
+  resolveCallBookingPropertyLinkage,
+  sameFirstName,
+  firstNameVariants,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,

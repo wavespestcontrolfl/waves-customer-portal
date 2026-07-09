@@ -13,6 +13,7 @@ const {
   summarizeProtocolContext,
 } = require('../lawn-protocol-operating-layer');
 const { loadCustomerGrassContext } = require('../lawn-grass-context');
+const { sqlZip5 } = require('../stamped-address');
 
 async function safeBuild(label, fn) {
   try {
@@ -29,13 +30,24 @@ async function safeBuild(label, fn) {
 async function loadServiceRecordForDynamicContext(recordId, knex = db) {
   const customerCols = await knex('customers').columnInfo().catch(() => ({}));
   const customerSelect = [
-    'customers.zip',
-    customerCols.county ? 'customers.county' : null,
+    // Pest-pressure context keys off the VISIT's location: the stamped
+    // service ZIP when present (a rental in another town has that town's
+    // pest pressure), the customer mirror otherwise (codex round-9 P2).
+    knex.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+    // County follows the same rule: when the stamped ZIP wins AND differs
+    // from the customer's, the primary's county no longer describes the
+    // visit — neighborhood-pressure filters on county+zip together, and a
+    // mismatched pair drops or mangles the context (codex round-10 P2).
+    // Same-ZIP (or unstamped) visits keep the customer county.
+    customerCols.county
+      ? knex.raw(`CASE WHEN ss.service_address_zip IS NOT NULL AND NULLIF(${sqlZip5('ss.service_address_zip')}, '') IS DISTINCT FROM NULLIF(${sqlZip5('customers.zip')}, '') THEN NULL ELSE customers.county END as county`)
+      : null,
     customerCols.timezone ? 'customers.timezone' : null,
   ].filter(Boolean);
   return knex('service_records')
     .where({ 'service_records.id': recordId })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .select(
       'service_records.*',
       ...customerSelect,

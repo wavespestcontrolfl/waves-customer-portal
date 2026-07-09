@@ -95,8 +95,8 @@ SECONDARY CONTACT (a SECOND person who is a party to the service):
 - The CALLER's own identity always stays in the "caller" object. Never duplicate the caller into secondary_contact, and never put the other person's phone/email into the caller's fields.
 - role is this person's relationship to the TRANSACTION: the buyer a realtor is booking for is home_buyer (not real_estate_agent).
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — is false.
-- When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
-- other_parties_mentioned: true when the call named MORE people as parties to the service than the one secondary_contact you extracted (buyer + co-buyer + agent; tenant + owner + manager) — this tells the office to re-listen for the others. false/null when the secondary_contact (or nobody) was the only other party.
+- secondary_contacts (ARRAY): when MORE THAN ONE other person is a party to the service (buyer + co-buyer + agent; tenant + owner + manager), list EVERY such person here — up to 3, ordered most notification-central first (the person the caller designates for contact/notifications leads; the property's buyer/occupant beats a bystander). Each entry follows every rule in this section. The FIRST entry must be the SAME person as secondary_contact. One other party → a one-entry array. Nobody → [] or null.
+- other_parties_mentioned: true ONLY when the call named MORE parties than fit in secondary_contacts (a 4th+ person) — this tells the office to re-listen for the overflow. false/null otherwise.
 - The SPELLED-OUT INPUT, TRANSCRIPT RELIABILITY, and EMAIL rules above apply to this person's fields exactly as they do to the caller's.
 
 SERVICE REQUEST:

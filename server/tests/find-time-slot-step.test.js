@@ -1,6 +1,12 @@
 // find-time slotStepMinutes: auto-dispatch needs on-the-hour starts (stops are
 // never at 10:15 / 1:30). Default (1) preserves exact earliest-feasible minute.
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  // The stop query selects db.raw(...) coordinate expressions (stamped-address
+  // divergence guard) — mirror knex's raw so building the select can't throw.
+  fn.raw = (sql) => ({ toString: () => sql });
+  return fn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/route-optimizer', () => ({ HQ: { lat: 27.39, lng: -82.39 }, haversine: () => 0.5 }));
 
@@ -52,4 +58,20 @@ test('earliestStartMin past what fits before day close yields no slot (correctly
 test('earliestStartMin default (0) is a no-op — identical legacy behavior', async () => {
   const { slots } = await findAvailableSlots(BASE);
   expect(slots[0].start_time).toBe('08:01');
+});
+
+test('a coordless stop (divergent stamped rental) degrades to zero drive, not hidden gaps (round-9 P2)', async () => {
+  const stop = {
+    id: 's1', scheduled_date: '2026-09-01', technician_id: 't1',
+    window_start: '10:00', window_end: '11:00', service_type: 'pest',
+    estimated_duration_minutes: 60,
+    svc_lat: null, svc_lng: null, cust_lat: null, cust_lng: null,
+    first_name: 'Rental', last_name: 'Stop', city: 'Venice',
+  };
+  db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([stop])));
+  const { slots } = await findAvailableSlots(BASE);
+  const starts = slots.map((s) => s.start_time);
+  // Both gaps around the coordless stop must still offer slots.
+  expect(starts.some((t) => t < '10:00')).toBe(true);
+  expect(starts.some((t) => t >= '11:00')).toBe(true);
 });

@@ -243,8 +243,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.3.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.3.0');
+  test('current SCHEMA_VERSION is 1.4.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.4.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -354,6 +354,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: 'joseph.haught89431@gmail.com',
+      service_contact_role: 'home_buyer',
     }]);
     // Emptiness re-asserted in the UPDATE's WHERE (race guard) — one
     // predicate per slot column.
@@ -381,6 +382,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: null,
+      service_contact_role: 'home_buyer',
     }]);
   });
 
@@ -396,10 +398,18 @@ describe('persistCallSecondaryContact', () => {
   test('a phone already on the record (primary or slot, any format) is a no-op', async () => {
     const writes = makeDb({ customer: { ...bareCustomer, phone: '9542901693' } });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record');
+    // Slot match with an EMPTY role column: identity is a no-op, but the
+    // role the call just identified backfills onto the matched slot (codex
+    // round-8 P2) — otherwise household-role matching can never link this
+    // stored contact's future calls.
     const writes2 = makeDb({ customer: { ...bareCustomer, service_contact2_phone: '(954) 290-1693' } });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record_role_backfilled');
+    // Slot match with a role already recorded stays a full no-op.
+    const writes3 = makeDb({ customer: { ...bareCustomer, service_contact2_phone: '(954) 290-1693', service_contact2_role: 'tenant' } });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record');
     expect(writes.updates).toHaveLength(0);
-    expect(writes2.updates).toHaveLength(0);
+    expect(writes2.updates).toEqual([{ service_contact2_role: 'home_buyer' }]);
+    expect(writes3.updates).toHaveLength(0);
   });
 
   test('a service-contact slot email satisfies the appointment email requirement (post-scrub bookability)', () => {
@@ -437,6 +447,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact2_name: 'Joseph Haught',
       service_contact2_phone: '+19542901693',
       service_contact2_email: 'joseph.haught89431@gmail.com',
+      service_contact2_role: 'home_buyer',
     }]);
     // Slot phones already existed → the admin's appointment notify-primary
     // choice stands. No slot EMAIL existed → report emails flip now.
@@ -462,6 +473,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_name: 'Joseph Haught',
       service_contact_phone: null,
       service_contact_email: 'joseph.haught89431@gmail.com',
+      service_contact_role: 'home_buyer',
     }]);
     expect(writes.prefsMerges).toHaveLength(1);
     expect(writes.prefsMerges[0].mergePayload).toEqual({ service_report_notify_primary: true });

@@ -56,13 +56,17 @@ function getPrimaryContact(customer) {
 // Up to three on-location contacts per customer. Slot 1 keeps the original
 // column names so single-beneficiary consumers (getServiceContact) are
 // untouched; slots 2/3 only participate in the multi-recipient fan-outs.
+// `role` is the SLOT's label (drives sender semantics); `roleCol` is the
+// column holding the PERSON's relationship to the service (home_buyer,
+// tenant, ...) as extracted from the call — recorded for role-aware
+// recipient selection later, no current sender reads it.
 const SERVICE_CONTACT_SLOTS = [
-  { name: 'service_contact_name', phone: 'service_contact_phone', email: 'service_contact_email', role: 'service_contact' },
-  { name: 'service_contact2_name', phone: 'service_contact2_phone', email: 'service_contact2_email', role: 'service_contact_2' },
-  { name: 'service_contact3_name', phone: 'service_contact3_phone', email: 'service_contact3_email', role: 'service_contact_3' },
+  { name: 'service_contact_name', phone: 'service_contact_phone', email: 'service_contact_email', role: 'service_contact', roleCol: 'service_contact_role' },
+  { name: 'service_contact2_name', phone: 'service_contact2_phone', email: 'service_contact2_email', role: 'service_contact_2', roleCol: 'service_contact2_role' },
+  { name: 'service_contact3_name', phone: 'service_contact3_phone', email: 'service_contact3_email', role: 'service_contact_3', roleCol: 'service_contact3_role' },
 ];
 
-const SERVICE_CONTACT_COLUMNS = SERVICE_CONTACT_SLOTS.flatMap((slot) => [slot.name, slot.phone, slot.email]);
+const SERVICE_CONTACT_COLUMNS = SERVICE_CONTACT_SLOTS.flatMap((slot) => [slot.name, slot.phone, slot.email, slot.roleCol]);
 
 // Raw cleaned slot values (no primary fallback) for the fan-out helpers.
 function getServiceContactSlots(customer) {
@@ -72,6 +76,7 @@ function getServiceContactSlots(customer) {
     phone: clean(customer[slot.phone]),
     email: clean(customer[slot.email]),
     role: slot.role,
+    contactRole: clean(customer[slot.roleCol]) || null,
   }));
 }
 

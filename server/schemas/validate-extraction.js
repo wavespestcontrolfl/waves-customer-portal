@@ -16,7 +16,10 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // pest_type no_see_ums/flies_gnats/scorpions/moles/love_bugs/bats,
 // severity_signal swarmers_seen. All optional/enum-widening: older payloads
 // still validate.
-const SCHEMA_VERSION = '1.3.0';
+// 1.4.0: additive — top-level secondary_contacts ARRAY (up to 3 other
+// parties; first entry mirrors secondary_contact for older readers).
+// Optional/nullable: older payloads still validate.
+const SCHEMA_VERSION = '1.4.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -98,6 +98,20 @@ function normalizeSecondaryContact(contact) {
   return normalized;
 }
 
+// 1.4.0 array: each entry through the single-contact normalizer (E.164
+// re-validation, garbled-email rejection); empty shells drop; cap 3.
+// Non-array garbage fails safe to null (persisted schema allows null).
+function normalizeSecondaryContacts(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const entry of list) {
+    const normalized = normalizeSecondaryContact(entry);
+    if (normalized) out.push(normalized);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 function normalizeExtractionV2(extraction) {
   if (!extraction || typeof extraction !== 'object') return extraction;
 
@@ -108,6 +122,9 @@ function normalizeExtractionV2(extraction) {
     ...(extraction.secondary_contact !== undefined
       ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }
       : {}),
+    ...(extraction.secondary_contacts !== undefined
+      ? { secondary_contacts: normalizeSecondaryContacts(extraction.secondary_contacts) }
+      : {}),
   };
 }
 
@@ -115,6 +132,7 @@ module.exports = {
   normalizeExtractionV2,
   normalizeCaller,
   normalizeSecondaryContact,
+  normalizeSecondaryContacts,
   normalizeAddress,
   normalizePhone,
   normalizeZip,
