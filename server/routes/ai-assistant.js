@@ -112,7 +112,59 @@ router.post('/chat', async (req, res, next) => {
       customerPhone,
     });
 
-    res.json(result);
+    res.json({ ...result, canReport: aiContentReportEnabled() });
+  } catch (err) { next(err); }
+});
+
+// Kill switch for the customer-facing "report AI content" affordance
+// (Microsoft Store policy 11.16 requires a live report mechanism, so the
+// gate defaults ON; set GATE_AI_CONTENT_REPORT=false to kill).
+function aiContentReportEnabled() {
+  return process.env.GATE_AI_CONTENT_REPORT !== 'false';
+}
+
+// POST /api/ai/chat/report — customer flags an AI reply as inappropriate.
+// Lands in the existing ai_escalations review queue (admin AI page).
+router.post('/chat/report', async (req, res, next) => {
+  try {
+    if (!aiContentReportEnabled()) return res.status(404).json({ error: 'Not found' });
+
+    const messageContent = String(req.body?.messageContent || '').trim().slice(0, 4000);
+    if (!messageContent) return res.status(400).json({ error: 'messageContent required' });
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
+
+    // Same optional customer identification as /chat — anonymous reports allowed.
+    let customerId = null;
+    try {
+      const jwt = require('jsonwebtoken');
+      const config = require('../config');
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (token) {
+        const decoded = jwt.verify(token, config.jwt.secret);
+        if (decoded.customerId) customerId = decoded.customerId;
+      }
+    } catch { /* unauthenticated report is allowed */ }
+
+    let conversation = null;
+    if (sessionId) {
+      conversation = await db('agent_sessions')
+        .where({ channel: 'portal_chat', channel_identifier: sessionId })
+        .orderBy('created_at', 'desc')
+        .first();
+    }
+
+    await db('ai_escalations').insert({
+      conversation_id: conversation?.id || null,
+      customer_id: customerId || conversation?.customer_id || null,
+      reason: 'reported_ai_content',
+      summary: 'Customer flagged an AI chat reply as inappropriate via the portal Report button.',
+      customer_message: `[Reported AI reply] ${messageContent}`,
+      ai_draft_response: null,
+      priority: 'normal',
+      status: 'pending',
+    });
+
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
