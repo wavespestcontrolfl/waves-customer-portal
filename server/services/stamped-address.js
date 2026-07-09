@@ -104,4 +104,4 @@ function stampedLine2Sql(sAlias, cAlias) {
     + ` ELSE COALESCE(${sAlias}.service_address_line2, ${cAlias}.address_line2) END`;
 }
 
-module.exports = { stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql };
+module.exports = { stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5 };

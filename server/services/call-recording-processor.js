@@ -3686,7 +3686,13 @@ const CallRecordingProcessor = {
           city: extracted.city,
           zip: extracted.zip,
         },
-        avDecisive: ['validated_accept', 'corrected'].includes(v2AddressValidation?.status),
+        // Keyed on the same effective (recovery-aware) verdict the routing
+        // gate consumes: when street recovery found a single validated
+        // premise, extracted already carries the recovered address, so the
+        // address-disambiguation leg must see it as decisive too — otherwise
+        // an agent-role slot caller about the recovered property minted a
+        // duplicate customer (codex round-10 P2).
+        avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
       });
       if (existing) {
         customerId = existing.id;

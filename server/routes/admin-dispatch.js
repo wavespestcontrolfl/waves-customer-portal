@@ -2258,7 +2258,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Report application-conditions (weather) capture at the TREATED
+        // parcel: stamped visit coords first, the primary home only for
+        // non-divergent stamps (codex round-10 P2).
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
         'customers.autopay_enabled as cust_autopay_enabled',
