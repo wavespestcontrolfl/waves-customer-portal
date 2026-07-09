@@ -74,7 +74,13 @@ const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
-const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
+// Prod technician row is named "Adam" (verified 2026-07-08) — the old
+// 'Adam B.' default never name-matched and assignment survived only on the
+// sole-active-technician fallback.
+const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam';
+// Owner directive 2026-07-08: call-booked visits default to a 60-minute
+// duration when the catalog doesn't specify one.
+const DEFAULT_CALL_BOOKING_DURATION_MINUTES = 60;
 const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize';
@@ -4427,7 +4433,7 @@ const CallRecordingProcessor = {
                           // semantics of its own.
                           ...callFollowUpBillingShape(priceInfo.price),
                           followup_source_service_id: primaryRow.id,
-                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                           // Customer-safe only: once dispatch confirms this row
                           // the portal filter no longer hides it and
                           // GET /api/schedule returns notes verbatim. The
@@ -4541,7 +4547,7 @@ const CallRecordingProcessor = {
                     price: priceInfo.price,
                     catalogRow: callBookingCatalogRow,
                   }),
-                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                   status: 'confirmed',
                   customer_confirmed: true,
                   confirmed_at: new Date(),
@@ -4680,6 +4686,22 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
+              }
+              if (!svc.technician_id) {
+                // A confirmed, customer-notified booking assigned to NOBODY
+                // used to be invisible (log line only) — surface it so the
+                // visit can't slip off the dispatch board.
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: 'unassigned_auto_booking',
+                    extraction: v2ApprovedExtraction || undefined,
+                    severity: 'advisory',
+                    extraPayload: { scheduled_service_id: svc.id, scheduled_date: scheduledDate, service: svc.service_type },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((triageErr) => logger.warn(`[call-proc] unassigned-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
               }
               }
               if (followUpCreated) {

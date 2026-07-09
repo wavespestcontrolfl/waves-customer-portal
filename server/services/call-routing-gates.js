@@ -124,6 +124,7 @@ function buildTriageItem({
     address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
+    unassigned_auto_booking: 'time_ambiguous',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
