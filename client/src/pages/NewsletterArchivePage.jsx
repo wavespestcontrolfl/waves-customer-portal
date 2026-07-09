@@ -14,6 +14,7 @@ import { Link, useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { WavesShell } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -102,11 +103,19 @@ export default function NewsletterArchivePage() {
     return () => { cancelled = true; };
   }, [id]);
 
+  // Standard shell top bar — same header as /track (owner 2026-07-09):
+  // store links · centered logo · help icons. The navy issue strip stays
+  // as a sub-header beneath it.
   if (status === 'loading') {
-    return <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />;
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />
+      </WavesShell>
+    );
   }
   if (status === 'notfound') {
     return (
+      <WavesShell variant="customer" topBar="solid">
       <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh', padding: '56px 24px', textAlign: 'center' }}>
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, letterSpacing: 0, color: TEXT, margin: '0 0 8px' }}>
           We couldn't find that issue.
@@ -134,6 +143,7 @@ export default function NewsletterArchivePage() {
           See the latest issues
         </Link>
       </div>
+      </WavesShell>
     );
   }
 
@@ -142,6 +152,7 @@ export default function NewsletterArchivePage() {
     : '';
 
   return (
+    <WavesShell variant="customer" topBar="solid">
     <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }}>
       {/* Header strip */}
       <div style={{ background: B.blueDeeper, color: '#fff', padding: '16px 24px' }}>
@@ -224,5 +235,6 @@ export default function NewsletterArchivePage() {
         <BrandFooter />
       </div>
     </div>
+    </WavesShell>
   );
 }
