@@ -1262,8 +1262,13 @@ function situsHouseNumberExactMatch(searchAddress, situsAddress, typedAddress = 
   if (!searchNumber || !situsNumber || searchNumber !== situsNumber) return false;
   const typedNumber = leadingHouseNumber(typedAddress);
   if (!typedNumber || typedNumber !== situsNumber) return false;
-  const streetOf = (value) => stripUnitDesignators(normalizeCountyStreetLine(value))
-    .replace(/^\d+\s+/, '').trim();
+  // Bare "#110" markers lose their '#' in normalization and the leftover
+  // trailing number defeats stripUnitDesignators — pre-strip them from the
+  // raw string like the audit does, or a unit-suffixed typed address fails
+  // the street comparison against its own parcel.
+  const streetOf = (value) => stripUnitDesignators(normalizeCountyStreetLine(
+    String(value || '').replace(/#\s*[A-Za-z0-9-]+/g, ' '),
+  )).replace(/^\d+\s+/, '').trim();
   const searchStreet = streetOf(searchAddress);
   const situsStreet = streetOf(situsAddress);
   return Boolean(searchStreet && situsStreet && searchStreet === situsStreet);
@@ -1312,13 +1317,27 @@ function slugAddressLine(url) {
   return stripUnitDesignators(normalizeCountyStreetLine(segment.replace(/[-_]+/g, ' '))) || null;
 }
 
-// Source types whose detail URLs embed the PROPERTY's address as the slug —
-// the only URLs where a leading number is a house number. Restricted to
-// CLASSIFIED listing/aggregator hosts: builder catalogs and permit pages
-// carry plan/permit numbers in the slug position, and an UNCLASSIFIED host
-// can too (an unrecognized builder's "/1820-magnolia-plan" must not read as
-// a wrong house and torpedo valid new-construction evidence — codex P2).
-const ADDRESS_SLUG_SOURCE_TYPES = new Set(['listing', 'aggregator']);
+// Hosts whose detail URLs embed the PROPERTY's address as the slug — the
+// only URLs where a leading number is a house number. EXACT host matching
+// (domain or subdomain), never substring: classifyPropertySource's
+// `includes` check reads "marondahomes.com" as homes.com, and a builder's
+// plan-number slug ("/1820-magnolia-plan") must not read as a wrong house
+// and torpedo valid new-construction evidence (codex P2).
+const LISTING_SLUG_HOSTS = [
+  'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
+  'apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com',
+];
+
+function isListingSlugHost(url) {
+  if (!url || typeof url !== 'string') return false;
+  let host;
+  try {
+    host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return false;
+  }
+  return LISTING_SLUG_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
 
 // The situs guard's twin for the AI web-search path. The prompt forbids
 // borrowing facts from a nearby home, but nothing enforced it — a trio
@@ -1335,6 +1354,12 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   if (!record) return false;
   const typedNumber = leadingHouseNumber(typedAddress);
   if (!typedNumber) return false;
+  // A trusted PRIMARY source (county/permit/builder page) means the facts
+  // are not listing-borrowed — a comp/neighbor listing cited beside it must
+  // not veto the record (codex P2). The veto below exists for records whose
+  // facts came from listing-shaped sources.
+  const primaryType = classifyPropertySource(record._aiSourceUrl).type;
+  if (['county', 'cadastral', 'permit', 'builder'].includes(primaryType)) return false;
   // Same bare-'#' pre-strip as the audit, so a typed unit can't ride into
   // the street identity.
   const typedLine = stripUnitDesignators(
@@ -1357,7 +1382,7 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   let confirmed = false;
   let sawDisagreement = false;
   for (const url of urls) {
-    if (!ADDRESS_SLUG_SOURCE_TYPES.has(classifyPropertySource(url).type)) continue;
+    if (!isListingSlugHost(url)) continue;
     const slugLine = slugAddressLine(url);
     const slugNumber = slugLine ? leadingHouseNumber(slugLine) : null;
     if (!slugNumber) continue;
