@@ -10,7 +10,7 @@ import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import EstimateViewPage from '../pages/EstimateViewPage';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'accepted'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'lawn', 'accepted'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -269,10 +269,30 @@ function acceptedScenario() {
   };
 }
 
+// Lawn-only recurring estimate — exercises the lawn variant of the report
+// showcase (lawn health score mock instead of the pest recap video).
+function lawnScenario() {
+  const bundle = bundleScenario();
+  const lawnService = bundle.pricing.services.find((s) => s.key === 'lawn_care');
+  return {
+    ...bundle,
+    estimate: { ...bundle.estimate, serviceCategory: 'lawn_care' },
+    pricing: {
+      ...bundle.pricing,
+      services: [lawnService],
+      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      waveGuardTier: null,
+      combinedRecurring: null,
+      askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'Are pets and kids safe?'],
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
   bundle: bundleScenario,
+  lawn: lawnScenario,
   accepted: acceptedScenario,
 };
 
@@ -315,7 +335,9 @@ window.fetch = async (input, init) => {
   });
 
   if (url.includes('/api/estimates/') && url.includes('/data')) {
-    return respond(PAYLOADS[scenario]());
+    // Prod sends glassDefault per eligible category with the gate unset =
+    // ALL categories, so the harness mirrors the live copy pack.
+    return respond({ ...PAYLOADS[scenario](), glassDefault: true });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

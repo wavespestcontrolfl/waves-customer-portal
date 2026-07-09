@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -331,6 +331,55 @@ describe('estimateAddServiceOffer', () => {
       serviceKey: 'mosquito',
       label: 'Mosquito',
     }));
+  });
+});
+
+describe('reportShowcaseVariantForServices', () => {
+  it('shows the lawn report on a lawn-only estimate', () => {
+    expect(reportShowcaseVariantForServices([
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true },
+    ])).toBe('lawn');
+  });
+
+  it('ignores "pest" in lawn marketing copy — included lines never flip the variant', () => {
+    // Real lawn payloads include "Chinch, sod webworm & turf pest response";
+    // only structural identity (key/memberKeys/isPest/serviceCategory) may
+    // decide the variant, never copy text.
+    expect(reportShowcaseVariantForServices([{
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      isRecurring: true,
+      isPest: false,
+      frequencies: [{
+        key: 'standard',
+        serviceCategory: 'lawn_care',
+        included: [
+          { key: 'fert', label: 'Fertilization + weed control' },
+          { key: 'pests', label: 'Chinch, sod webworm & turf pest response' },
+        ],
+      }],
+    }])).toBe('lawn');
+  });
+
+  it('keeps the pest report when pest control is in the mix', () => {
+    expect(reportShowcaseVariantForServices([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control', 'lawn_care'],
+      frequencies: [],
+    }])).toBe('pest');
+  });
+
+  it('keeps the pest report for lawn + mosquito', () => {
+    expect(reportShowcaseVariantForServices([
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true },
+      { key: 'mosquito', label: 'Mosquito', isRecurring: true },
+    ])).toBe('pest');
+  });
+
+  it('defaults to the pest report with no services', () => {
+    expect(reportShowcaseVariantForServices([])).toBe('pest');
   });
 });
 
