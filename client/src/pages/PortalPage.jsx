@@ -6284,12 +6284,16 @@ function LearnTab({ customer }) {
           />
         )}
 
-        <div style={{
+        {/* Glass material (owner 2026-07-09) — the sand wash read as the old
+            warm theme inside the glass Learn tab; sand stays as the non-glass
+            fallback. Nested inside a glass card → soft tier. */}
+        <div data-glass="soft" style={{
           marginTop: 14,
           padding: 16,
           background: B.sand,
           border: '1px solid #E7E2D7',
           borderRadius: 8,
+          position: 'relative',
         }}>
           <NewsletterSignup
             variant="light"

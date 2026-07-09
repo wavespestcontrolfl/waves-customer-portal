@@ -14,6 +14,7 @@ import { Link, useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
@@ -79,6 +80,10 @@ function ArchiveBody({ html }) {
 
 export default function NewsletterArchivePage() {
   const { id } = useParams();
+  // Glass scene (owner 2026-07-09) — customers read the archive from inside
+  // the portal (Learn tab + portal /newsletter landing), so it renders like
+  // the other glass surfaces. The public/SEO archive lives on the astro site.
+  useGlassSurface(true, 'full');
   const [post, setPost] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | notfound
 

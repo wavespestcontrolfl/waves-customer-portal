@@ -29,6 +29,7 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -7767,9 +7768,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        {/* Live (glass) view carries the standard identity footer — same as
-            /track (owner 2026-07-08). PDF/static/sms_preview keep the quiet
-            document sign-off so the print pipeline stays byte-identical. */}
+        {/* Live (glass) view carries the standard newsletter card + identity
+            footer — same as /track (owner 2026-07-08/09). PDF/static/
+            sms_preview keep the quiet document sign-off so the print
+            pipeline stays byte-identical. */}
+        {mode === 'live' && <GlassNewsletterCard source="report_footer" />}
         <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>

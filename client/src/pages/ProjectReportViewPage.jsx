@@ -7,6 +7,7 @@ import {
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -635,10 +636,11 @@ export default function ProjectReportViewPage() {
         </div>
 
       </main>
-      {/* Glass views carry the standard identity footer — same as /track
-          (owner 2026-07-08, supersedes the 2026-07-04 quiet-contact ruling
-          for glassed renders). The certificate render stays plain paper
-          with the quiet contact footer. */}
+      {/* Glass views carry the standard newsletter card + identity footer —
+          same as /track (owner 2026-07-08/09, supersedes the 2026-07-04
+          quiet-contact ruling for glassed renders). The certificate render
+          stays plain paper with the quiet contact footer, no signup. */}
+      {!isCertificate && <GlassNewsletterCard source="project_report_footer" />}
       <BrandFooter variant={isCertificate ? 'contact' : undefined} />
     </div>
   );
