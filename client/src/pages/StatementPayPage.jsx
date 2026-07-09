@@ -22,6 +22,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 import { useParams } from "react-router-dom";
 import { COLORS, FONTS } from "../theme-brand";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
+import BrandFooter from "../components/BrandFooter";
 import { getStripe } from "../lib/stripeLoader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -411,7 +412,12 @@ export default function StatementPayPage() {
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 560, margin: "48px auto", padding: "0 16px" }}>{children}</div>
+      <div style={{ maxWidth: 560, margin: "48px auto", padding: "0 16px" }}>
+        {children}
+        {/* Standard identity footer — every glass surface carries the same
+            footer as /track (owner 2026-07-08). */}
+        <BrandFooter />
+      </div>
     </WavesShell>
   );
 

@@ -7766,7 +7766,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        <BrandFooter variant="document" />
+        {/* Live (glass) view carries the standard identity footer — same as
+            /track (owner 2026-07-08). PDF/static/sms_preview keep the quiet
+            document sign-off so the print pipeline stays byte-identical. */}
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>
   );

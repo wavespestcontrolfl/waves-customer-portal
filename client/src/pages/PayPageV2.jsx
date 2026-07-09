@@ -90,6 +90,7 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
@@ -2025,6 +2026,12 @@ export default function PayPageV2() {
 
         <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
           Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
+        </div>
+        {/* Standard identity footer — every glass surface carries the same
+            footer as /track (owner 2026-07-08). Hidden from the invoice
+            printout via waves-no-print. */}
+        <div className="waves-no-print">
+          <BrandFooter />
         </div>
       </div>
     </WavesShell>

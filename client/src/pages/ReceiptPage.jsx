@@ -45,6 +45,7 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -769,6 +770,12 @@ export default function ReceiptPage() {
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
+        </div>
+        {/* Standard identity footer — every glass surface carries the same
+            footer as /track (owner 2026-07-08). Hidden from the receipt
+            printout via waves-no-print. */}
+        <div className="waves-no-print">
+          <BrandFooter />
         </div>
       </div>
     </WavesShell>

@@ -4,6 +4,8 @@ import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
+import BrandFooter from '../components/BrandFooter';
+import { TrustFooter, WavesShellContext } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import { isNativeApp } from '../native/platform';
 
@@ -95,6 +97,7 @@ export default function LoginPage() {
   if (isAuthenticated) return null;
 
   return (
+    <>
     <main
       className="portal-login-page"
       style={{
@@ -685,5 +688,14 @@ export default function LoginPage() {
         </section>
       </div>
     </main>
+    {/* Standard identity footer — every glass surface carries the same
+        footer stack as /track (owner 2026-07-08): BrandFooter identity
+        block + TrustFooter legal strip, added beneath the locked login
+        layout without touching it. */}
+    <WavesShellContext.Provider value={{ variant: 'customer', inShell: true }}>
+      <BrandFooter />
+    </WavesShellContext.Provider>
+    <TrustFooter />
+    </>
   );
 }

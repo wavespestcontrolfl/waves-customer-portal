@@ -9,6 +9,8 @@ import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import NewsletterSignup from '../components/NewsletterSignup';
+import BrandFooter from '../components/BrandFooter';
+import { TrustFooter, WavesShellContext } from '../components/brand';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
@@ -12260,6 +12262,16 @@ export default function PortalPage() {
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        {/* Standard identity footer — every glass surface carries the same
+            footer stack as /track (owner 2026-07-08): BrandFooter identity
+            block + TrustFooter legal strip. The inShell provider keeps
+            BrandFooter from doubling the legal lines, exactly as WavesShell
+            pages render it. Sits inside the padded content column so the
+            mobile bottom-nav clearance still applies. */}
+        <WavesShellContext.Provider value={{ variant: 'customer', inShell: true }}>
+          <BrandFooter />
+        </WavesShellContext.Provider>
+        <TrustFooter />
       </div>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}

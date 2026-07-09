@@ -635,11 +635,11 @@ export default function ProjectReportViewPage() {
         </div>
 
       </main>
-      {/* Quiet contact footer mirroring the customer estimate (owner
-          directive 2026-07-04): company email · phone · street address.
-          Still no trust strip / newsletter tail — the 2026-07-03 "delivered
-          document" directive stands for everything above this line. */}
-      <BrandFooter variant="contact" />
+      {/* Glass views carry the standard identity footer — same as /track
+          (owner 2026-07-08, supersedes the 2026-07-04 quiet-contact ruling
+          for glassed renders). The certificate render stays plain paper
+          with the quiet contact footer. */}
+      <BrandFooter variant={isCertificate ? 'contact' : undefined} />
     </div>
   );
 }
