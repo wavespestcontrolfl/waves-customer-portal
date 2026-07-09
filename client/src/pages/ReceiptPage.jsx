@@ -35,7 +35,7 @@
 import { FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useGlassSurface } from '../glass/glass-engine';
-import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
+import DocumentActionBar from '../components/DocumentActionBar';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -46,7 +46,6 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -175,30 +174,6 @@ function SummaryRow({ label, value, strong, danger }) {
   );
 }
 
-// Inline success checkmark — navy ring, white tick. Used in the fresh-payment
-// badge scale-in animation.
-function SuccessCheck({ size = 56 }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 56 56"
-      role="img"
-      aria-label="Payment received"
-      style={{ display: 'block' }}
-    >
-      <circle cx="28" cy="28" r="26" fill="var(--success)" />
-      <path
-        d="M16 29 L25 37 L41 20"
-        fill="none"
-        stroke="#FFFFFF"
-        strokeWidth="3.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 export default function ReceiptPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
@@ -393,7 +368,7 @@ export default function ReceiptPage() {
               textAlign: 'center',
             }}
           >
-            <SuccessCheck size={56} />
+            {/* Checkmark graphic removed (owner 2026-07-09 — no decorative icons on customer document pages). */}
             <div style={{
               fontFamily: FONTS.body,
               fontWeight: 750,
@@ -484,6 +459,11 @@ export default function ReceiptPage() {
           </div>
         )}
 
+        <DocumentActionBar
+          pdfUrl={hasReceiptPdf ? `${API_BASE}/receipt/${token}/pdf` : null}
+          pdfFileName="Waves_Receipt.pdf"
+          shareTitle="Waves receipt"
+        />
         <BrandCard className="waves-print-card" padding={28} style={{ marginBottom: 20 }}>
           <div style={{
             display: 'flex',
@@ -494,20 +474,7 @@ export default function ReceiptPage() {
             marginBottom: 18,
           }}>
             <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0 }}>
-              <span style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                background: statusTone === 'refunded' ? 'rgba(200,16,46,0.08)' : (statusTone === 'processing' || statusTone === 'partial') ? '#EEF6FF' : '#F0FDF4',
-                color: statusTone === 'refunded' ? 'var(--danger)' : (statusTone === 'processing' || statusTone === 'partial') ? '#065A8C' : 'var(--success)',
-                border: `1px solid ${statusTone === 'refunded' ? 'rgba(200,16,46,0.22)' : (statusTone === 'processing' || statusTone === 'partial') ? '#BFE4F8' : '#BBF7D0'}`,
-              }}>
-                <Icon name={statusTone === 'processing' ? 'clock' : (statusTone === 'refunded' || statusTone === 'partial') ? 'refresh' : 'check'} size={22} strokeWidth={2.4} />
-              </span>
+              {/* Status icon tile removed (owner 2026-07-09 — no decorative icons). */}
               <div style={{ minWidth: 0 }}>
                 <div style={{ ...eyebrow, marginBottom: 8 }}>
                   {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
@@ -540,19 +507,7 @@ export default function ReceiptPage() {
                 {statusDetail}
               </div>
             </div>
-            <span data-glass="soft" style={{
-              width: 42,
-              height: 42,
-              borderRadius: 8,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--brand)',
-              background: '#FFFFFF',
-              border: '1px solid var(--border)',
-            }}>
-              <Icon name="document" size={20} strokeWidth={2} />
-            </span>
+            {/* Document icon tile removed (owner 2026-07-09 — no decorative icons). */}
           </div>
 
           <div style={{
@@ -702,83 +657,23 @@ export default function ReceiptPage() {
             </div>
           )}
 
-          <div className="waves-no-print" style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
-            {hasReceiptPdf ? (
-              <a
-                href={`${API_BASE}/receipt/${token}/pdf`}
-                onClick={(e) => {
-                  // Capacitor webview: a bare PDF navigation replaces the SPA
-                  // with no back control — share sheet instead (F-046). Old
-                  // binaries without the plugins keep the legacy navigation.
-                  if (canSaveNative()) {
-                    e.preventDefault();
-                    saveUrlNative(`${API_BASE}/receipt/${token}/pdf`, 'Waves_Receipt.pdf')
-                      .catch(() => window.alert('Could not save the PDF. Please try again.'));
-                  }
-                }}
-                data-glass="chip" data-glass-pill=""
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--brand)',
-                  textDecoration: 'none',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  background: '#FFFFFF',
-                }}
-              >
-                <Icon name="download" size={16} strokeWidth={2} />
-                Receipt PDF
-              </a>
-            ) : processing ? (
-              <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>
-                Receipt PDF available after bank payment clears
-              </span>
-            ) : null}
-            {/* window.print() is a no-op in the Capacitor webview — hide the
-                button there; the Receipt PDF share sheet carries Print on iOS. */}
-            {isNativeApp() ? null : (
-            <button
-              type="button"
-              onClick={() => window.print()}
-              data-glass="chip" data-glass-pill=""
-              style={{
-                minHeight: 40,
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '0 12px',
-                borderRadius: 8,
-                border: '1px solid var(--border-strong)',
-                color: 'var(--brand)',
-                background: '#FFFFFF',
-                fontSize: 14,
-                fontWeight: 800,
-                cursor: 'pointer',
-                fontFamily: FONTS.body,
-              }}
-            >
-              <Icon name="print" size={16} strokeWidth={2} />
-              Print
-            </button>
-            )}
-          </div>
+          {/* In-card PDF/Print chips superseded by the DocumentActionBar at
+              the top of the page (owner 2026-07-09). The processing note
+              stays — it explains the missing Download button. */}
+          {!hasReceiptPdf && processing ? (
+            <div className="waves-no-print" style={{ marginTop: 22, fontSize: 14, color: 'var(--text-muted)' }}>
+              Receipt PDF available after bank payment clears
+            </div>
+          ) : null}
         </BrandCard>
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
-        {/* Standard pre-footer newsletter card + identity footer — every
-            glass surface carries the same footer as /track (owner
-            2026-07-08/09). Hidden from the receipt printout via
-            waves-no-print. */}
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
+            Hidden from the receipt printout via waves-no-print. */}
         <div className="waves-no-print">
-          <GlassNewsletterCard source="receipt_footer" />
           <BrandFooter />
         </div>
       </div>

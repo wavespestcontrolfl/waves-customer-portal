@@ -29,7 +29,6 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -7770,7 +7769,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             footer — same as /track (owner 2026-07-08/09). PDF/static/
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
-        {mode === 'live' && <GlassNewsletterCard source="report_footer" />}
+        {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
         <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>

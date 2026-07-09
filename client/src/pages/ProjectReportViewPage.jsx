@@ -7,7 +7,7 @@ import {
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
+import DocumentActionBar from '../components/DocumentActionBar';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -488,6 +488,10 @@ export default function ProjectReportViewPage() {
           ) : null}
         </div>
 
+        {/* No generic project-report PDF render exists server-side (the FDACS
+            form link below covers WDO certificates) — Share + Print only. */}
+        <DocumentActionBar shareTitle="Waves project report" />
+
         {/* Summary card — no "Report details" block (owner directive
             2026-07-03): the hero already carries the address, the At-a-glance
             carries the follow-up, and the certificate document carries its
@@ -636,11 +640,8 @@ export default function ProjectReportViewPage() {
         </div>
 
       </main>
-      {/* Glass views carry the standard newsletter card + identity footer —
-          same as /track (owner 2026-07-08/09, supersedes the 2026-07-04
-          quiet-contact ruling for glassed renders). The certificate render
-          stays plain paper with the quiet contact footer, no signup. */}
-      {!isCertificate && <GlassNewsletterCard source="project_report_footer" />}
+      {/* Newsletter signup lives only on the newsletter pages (owner
+          2026-07-09, supersedes the 2026-07-08 glass-views ruling). */}
       <BrandFooter variant={isCertificate ? 'contact' : undefined} />
     </div>
   );

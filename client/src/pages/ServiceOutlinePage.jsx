@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
 import BrandFooter from "../components/BrandFooter";
-import GlassNewsletterCard from "../components/GlassNewsletterCard";
+import DocumentActionBar from "../components/DocumentActionBar";
 import { useGlassSurface } from "../glass/glass-engine";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -126,7 +126,11 @@ export default function ServiceOutlinePage() {
       )}
 
       <main>
-        <section data-glass-clear="" className="bg-white">
+        <div className="mx-auto max-w-6xl px-4 pt-6">
+          {/* No server-side outline PDF render — Share + Print only. */}
+          <DocumentActionBar shareTitle="Waves program outline" style={{ marginBottom: 0 }} />
+        </div>
+        <section data-glass-clear="" className="bg-white mt-6">
           <div className="mx-auto grid max-w-6xl gap-8 px-4 py-10 lg:grid-cols-[1fr_320px]">
             <div>
               <div className="inline-flex items-center gap-2 rounded-xs border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-800">
@@ -219,8 +223,8 @@ export default function ServiceOutlinePage() {
         </section>
 
         <div className="mx-auto max-w-6xl px-4 pb-10">
-          {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
-          <GlassNewsletterCard source="service_outline_footer" />
+          {/* Newsletter signup lives only on the newsletter pages (owner
+              2026-07-09, supersedes same-day card ruling). */}
           <BrandFooter />
         </div>
       </main>

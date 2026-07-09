@@ -140,6 +140,11 @@ router.get('/:token', async (req, res) => {
 
     return res.json({
       customerFirstName,
+      // Full contact block (owner 2026-07-09): the prep page renders the
+      // same name / email / phone / address lines as the report heroes.
+      customerName: vars.customer_name,
+      customerEmail: String(customer?.email || '').trim() || null,
+      customerPhone: String(customer?.phone || '').trim() || null,
       projectTypeLabel: typeLabel,
       serviceDate,
       propertyAddress,

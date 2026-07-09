@@ -28,7 +28,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
@@ -452,8 +451,7 @@ function Page({ children }) {
       <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
-      {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
-      <GlassNewsletterCard source="estimate_footer" />
+      {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       {/* Standard footer on estimates too (owner 2026-07-06) — same identity/
           contact/socials/app-badge stack as every other customer page. */}
       <BrandFooter />
