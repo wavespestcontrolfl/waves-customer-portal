@@ -43,6 +43,8 @@ jest.mock('../services/estimate-conversion-guard', () => ({
 }));
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceInterest: jest.fn(() => ''),
+  // Deterministic pest lane so the per-category copy vars are assertable.
+  inferEstimateServiceLines: jest.fn(() => [{ key: 'pest' }]),
 }));
 jest.mock('../services/estimate-deposits', () => ({
   assessDepositFollowUpEligibility: jest.fn(async () => ({
@@ -153,6 +155,7 @@ describe('questions touch (touch 1)', () => {
       'estimate_followup_questions',
       {
         first_name: 'Taylor',
+        service_hook: 'pest-free home plan',
         estimate_url: 'https://portal.wavespestcontrol.com/estimate/tok-xyz',
       },
       { workflow: 'estimate_follow_up', entity_type: 'estimate', entity_id: 'est-1' },
@@ -176,6 +179,7 @@ describe('questions touch (touch 1)', () => {
       'estimate_followup_questions_unviewed',
       {
         first_name: 'Taylor',
+        service_hook: 'pest-free home plan',
         address: '123 Palm Ave, Venice, FL 34285',
         expires_at: 'June 17, 2026',
         estimate_url: 'https://portal.wavespestcontrol.com/estimate/tok-xyz',
@@ -265,6 +269,7 @@ describe('day-5 check-in (touch 2 — the offer slot)', () => {
       'estimate_followup_credit',
       {
         first_name: 'Taylor',
+        service_hook: 'pest-free home plan',
         expires_at: 'June 17, 2026',
         estimate_url: 'https://portal.wavespestcontrol.com/estimate/tok-xyz',
       },

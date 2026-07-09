@@ -22,6 +22,14 @@
  *
  * All bodies use plain hyphens and straight apostrophes: em-dashes knock SMS
  * out of GSM-7 into UCS-2 and roughly double the per-message segment count.
+ *
+ * {service_hook} completes the phrase "your Waves {service_hook}" with a
+ * per-category noun ("pest-free home plan", "greener-lawn program", ...),
+ * resolved by estimate-followup-copy.js from the estimate's service lines.
+ * Both render sites (the cron touches and the manual admin follow-up
+ * route) always pass it — getTemplate fails closed on unresolved
+ * placeholders, so a render site that forgets the var skips the SMS
+ * instead of texting a literal brace.
  */
 
 const NEW_TEMPLATES = [
@@ -29,8 +37,8 @@ const NEW_TEMPLATES = [
     template_key: 'estimate_followup_questions',
     name: 'Estimate Follow-Up — Questions (viewed)',
     category: 'estimates',
-    body: "Hi {first_name}! I saw you had a chance to look over your Waves plan - any questions I can answer? Happy to walk through pricing, scheduling, or what's covered.\n\nYour quote is here whenever you're ready: {estimate_url}\n\nJust reply to this text and it comes straight to us.",
-    variables: ['first_name', 'estimate_url'],
+    body: "Hi {first_name}! I saw you had a chance to look over your Waves {service_hook} - any questions I can answer? Happy to walk through pricing, scheduling, or what's covered.\n\nYour quote is here whenever you're ready: {estimate_url}\n\nJust reply to this text and it comes straight to us.",
+    variables: ['first_name', 'service_hook', 'estimate_url'],
     trigger_event_key: 'estimate.followup_questions',
     sort_order: 22,
   },
@@ -38,8 +46,8 @@ const NEW_TEMPLATES = [
     template_key: 'estimate_followup_questions_unviewed',
     name: 'Estimate Follow-Up — Questions (not yet viewed)',
     category: 'estimates',
-    body: 'Hey {first_name}, your Waves Pest Control plan for {address} is ready - your quoted price is locked until {expires_at}.\n\nTake a look here: {estimate_url}\n\nAny questions at all, just reply to this text.',
-    variables: ['first_name', 'address', 'expires_at', 'estimate_url'],
+    body: 'Hey {first_name}, your Waves {service_hook} for {address} is ready - your quoted price is locked until {expires_at}.\n\nTake a look here: {estimate_url}\n\nAny questions at all, just reply to this text.',
+    variables: ['first_name', 'service_hook', 'address', 'expires_at', 'estimate_url'],
     trigger_event_key: 'estimate.followup_questions',
     sort_order: 23,
   },
@@ -47,8 +55,8 @@ const NEW_TEMPLATES = [
     template_key: 'estimate_followup_credit',
     name: 'Estimate Follow-Up — Day-5 Check-In',
     category: 'estimates',
-    body: 'Hi {first_name}, just checking in on your Waves plan - everything is ready whenever you are, and your quoted price is locked until {expires_at}.\n\nPick your first visit here: {estimate_url}\n\nAny questions, just reply.',
-    variables: ['first_name', 'expires_at', 'estimate_url'],
+    body: 'Hi {first_name}, just checking in on your Waves {service_hook} - everything is ready whenever you are, and your quoted price is locked until {expires_at}.\n\nPick your first visit here: {estimate_url}\n\nAny questions, just reply.',
+    variables: ['first_name', 'service_hook', 'expires_at', 'estimate_url'],
     trigger_event_key: 'estimate.followup_checkin',
     sort_order: 26,
   },
@@ -56,8 +64,8 @@ const NEW_TEMPLATES = [
     template_key: 'estimate_followup_expiring',
     name: 'Estimate Follow-Up — Last Day',
     category: 'estimates',
-    body: "Last day, {first_name} - your locked Waves quote expires after {expires_at}, and we'd have to re-quote from scratch.\n\nTwo minutes to lock it in and pick your first visit: {estimate_url}",
-    variables: ['first_name', 'expires_at', 'estimate_url'],
+    body: "Last day, {first_name} - your locked Waves quote expires after {expires_at}, and we'd have to re-quote from scratch.\n\nTwo minutes to lock in your {service_hook} and pick your first visit: {estimate_url}",
+    variables: ['first_name', 'service_hook', 'expires_at', 'estimate_url'],
     trigger_event_key: 'estimate.expiring_soon',
     sort_order: 29,
   },

@@ -6,6 +6,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const {
@@ -40,6 +41,7 @@ const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
+const { followupEmailVars, followupSmsHook } = require('../services/estimate-followup-copy');
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const {
   generateEstimateProposalPDF,
@@ -251,6 +253,9 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     price_summary: priceLine || moneySummary(estimate),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
+    // Per-category copy slots — same vars the follow-up engine injects, so
+    // the delivery email speaks the estimate's language from the first send.
+    ...followupEmailVars(estimate),
     next_step_summary: proposalMode
       ? PROPOSAL_NEXT_STEP_SUMMARY
       : 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
@@ -260,6 +265,15 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
 function assertEstimateSendable(estimate) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
+    err.statusCode = 400;
+    throw err;
+  }
+  // Some rows have no share token (quote-wizard mirrors, legacy imports).
+  // Without this gate the customer link is built by template literal and the
+  // SMS/email ships a literal /estimate/null — a dead link — while the
+  // estimate still gets stamped `sent`.
+  if (!String(estimate.token || '').trim()) {
+    const err = new Error('This estimate has no customer link token, so there is nothing to send. Rebuild it in the estimate tool to mint a shareable link.');
     err.statusCode = 400;
     throw err;
   }
@@ -491,15 +505,31 @@ router.post('/:id/send', async (req, res, next) => {
       if (scheduledTime <= new Date()) {
         return res.status(400).json({ error: 'scheduledAt must be in the future' });
       }
-      await db('estimates').where({ id: estimate.id }).update({
-        status: 'scheduled',
-        scheduled_at: scheduledTime,
-        send_method: sendMethod,
-        expires_at: estimateExpiresAt(() => scheduledTime),
-        scheduled_send_attempts: 0,
-        last_send_error: null,
-        updated_at: db.fn.now(),
-      });
+      // Atomic claim, mirroring the immediate-send path below. The
+      // assertEstimateSendable check above ran on a stale read: writing
+      // status='scheduled' unconditionally could clobber an in-flight
+      // 'sending' row (its guarded sent-write then misses and the cron
+      // re-sends — duplicate customer texts) or overwrite a concurrent
+      // accept (money-bearing state lost, and the row re-enters the send
+      // pipeline on a committed conversion).
+      const scheduledClaim = await db('estimates')
+        .where({ id: estimate.id })
+        .whereNull('price_locked_at')
+        .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        .update({
+          status: 'scheduled',
+          scheduled_at: scheduledTime,
+          send_method: sendMethod,
+          expires_at: estimateExpiresAt(() => scheduledTime),
+          scheduled_send_attempts: 0,
+          last_send_error: null,
+          updated_at: db.fn.now(),
+        });
+      if (!scheduledClaim) {
+        return res.status(409).json({
+          error: 'This estimate is mid-send, already accepted, or locked — refresh and retry.',
+        });
+      }
       return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
     }
 
@@ -510,7 +540,6 @@ router.post('/:id/send', async (req, res, next) => {
     // The scheduled-send cron and lead-auto-send already pre-claim before
     // calling sendEstimateNow, so the claim happens here only for immediate
     // sends. A crashed immediate send is recovered by the stale-claim sweep.
-    const quietHoursOverride = req.body?.quietHoursOverride === true;
     const claimed = await db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
@@ -528,7 +557,7 @@ router.post('/:id/send', async (req, res, next) => {
 
     let result;
     try {
-      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey, quietHoursOverride });
+      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey });
     } catch (e) {
       await releaseSendClaim();
       throw e;
@@ -563,9 +592,29 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const nextExpiresAt = estimateExpiresAt(now);
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
-  const viewUrl = await shortenOrPassthrough(longUrl, {
+  // One tracked short code PER CHANNEL LEG (same rule as estimate-follow-up
+  // .js mintStageLinks): on sendMethod='both' either leg can fail alone
+  // (missing/disabled SMS template, policy-blocked SMS, provider error), and
+  // the click-followup candidate scan (services/click-followup.js) admits
+  // sc.channel='sms' links only — a single sms-tagged code reused in the
+  // email payload would let a click on an EMAIL-only delivery masquerade as
+  // an SMS click and queue a proactive SMS nudge. Minting per leg keeps
+  // every click attributable to the channel that actually carried it: a leg
+  // that never goes out just leaves an undelivered (hence unclickable) code
+  // behind, which is harmless. A leg without a contact handle skips the mint
+  // entirely — the long-URL fallback mirrors shortenOrPassthrough's own
+  // graceful degradation on shortener failure.
+  const linkMeta = {
     kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
-  });
+    leadId: await leadIdForEstimate(estimate),
+    purpose: 'estimate_send',
+  };
+  const smsViewUrl = (sendMethod !== 'email' && estimate.customer_phone)
+    ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'sms' })
+    : longUrl;
+  const emailViewUrl = (sendMethod !== 'sms' && estimate.customer_email)
+    ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'email' })
+    : longUrl;
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
   const monthlyTotal = parseFloat(estimate.monthly_total || 0);
   const annualTotal = parseFloat(estimate.annual_total || 0);
@@ -602,7 +651,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
-          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, {
+          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
             workflow: 'admin_estimate_send',
             entity_type: 'estimate',
             entity_id: estimate.id,
@@ -625,8 +674,6 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             entryPoint: 'admin_estimate_send',
             metadata: {
               original_message_type: 'estimate_sent',
-              quietHoursOverride: options.quietHoursOverride === true,
-              quietHoursOverrideSource: options.quietHoursOverride === true ? 'admin_estimate_send' : undefined,
             },
           });
           if (!result.sent) {
@@ -701,7 +748,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
-            viewUrl,
+            viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: proposalAttachments,
@@ -1355,7 +1402,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
       .first(
         'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
         'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-        'bill_by_invoice', 'created_at', 'accepted_at', 'expires_at',
+        'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'expires_at',
         'customer_name', 'customer_phone', 'customer_email', 'address',
       );
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1415,6 +1462,16 @@ router.get('/:id/schedule-source', async (req, res, next) => {
     // annualized monthly, so summing both would double-count.
     const quotedTotal = (monthlyTotal || annualTotal || 0) + (onetimeTotal || 0);
 
+    // Whether the Schedule modal may offer one-step annual prepay for this
+    // quote + the exact amount the prepay invoice would bill (discount + floor
+    // applied). Server-derived so the modal never offers a billing term the
+    // accept would reject. Fail-soft: no prepay offer on error.
+    let prepay = { eligible: false, invoiceTotal: null };
+    try {
+      const e = await require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+      prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+    } catch { prepay = { eligible: false, invoiceTotal: null }; }
+
     const nameParts = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean);
 
     res.json({
@@ -1432,6 +1489,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
         waveguardTier: estimate.waveguard_tier,
         lines,
         deposit,
+        prepay,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,
@@ -1518,6 +1576,8 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
       kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      leadId: await leadIdForEstimate(estimate),
+      channel: 'sms', purpose: 'estimate_followup_manual',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
@@ -1540,9 +1600,11 @@ router.post('/:id/follow-up', async (req, res, next) => {
     }
     const msg = req.body.message || await renderTemplate(followupTemplateKey, viewed ? {
       first_name: firstName,
+      service_hook: followupSmsHook(estimate),
       estimate_url: viewUrl,
     } : {
       first_name: firstName,
+      service_hook: followupSmsHook(estimate),
       address: (estimate.address || '').trim() || 'your home',
       expires_at: expiresLabel,
       estimate_url: viewUrl,
@@ -1672,6 +1734,8 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
     const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
       kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      leadId: await leadIdForEstimate(estimate),
+      channel: 'sms', purpose: 'estimate_booking_link',
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
@@ -1777,6 +1841,8 @@ router.post('/:id/extend', async (req, res, next) => {
       const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
       const viewUrl = await shortenOrPassthrough(longUrl, {
         kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+        leadId: await leadIdForEstimate(estimate),
+        channel: 'sms', purpose: 'estimate_extended',
       });
       const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
         month: 'long', day: 'numeric', timeZone: 'America/New_York',
