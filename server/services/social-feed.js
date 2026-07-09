@@ -109,6 +109,45 @@ async function fetchInstagram() {
 }
 
 // ----------------------------------------------------------------- Facebook
+// Graph returns permalink_url for API-published page posts in legacy forms —
+// permalink.php?story_fbid=…&id=… for text/link stories and photo-viewer
+// links (photo.php / /photo/ / …/photos/a.…) for photo stories. Desktop web
+// resolves those, but the Facebook mobile app's deep-link handler rejects
+// them with "This isn't available" even when the post is live and public.
+// The canonical /{page}/posts/{post} path form resolves on both, so rewrite
+// the known-bad forms onto it (from the same identifiers Graph already gave
+// us) and pass every other shape through untouched.
+function normalizeFacebookPermalink(permalinkUrl, postId) {
+  let url;
+  try {
+    url = new URL(permalinkUrl);
+  } catch {
+    return permalinkUrl;
+  }
+
+  if (url.pathname === '/permalink.php') {
+    const story = url.searchParams.get('story_fbid');
+    const owner = url.searchParams.get('id');
+    if (story && owner) return `https://www.facebook.com/${owner}/posts/${story}`;
+  }
+
+  const photoViewer =
+    url.pathname === '/photo.php' ||
+    url.pathname === '/photo' ||
+    url.pathname === '/photo/' ||
+    /^\/[^/]+\/photos\//.test(url.pathname);
+  if (photoViewer) {
+    // Post ids from /{page-id}/posts are "{pageId}_{storyId}"; the story id
+    // is the post itself (not the photo), so this lands on the post.
+    const [pageId, storyId, ...rest] = String(postId || '').split('_');
+    if (pageId && storyId && rest.length === 0) {
+      return `https://www.facebook.com/${pageId}/posts/${storyId}`;
+    }
+  }
+
+  return permalinkUrl;
+}
+
 async function fetchFacebook() {
   if (!token() || !FACEBOOK_PAGE_ID) return { status: 'skipped', posts: [] };
   const data = await graphGet(`${FACEBOOK_PAGE_ID}/posts`, {
@@ -121,7 +160,7 @@ async function fetchFacebook() {
       platform: 'facebook',
       caption: clip(p.message),
       postedAt: p.created_time || null,
-      postUrl: p.permalink_url,
+      postUrl: normalizeFacebookPermalink(p.permalink_url, p.id),
       image: p.full_picture || null,
       video: false,
       location: null,
@@ -274,4 +313,4 @@ async function getFeed({ force = false } = {}) {
   return INFLIGHT;
 }
 
-module.exports = { getFeed };
+module.exports = { getFeed, normalizeFacebookPermalink };
