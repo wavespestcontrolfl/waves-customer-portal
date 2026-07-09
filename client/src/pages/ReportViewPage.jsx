@@ -7833,6 +7833,50 @@ export default function ReportViewPage() {
     applyReportDocumentMetadata(data);
   }, [data]);
 
+  // The browser resolves the URL fragment against the loading skeleton —
+  // anchor targets (e.g. #visit-recap from recap SMS links) don't exist
+  // until /data resolves and the report tree commits, so re-run the scroll
+  // here. Cards above the anchor keep settling after that first commit
+  // (self-gating sections unmount, images load) and shift the target, so
+  // re-anchor for a short window — stopping the moment the reader scrolls
+  // or the window elapses. No-op when the hash is absent or the target
+  // never renders (recap not ready), which leaves the reader at the top.
+  useEffect(() => {
+    if (!data || data.error) return undefined;
+    const anchorId = window.location.hash.slice(1);
+    if (!anchorId) return undefined;
+
+    let readerTookOver = false;
+    const markTakeover = () => { readerTookOver = true; };
+    const inputEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+    inputEvents.forEach((e) => window.addEventListener(e, markTakeover, { passive: true }));
+
+    const align = () => {
+      const target = document.getElementById(anchorId);
+      if (!target) return;
+      // The WavesShell top bar is sticky — without a scroll margin the
+      // card's top edge lands underneath it.
+      const header = document.querySelector('[data-waves-shell-header]');
+      const margin = (header?.offsetHeight || 64) + 12;
+      target.style.scrollMarginTop = `${margin}px`;
+      if (Math.abs(target.getBoundingClientRect().top - margin) > 4) {
+        target.scrollIntoView({ block: 'start' });
+      }
+    };
+
+    align();
+    const interval = setInterval(() => {
+      if (readerTookOver) { clearInterval(interval); return; }
+      align();
+    }, 250);
+    const stop = setTimeout(() => clearInterval(interval), 2000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(stop);
+      inputEvents.forEach((e) => window.removeEventListener(e, markTakeover));
+    };
+  }, [data]);
+
   if (loading) return <LoadingState glass={glassActive} />;
   if (!data || data.error) return <NotFoundState glass={glassActive} />;
   if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
