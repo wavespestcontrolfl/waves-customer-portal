@@ -1132,6 +1132,70 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.frequencies.map((f) => f.key)).not.toContain('basic');
   });
 
+  test('a MIXED bundle whose only stored lawn row is retired is also quote-required', async () => {
+    // The converter schedules from the stored lawn service row — a mixed
+    // pest+lawn accept would keep the retired 4-visit cadence with only the
+    // price floored. No sellable lawn cadence → requote, any mix.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-retired-lawn-mixed-requote-test',
+      monthly_total: 80,
+      annual_total: 960,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 80,
+            annualAfterDiscount: 960,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 30, visitsPerYear: 4 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('retired_lawn_cadence_requote');
+  });
+
+  test('a bundle with a sellable lawn cadence in its rows stays self-serve acceptable', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-sellable-lawn-not-requote-test',
+      monthly_total: 95,
+      annual_total: 1140,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90 },
+              { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 95,
+            annualAfterDiscount: 1140,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 6 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(false);
+    expect(payload.quoteRequiredReason).not.toBe('retired_lawn_cadence_requote');
+  });
+
   test('phase 0 no-engine recurring fallback keeps stored frequency pricing in services', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-stored-recurring-fallback-test',

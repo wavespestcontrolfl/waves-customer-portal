@@ -1590,8 +1590,28 @@ function generateEstimate(input) {
         .reduce((sum, i) => sum + Math.min(i.annualAfterDiscount || i.annual || 0, lawnFloorAnnual), 0));
       const recurringManualHeadroom = Math.max(0, roundMoney(manualDiscountableRecurringAnnual - lawnFloorProtectedAnnual));
       if (manualDiscountAmount > recurringManualHeadroom) {
+        const blockedRecurring = roundMoney(manualDiscountAmount - recurringManualHeadroom);
         manualDiscountAmount = recurringManualHeadroom;
-        manualDiscountLawnFloorCapped = true;
+        // FIXED discounts are one admin-entered dollar amount for the whole
+        // estimate — dollars the lawn floor blocks from the recurring slice
+        // move to the one-time/specialty buckets while they have room, so
+        // the customer still receives the intended total wherever possible.
+        // (PERCENT stays per-bucket by definition.) Only dollars that no
+        // bucket can absorb count as capped.
+        let stillBlocked = blockedRecurring;
+        if (md.type !== 'PERCENT' && stillBlocked > 0) {
+          const oneTimeRoom = Math.max(0, roundMoney(manualDiscountableOneTime - manualDiscountOneTimeAmount));
+          const toOneTime = Math.min(stillBlocked, oneTimeRoom);
+          manualDiscountOneTimeAmount = roundMoney(manualDiscountOneTimeAmount + toOneTime);
+          stillBlocked = roundMoney(stillBlocked - toOneTime);
+          if (stillBlocked > 0) {
+            const specialtyRoom = Math.max(0, roundMoney(manualDiscountableSpecialty - manualDiscountSpecialtyAmount));
+            const toSpecialty = Math.min(stillBlocked, specialtyRoom);
+            manualDiscountSpecialtyAmount = roundMoney(manualDiscountSpecialtyAmount + toSpecialty);
+            stillBlocked = roundMoney(stillBlocked - toSpecialty);
+          }
+        }
+        if (stillBlocked > 0) manualDiscountLawnFloorCapped = true;
       }
     }
     const appliedTotal = roundMoney(

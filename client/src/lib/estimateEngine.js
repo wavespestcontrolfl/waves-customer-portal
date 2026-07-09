@@ -2648,7 +2648,30 @@ export function calculateEstimate(inputs) {
   const waveGuardDiscountableAnnual = lineItems
     .filter(li => li.discountable !== false)
     .reduce((sum, li) => sum + li.ann, 0);
-  const da = Math.round(waveGuardDiscountableAnnual * wd * 100) / 100;
+  let da = Math.round(waveGuardDiscountableAnnual * wd * 100) / 100;
+  // Lawn program minimum — mirror the server's post-discount guards
+  // (estimate-engine.js). This preview can persist via the CLIENT_FALLBACK
+  // save path when server recompute is unavailable, so the aggregate
+  // WaveGuard % gives back whatever would cut the lawn slice below the
+  // floor, and the manual discount below is capped at the non-lawn room
+  // plus lawn's above-floor headroom.
+  const lawnFloorAnnualGuard = Number.isFinite(Number(LAWN_PRICING_V2.programMinimumMonthly))
+    && Number(LAWN_PRICING_V2.programMinimumMonthly) > 0
+    ? Math.round(Number(LAWN_PRICING_V2.programMinimumMonthly) * 12 * 100) / 100
+    : 0;
+  let lawnFloorProtectedAfterWg = 0;
+  if (lawnFloorAnnualGuard > 0) {
+    let wgGiveBack = 0;
+    for (const li of lineItems) {
+      if (li.service !== 'lawn_care' || li.discountable === false || !(li.ann > 0)) continue;
+      const lineFloor = Math.min(li.ann, lawnFloorAnnualGuard);
+      const afterWg = li.ann * (1 - wd);
+      const clamped = Math.max(afterWg, lineFloor);
+      wgGiveBack += clamped - afterWg;
+      lawnFloorProtectedAfterWg += Math.min(clamped, lawnFloorAnnualGuard);
+    }
+    da = Math.round((da - wgGiveBack) * 100) / 100;
+  }
   const recurringAnnualAfterWaveGuard = Math.round((ra - da) * 100) / 100;
   const md = inputs.manualDiscount;
   let manualDiscountAmount = 0;
@@ -2663,7 +2686,11 @@ export function calculateEstimate(inputs) {
       manualDiscountAmount = Math.round(v * 100) / 100;
     }
     const requestedAmount = manualDiscountAmount;
-    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
+    const manualHeadroom = Math.max(0, Math.round((manualDiscountableRecurringAnnual - lawnFloorProtectedAfterWg) * 100) / 100);
+    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual, manualHeadroom);
+    const lawnFloorCapApplied = manualDiscountAmount === manualHeadroom
+      && requestedAmount > manualHeadroom
+      && manualHeadroom < manualDiscountableRecurringAnnual;
     manualDiscountInfo = {
       ...md,
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
@@ -2673,7 +2700,9 @@ export function calculateEstimate(inputs) {
       label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
       discountableBase: manualDiscountableRecurringAnnual,
       capped: requestedAmount > manualDiscountAmount,
-      capReason: requestedAmount > manualDiscountAmount ? 'discountable_base' : null,
+      capReason: lawnFloorCapApplied
+        ? 'lawn_program_minimum'
+        : (requestedAmount > manualDiscountAmount ? 'discountable_base' : null),
       scope: 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
     };

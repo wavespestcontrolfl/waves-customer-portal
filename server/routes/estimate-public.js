@@ -9388,15 +9388,19 @@ function normalizeOneTimeBreakdown(estData) {
   };
 }
 
-// A lawn-only estimate whose stored cadence rows are ALL retired (e.g. a
-// legacy quote that stored only the Basic/4-app row) has nothing sellable
+// An estimate whose stored lawn cadence rows are ALL retired (e.g. a legacy
+// quote that stored only the Basic/4-app row) has no sellable lawn cadence
 // left after the 2026-07-09 quarterly retirement: the ladder builders filter
-// every row, and the generic fallback frequency would silently bill the old
-// below-floor total AND leave the Basic cadence in the estimate data for
-// scheduling. Surface it as quote-required so the public view shows the
-// call-to-confirm state and the accept endpoint refuses online acceptance —
-// the requote prices the current 6/9/12 ladder.
-function retiredLawnOnlyRequoteNeeded(estData = null) {
+// every row, and the fallback paths would either silently bill the old
+// below-floor total (lawn-only) or accept a MIXED bundle whose lawn line
+// still schedules at the retired 4-visit cadence — the converter reads the
+// stored service row, and only its price is floored. Surface it as
+// quote-required so the public view shows the call-to-confirm state and the
+// accept endpoint refuses online acceptance — the requote prices the
+// current 6/9/12 ladder. Applies to any service mix that includes a
+// recurring lawn line; estimates whose rows still include a sold cadence
+// keep self-serve accept.
+function retiredLawnRequoteNeeded(estData = null) {
   if (!estData || typeof estData !== 'object') return false;
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats?.lawn) ? resultStats.lawn : [];
@@ -9405,11 +9409,9 @@ function retiredLawnOnlyRequoteNeeded(estData = null) {
     .filter((key) => ['basic', 'standard', 'enhanced', 'premium'].includes(key));
   if (!tierKeys.length) return false;
   if (!tierKeys.every((key) => isRetiredLawnTierKey(key))) return false;
-  // Lawn-only scope: mixed bundles price lawn inside the pest cadence and
-  // never render the lawn ladder, so they keep their existing behavior.
   const { recurringSvcList } = acceptanceServiceLists(estData);
   const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
-  return recurringKeys.length > 0 && recurringKeys.every((key) => key === 'lawn_care');
+  return recurringKeys.includes('lawn_care');
 }
 
 function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
@@ -9444,7 +9446,7 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const commercialLowConfidenceSiteQuote = commercialLowConfidenceRequiresSiteQuote(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
-  const retiredLawnRequote = retiredLawnOnlyRequoteNeeded(
+  const retiredLawnRequote = retiredLawnRequoteNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
   const quoteRequired = pricingBundle?.quoteRequired === true
