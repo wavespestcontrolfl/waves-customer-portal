@@ -15,12 +15,15 @@ exports.up = async function up(knex) {
     .first();
   if (existing) return;
 
+  // Status is 'upcoming', not 'late': FilingCalendarTab only renders the
+  // upcoming/prepared and filed/paid buckets, so a 'late' row would be
+  // invisible and unmarkable. The past due_date already renders it red.
   await knex('tax_filing_calendar').insert({
     filing_type: 'sunbiz_annual_report',
     title: 'Florida LLC Annual Report (Sunbiz) — 2026',
     period_label: '2026',
     due_date: '2026-05-01',
-    status: 'late',
+    status: 'upcoming',
     amount_due: 538.75,
     notes: 'Filed late — $138.75 report fee + $400 statutory late fee (non-waivable after May 1). Mark paid once Sunbiz confirms. From 2027 on, a Jan-1 admin reminder fires automatically.',
   });

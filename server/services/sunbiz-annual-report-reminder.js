@@ -7,11 +7,18 @@
  * filed at the start of the window, and makes sure the Tax → Filing Calendar
  * has a row for the year so the deadline shows on the tax dashboard.
  *
- * Runs daily during January from scheduler.js — a Jan-1 deploy overlap or
- * downtime must not swallow the year's only reminder. The notifications-table
- * dedupe (metadata.reminder + metadata.year) keeps it to one bell ring per
- * year. Fail-open like credential-expiry-checker: a broken dedupe query fires
- * anyway rather than silently skipping a $400 penalty.
+ * Runs daily from scheduler.js. January ticks handle the reminder — daily
+ * rather than Jan-1-only so a deploy overlap or downtime can't swallow the
+ * year's only bell ring; the notifications-table dedupe (metadata.reminder +
+ * metadata.year) keeps it to one per year. Ticks after May 1 sweep the year's
+ * row: if it's still unfiled, the statutory $400 late fee is now owed, so
+ * amount_due is bumped to reflect the real payable. Fail-open like
+ * credential-expiry-checker: a broken dedupe query fires anyway rather than
+ * silently skipping a $400 penalty.
+ *
+ * Status stays 'upcoming' until the operator marks it filed/paid — the
+ * FilingCalendarTab only renders upcoming/prepared and filed/paid buckets,
+ * so writing 'late' would make the row invisible in /admin/tax.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -20,6 +27,7 @@ const { etParts } = require('../utils/datetime-et');
 const REMINDER_KEY = 'sunbiz_annual_report';
 const FILING_TYPE = 'sunbiz_annual_report';
 const REPORT_FEE = 138.75;
+const LATE_FEE = 400;
 
 async function alreadyNotified(year) {
   try {
@@ -61,11 +69,41 @@ async function ensureFilingRow(year) {
   }
 }
 
+// After May 1 an unfiled report owes the statutory $400 late fee on top of
+// the report fee. Bump amount_due on the year's still-open row so /admin/tax
+// shows the real payable instead of understating it by $400.
+async function applyLateFee(year) {
+  try {
+    const row = await db('tax_filing_calendar')
+      .where('filing_type', FILING_TYPE)
+      .where('period_label', String(year))
+      .whereIn('status', ['upcoming', 'prepared'])
+      .first();
+    if (!row || parseFloat(row.amount_due) >= REPORT_FEE + LATE_FEE) return false;
+    await db('tax_filing_calendar').where({ id: row.id }).update({
+      amount_due: REPORT_FEE + LATE_FEE,
+      notes: `${row.notes ? `${row.notes} ` : ''}Missed the May 1 deadline — non-waivable $400 statutory late fee added.`,
+      updated_at: new Date(),
+    });
+    logger.info(`[sunbiz-reminder] ${year} report unfiled past May 1 — amount_due bumped to $${(REPORT_FEE + LATE_FEE).toFixed(2)}`);
+    return true;
+  } catch (e) {
+    logger.warn(`[sunbiz-reminder] late-fee sweep failed: ${e.message}`);
+    return false;
+  }
+}
+
 async function runSunbizAnnualReportReminder(now = new Date()) {
-  const { year, month } = etParts(now);
-  // The cron is January-only already; guard here too so a schedule edit or a
-  // manual invocation outside the window can't ring the bell mid-year.
-  if (month !== 1) return { fired: false, reason: 'not_january' };
+  const { year, month, day } = etParts(now);
+
+  // Past the May 1 deadline: reflect the late fee on a still-unfiled row.
+  if (month > 5 || (month === 5 && day > 1)) {
+    const lateFeeApplied = await applyLateFee(year);
+    return { fired: false, lateFeeApplied, reason: 'past_due_sweep' };
+  }
+
+  // The bell only rings during the January filing-window open.
+  if (month !== 1) return { fired: false, reason: 'outside_window' };
 
   const filingRowCreated = await ensureFilingRow(year);
 
