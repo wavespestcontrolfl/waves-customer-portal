@@ -1395,7 +1395,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     color: "#374151",
     marginBottom: 6,
     display: "block",
-    fontWeight: 700,
+    fontWeight: 500,
   };
   const inputStyle = {
     width: "100%",
@@ -1404,7 +1404,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     background: D.input,
     color: "#111827",
     border: `1px solid ${D.inputBorder}`,
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
     boxSizing: "border-box",
   };
@@ -1417,7 +1417,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
   const sectionTitleStyle = {
     fontSize: 18,
-    fontWeight: 700,
+    fontWeight: 500,
     color: "#111827",
     margin: "0 0 14px",
   };
@@ -1466,14 +1466,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               borderBottom: `1px solid ${D.border}`,
             }}
           >
-            <span style={{ fontSize: 12, fontWeight: 800, color: D.muted }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
               {label || "Additional service"}
             </span>
             {onRemove && (
               <button
                 type="button"
                 onClick={onRemove}
-                className="font-bold"
+                className="font-medium"
                 style={{
                   padding: "4px 10px",
                   borderRadius: 4,
@@ -1514,7 +1514,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     setPickerKey(pickerId);
                     setExpandedCategory(null);
                   }}
-                  className="font-bold"
+                  className="font-medium"
                   style={{
                     padding: "8px 10px",
                     borderRadius: 4,
@@ -1548,7 +1548,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         onClick={() =>
                           setExpandedCategory(isOpen ? null : group.category)
                         }
-                        className="font-bold"
+                        className="font-medium"
                         style={{
                           width: "100%",
                           textAlign: "left",
@@ -1602,7 +1602,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
-                              className="font-bold"
+                              className="font-medium"
                               style={{
                                 padding: "8px 10px",
                                 background: "#fff",
@@ -1631,7 +1631,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <select
                 value={technicianId}
                 onChange={(e) => onField("technicianId", e.target.value)}
-                className="font-bold"
+                className="font-medium"
                 style={inputStyle}
               >
                 <option value="">Unassigned</option>
@@ -1648,7 +1648,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <select
                       value={assignmentScope}
                       onChange={(e) => setAssignmentScope(e.target.value)}
-                      className="font-bold"
+                      className="font-medium"
                       style={inputStyle}
                     >
                       <option value="this_only">This appointment only</option>
@@ -1667,7 +1667,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               type="number"
               value={estimatedDuration}
               onChange={(e) => onField("estimatedDuration", e.target.value)}
-              className="font-bold"
+              className="font-medium"
               style={inputStyle}
             />
           </div>
@@ -1680,7 +1680,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               value={price}
               onChange={(e) => onField("price", e.target.value)}
               placeholder="0.00"
-              className="font-bold"
+              className="font-medium"
               style={inputStyle}
             />
           </div>
@@ -1705,7 +1705,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="font-bold"
         style={{
           height: "100%",
           overflow: "auto",
@@ -1729,7 +1728,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           {" "}
           <div className="min-w-0 flex-1">
             {" "}
-            <div style={{ fontSize: 22, fontWeight: 800, color: "#111827" }}>
+            <div style={{ fontSize: 22, fontWeight: 500, color: "#111827" }}>
               Edit appointment
             </div>{" "}
             <div
@@ -1752,7 +1751,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#ECFDF3",
                   color: "#027A48",
                   fontSize: 12,
-                  fontWeight: 800,
+                  fontWeight: 500,
                 }}
               >
                 {service.status || "Accepted"}
@@ -1785,7 +1784,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={() => handleSave({ takePayment: true })}
               disabled={saving}
-              className="font-bold flex-1 md:flex-initial"
+              className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
                 borderRadius: 4,
@@ -1803,7 +1802,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={() => handleSave()}
               disabled={saving}
-              className="font-bold flex-1 md:flex-initial"
+              className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
                 borderRadius: 4,
@@ -1821,7 +1820,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={onClose}
               disabled={saving}
-              className="font-bold"
+              className="font-medium"
               style={{
                 width: 38,
                 height: 38,
@@ -1861,7 +1860,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
                 color: D.muted,
                 marginBottom: 12,
               }}
@@ -1871,7 +1870,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <div
               style={{
                 fontSize: 22,
-                fontWeight: 800,
+                fontWeight: 500,
                 color: "#111827",
                 marginBottom: 10,
               }}
@@ -1921,7 +1920,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 background: "#fff",
                 color: "#111827",
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
                 cursor: "pointer",
                 marginBottom: 18,
               }}
@@ -1945,7 +1944,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 15, fontWeight: 800 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>
                   Customer notes
                 </div>{" "}
                 <button
@@ -1955,7 +1954,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     background: "transparent",
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -1985,7 +1984,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 15, fontWeight: 800 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>
                   Cards on file
                 </div>{" "}
                 <button
@@ -1995,7 +1994,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     background: "transparent",
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -2019,7 +2018,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </div>{" "}
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>
+              <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 10 }}>
                 Appointment history
               </div>
               {customerLoading && (
@@ -2045,7 +2044,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <div
                       style={{
                         fontSize: 13,
-                        fontWeight: 800,
+                        fontWeight: 500,
                         color: "#111827",
                       }}
                     >
@@ -2086,7 +2085,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#EEF6FF",
                   color: D.teal,
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   marginBottom: 14,
                 }}
               >
@@ -2100,7 +2099,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <input
                     value={service.address || customer.address?.line1 || ""}
                     readOnly
-                    className="font-bold"
+                    className="font-medium"
                     style={{ ...inputStyle, background: "#F9FAFB" }}
                   />{" "}
                 </div>{" "}
@@ -2118,7 +2117,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input
                       value={service.city || customer.address?.city || ""}
                       readOnly
-                      className="font-bold"
+                      className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
                     />{" "}
                   </div>{" "}
@@ -2128,7 +2127,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input
                       value={customer.address?.state || "Florida"}
                       readOnly
-                      className="font-bold"
+                      className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
                     />{" "}
                   </div>{" "}
@@ -2164,7 +2163,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <button
                 type="button"
                 onClick={addServiceLine}
-                className="font-bold"
+                className="font-medium"
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -2175,7 +2174,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#fff",
                   color: "#111827",
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   cursor: "pointer",
                   marginBottom: 12,
                 }}
@@ -2207,7 +2206,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   }}
                 >
                   <div>
-                    <div style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: "#166534" }}>
                       Prepaid ${Number(service.prepaidAmount).toFixed(2)}
                       {service.prepaidMethod ? ` · ${String(service.prepaidMethod).replace(/_/g, " ")}` : ""}
                     </div>
@@ -2223,7 +2222,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <button
                     type="button"
                     onClick={() => onMarkPrepaid?.(service)}
-                    className="font-bold"
+                    className="font-medium"
                     style={{
                       padding: "8px 12px",
                       borderRadius: 4,
@@ -2252,14 +2251,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <button
                     type="button"
                     onClick={() => onMarkPrepaid(service)}
-                    className="font-bold"
+                    className="font-medium"
                     style={{
                       padding: "9px 12px",
                       borderRadius: 4,
                       border: `1px solid ${D.inputBorder}`,
                       background: "#fff",
                       fontSize: 13,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       cursor: "pointer",
                     }}
                   >
@@ -2271,14 +2270,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
-                  className="font-bold"
+                  className="font-medium"
                   style={{
                     padding: "9px 12px",
                     borderRadius: 4,
                     border: `1px solid ${D.inputBorder}`,
                     background: "#fff",
                     fontSize: 13,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -2300,7 +2299,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <select
                     value={discountPresetId}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   >
                     {" "}
@@ -2325,7 +2324,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={discountType}
                         onChange={(e) => setDiscountType(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         {" "}
@@ -2348,7 +2347,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           step={discountType === "percentage" ? 1 : 0.01}
                           value={discountAmount}
                           onChange={(e) => setDiscountAmount(e.target.value)}
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2431,7 +2430,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="date"
                     value={form.scheduledDate}
                     onChange={(e) => update("scheduledDate", e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2442,7 +2441,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="time"
                     value={form.windowStart}
                     onChange={(e) => updateWindowStart(e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2453,7 +2452,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="time"
                     value={form.windowEnd}
                     onChange={(e) => update("windowEnd", e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2476,7 +2475,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 />{" "}
                 <div>
                   {" "}
-                  <div style={{ fontSize: 14, fontWeight: 800 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>
                     Repeat
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
@@ -2510,7 +2509,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={recurringFreq}
                         onChange={(e) => setRecurringFreq(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         {EDIT_FREQUENCIES.map((f) => (
@@ -2529,7 +2528,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringOngoing(e.target.value === "never")
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {" "}
@@ -2550,7 +2549,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringCount(parseInt(e.target.value) || 4)
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2575,7 +2574,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringNth(parseInt(e.target.value))
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {EDIT_NTH_OPTIONS.map((o) => (
@@ -2593,7 +2592,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringWeekday(parseInt(e.target.value))
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {EDIT_WEEKDAY_OPTIONS.map((o) => (
@@ -2628,7 +2627,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                               parseInt(e.target.value) || 30,
                             )
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2637,7 +2636,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         <select
                           value={weekendRuleValue}
                           onChange={(e) => updateWeekendRule(e.target.value)}
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           <option value="allow">Allow weekends</option>
@@ -2655,7 +2654,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={weekendRuleValue}
                         onChange={(e) => updateWeekendRule(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         <option value="allow">Allow weekends</option>
@@ -2682,7 +2681,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                             background: "#EEF6FF",
                             borderRadius: 999,
                             color: D.teal,
-                            fontWeight: 800,
+                            fontWeight: 500,
                           }}
                         >
                           {d}
@@ -2712,7 +2711,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 value={form.notes}
                 onChange={(e) => update("notes", e.target.value)}
                 rows={5}
-                className="font-bold"
+                className="font-medium"
                 style={{ ...inputStyle, resize: "vertical" }}
               />{" "}
               <label
@@ -2736,7 +2735,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   style={{ width: 16, height: 16, accentColor: D.green }}
                 />{" "}
                 <span
-                  style={{ fontSize: 13, color: "#111827", fontWeight: 800 }}
+                  style={{ fontSize: 13, color: "#111827", fontWeight: 500 }}
                 >
                   Create invoice on completion
                 </span>{" "}
@@ -2746,7 +2745,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <select
                   value={form.payerId}
                   onChange={(e) => update("payerId", e.target.value)}
-                  className="font-bold"
+                  className="font-medium"
                   style={inputStyle}
                 >
                   <option value="">
@@ -2795,7 +2794,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         value={form.poNumber}
                         onChange={(e) => update("poNumber", e.target.value)}
                         placeholder="Purchase order #"
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       />
                       {needsPo && (
@@ -3036,7 +3035,7 @@ export function ProtocolPanel({ service, onClose }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Service Protocol
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
@@ -3112,7 +3111,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -3162,7 +3161,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           color: D.heading,
                           marginBottom: 6,
                         }}
@@ -3227,7 +3226,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 12,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.teal,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
@@ -3308,7 +3307,7 @@ export function ProtocolPanel({ service, onClose }) {
                                 <div
                                   style={{
                                     fontSize: 12,
-                                    fontWeight: 700,
+                                    fontWeight: 500,
                                     color: D.heading,
                                   }}
                                 >
@@ -3357,7 +3356,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
@@ -3395,7 +3394,7 @@ export function ProtocolPanel({ service, onClose }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 800,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 8,
                       }}
@@ -3426,7 +3425,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 12,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.heading,
                             }}
                           >
@@ -3489,7 +3488,7 @@ export function ProtocolPanel({ service, onClose }) {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 4,
                     }}
@@ -3544,7 +3543,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 10,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.teal,
                               textTransform: "uppercase",
                               letterSpacing: 0.6,
@@ -3556,7 +3555,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 12,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.heading,
                             }}
                           >
@@ -3597,7 +3596,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 11,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           color: D.teal,
                           textTransform: "uppercase",
                           letterSpacing: 0.5,
@@ -3622,7 +3621,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 11,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.muted,
                               textTransform: "uppercase",
                               letterSpacing: 0.5,
@@ -3649,7 +3648,7 @@ export function ProtocolPanel({ service, onClose }) {
                   <div
                     style={{
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 0.6,
@@ -3689,7 +3688,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 12,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.heading,
                               }}
                             >
@@ -3723,7 +3722,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <div
                           style={{
                             fontSize: 11,
-                            fontWeight: 800,
+                            fontWeight: 500,
                             color: D.teal,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
@@ -3748,7 +3747,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.5,
@@ -3782,7 +3781,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 12,
                   }}
@@ -3800,7 +3799,7 @@ export function ProtocolPanel({ service, onClose }) {
                 >
                   {" "}
                   <div
-                    style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}
+                    style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}
                   >
                     {service.serviceType}
                   </div>{" "}
@@ -3832,7 +3831,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {seasonal.length}
                     </div>{" "}
@@ -3859,7 +3858,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {photos.length}
                     </div>{" "}
@@ -3886,7 +3885,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {scripts.length}
                     </div>{" "}
@@ -3909,7 +3908,7 @@ export function ProtocolPanel({ service, onClose }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 6,
                       }}
@@ -3947,7 +3946,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 11,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.muted,
                           textTransform: "uppercase",
                           letterSpacing: 0.5,
@@ -3973,7 +3972,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4020,7 +4019,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <span
                           style={{
                             fontSize: 13,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                           }}
                         >
@@ -4029,7 +4028,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <span
                           style={{
                             fontSize: 10,
-                            fontWeight: 700,
+                            fontWeight: 500,
                             textTransform: "uppercase",
                             padding: "2px 8px",
                             borderRadius: 8,
@@ -4077,7 +4076,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4114,7 +4113,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.teal,
                           marginBottom: 6,
                         }}
@@ -4155,7 +4154,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4192,7 +4191,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.heading,
                           marginBottom: 6,
                         }}
@@ -4234,7 +4233,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4262,7 +4261,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 12,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.teal,
                           marginBottom: 8,
                         }}
@@ -4279,7 +4278,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 11,
-                              fontWeight: 700,
+                              fontWeight: 500,
                               color: D.amber,
                               textTransform: "uppercase",
                               letterSpacing: 0.8,
@@ -4448,7 +4447,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     border: `1px solid ${D.border}`,
     background: D.input,
     color: D.heading,
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
     boxSizing: "border-box",
   };
@@ -4485,7 +4484,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -4500,7 +4499,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               marginBottom: 6,
             }}
@@ -4524,7 +4523,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               marginBottom: 6,
             }}
@@ -4541,7 +4540,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         <div
           style={{
             fontSize: 13,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.teal,
             marginBottom: 10,
           }}
@@ -4586,7 +4585,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {opt.displayDate}
                   </div>{" "}
@@ -4606,7 +4605,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     background: D.teal,
                     color: "#fff",
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     opacity: sending ? 0.6 : 1,
                   }}
                 >
@@ -4632,7 +4631,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
               border: "none",
               color: D.teal,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               padding: 0,
               display: "flex",
@@ -4682,7 +4681,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     background: manualDate ? D.teal : D.border,
                     color: D.heading,
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     opacity: sending ? 0.6 : 1,
                     whiteSpace: "nowrap",
                   }}
