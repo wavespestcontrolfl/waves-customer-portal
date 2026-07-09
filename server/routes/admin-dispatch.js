@@ -4666,7 +4666,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         prepaidPiId = guard.piId;
       }
 
-      return db.transaction(async (trx) => {
+      let flippedPaidByPrepayment = false;
+      const creditedResult = await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceRow.id })
           .forUpdate()
@@ -4698,6 +4699,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
         const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
         const paidByPrepayment = remainingCents <= 0;
+        flippedPaidByPrepayment = paidByPrepayment;
         const [updatedInvoice] = await trx('invoices')
           .where({ id: lockedInvoice.id })
           .update({
@@ -4733,6 +4735,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         });
         return creditedInvoice;
       });
+      // A cash/Zelle prepayment that fully covers the invoice flips it paid
+      // with NO Stripe webhook behind it, so the annual-prepay payment sync
+      // (pending-term activation + the pending-window slice resolution the
+      // reconcile left "until the invoice resolves") would never run.
+      // Mirror the prepaid-receipt path (admin-schedule): best-effort — the
+      // daily covered-term sweep is the recovery net.
+      if (flippedPaidByPrepayment && creditedResult?.id) {
+        try {
+          await AnnualPrepayRenewals.syncTermForInvoicePayment(creditedResult);
+        } catch (err) {
+          logger.warn(`[dispatch] annual-prepay sync after prepaid credit failed for invoice ${creditedResult.id}: ${err.message}`);
+        }
+      }
+      return creditedResult;
     };
 
     if (shouldInvoice) {
