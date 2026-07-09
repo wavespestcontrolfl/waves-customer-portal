@@ -2257,7 +2257,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -2360,7 +2360,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                     style={{
                       display: "block",
                       fontSize: 11,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: "0.04em",
@@ -2385,7 +2385,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                     style={{
                       display: "block",
                       fontSize: 11,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: "0.04em",
@@ -2593,7 +2593,7 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -2609,11 +2609,11 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 6,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Optional memo
@@ -2850,11 +2850,11 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
   const fieldLabel = {
     display: "block",
     fontSize: 12,
-    fontWeight: 600,
+    fontWeight: 500,
     color: D.text,
     marginBottom: 8,
     textTransform: "uppercase",
-    letterSpacing: "0.05em",
+    letterSpacing: "0.06em",
   };
 
   return createPortal(
@@ -2890,7 +2890,7 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
         }}
       >
         <div
-          style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 4 }}
+          style={{ fontSize: 20, fontWeight: 500, color: D.heading, marginBottom: 4 }}
         >
           Apply account credit
         </div>
@@ -2918,18 +2918,18 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
               }}
             >
               <div>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   Available credit
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: balance > 0 ? D.heading : D.muted }}>
+                <div style={{ fontSize: 18, fontWeight: 500, color: balance > 0 ? D.heading : D.muted }}>
                   ${balance.toFixed(2)}
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   Amount due
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+                <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
                   ${amountDue.toFixed(2)}
                 </div>
               </div>
@@ -3155,7 +3155,7 @@ function RecordPaymentModal({
         border: `1px solid ${method === key ? D.heading : D.border}`,
         borderRadius: 8,
         fontSize: 14,
-        fontWeight: 600,
+        fontWeight: 500,
         cursor: "pointer",
         textTransform: "uppercase",
         letterSpacing: "0.04em",
@@ -3203,7 +3203,7 @@ function RecordPaymentModal({
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -3219,11 +3219,11 @@ function RecordPaymentModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 8,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Payment method
@@ -3245,11 +3245,11 @@ function RecordPaymentModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 6,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           {referenceLabel}
@@ -3264,11 +3264,11 @@ function RecordPaymentModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             margin: "16px 0 6px",
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Note (optional)
@@ -3580,11 +3580,11 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   const labelStyle = {
     display: "block",
     fontSize: 12,
-    fontWeight: 600,
+    fontWeight: 500,
     color: D.text,
     margin: "16px 0 6px",
     textTransform: "uppercase",
-    letterSpacing: "0.05em",
+    letterSpacing: "0.06em",
   };
 
   return createPortal(
@@ -3622,7 +3622,7 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -3862,7 +3862,7 @@ function PaymentPlanModal({
         border: `1px solid ${paymentFrequency === key ? D.heading : D.border}`,
         borderRadius: 8,
         fontSize: 13,
-        fontWeight: 600,
+        fontWeight: 500,
         cursor: "pointer",
         textTransform: "uppercase",
         letterSpacing: "0.04em",
@@ -3908,7 +3908,7 @@ function PaymentPlanModal({
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -3924,11 +3924,11 @@ function PaymentPlanModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 6,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Payment amount
@@ -3951,11 +3951,11 @@ function PaymentPlanModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             margin: "16px 0 8px",
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Frequency
@@ -3978,11 +3978,11 @@ function PaymentPlanModal({
               style={{
                 display: "block",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.text,
                 marginBottom: 6,
                 textTransform: "uppercase",
-                letterSpacing: "0.05em",
+                letterSpacing: "0.06em",
               }}
             >
               Start date
@@ -3999,11 +3999,11 @@ function PaymentPlanModal({
               style={{
                 display: "block",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.text,
                 marginBottom: 6,
                 textTransform: "uppercase",
-                letterSpacing: "0.05em",
+                letterSpacing: "0.06em",
               }}
             >
               Next payment
@@ -4021,11 +4021,11 @@ function PaymentPlanModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             margin: "16px 0 6px",
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Note (optional)
