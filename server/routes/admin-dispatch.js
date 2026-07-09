@@ -5075,6 +5075,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && !prepaidCovered
           && !alreadyPaid
           && !autopayCoversVisit
+          // Collectible statuses only: a crash-resumed completion reloads the
+          // invoice through the existing-invoice path with invoiceCreated/
+          // payUrl set for any non-paid status — a 'processing' invoice (ACH
+          // autopay debit in flight, or the orphaned-charge park) must never
+          // get a pay link texted for money already moving (Codex round-6
+          // P1). Mirrors the invoicePaymentActionRequired guard.
+          && (!invoice || require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status))
           // Third-party Bill-To: never text the homeowner the pay link for a
           // payer-billed invoice — AR routes to the payer's AP inbox. The
           // homeowner still gets the report-only completion SMS (no pay_url).

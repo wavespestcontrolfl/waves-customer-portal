@@ -638,17 +638,20 @@ const BillingCron = {
         continue;
       }
 
-      // RESOLUTION GUARD (mirrors monthly GUARD 3b): a MONTHLY obligation
-      // row exists for a per-application customer — mis-created before the
-      // customer was classified (the July failed-charge cohort). Nothing is
-      // owed on a monthly basis for them, so resolve the row non-collectible
-      // (disarm + the same self-superseding convention as the parked states)
-      // instead of burning retry rungs / decline SMS on a debt that does not
-      // exist. Two deliberate limits (Codex P1/P2): only 'per_application'
-      // — an 'annual_prepay' customer's old monthly debt is governed by the
-      // coverage-DATED absorb above, never by current mode — and only when
-      // the customer has NEVER successfully paid a monthly charge: a real
-      // ex-monthly-member's pre-conversion debt stays collectible.
+      // STATE GUARD (mirrors monthly GUARD 3b): a MONTHLY obligation row
+      // exists for a per-application customer — almost always mis-created
+      // before the customer was classified (the July failed-charge cohort).
+      // The ladder STOPS (disarm), but the row is deliberately NOT
+      // self-superseded (Codex round-6 P2): "never successfully paid a
+      // monthly charge" cannot prove misclassification — a real monthly
+      // member's FIRST-ever charge can fail before they later accept a
+      // per-application estimate, and an auto-write-off would erase that
+      // legitimate pre-conversion debt with no stronger signal available
+      // retroactively (mode-change timestamps aren't stored; pre-#2505
+      // estimate accepts also created monthly members, so accepted_at can't
+      // discriminate either). Disarmed rows stay visible for manual triage;
+      // the owner-run staged backfill supersedes the KNOWN mis-created July
+      // cohort explicitly, with human eyes on each row.
       if (isMonthlyObligation && customer.billing_mode === 'per_application'
         && !(await db('payments')
           .where({ customer_id: payment.customer_id, status: 'paid' })
@@ -659,16 +662,15 @@ const BillingCron = {
           .where({ id: payment.id })
           .update({
             next_retry_at: null,
-            superseded_by_payment_id: payment.id,
             failure_reason: db.raw(
-              "COALESCE(failure_reason, '') || ' — resolved: customer bills per application, monthly obligation not owed'",
+              "COALESCE(failure_reason, '') || ' — retry ladder stopped: customer bills per application (review manually — likely mis-created monthly obligation)'",
             ),
-          }).catch((updErr) => logger.error(`[billing-cron] retry absorb (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
+          }).catch((updErr) => logger.error(`[billing-cron] retry disarm (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
         await logAutopay(payment.customer_id, 'skipped_billing_mode', {
           paymentId: payment.id,
-          details: { source: 'autopay_retry', billing_mode: customer.billing_mode, ladder_stopped: true },
+          details: { source: 'autopay_retry', billing_mode: customer.billing_mode, ladder_stopped: true, superseded: false },
         }).catch(() => {});
-        logger.info(`[billing-cron] Retry for payment ${payment.id} resolved — billing_mode ${customer.billing_mode} owes no monthly obligation`);
+        logger.info(`[billing-cron] Retry ladder stopped for payment ${payment.id} — billing_mode ${customer.billing_mode}; row left visible for manual review`);
         continue;
       }
 

@@ -288,7 +288,7 @@ describe('processPaymentRetries — suppression guards', () => {
 // collectible). 'annual_prepay' old debt is governed exclusively by the
 // coverage-DATED absorb, not by current mode.
 describe('processPaymentRetries — billing_mode resolution guard', () => {
-  test('per_application customer (never paid monthly): monthly row resolved non-collectible', async () => {
+  test('per_application customer (never paid monthly): ladder DISARMED but debt stays visible — no auto write-off (Codex round-6)', async () => {
     mockCustomer.billing_mode = 'per_application';
     mockFailedPayments = [monthlyFailedPayment()];
     mockCollectedRow = null; // no paid monthly row exists, ever
@@ -297,13 +297,16 @@ describe('processPaymentRetries — billing_mode resolution guard', () => {
 
     expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
-    const resolved = mockPaymentUpdates[0];
-    expect(resolved.next_retry_at).toBeNull();
-    expect(resolved.superseded_by_payment_id).toBe('pay-failed-1'); // self-supersede convention
+    const disarmed = mockPaymentUpdates[0];
+    expect(disarmed.next_retry_at).toBeNull();
+    // Deliberately NOT superseded: "never paid monthly" can't prove the row
+    // was mis-created (a real member's first charge can fail pre-conversion)
+    // — the owner-run backfill supersedes the known July cohort explicitly.
+    expect(disarmed.superseded_by_payment_id).toBeUndefined();
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_billing_mode',
       expect.objectContaining({
         paymentId: 'pay-failed-1',
-        details: expect.objectContaining({ billing_mode: 'per_application', ladder_stopped: true }),
+        details: expect.objectContaining({ billing_mode: 'per_application', ladder_stopped: true, superseded: false }),
       }));
   });
 

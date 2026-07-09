@@ -36,6 +36,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   [
     'whereIn',
     'whereNull',
+    'whereNot',
     'whereBetween',
     'whereNotIn',
     'orderBy',
@@ -1589,6 +1590,7 @@ describe('billing_mode reset on term void/refund', () => {
     annual_prepay_terms: [
       query({ rows: [term] }), // terms select for the refunded invoice
       query({ returning: [cancelled] }), // cancel transition update
+      query({ first: undefined }), // reset helper's replacement-coverage check
       query({ rows: [] }), // decided-covered terms sweep (post-loop)
     ],
     scheduled_services: [
@@ -1646,5 +1648,73 @@ describe('billing_mode reset on term void/refund', () => {
     expect(resetQ.update).toHaveBeenCalledWith(
       expect.objectContaining({ billing_mode: null }),
     );
+  });
+});
+
+// Codex round-6 P1: a decided-lapse term (status 'cancelled' +
+// renewal_decision) whose invoice refunds is handled by the decided-covered
+// sweep, not the active loop — it must ALSO reset billing_mode when no
+// replacement coverage exists, or the customer stays 'annual_prepay' with
+// the cron skipping them and completion refusing to bill.
+describe('billing_mode reset for decided-lapse terms on refund', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = {
+      hasTable: jest.fn().mockResolvedValue(true),
+      hasColumn: jest.fn().mockResolvedValue(true),
+    };
+    _private.resetCachesForTests();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('refunded decided-lapse term with no replacement coverage resets the mode', async () => {
+    const DECIDED = { id: 'term-d', customer_id: 'customer-1', source_estimate_id: 'est-1' };
+    const resetQ = query({});
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [] }), // active/pending terms select — none (already decided)
+        query({ rows: [DECIDED] }), // decided-covered terms sweep
+        query({ first: undefined }), // reset helper's replacement-coverage check
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {} } }), // clearPrepaidStamps probe → no-op
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', account_credits: 0 } }), // credit-reversal row lock
+        resetQ,
+      ],
+      customer_credit_ledger: [query({ rows: [] })],
+    });
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    );
+
+    expect(resetQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: 'per_application' }),
+    );
+  });
+
+  test('a replacement live term keeps the customer annual_prepay (renewed-then-old-refunded)', async () => {
+    const DECIDED = { id: 'term-d', customer_id: 'customer-1', source_estimate_id: 'est-1' };
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [] }),
+        query({ rows: [DECIDED] }),
+        query({ first: { id: 'term-new' } }), // replacement coverage EXISTS
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {} } }),
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', account_credits: 0 } }),
+        // NO reset entry: a customers access for the reset would throw
+      ],
+      customer_credit_ledger: [query({ rows: [] })],
+    });
+
+    await expect(AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    )).resolves.toBeDefined();
   });
 });

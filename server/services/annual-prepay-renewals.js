@@ -1207,7 +1207,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             this.where('status', 'cancelled').whereNotNull('renewal_decision');
           });
       })
-      .select('id', 'customer_id');
+      .select('id', 'customer_id', 'source_estimate_id');
     for (const decided of decidedCoveredTerms) {
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
@@ -1218,6 +1218,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
       }
       await reversePendingWindowCompletionCredits(decided, conn);
+      // A decided-lapse term (status 'cancelled' + renewal_decision) whose
+      // invoice refunds never passes through the active loop's reset — the
+      // customer would stay 'annual_prepay' with the cron skipping them and
+      // completion refusing to bill: unbilled forever (Codex round-6 P1).
+      // The helper self-checks for replacement coverage, so a renewed
+      // customer (live follow-on term) keeps their mode.
+      await resetBillingModeAfterTermCancel(decided, conn);
     }
   }
 
@@ -1398,6 +1405,17 @@ async function stampAnnualPrepayBillingMode(customerId, conn) {
 async function resetBillingModeAfterTermCancel(term, conn) {
   try {
     if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    // Replacement coverage keeps the mode: if ANOTHER live/pending prepay
+    // term exists (e.g. the refunded term was a decided lapse and the
+    // customer already renewed into a new term), the customer is still
+    // genuinely annual-prepay — only reset when nothing remains
+    // (Codex round-6 P1).
+    const replacement = await conn('annual_prepay_terms')
+      .where({ customer_id: term.customer_id })
+      .whereNot({ id: term.id })
+      .whereIn('status', [PAYMENT_PENDING_STATUS, ...ACTIVE_STATUSES])
+      .first('id');
+    if (replacement) return;
     await conn('customers')
       .where({ id: term.customer_id, billing_mode: 'annual_prepay' })
       .update({
