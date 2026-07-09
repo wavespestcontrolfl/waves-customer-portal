@@ -780,9 +780,12 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.frequency).toBe(9);
     expect(lawn.perApp).toBe(62.67);
     expect(lawn.annual).toBe(564);
-    expect(lawn.annualAfterDiscount).toBe(507.6);
-    expect(lawn.monthlyAfterDiscount).toBe(42.3);
-    expect(Math.round(lawn.perApp * 0.9 * 100) / 100).toBe(56.4);
+    // Silver 10% would land at $507.60/yr ($42.30/mo) — below the $45/mo
+    // program minimum, so the discount caps at the floor (owner 2026-07-09).
+    expect(lawn.annualAfterDiscount).toBe(540);
+    expect(lawn.monthlyAfterDiscount).toBe(45);
+    expect(lawn.programMinimumGuardApplied).toBe(true);
+    expect(lawn.discountCapped).toBe(true);
     expect(lawn.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.costFloorApplied).toBe(false);
   });
@@ -841,8 +844,15 @@ describe('lawn pricing production follow-up', () => {
       activeServices: ['pest_control', 'lawn_care'],
     });
     expect(lawn.annual).toBe(576);
-    expect(lawn.annualAfterDiscount).toBe(518.4);
-    expect(lawn.monthlyAfterDiscount).toBe(43.2);
+    // Silver 10% would land at $518.40/yr ($43.20/mo) — below the $45/mo
+    // program minimum, so only the slice down to the floor applies
+    // (576 → 540 is an effective 6.3%).
+    expect(lawn.annualAfterDiscount).toBe(540);
+    expect(lawn.monthlyAfterDiscount).toBe(45);
+    expect(lawn.programMinimumGuardApplied).toBe(true);
+    expect(lawn.discountCapped).toBe(true);
+    expect(lawn.requestedDiscountPct).toBe(0.10);
+    expect(lawn.actualDiscountPct).toBe(0.063);
     expect(lawn.discount).toMatchObject({
       discountable: true,
       requestedDiscountPercent: 0.10,
@@ -862,9 +872,11 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    expect(lawn.annualAfterDiscount).toBe(518.4);
-    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(939.6, 2);
-    expect(estimate.summary.manualDiscount.amount).toBe(93.96);
+    // Lawn holds at the $540 floor post-WaveGuard, so the manual-discount
+    // base is pest 421.20 + lawn 540 = 961.20 (was 939.60 pre-floor).
+    expect(lawn.annualAfterDiscount).toBe(540);
+    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(961.2, 2);
+    expect(estimate.summary.manualDiscount.amount).toBe(96.12);
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });

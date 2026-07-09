@@ -12625,6 +12625,47 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   };
 }
 
+// Does a (snapshotted) pricing bundle violate the lawn program policy —
+// a retired (hidden) lawn cadence still offered, or a lawn-identifiable
+// price below the program minimum? Checked over top-level frequency rows,
+// per-section ladders, per-service treatment rows, and combo axes. Used to
+// bypass the send-snapshot fast path in buildPricingBundle: snapshots taken
+// before the 2026-07-09 retirement/floor carry Basic cadences and below-$45
+// lawn prices verbatim, and accept resolves selectedFrequency from this
+// bundle. Compliant snapshots (including everything snapshotted after the
+// floor shipped) keep the fast path. Legacy bundle rows whose lawn slice is
+// not itemized (no lawn perServiceTreatments row) cannot be attributed and
+// are intentionally left alone.
+function pricingBundleViolatesLawnPolicy(bundle = {}) {
+  const minMonthly = lawnProgramMinimumMonthly();
+  const belowFloor = (monthly) => minMonthly > 0
+    && Number.isFinite(monthly) && monthly > 0 && monthly < minMonthly - 0.005;
+  const lawnTreatmentRowBelowFloor = (rows) => Array.isArray(rows) && rows.some((r) => {
+    if (recurringServiceKey(r) !== 'lawn_care') return false;
+    const per = Number(r?.displayPrice ?? r?.perTreatment);
+    const visits = Number(r?.visitsPerYear ?? r?.visits);
+    if (!Number.isFinite(per) || per <= 0 || !Number.isFinite(visits) || visits <= 0) return false;
+    return belowFloor((per * visits) / 12);
+  });
+
+  const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  const services = Array.isArray(bundle.services) ? bundle.services : [];
+  for (const s of services) {
+    if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
+  }
+  for (const f of frequencyRows) {
+    if (f?.serviceCategory === 'lawn_care') {
+      if (isRetiredLawnTierKey(f.serviceTierKey ?? f.key)) return true;
+      if (belowFloor(Number(f.monthly))) return true;
+    }
+    if (lawnTreatmentRowBelowFloor(f?.perServiceTreatments)) return true;
+  }
+
+  const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
+  return combos.some((c) => (c?.selection && isRetiredLawnTierKey(c.selection.lawn_care))
+    || lawnTreatmentRowBelowFloor(c?.perServiceTreatments));
+}
+
 function invalidateSendSnapshotPricingBundle(estData = {}) {
   if (!estData || typeof estData !== 'object' || !estData.sendSnapshot?.pricingBundle) return false;
   estData.sendSnapshot = { ...estData.sendSnapshot };
@@ -12689,6 +12730,11 @@ async function buildPricingBundle(estimate) {
     snapshotBundle
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    // Snapshots that violate the lawn program policy (retired Quarterly
+    // cadence, or an itemized lawn price below the $45/mo minimum) must NOT
+    // short-circuit — they re-derive through the clamped ladder builders so
+    // outstanding links can't sell the retired/below-floor plan.
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle)
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,

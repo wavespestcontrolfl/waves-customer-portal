@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, LAWN_PRICING_V2 } = require('./constants');
 
 // All-in annual cost (direct + admin) + margin floor for the guarded services,
 // mirroring discount-engine.applyMarginGuard's per-service cost shapes. Returns
@@ -1478,6 +1478,27 @@ function generateEstimate(input) {
           item.minAnnualForMargin = guarded.minAnnualForMargin;
         }
         item.annualAfterDiscount = guarded.finalAnnual;
+      } else if (item.service === 'lawn_care') {
+        // Lawn program minimum (owner directive 2026-07-09) holds POST-
+        // WaveGuard: a floor-priced $540/yr lawn line must not leave the
+        // engine at $486/$459/$432 after Silver/Gold/Platinum. Never raise
+        // a line above its own pre-discount price (min() keeps legacy
+        // below-floor lines merely undiscounted, not repriced upward here).
+        const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+        const floorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+          ? Math.min(Math.round(minMonthly * 12 * 100) / 100, item.annualBeforeDiscount)
+          : 0;
+        if (floorAnnual > 0 && discountedAnnual < floorAnnual) {
+          item.annualAfterDiscount = floorAnnual;
+          item.discountCapped = true;
+          item.programMinimumGuardApplied = true;
+          item.requestedDiscountPct = discount.effectiveDiscount || 0;
+          item.actualDiscountPct = item.annualBeforeDiscount > 0
+            ? Math.round((1 - floorAnnual / item.annualBeforeDiscount) * 1000) / 1000
+            : 0;
+        } else {
+          item.annualAfterDiscount = discountedAnnual;
+        }
       } else {
         item.annualAfterDiscount = discountedAnnual;
       }

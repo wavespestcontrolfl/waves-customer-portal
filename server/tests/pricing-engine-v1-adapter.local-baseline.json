@@ -559,9 +559,9 @@
       "tier": "Silver",
       "discount": 0.1,
       "annualBeforeDiscount": 1032,
-      "annualAfterDiscount": 928.8,
-      "monthlyTotal": 77.4,
-      "savings": 103.2,
+      "annualAfterDiscount": 961.2,
+      "monthlyTotal": 80.1,
+      "savings": 70.8,
       "serviceCount": 2
     },
     "results": {
@@ -613,8 +613,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1027.8,
-      "year2": 928.8
+      "year1": 1060.2,
+      "year2": 961.2
     }
   }
 }
