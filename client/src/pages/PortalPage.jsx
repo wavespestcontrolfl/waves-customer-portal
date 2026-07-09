@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import api from '../utils/api';
@@ -1167,37 +1168,177 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   );
 }
 
-// Share action on the home-page content cards (owner 2026-07-09): native
-// share sheet where available, clipboard fallback with a "Copied!" flash.
-// A canceled share sheet is not an error and does nothing.
+// Share action on the home-page content cards (owner 2026-07-09): explicit
+// channel menu — Facebook, Twitter, Instagram, email, text message.
+// Instagram has no web share intent, so that option copies the link and
+// opens Instagram with a "Link copied!" flash on the button. The menu is
+// position:fixed because the cards clip overflow and live inside a
+// horizontal scroll rail; any scroll closes it so it can't drift.
+const SHARE_BRAND_ICONS = {
+  facebook: (
+    <svg viewBox="0 0 24 24" width={15} height={15} fill="#1877F2" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+  ),
+  twitter: (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.451-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z" /></svg>
+  ),
+  instagram: (
+    <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="#E1306C" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="5" /><circle cx="12" cy="12" r="4.2" /><circle cx="17.4" cy="6.6" r="0.6" fill="#E1306C" stroke="none" /></svg>
+  ),
+};
+
 function SharePostButton({ url, title }) {
-  const [copied, setCopied] = useState(false);
-  const share = async (e) => {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState(null);
+  const [flash, setFlash] = useState('');
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    // Capture-phase so the card rail's own horizontal scroll closes it too.
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open]);
+
+  // 5 items × 42px + 12px padding + 2px border — used to decide whether the
+  // menu fits above the button; measured-after-render would flash misplaced.
+  const MENU_HEIGHT = 228;
+
+  const toggle = async (e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (open) { setOpen(false); return; }
     const absolute = new URL(url, window.location.origin).toString();
-    if (navigator.share) {
-      try { await navigator.share({ title: title || 'Waves Pest Control', url: absolute }); } catch { /* canceled */ }
-      return;
+    // Capacitor shell: window.open(_blank) dead-ends the webview and the
+    // webview clipboard is unreliable (see nativeFile.js) — hand the link to
+    // the OS share sheet instead, which offers the same channels natively.
+    if (isNativeApp() && await shareUrlNative(absolute, title || 'Waves Pest Control').catch(() => false)) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const right = Math.max(8, window.innerWidth - rect.right);
+    // Prefer opening above the button (the footer sits at the card bottom),
+    // but a rail scrolled near the viewport top would push the top options
+    // off-screen — and the scroll-closes-menu listener makes them
+    // unreachable — so flip below when the space above is too short.
+    if (rect.top >= MENU_HEIGHT + 12) {
+      setMenuPos({ right, bottom: window.innerHeight - rect.top + 8 });
+    } else {
+      setMenuPos({ right, top: rect.bottom + 8 });
     }
-    try {
-      await navigator.clipboard.writeText(absolute);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch { /* clipboard unavailable */ }
+    setOpen(true);
   };
+
+  const shareTo = async (channel) => {
+    const absolute = new URL(url, window.location.origin).toString();
+    const text = title || 'Waves Pest Control';
+    setOpen(false);
+    if (channel === 'facebook') {
+      window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(absolute)}`, '_blank', 'noopener,noreferrer');
+    } else if (channel === 'twitter') {
+      window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(absolute)}&text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+    } else if (channel === 'instagram') {
+      // No web share intent exists for Instagram: copy the link and open the
+      // app/site. Open FIRST (synchronously, keeping the click's popup
+      // activation), then report honestly — Instagram sharing depends
+      // entirely on the copied URL, so a swallowed copy failure would strand
+      // the customer there with nothing to paste and a false "copied" flash.
+      window.open('https://www.instagram.com/', '_blank', 'noopener,noreferrer');
+      try {
+        await navigator.clipboard.writeText(absolute);
+        setFlash('Link copied!');
+      } catch {
+        setFlash("Couldn't copy link");
+      }
+      setTimeout(() => setFlash(''), 2400);
+    } else if (channel === 'email') {
+      window.location.href = `mailto:?subject=${encodeURIComponent(text)}&body=${encodeURIComponent(absolute)}`;
+    } else if (channel === 'sms') {
+      window.location.href = `sms:?body=${encodeURIComponent(`${text} ${absolute}`)}`;
+    }
+  };
+
+  const options = [
+    { key: 'facebook', label: 'Facebook', icon: SHARE_BRAND_ICONS.facebook },
+    { key: 'twitter', label: 'Twitter', icon: SHARE_BRAND_ICONS.twitter },
+    { key: 'instagram', label: 'Instagram', icon: SHARE_BRAND_ICONS.instagram },
+    { key: 'email', label: 'Email', icon: <Icon name="mail" size={15} strokeWidth={2} /> },
+    { key: 'sms', label: 'Text message', icon: <Icon name="message" size={15} strokeWidth={2} /> },
+  ];
+
   return (
-    <button
-      type="button"
-      onClick={share}
-      style={{
-        border: 'none', background: 'none', padding: 0, cursor: 'pointer',
-        fontSize: 12, fontWeight: 800, color: PORTAL_SHELL.muted, fontFamily: FONTS.heading,
-      }}
-    >
-      {copied ? 'Copied!' : 'Share'}
-    </button>
+    <span ref={rootRef} style={{ marginLeft: 'auto', display: 'inline-flex' }}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        style={{
+          border: 'none', background: 'none', padding: 0, cursor: 'pointer',
+          fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading,
+          color: open ? B.wavesBlue : PORTAL_SHELL.muted, whiteSpace: 'nowrap',
+        }}
+      >
+        {flash || 'Share'}
+      </button>
+      {open && menuPos && createPortal(
+        // Portaled to <body>: the glass cards carry transform/backdrop-filter,
+        // which would otherwise make the card (clipped, horizontally
+        // scrolling) the containing block for this fixed-position menu.
+        <div
+          ref={menuRef}
+          role="menu"
+          style={{
+            position: 'fixed', right: menuPos.right, zIndex: 1200,
+            ...(menuPos.bottom != null ? { bottom: menuPos.bottom } : { top: menuPos.top }),
+            background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+            boxShadow: '0 8px 24px rgba(15,23,42,0.14)', padding: 6, minWidth: 172,
+          }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              role="menuitem"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); shareTo(opt.key); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left',
+                padding: '10px 12px', minHeight: 42, borderRadius: 8,
+                fontSize: 14, fontWeight: 800, color: B.blueDeeper, fontFamily: FONTS.heading,
+              }}
+            >
+              <span style={{ display: 'inline-flex', width: 18, justifyContent: 'center', flexShrink: 0 }}>{opt.icon}</span>
+              {opt.label}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </span>
   );
+}
+
+// Feed dates arrive in mixed shapes (ISO from Facebook, RFC-822 from the
+// RSS/newsletter feeds) — parseDate/fmtDate only handle YYYY-MM-DD, so this
+// mirrors the Learn tab's ContentCard: plain Date parse, month + day, no
+// year, and nothing rendered when the feed omits or mangles the date.
+function formatPostDate(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  if (isNaN(dt)) return null;
+  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 // Home-page content row (owner 2026-07-09): one glass section per source —
@@ -1268,6 +1409,11 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
               )}
             </a>
             <div style={{ padding: compact ? '8px 10px 10px' : '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6, flex: 1 }}>
+              {formatPostDate(post.date) && (
+                <div style={{ fontSize: 12, color: PORTAL_SHELL.muted }}>
+                  {formatPostDate(post.date)}
+                </div>
+              )}
               {post.title && (
                 <div style={{
                   fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
@@ -1897,7 +2043,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           </span>
         )}
         posts={facebookPosts.map((p) => ({
-          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', external: true,
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', date: p.postedAt, external: true,
         }))}
       />
       <HomeContentRow
@@ -1908,7 +2054,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         ctaLabel="Read Post"
         iconTile={<ShellIconTile icon="bulb" size={compact ? 30 : 38} />}
         posts={blogPosts.map((p) => ({
-          url: p.link, image: p.image, title: p.title, text: p.description, external: true,
+          url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate, external: true,
         }))}
       />
       <HomeContentRow
@@ -1919,7 +2065,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         ctaLabel="Read Issue"
         iconTile={<ShellIconTile icon="newspaper" size={compact ? 30 : 38} />}
         posts={newsletterPosts.map((p) => ({
-          url: p.link, image: p.image, title: p.title, text: p.description,
+          url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate,
           external: !String(p.link || '').startsWith('/'),
         }))}
       />
