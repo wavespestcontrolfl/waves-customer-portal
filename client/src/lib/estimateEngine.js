@@ -340,6 +340,10 @@ const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
+  // Mirrors server constants.LAWN_PRICING_V2.programMinimumMonthly (owner
+  // directive 2026-07-09): no recurring lawn plan below $45/mo. Server is
+  // authoritative on save; this keeps the preview from under-quoting.
+  programMinimumMonthly: 45,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
   pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
   laborRateLoaded: 35,
@@ -998,6 +1002,10 @@ function lookupPreSlabMinimum(slabSqFt, jobContext) {
 
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
+  // basic/4x is retired for new sales (owner directive 2026-07-09) — a stale
+  // form value of 4 resolves to the 9-app default, matching the server's
+  // hidden-tier fallback in resolveLawnTier/priceLawnCare.
+  if (parsed === 4) return 9;
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
@@ -1602,8 +1610,9 @@ export function calculateEstimate(inputs) {
     const lsf = turfArea.turfSf;
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
+    // 4x/Quarterly is retired for new sales (owner directive 2026-07-09) —
+    // mirrors the server's LAWN_TIERS.basic hidden flag.
     const freqs = [
-      { name: '4x applications/yr', v: 4 },
       { name: '6x applications/yr', v: 6 },
       { name: '9x applications/yr', v: 9 },
       { name: '12x applications/yr', v: 12 },
@@ -1611,6 +1620,11 @@ export function calculateEstimate(inputs) {
     // Same complexity-minutes the server applies to the lawn cost floor, so the
     // preview matches the server-authoritative price (Decision #2).
     const lawnComplexityMin = lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriveway });
+    // Program minimum — same arithmetic as the server's priceLawnCare clamp.
+    const lawnProgramMinMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    const lawnProgramMinAnnual = Number.isFinite(lawnProgramMinMonthly) && lawnProgramMinMonthly > 0
+      ? Math.round(lawnProgramMinMonthly * 12 * 100) / 100
+      : 0;
     R.lawn = [];
     freqs.forEach((f) => {
       const freqIdx = LAWN_FREQS.indexOf(f.v);
@@ -1618,7 +1632,9 @@ export function calculateEstimate(inputs) {
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
       const floorApplied = floorPrice.costFloorAnnual > marketAnnual;
-      const ann = floorApplied ? floorPrice.ann : marketAnnual;
+      let ann = floorApplied ? floorPrice.ann : marketAnnual;
+      const programMinimumApplied = lawnProgramMinAnnual > 0 && ann < lawnProgramMinAnnual;
+      if (programMinimumApplied) ann = Math.ceil(lawnProgramMinAnnual / f.v) * f.v;
       const mo = Math.round(ann / 12 * 100) / 100;
       const pa = Math.round(ann / f.v * 100) / 100;
       const rec = f.v === selectedFreq, dim = !rec;
@@ -1630,8 +1646,13 @@ export function calculateEstimate(inputs) {
         name: f.name,
         recommended: rec,
         dimmed: dim,
-        pricingBasis: floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis,
-        pricingSource: floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource,
+        programMinimumApplied,
+        pricingBasis: programMinimumApplied
+          ? 'PROGRAM_MINIMUM_MONTHLY'
+          : (floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis),
+        pricingSource: programMinimumApplied
+          ? 'PROGRAM_MINIMUM'
+          : (floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource),
         marketMonthly: marketPrice.monthly,
         marketAnnual,
         costFloorAnnual: floorPrice.costFloorAnnual,

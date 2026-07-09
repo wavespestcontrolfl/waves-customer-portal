@@ -18,7 +18,7 @@ const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/con
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
-const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
+const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
 const {
@@ -10722,6 +10722,68 @@ function lawnTierKey(row = {}) {
 
 const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: '9 visits / yr', premium: 'Monthly' };
 
+// ── Lawn program minimum + retired cadences (owner directive 2026-07-09) ─────
+// The engine floors NEW quotes (priceLawnCare), but stored estimates carry
+// pre-floor tier rows and the WaveGuard/manual discounts are applied HERE at
+// view/accept time — so the ladder builders re-clamp post-discount and drop
+// retired (hidden) cadences. Both constants objects are live references that
+// db-bridge mutates from pricing_config, so DB edits apply without a deploy.
+function lawnProgramMinimumMonthly() {
+  const n = Number(LAWN_PRICING_V2?.programMinimumMonthly);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function isRetiredLawnTierKey(tierKey) {
+  return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
+}
+
+// Clamp a customer-facing lawn ladder entry to the program minimum AFTER
+// discounts. Annual re-derives from the clamped monthly so monthly/annual/
+// per-app never disagree, the pre-discount anchor never drops below the net
+// price, and the reported manual discount shrinks to what the floor actually
+// let through (never display savings the price doesn't reflect).
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount }) {
+  const minMonthly = lawnProgramMinimumMonthly();
+  if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
+  const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
+  const clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
+  const monthlyWasClamped = monthly != null && clampedMonthly !== monthly;
+  // Only re-derive annual/per-app when the floor actually moved a number —
+  // untouched rows keep their stored annual (it is the billing source of
+  // truth and carries exact cents the monthly×12 round-trip would lose).
+  const clampedAnnual = monthlyWasClamped
+    ? roundMonthly(clampedMonthly * 12)
+    : (annual != null && monthly == null ? Math.max(annual, roundMonthly(minMonthly * 12)) : annual);
+  const annualWasClamped = clampedAnnual != null && annual != null && clampedAnnual !== annual;
+  const clampedPerTreatment = (monthlyWasClamped || annualWasClamped) && clampedAnnual != null && visits
+    ? roundMonthly(clampedAnnual / visits)
+    : perTreatment;
+  let clampedManualDiscount = manualDiscount || null;
+  if (clampedManualDiscount && clampedMonthlyBase != null && clampedMonthly != null) {
+    const effMonthlyOff = Math.max(0, roundMonthly(clampedMonthlyBase - clampedMonthly));
+    if (effMonthlyOff <= 0) {
+      clampedManualDiscount = null;
+    } else if (effMonthlyOff < Number(clampedManualDiscount.monthlyAmount || 0)) {
+      const effAmount = roundMonthly(effMonthlyOff * 12);
+      clampedManualDiscount = {
+        ...clampedManualDiscount,
+        amount: effAmount,
+        recurringAmount: effAmount,
+        monthlyAmount: effMonthlyOff,
+        capped: true,
+        capReason: 'lawn_program_minimum',
+      };
+    }
+  }
+  return {
+    monthlyBase: clampedMonthlyBase,
+    monthly: clampedMonthly,
+    annual: clampedAnnual,
+    perTreatment: clampedPerTreatment,
+    manualDiscount: clampedManualDiscount,
+  };
+}
+
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
@@ -10748,26 +10810,37 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
     .map((row) => {
       const tierKey = lawnTierKey(row);
       if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
+      // Retired cadences (basic/Quarterly) stay in stored result rows on old
+      // estimates — never re-offer them for selection or acceptance.
+      if (isRetiredLawnTierKey(tierKey)) return null;
       seen.add(tierKey);
       const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
-      const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
+      const rawMonthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
       const annualBase = finiteNumberOrNull(row.ann ?? row.annual);
       const perTreatmentBase = finiteNumberOrNull(row.pa ?? row.perTreatment ?? row.perApp ?? row.perVisit);
       const discountBaseAnnual = annualBase != null
         ? annualBase
-        : (monthlyBase != null ? roundMonthly(monthlyBase * 12) : 0);
-      const manualDiscount = manualDiscountForRecurringBase(rawManualDiscount, discountBaseAnnual);
-      const manualDiscountAmount = Number(manualDiscount?.amount || 0);
-      const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
-      const monthly = monthlyBase != null
-        ? Math.max(0, roundMonthly(monthlyBase - manualDiscountMonthly))
+        : (rawMonthlyBase != null ? roundMonthly(rawMonthlyBase * 12) : 0);
+      const rawManualDiscountForTier = manualDiscountForRecurringBase(rawManualDiscount, discountBaseAnnual);
+      const manualDiscountAmount = Number(rawManualDiscountForTier?.amount || 0);
+      const manualDiscountMonthly = Number(rawManualDiscountForTier?.monthlyAmount || 0);
+      const rawMonthly = rawMonthlyBase != null
+        ? Math.max(0, roundMonthly(rawMonthlyBase - manualDiscountMonthly))
         : null;
-      const annual = annualBase != null
+      const rawAnnual = annualBase != null
         ? Math.max(0, roundMonthly(annualBase - manualDiscountAmount))
-        : (monthly != null ? roundMonthly(monthly * 12) : null);
-      const perTreatment = perTreatmentBase != null
+        : (rawMonthly != null ? roundMonthly(rawMonthly * 12) : null);
+      const rawPerTreatment = perTreatmentBase != null
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
+      const { monthlyBase, monthly, annual, perTreatment, manualDiscount } = clampLawnLadderEntry({
+        monthlyBase: rawMonthlyBase,
+        monthly: rawMonthly,
+        annual: rawAnnual,
+        perTreatment: rawPerTreatment,
+        visits,
+        manualDiscount: rawManualDiscountForTier,
+      });
       const labelBase = LAWN_CADENCE_LABEL[tierKey] || 'Lawn care';
       return {
         key: tierKey,
@@ -11825,11 +11898,25 @@ function nonPestTierBaseMap(resultStats = {}) {
     for (const row of rows) {
       const tierKey = tierKeyFn(row);
       if (!tierKey || tiers[tierKey]) continue;
+      // Retired lawn cadences (basic/Quarterly) must not be a selectable
+      // combo axis on old stored estimates either.
+      if (serviceKey === 'lawn_care' && isRetiredLawnTierKey(tierKey)) continue;
       const v = finiteNumberOrNull(row.v ?? row.visits ?? row.visitsPerYear ?? row.frequency);
-      const mo = finiteNumberOrNull(row.mo ?? row.monthly);
-      const ann = finiteNumberOrNull(row.ann ?? row.annual) ?? (mo != null ? roundMonthly(mo * 12) : null);
-      const pa = finiteNumberOrNull(row.pa ?? row.pv ?? row.perTreatment ?? row.perApp ?? row.perVisit);
+      let mo = finiteNumberOrNull(row.mo ?? row.monthly);
+      let ann = finiteNumberOrNull(row.ann ?? row.annual) ?? (mo != null ? roundMonthly(mo * 12) : null);
+      let pa = finiteNumberOrNull(row.pa ?? row.pv ?? row.perTreatment ?? row.perApp ?? row.perVisit);
       if (mo == null && ann == null) continue;
+      // Stored lawn rows on old estimates predate the program minimum —
+      // clamp the combo base so shapeFromV1 never sums a below-floor lawn
+      // component (its per-service discount hook re-clamps post-WaveGuard).
+      if (serviceKey === 'lawn_care') {
+        const minMonthly = lawnProgramMinimumMonthly();
+        if (minMonthly > 0 && mo != null && mo < minMonthly) {
+          mo = minMonthly;
+          ann = roundMonthly(mo * 12);
+          pa = v ? roundMonthly(ann / v) : pa;
+        }
+      }
       tiers[tierKey] = {
         mo, ann, pa, v,
         recommended: row.recommended === true || row.isRecommended === true,
@@ -11941,10 +12028,13 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   const entries = extractor(estData);
   if (!Array.isArray(entries) || entries.length < 2) return null;
   const d = recurringServiceReceivesTierDiscount(recurringService) ? (Number(recurringDiscount) || 0) : 0;
+  // Lawn program minimum re-clamps AFTER the WaveGuard % — a Platinum 20% on
+  // a floor-priced lawn section must not sell below the floor.
+  const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthly() : 0;
   return entries.map((e) => {
     const base = Number(e.monthlyBase);
     if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
-    const monthly = roundMonthly(base * (1 - d));
+    const monthly = Math.max(roundMonthly(base * (1 - d)), sectionMinMonthly);
     const visits = Number(e.visitsPerYear) || null;
     const perTreatment = visits ? roundMonthly((monthly * 12) / visits) : (e.perTreatment ?? null);
     return {
@@ -12421,7 +12511,15 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const discountMonthly = (monthly, svc) => {
     const n = Number(monthly || 0);
     const discount = recurringServiceReceivesTierDiscount(svc) ? v1.discount : 0;
-    return n * (1 - discount);
+    const after = n * (1 - discount);
+    // Lawn program minimum holds POST-WaveGuard: a % discount on a bundle
+    // must not pull the lawn component below the floor. Guard on n > 0 so a
+    // missing/zero lawn row is never inflated to the minimum.
+    if (n > 0 && recurringServiceKey(svc) === 'lawn_care') {
+      const minMonthly = lawnProgramMinimumMonthly();
+      if (minMonthly > 0 && after < minMonthly) return minMonthly;
+    }
+    return after;
   };
   const pestMoAfter = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
   const nonPestMoAfter = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
@@ -12484,11 +12582,24 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     nonPestServices.forEach((svc) => {
       const pa = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit);
       const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
+      let displayPrice = treatmentDisplayPrice(pa, svc);
+      // Lawn program minimum: the discounted per-visit display drives the
+      // first-application invoice, so it must match the floor-clamped
+      // monthly (min × 12 ÷ visits) whenever the % discount would price a
+      // visit below it — otherwise the first visit bills under the floor
+      // the plan itself charges.
+      if (displayPrice != null && recurringServiceKey(svc) === 'lawn_care'
+        && Number.isFinite(visits) && visits > 0) {
+        const minMonthly = lawnProgramMinimumMonthly();
+        if (minMonthly > 0) {
+          displayPrice = Math.max(displayPrice, roundMonthly((minMonthly * 12) / visits));
+        }
+      }
       perServiceTreatments.push({
         service: svc?.service || (svc?.name || '').toLowerCase().replace(/\s+/g, '_'),
         label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
-        displayPrice: treatmentDisplayPrice(pa, svc),
+        displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
       });

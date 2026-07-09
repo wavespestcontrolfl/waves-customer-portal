@@ -71,9 +71,9 @@
   },
   "zone_d_quarterly_pest_bahia_basic": {
     "summary": {
-      "recurringAnnualAfterDiscount": 640.8,
-      "recurringMonthlyAfterDiscount": 53.4,
-      "year1Total": 641
+      "recurringAnnualAfterDiscount": 856.8,
+      "recurringMonthlyAfterDiscount": 71.4,
+      "year1Total": 857
     },
     "waveGuard": {
       "tier": "silver",
@@ -86,8 +86,8 @@
         "monthly": 34.33
       },
       "lawn_care": {
-        "annual": 300,
-        "monthly": 25
+        "annual": 540,
+        "monthly": 45
       }
     }
   },

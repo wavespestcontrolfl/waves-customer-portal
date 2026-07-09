@@ -721,17 +721,16 @@ describe('lawn pricing production follow-up', () => {
     expect(floor.pricingSource).toBe('COST_FLOOR');
   });
 
-  test('default tiers expose 4/6/9/12 application options', () => {
+  test('default tiers expose 6/9/12 application options (4x retired 2026-07-09)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    expect(lawn.tiers).toHaveLength(4);
-    expect(lawn.tiers.map(t => t.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    expect(lawn.tiers).toHaveLength(3);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
     expect(lawn.tiers.every(t => t.label)).toBe(true);
-    expect(lawn.tiers[0].label).toBe('4x applications/yr');
-    expect(lawn.tiers[1].label).toBe('6x applications/yr');
-    expect(lawn.tiers[2].label).toBe('9x applications/yr');
-    expect(lawn.tiers[3].label).toBe('12x applications/yr');
+    expect(lawn.tiers[0].label).toBe('6x applications/yr');
+    expect(lawn.tiers[1].label).toBe('9x applications/yr');
+    expect(lawn.tiers[2].label).toBe('12x applications/yr');
   });
 
   test('includeHiddenTiers preserves the full lawn tier list', () => {
@@ -870,17 +869,24 @@ describe('lawn pricing production follow-up', () => {
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });
 
-  test('requesting 4-application lawn tier selects basic', () => {
+  test('requesting the retired 4-application tier falls back to enhanced (quarterly retired 2026-07-09)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, {
       track: 'st_augustine', tier: 'basic', lawnFreq: 4,
     });
 
-    expect(lawn.tiers).toHaveLength(4);
-    expect(lawn.tiers.map(t => t.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
-    expect(lawn.selected.tier).toBe('basic');
-    expect(lawn.tier).toBe('basic');
-    expect(lawn.frequency).toBe(4);
+    expect(lawn.tiers).toHaveLength(3);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.selected.tier).toBe('enhanced');
+    expect(lawn.tier).toBe('enhanced');
+    expect(lawn.frequency).toBe(9);
+
+    // Legacy/admin flows can still price the retired tier explicitly.
+    const withHidden = priceLawnCare(property, {
+      track: 'st_augustine', tier: 'basic', lawnFreq: 4, includeHiddenTiers: true,
+    });
+    expect(withHidden.selected.tier).toBe('basic');
+    expect(withHidden.frequency).toBe(4);
   });
 
   test('useLawnCostFloor defaults to true for recurring lawn', () => {

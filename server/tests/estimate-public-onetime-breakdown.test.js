@@ -1946,7 +1946,7 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
-  test('lawn-only public frequencies include and preserve 4-application basic tier', () => {
+  test('lawn-only public frequencies drop the retired 4-application basic tier (owner directive 2026-07-09)', () => {
     const estData = {
       result: {
         results: {
@@ -1965,34 +1965,38 @@ describe('public estimate one-time breakdown', () => {
       },
     };
 
+    // Quarterly is retired: a stored Basic row (even the recommended one)
+    // never re-renders as a selectable cadence, so it can't be accepted.
     const frequencies = lawnFrequenciesFromResultStats(estData);
-    expect(frequencies.map((frequency) => frequency.key)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    expect(frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced', 'premium']);
     expect(frequencies[0]).toMatchObject({
-      key: 'basic',
-      label: 'Quarterly',
+      key: 'standard',
+      label: 'Bi-monthly',
       serviceCategory: 'lawn_care',
-      serviceTierKey: 'basic',
-      monthly: 80,
-      annual: 960,
-      perTreatment: 240,
-      visitsPerYear: 4,
+      serviceTierKey: 'standard',
+      monthly: 90,
+      annual: 1080,
+      perTreatment: 180,
+      visitsPerYear: 6,
       perServiceTreatments: [
-        expect.objectContaining({ service: 'lawn_care', perTreatment: 240, visitsPerYear: 4 }),
+        expect.objectContaining({ service: 'lawn_care', perTreatment: 180, visitsPerYear: 6 }),
       ],
     });
 
+    // Accepting a surviving cadence still re-stamps the recurring line and
+    // marks the results rows (Basic stays unselected).
     const nextData = applySelectedLawnTierToEstimateData(estData, frequencies[0]);
     expect(nextData.result.recurring.services[0]).toMatchObject({
       service: 'lawn_care',
-      serviceKey: 'lawn_care_quarterly',
-      frequency: 'quarterly',
-      tier: 'basic',
-      visitsPerYear: 4,
-      perTreatment: 240,
+      serviceKey: 'lawn_care_bimonthly',
+      frequency: 'bi_monthly',
+      tier: 'standard',
+      visitsPerYear: 6,
+      perTreatment: 180,
     });
     expect(nextData.result.results.lawn.map((row) => ({ tier: row.tier, selected: row.selected }))).toEqual([
-      { tier: 'basic', selected: true },
-      { tier: 'standard', selected: false },
+      { tier: 'basic', selected: false },
+      { tier: 'standard', selected: true },
       { tier: 'enhanced', selected: false },
       { tier: 'premium', selected: false },
     ]);

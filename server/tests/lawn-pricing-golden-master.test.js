@@ -53,13 +53,24 @@ describe('lawn pricing golden master', () => {
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);
   });
 
-  it('every recurring case uses either the market table or the 35% floor, whichever is higher', () => {
+  it('every recurring case uses the market table, the 35% floor, or the $45 program minimum, whichever is highest', () => {
     for (const c of cases) {
-      expect(['TABLE_INTERPOLATION', 'EXTRAPOLATED_ABOVE_TABLE_MAX', 'THIRTY_FIVE_MARGIN_FLOOR'])
+      expect(['TABLE_INTERPOLATION', 'EXTRAPOLATED_ABOVE_TABLE_MAX', 'THIRTY_FIVE_MARGIN_FLOOR', 'PROGRAM_MINIMUM_MONTHLY'])
         .toContain(c.out.pricingBasis);
-      expect(['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR'])
+      expect(['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR', 'PROGRAM_MINIMUM'])
         .toContain(c.out.pricingSource);
       expect(c.out.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
     }
+  });
+
+  it('program minimum: no sold plan below $45/mo (owner directive 2026-07-09)', () => {
+    for (const c of cases) {
+      expect(c.out.monthly).toBeGreaterThanOrEqual(45);
+    }
+    // The old worst case — small Bahia — now floors at exactly $45/$540.
+    const r = priceLawnCare({ turfSf: 3000 }, { track: 'bahia', tier: 'standard' });
+    expect(r.monthly).toBe(45);
+    expect(r.annual).toBe(540);
+    expect(r.pricingSource).toBe('PROGRAM_MINIMUM');
   });
 });

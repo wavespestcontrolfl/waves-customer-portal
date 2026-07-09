@@ -12,12 +12,7 @@
     "results": {
       "lawn": [
         {
-          "mo": 30,
-          "recommended": false,
-          "name": "4x applications/yr"
-        },
-        {
-          "mo": 38,
+          "mo": 45,
           "recommended": false,
           "name": "6x applications/yr"
         },
@@ -80,12 +75,7 @@
     "results": {
       "lawn": [
         {
-          "mo": 30,
-          "recommended": false,
-          "name": "4x applications/yr"
-        },
-        {
-          "mo": 40.5,
+          "mo": 45,
           "recommended": false,
           "name": "6x applications/yr"
         },
@@ -503,12 +493,7 @@
     "results": {
       "lawn": [
         {
-          "mo": 34,
-          "recommended": false,
-          "name": "4x applications/yr"
-        },
-        {
-          "mo": 42,
+          "mo": 45,
           "recommended": false,
           "name": "6x applications/yr"
         },
@@ -582,12 +567,7 @@
     "results": {
       "lawn": [
         {
-          "mo": 25,
-          "recommended": false,
-          "name": "4x applications/yr"
-        },
-        {
-          "mo": 34,
+          "mo": 45,
           "recommended": false,
           "name": "6x applications/yr"
         },
