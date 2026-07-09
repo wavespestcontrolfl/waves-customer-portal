@@ -10,7 +10,7 @@ const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, for
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
-const { stampedDivergesSql } = require('../services/stamped-address');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
@@ -1329,9 +1329,9 @@ router.get('/:date?', async (req, res, next) => {
         // visits, e.g. a customer's rental) wins over the customer's primary
         // mirror — same output field names, so every consumer keeps working.
         db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
-        // Stamped condo/duplex visits keep THEIR unit line, never the
-        // primary address's (codex round-4 P2).
-        db.raw('CASE WHEN scheduled_services.service_address_line1 IS NOT NULL THEN scheduled_services.service_address_line2 ELSE customers.address_line2 END as address_line2'),
+        // Divergent stamps keep THEIR unit line; non-divergent stamps fall
+        // back to the primary's unit (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -6707,7 +6707,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         c.first_name,
         c.last_name,
         COALESCE(s.service_address_line1, c.address_line1) AS address_line1,
-        CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END AS address_line2,
+        ${stampedLine2Sql('s', 'c')} AS address_line2,
         COALESCE(s.service_address_city, c.city) AS city,
         COALESCE(s.service_address_state, c.state) AS state,
         COALESCE(s.service_address_zip, c.zip) AS zip
@@ -6840,7 +6840,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         'c.phone as cust_phone',
         'c.email as cust_email',
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-        db.raw('CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END as address_line2'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
@@ -6942,7 +6942,7 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-        db.raw('CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END as address_line2'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip')

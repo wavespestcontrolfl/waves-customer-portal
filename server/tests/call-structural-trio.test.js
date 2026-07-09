@@ -316,6 +316,27 @@ describe('stampedAddressDiverges', () => {
     })).toBe(true);
   });
 
+  test('formatting-only differences never diverge (suffix abbreviation, punctuation, ZIP+4)', () => {
+    // Stamp and primary mirror often differ only by normal address formatting
+    // — treating those as different properties would strip pins/ETA from
+    // ordinary primary-address bookings (codex round-5 P2).
+    expect(stampedAddressDiverges({
+      service_address_line1: '123 Main St.',
+      customer_address_line1: '123 Main Street',
+    })).toBe(false);
+    expect(stampedAddressDiverges({
+      service_address_line1: '9210 Palm Ave',
+      customer_address_line1: '9210 Palm Avenue',
+      service_address_zip: '34219-1234',
+      customer_zip: '34219',
+    })).toBe(false);
+    // Suffixes canonicalize but are never STRIPPED — different streets stay distinct.
+    expect(stampedAddressDiverges({
+      service_address_line1: '123 Main Ave',
+      customer_address_line1: '123 Main St',
+    })).toBe(true);
+  });
+
   test('same street line in a different ZIP diverges; missing ZIPs do not', () => {
     expect(stampedAddressDiverges({
       service_address_line1: '123 Main St', service_address_zip: '34285',

@@ -42,7 +42,7 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
-const { stampedDivergesSql } = require('../services/stamped-address');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -329,7 +329,7 @@ router.get('/:token', async (req, res, next) => {
         'c.email as cust_email',
         'c.phone as cust_phone',
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-        db.raw('CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END as address_line2'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),

@@ -5,7 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
-const { stampedDivergesSql } = require('../services/stamped-address');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -1211,9 +1211,10 @@ router.get('/', async (req, res, next) => {
         // rental property) wins over the customer's primary mirror — same
         // field names, so the schedule/tech-home consumers keep working.
         db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
-        // A stamped visit's unit line must never be swapped for the primary
-        // address's unit — condo/duplex bookings need THEIR door (codex P2).
-        db.raw('CASE WHEN scheduled_services.service_address_line1 IS NOT NULL THEN scheduled_services.service_address_line2 ELSE customers.address_line2 END as address_line2'),
+        // Divergent stamps keep THEIR unit line (condo/duplex bookings need
+        // their door); non-divergent stamps fall back to the primary's unit
+        // (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),

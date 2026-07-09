@@ -563,22 +563,38 @@ function compactServiceContactSlots(updates, before = {}) {
     return value;
   };
 
+  // Roles belong to PEOPLE, not slot positions. The edit form submits only
+  // name/phone/email (echoing every field on every save), so each slot's
+  // role is re-derived by matching the slot's resulting identity against
+  // the slots stored BEFORE the save (phone, then email, then exact name):
+  // the same person — even shifted to a different slot by a delete —
+  // keeps their pipeline-recorded role, and a genuinely new person never
+  // inherits the old one (codex rounds 2/3/5).
+  const normKey = (v) => String(v == null ? '' : v).trim().toLowerCase();
+  const phoneKey = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+  const beforeSlots = SERVICE_CONTACT_SLOT_FIELDS.map(([nameCol, phoneCol, emailCol, roleCol]) => ({
+    name: before[nameCol], phone: before[phoneCol], email: before[emailCol], role: normalizedValue(before[roleCol]),
+  }));
+  const roleForIdentity = ([name, phone, email]) => {
+    const match = beforeSlots.find((b) => phoneKey(phone) && phoneKey(phone) === phoneKey(b.phone))
+      || beforeSlots.find((b) => normKey(email) && normKey(email) === normKey(b.email))
+      || beforeSlots.find((b) => normKey(name) && normKey(name) === normKey(b.name));
+    return match ? match.role : null;
+  };
+
   const compacted = SERVICE_CONTACT_SLOT_FIELDS
     .map((fields) => {
-      // The admin PUT / prefs editors submit only name/phone/email — when a
-      // slot's IDENTITY changes without an explicit role, the old role must
-      // not attach itself to the new person (codex P2). "Changes" means the
-      // VALUE differs from what's stored: the edit form echoes every field
-      // on every save, so key presence alone would wipe roles on unrelated
-      // edits and starve the call pipeline's role matching (codex round-3 P1).
-      const identityChanged = fields.slice(0, 3)
-        .some((field) => Object.prototype.hasOwnProperty.call(updates, field)
-          && normalizedValue(updates[field]) !== normalizedValue(before[field]));
-      return fields.map((field, fieldIndex) => {
-        if (Object.prototype.hasOwnProperty.call(updates, field)) return normalizedValue(updates[field]);
-        if (fieldIndex === 3 && identityChanged) return null;
-        return normalizedValue(before[field]);
-      });
+      const identity = fields.slice(0, 3).map((field) => (
+        Object.prototype.hasOwnProperty.call(updates, field)
+          ? normalizedValue(updates[field])
+          : normalizedValue(before[field])
+      ));
+      // An explicit role in the payload wins (the pipeline's own writes);
+      // otherwise the role follows the person.
+      const role = Object.prototype.hasOwnProperty.call(updates, fields[3])
+        ? normalizedValue(updates[fields[3]])
+        : roleForIdentity(identity);
+      return [...identity, role];
     })
     // Survival is judged on name/phone/email only — a role with no person
     // attached must not keep a ghost slot alive.
