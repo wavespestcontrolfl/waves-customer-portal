@@ -64,9 +64,10 @@ import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDi
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { formatETDate } from '../lib/timezone';
-import { PRICE_FONT } from '../components/estimate/tokens';
+import { PRICE_FONT, W } from '../components/estimate/tokens';
+import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
-const FONT_BODY = "'Inter', system-ui, sans-serif";
+const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
@@ -79,6 +80,26 @@ const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_CHROME = CUSTOMER_SURFACE.chrome;
 const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
+
+// THE estimate primary CTA (modal pay/confirm buttons + success links) —
+// hoisted so the repeated inline copies can't drift (doc-style unify).
+// NOTE: deliberately NOT theme-doc docButton — estimate buttons are a
+// different anatomy (16px vertical padding, not minHeight 48).
+const estimateCtaStyle = {
+  padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
+  border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
+};
+// Quiet outline secondary ("Not now" / "Go back") — same dedupe.
+const estimateSecondaryCtaStyle = {
+  padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+  border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+};
+// Call-Waves anchor CTA (AcceptanceModeCard / ReviewBeforeBookingCard).
+const estimateCallCtaStyle = {
+  display: 'inline-block', marginTop: 16, padding: '12px 20px',
+  background: ESTIMATE_BUTTON_BG, color: COLORS.white, borderRadius: 10,
+  textDecoration: 'none', fontSize: 14, fontWeight: 700,
+};
 
 // Universal hero headline (owner directive 2026-07-03). The eyebrow line
 // ("Your estimate · <quoted services>") carries the service specifics, so
@@ -448,7 +469,7 @@ function Page({ children }) {
           buffer under the last content card now (owner 2026-07-09: "close
           the gap"), and it also gives the floating book bar something
           non-critical to overlap at full scroll. */}
-      <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
@@ -462,9 +483,9 @@ function Page({ children }) {
 function SkeletonBlock({ minHeight = null }) {
   return (
     <div style={estimateCard(minHeight ? { minHeight } : {})}>
-      <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 4 }} />
-      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 16 }} />
-      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 12 }} />
+      <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 6 }} />
+      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 16 }} />
+      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 12 }} />
     </div>
   );
 }
@@ -477,14 +498,14 @@ function SkeletonBlock({ minHeight = null }) {
 function HeaderTailSkeleton() {
   return (
     <div aria-hidden="true" style={{ padding: '0 0 24px' }}>
-      <div style={{ height: 16, width: '90%', maxWidth: 480, background: ESTIMATE_CHROME, borderRadius: 4 }} />
-      <div style={{ height: 16, width: '72%', maxWidth: 400, background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 8 }} />
+      <div style={{ height: 16, width: '90%', maxWidth: 480, background: ESTIMATE_CHROME, borderRadius: 6 }} />
+      <div style={{ height: 16, width: '72%', maxWidth: 400, background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 8 }} />
       <div style={{ marginTop: 16, display: 'grid', gap: 8 }}>
         {[120, 180, 140, 220].map((w) => (
-          <div key={w} style={{ height: 13, width: w, background: ESTIMATE_CHROME, borderRadius: 4 }} />
+          <div key={w} style={{ height: 14, width: w, background: ESTIMATE_CHROME, borderRadius: 6 }} />
         ))}
       </div>
-      <div style={{ height: 15, width: 260, maxWidth: '85%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 12 }} />
+      <div style={{ height: 15, width: 260, maxWidth: '85%', background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 12 }} />
     </div>
   );
 }
@@ -492,9 +513,9 @@ function HeaderTailSkeleton() {
 function NotFoundCard() {
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
-      <div style={{ fontSize: 32 }}></div>
+      <div style={{ fontSize: 34 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
         This link may have expired or isn't valid. Call us at{' '}
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         and we'll get you sorted.
@@ -568,7 +589,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         {headlineText}
       </h1>
       {subline ? (
-        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.55, maxWidth: '62ch' }}>
+        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
           {subline}
         </p>
       ) : null}
@@ -615,7 +636,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         <h2 style={{
                     fontSize: 24,
           fontWeight: 500,
-          lineHeight: 1.18,
+          lineHeight: 1.2,
           color: ESTIMATE_TEXT,
           margin: 0,
           letterSpacing: 0,
@@ -628,7 +649,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         margin: satelliteUrl || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
-        lineHeight: 1.55,
+        lineHeight: 1.5,
       }}>
         {intelligence.body || copy?.aiBody || 'We reviewed the available property details and pricing rules before preparing this estimate.'}
       </p>
@@ -651,7 +672,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {showYourWork?.overlaySatelliteUrl ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.45 }}>
+        <div style={{ marginTop: 8, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
       ) : null}
@@ -749,7 +770,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                   </div>
                   <span style={{
                     flex: 'none',
-                    padding: '5px 9px',
+                    padding: '4px 8px',
                     borderRadius: 999,
                     background: '#E3F5FD',
                     color: '#065A8C',
@@ -799,7 +820,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                 padding: '12px 12px',
                 color: '#3F4A65',
                 fontSize: 16,
-                lineHeight: 1.45,
+                lineHeight: 1.5,
               }}
             >
               {signal}
@@ -851,16 +872,16 @@ function MembershipCard({ membership }) {
     fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
   };
   const labelStyle = { color: ESTIMATE_TEXT, fontWeight: 600, fontSize: 15 };
-  const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
+  const valStyle = { color: W.green, fontSize: 14, fontWeight: 600, textAlign: 'right' };
 
   return (
     <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
+          <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: ESTIMATE_TEXT, margin: 0 }}>
             {hello}
           </h2>
-          <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
+          <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.5 }}>
             Here&rsquo;s what your WaveGuard membership saves you on this estimate.
           </p>
         </div>
@@ -988,7 +1009,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
         <h2 style={{
                     fontSize: 24,
           fontWeight: 500,
-          lineHeight: 1.18,
+          lineHeight: 1.2,
           color: ESTIMATE_TEXT,
           margin: 0,
           letterSpacing: 0,
@@ -996,7 +1017,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           {glassCopyActive() ? GLASS_COPY.askTitle : 'Ask Waves'}
         </h2>
         {glassCopyActive() ? (
-          <p style={{ margin: '8px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          <p style={{ margin: '8px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {GLASS_COPY.askExcerpt}
           </p>
         ) : null}
@@ -1061,7 +1082,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             disabled={asking}
             className="gc-section-cta"
             style={{
-              padding: '11px 16px', // >=40px hit height (touch audit 2026-07-06)
+              padding: '12px 16px', // >=40px hit height (touch audit 2026-07-06)
               fontSize: 12,
               fontWeight: 700,
               cursor: asking ? 'not-allowed' : 'pointer',
@@ -1077,13 +1098,13 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
         <div
           aria-live="polite"
           style={{
-            borderLeft: `4px solid ${failed ? COLORS.red : ESTIMATE_BUTTON_BG}`,
+            borderLeft: `4px solid ${failed ? W.red : ESTIMATE_BUTTON_BG}`,
             background: failed ? '#FFF5F5' : '#F8FCFE',
             borderRadius: 10,
             padding: '12px 16px',
             color: ESTIMATE_TEXT,
             fontSize: 14,
-            lineHeight: 1.55,
+            lineHeight: 1.5,
             whiteSpace: 'pre-line',
           }}
         >
@@ -1297,7 +1318,7 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
         + {fmtMoney(fee.amount)} one-time {fee.label || 'first-visit setup'}
       </div>
       {fee.waivedWithPrepay ? (
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.5 }}>
           {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
         </div>
       ) : null}
@@ -1314,7 +1335,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   const pillBase = {
     padding: '12px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
     cursor: 'pointer', border: 'none', textAlign: 'center', flex: 1,
-    transition: 'all 150ms ease',
+    transition: docTransition('background', 'color'),
   };
   return (
     <div style={{
@@ -1375,7 +1396,7 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               minHeight: 44,
               border: 'none',
               borderRadius: 10,
-              background: isReceived ? '#166534' : ESTIMATE_BUTTON_BG,
+              background: isReceived ? W.green : ESTIMATE_BUTTON_BG,
               color: COLORS.white,
               fontSize: 15,
               fontWeight: 800,
@@ -1395,11 +1416,11 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               marginTop: 12,
               background: '#ECFDF5',
               border: '1px solid #86EFAC',
-              color: '#14532D',
+              color: W.green,
               borderRadius: 10,
               padding: '12px 12px',
               fontSize: 14,
-              lineHeight: 1.45,
+              lineHeight: 1.5,
             }}>
               <strong style={{ display: 'block', marginBottom: 2 }}>Request received.</strong>
               {requestState?.message || 'Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.'}
@@ -1409,12 +1430,12 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
             <div role="alert" style={{
               marginTop: 12,
               background: '#FEF2F2',
-              border: `1px solid ${COLORS.red}`,
-              color: COLORS.red,
+              border: `1px solid ${W.red}`,
+              color: W.red,
               borderRadius: 10,
               padding: '12px 12px',
               fontSize: 14,
-              lineHeight: 1.45,
+              lineHeight: 1.5,
             }}>
               {requestState?.message || `Could not send the request. Call ${WAVES_PHONE_DISPLAY}.`}
             </div>
@@ -1429,12 +1450,12 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 34, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
         {fmtMoney(oneTimePrice)}
         </span>
         <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
-      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
         {oneTimePriceCopy(breakdown)}
       </div>
     </div>
@@ -1495,14 +1516,14 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   </div>
                 ) : null}
                 {showPrepayWaiverNote ? (
-                  <div style={{ fontSize: 12, color: COLORS.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                  <div style={{ fontSize: 12, color: W.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     * {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
                   </div>
                 ) : null}
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
-                color: isQuoteRequired ? COLORS.red : (isDiscount || isIncluded ? COLORS.green : COLORS.navy),
+                color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
                 whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
               }}>
                 {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
@@ -1518,12 +1539,12 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
         fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
       }}>
         <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
-        <span style={totalIsQuoteRequired ? { color: COLORS.red } : null}>
+        <span style={totalIsQuoteRequired ? { color: W.red } : null}>
           {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
         </span>
       </div>
       {totalIsQuoteRequired ? (
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
         </div>
       ) : null}
@@ -1604,7 +1625,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{
-                        fontSize: quoteRequired || showLowConfidenceRange ? 32 : PRICE_FONT,
+                        fontSize: quoteRequired || showLowConfidenceRange ? 34 : PRICE_FONT,
             lineHeight: 1,
             color: ESTIMATE_TEXT,
             fontWeight: 500,
@@ -1630,7 +1651,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             </div>
           ) : null}
           {quoteRequired && quoteReason ? (
-            <div style={{ fontSize: 14, color: '#92400E', marginTop: 12, lineHeight: 1.4, fontWeight: 700, maxWidth: 320 }}>
+            <div style={{ fontSize: 14, color: '#92400E', marginTop: 12, lineHeight: 1.5, fontWeight: 700, maxWidth: 320 }}>
               {quoteReason}
             </div>
           ) : null}
@@ -1638,7 +1659,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             <div style={{
               display: 'inline-block',
               marginTop: 12,
-              padding: '5px 11px',
+              padding: '4px 12px',
               background: '#EEF2FF',
               color: ESTIMATE_TEXT,
               borderRadius: 6,
@@ -1661,7 +1682,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           border: '1px solid #DCFCE7',
           borderRadius: 10,
           background: '#F0FDF4',
-          color: COLORS.green,
+          color: W.green,
           fontSize: 14,
           fontWeight: 800,
           lineHeight: 1.35,
@@ -1703,13 +1724,13 @@ function ExistingAppointmentCard({ appointment }) {
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Existing appointment
       </div>
-      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.3 }}>
+      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.35 }}>
         {formatAppointmentLabel(appointment)}
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.45 }}>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
         {appointment?.serviceType || 'Service visit'}
       </div>
-      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
         Your visit is already on the schedule. Choose how you want to pay to approve this estimate.
       </div>
     </div>
@@ -1810,27 +1831,20 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
         </div>
         <div ref={mountRef} />
         {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 12 }}>{error}</div>
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
         ) : null}
         <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
           <button
             type="button"
             onClick={handlePay}
             disabled={!ready || submitting}
-            style={{
-              padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
-              opacity: !ready || submitting ? 0.6 : 1,
-            }}
+            style={{ ...estimateCtaStyle, opacity: !ready || submitting ? 0.6 : 1 }}
           >{submitting ? 'Processing…' : `Pay ${fmtMoney(intent.amount)} deposit`}</button>
           <button
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            style={{
-              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-            }}
+            style={estimateSecondaryCtaStyle}
           >Not now</button>
         </div>
       </div>
@@ -1928,27 +1942,20 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
         </div>
         <div ref={mountRef} />
         {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 12 }}>{error}</div>
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
         ) : null}
         <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
           <button
             type="button"
             onClick={handleSave}
             disabled={!ready || submitting}
-            style={{
-              padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
-              opacity: !ready || submitting ? 0.6 : 1,
-            }}
+            style={{ ...estimateCtaStyle, opacity: !ready || submitting ? 0.6 : 1 }}
           >{submitting ? 'Saving…' : 'Save card & hold my spot'}</button>
           <button
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            style={{
-              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-            }}
+            style={estimateSecondaryCtaStyle}
           >Not now</button>
         </div>
       </div>
@@ -2029,18 +2036,15 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         <button
           type="button"
           onClick={onConfirm}
-          style={{
-            padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-            border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
-          }}
+          style={estimateCtaStyle}
         >{confirmLabel}</button>
         {confirmSub ? (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
             {confirmSub}
           </div>
         ) : null}
         {depositNote ? (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
             {depositNote}
           </div>
         ) : null}
@@ -2048,10 +2052,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
           <button
             type="button"
             onClick={onCancel}
-            style={{
-              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-            }}
+            style={estimateSecondaryCtaStyle}
           >Go back</button>
         ) : null}
       </div>
@@ -2085,11 +2086,11 @@ function SuccessCard({ acceptResult }) {
       ? `${serviceProgressLabel} is not held up by payment, and you can use the invoice link later.`
       : `${serviceProgressLabel} is not held up by payment.`;
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {invoicePayUrl
             ? (isOneTimeInvoice
                 ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
@@ -2101,14 +2102,10 @@ function SuccessCard({ acceptResult }) {
         {invoicePayUrl ? (
           <a
             href={invoicePayUrl}
-            style={{
-              display: 'inline-block', marginTop: 16, padding: '16px 20px',
-              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
-              borderRadius: 12, fontWeight: 600, fontSize: 15,
-            }}
+            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 15 }}
           >{payNowLabel}</a>
         ) : null}
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
           {deferredPaymentCopy}
         </div>
       </div>
@@ -2117,11 +2114,11 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'prepay_invoice') {
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Your annual prepay is approved.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           Your annual prepay{prepayAmountText} is approved. Our team will follow up with the invoice details and confirm the schedule.
         </div>
       </div>
@@ -2132,11 +2129,11 @@ function SuccessCard({ acceptResult }) {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved — no payment needed yet.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           Your Waves account manager will confirm the exact price on a quick site visit, then send your first
           invoice. Nothing is charged until that's done.
         </div>
@@ -2146,11 +2143,11 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'book_one_time') {
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved for a one-time service.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {bookingUrl
             ? 'Check your phone for the booking link, or pick your appointment now.'
             : 'Our team will follow up to help schedule your appointment.'}
@@ -2158,11 +2155,7 @@ function SuccessCard({ acceptResult }) {
         {bookingUrl ? (
           <a
             href={bookingUrl}
-            style={{
-              display: 'inline-block', marginTop: 16, padding: '16px 20px',
-              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
-              borderRadius: 12, fontWeight: 600, fontSize: 15,
-            }}
+            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 15 }}
           >Pick appointment</a>
         ) : null}
       </div>
@@ -2170,12 +2163,12 @@ function SuccessCard({ acceptResult }) {
   }
 
   return (
-    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
+    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
       <div style={{ fontSize: 40 }}></div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
         Check your phone for the confirmation text. Our team will confirm the schedule.
       </div>
     </div>
@@ -2240,7 +2233,7 @@ function AcceptanceModeCard({ acceptance }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           No appointment needed.
         </div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
           This renews your annual guarantee coverage — there is no service visit to
           schedule. Accept below and we will send your invoice by text and email.
         </div>
@@ -2256,7 +2249,7 @@ function AcceptanceModeCard({ acceptance }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           Approve online — we handle the scheduling.
         </div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
           No appointment to pick here: after you approve, a Waves team member reaches out to
           schedule your commercial service, and your account manager confirms the exact price
           on a quick site visit before your first invoice.
@@ -2283,18 +2276,8 @@ function AcceptanceModeCard({ acceptance }) {
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>{title}</div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>{body}</div>
-      <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-        display: 'inline-block',
-        marginTop: 16,
-        padding: '12px 20px',
-        background: ESTIMATE_BUTTON_BG,
-        color: COLORS.white,
-        borderRadius: 10,
-        textDecoration: 'none',
-        fontSize: 14,
-        fontWeight: 700,
-      }}>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{body}</div>
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
         {acceptance.ctaLabel || 'Call Waves'}
       </a>
     </div>
@@ -2321,22 +2304,12 @@ function ReviewBeforeBookingCard({ reason }) {
           ? 'Waves will confirm & schedule your trenching'
           : 'Waves will confirm & schedule this service'}
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
         {isTrenching
           ? 'Your price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you — access, exact footage, product, and warranty — then schedules your visit, so it can’t be self-booked online.'
           : 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.'}
       </div>
-      <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-        display: 'inline-block',
-        marginTop: 16,
-        padding: '12px 20px',
-        background: ESTIMATE_BUTTON_BG,
-        color: COLORS.white,
-        borderRadius: 10,
-        textDecoration: 'none',
-        fontSize: 14,
-        fontWeight: 700,
-      }}>
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
         Call Waves to confirm — {WAVES_PHONE_DISPLAY}
       </a>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
@@ -2419,7 +2392,7 @@ export function ServiceSection({
               How often?
             </div>
             <h2 style={{
-                            fontSize: 20, fontWeight: 500, lineHeight: 1.25,
+                            fontSize: 20, fontWeight: 500, lineHeight: 1.2,
               color: '#1B2C5B', margin: '0 0 4px',
             }}>
               {/* The pest-branded line is pest-only — a lawn/mosquito/termite
@@ -3326,7 +3299,7 @@ export default function EstimateViewPage() {
           {services.length > 1 && waveGuardTier && combinedTierEligible ? (
             <div style={{ marginBottom: 12 }}>
               <span style={{
-                display: 'inline-block', padding: '5px 11px',
+                display: 'inline-block', padding: '4px 12px',
                 background: '#EEF2FF', color: COLORS.blueDeeper,
                 borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
               }}>
@@ -3770,11 +3743,11 @@ export default function EstimateViewPage() {
           {error ? (
             <div style={{
               background: '#fee', borderRadius: 12, padding: 12,
-              border: `1px solid ${COLORS.red}`, marginBottom: 16,
-              color: COLORS.red, fontSize: 14,
+              border: `1px solid ${W.red}`, marginBottom: 16,
+              color: W.red, fontSize: 14,
             }}>
               Something went wrong: {error}. Try again or call{' '}
-              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.red }}>{WAVES_PHONE_DISPLAY}</a>.
+              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
             </div>
           ) : null}
 

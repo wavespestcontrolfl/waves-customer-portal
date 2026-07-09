@@ -76,8 +76,12 @@
 //   accurate.
 // - Dispute webhook (dispute.created): must flag the customer for
 //   the operator to review before any further charges fire.
-import { COLORS, FONTS } from '../theme-brand';
+// COLORS is used ONLY inside the Stripe Elements appearance configs — the
+// Stripe iframe can't resolve our CSS vars, so it needs literals. All inline
+// page styles use theme-doc roles.
+import { COLORS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, SHADOW, docButton } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
@@ -224,16 +228,12 @@ function annualPrepayCalloutText(prepay) {
 const subtlePanel = {
   background: CUSTOMER_SURFACE.page,
   border: `1px solid ${CUSTOMER_SURFACE.border}`,
-  borderRadius: 8,
+  borderRadius: RADIUS.input,
 };
 
-const eyebrow = {
-  fontSize: 12,
-  color: 'var(--text-muted)',
-  fontWeight: 850,
-  letterSpacing: 0,
-  textTransform: 'uppercase',
-};
+// The shared uppercase eyebrow spec (DOC_EYEBROW); margin stays a
+// per-call-site delta, so zero out the token's default.
+const eyebrow = { ...DOC_EYEBROW, marginBottom: 0 };
 
 function fullName(customer = {}) {
   return [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Waves customer';
@@ -246,10 +246,10 @@ function cityStateZip(customer = {}) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
     due: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    overdue: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
-    secure: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
+    overdue: { bg: 'rgba(200,16,46,0.08)', color: DOC.danger, border: 'rgba(200,16,46,0.22)' },
+    secure: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
   };
   const t = tones[tone] || tones.neutral;
   const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
@@ -259,13 +259,13 @@ function StatusPill({ tone = 'neutral', children }) {
       alignItems: 'center',
       gap: 6,
       minHeight: 28,
-      padding: '5px 9px',
-      borderRadius: 8,
+      padding: '4px 8px',
+      borderRadius: RADIUS.input,
       background: t.bg,
       border: `1px solid ${t.border}`,
       color: t.color,
-      fontSize: 12,
-      fontWeight: 850,
+      fontSize: FS.caption,
+      fontWeight: FW.heavy,
       letterSpacing: 0,
       textTransform: 'uppercase',
       whiteSpace: 'nowrap',
@@ -291,29 +291,29 @@ function AnnualPrepayInvoicePanel({ term }) {
   return (
     <div style={{
       ...subtlePanel,
-      padding: 14,
-      marginBottom: 18,
+      padding: SP.md,
+      marginBottom: SP.lg,
       display: 'grid',
-      gap: 8,
+      gap: SP.xs,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ ...eyebrow, color: pending ? '#9A6200' : 'var(--success)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SP.sm, flexWrap: 'wrap' }}>
+        <div style={{ ...eyebrow, color: pending ? '#9A6200' : DOC.success }}>
           {annualPrepayStatusLabel(term)}
         </div>
         {term.prepayAmount != null && (
-          <div style={{ fontFamily: FONTS.mono, fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>
+          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.heavy, color: DOC.ink }}>
             {fmtCurrency(term.prepayAmount)}
           </div>
         )}
       </div>
-      <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text)' }}>
+      <div style={{ fontSize: FS.body, lineHeight: LH.body, color: DOC.ink }}>
         {term.planLabel || 'Annual prepay plan'}
         {term.termStart || term.termEnd
           ? ` · coverage ${fmtDate(term.termStart)} through ${fmtDate(term.termEnd)}`
           : ''}
       </div>
       {pending && (
-        <div style={{ fontSize: 14, lineHeight: 1.45, color: 'var(--text-muted)' }}>
+        <div style={{ fontSize: FS.body, lineHeight: LH.body, color: DOC.muted }}>
           Annual prepaid coverage activates after this invoice is paid.
         </div>
       )}
@@ -332,33 +332,33 @@ function CoverageVisitsList({ visits, status }) {
   const tag = prepaid ? 'Prepaid' : 'Included';
   return (
     <>
-      <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: 7 }}>
+      <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: SP.xs }}>
         {visits.map((v, i) => (
           <li key={i} style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            gap: 10,
-            fontSize: 14,
-            lineHeight: 1.4,
-            color: 'var(--text)',
+            gap: SP.sm,
+            fontSize: FS.body,
+            lineHeight: LH.snug,
+            color: DOC.ink,
           }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-              <span style={{ color: 'var(--success)', display: 'inline-flex' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: SP.xs, minWidth: 0 }}>
+              <span style={{ color: DOC.success, display: 'inline-flex' }}>
                 <Icon name="check" size={14} strokeWidth={3} />
               </span>
               <span>Visit {i + 1} of {visits.length} · target {fmtDate(v.date)}</span>
             </span>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: SP.xs, whiteSpace: 'nowrap' }}>
               {v.amount != null && (
-                <span style={{ fontFamily: FONTS.mono, color: 'var(--text-muted)' }}>{fmtCurrency(v.amount)}</span>
+                <span style={{ fontFamily: DOC_FONT, color: DOC.muted }}>{fmtCurrency(v.amount)}</span>
               )}
-              <span style={{ ...eyebrow, fontSize: 10, color: prepaid ? 'var(--success)' : '#9A6200' }}>{tag}</span>
+              <span style={{ ...eyebrow, fontSize: FS.micro, color: prepaid ? DOC.success : '#9A6200' }}>{tag}</span>
             </span>
           </li>
         ))}
       </ul>
-      <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.4, color: 'var(--text-muted)' }}>
+      <div style={{ marginTop: SP.xs, fontSize: FS.caption, lineHeight: LH.snug, color: DOC.muted }}>
         Target dates — your actual visits follow your regular service route.
       </div>
     </>
@@ -368,8 +368,8 @@ function CoverageVisitsList({ visits, status }) {
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ ...eyebrow, marginBottom: 7 }}>{label}</div>
-      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.55 }}>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
+      <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
         {children}
       </div>
     </div>
@@ -381,20 +381,20 @@ function SummaryRow({ label, value, strong, muted }) {
     <div style={{
       display: 'flex',
       justifyContent: 'space-between',
-      gap: 16,
-      padding: strong ? '12px 0 0' : '7px 0',
-      marginTop: strong ? 8 : 0,
-      borderTop: strong ? '1px solid var(--border)' : 'none',
-      color: strong ? 'var(--text)' : 'var(--text-muted)',
-      fontSize: strong ? 16 : 14,
-      fontWeight: strong ? 850 : 500,
-      fontFamily: strong ? FONTS.body : FONTS.body,
+      gap: SP.md,
+      padding: strong ? '12px 0 0' : '8px 0',
+      marginTop: strong ? SP.xs : 0,
+      borderTop: strong ? `1px solid ${DOC.border}` : 'none',
+      color: strong ? DOC.ink : DOC.muted,
+      fontSize: strong ? FS.lead : FS.body,
+      fontWeight: strong ? FW.heavy : FW.medium,
+      fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
-        color: muted ? 'var(--text-muted)' : 'var(--text)',
-        fontFamily: FONTS.mono,
-        fontWeight: strong ? 850 : 650,
+        color: muted ? DOC.muted : DOC.ink,
+        fontFamily: DOC_FONT,
+        fontWeight: strong ? FW.heavy : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -561,8 +561,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
-              fontFamily: FONTS.body,
-              borderRadius: '8px',
+              fontFamily: DOC_FONT,
+              borderRadius: `${RADIUS.input}px`,
               spacingUnit: '4px',
             },
             rules: {
@@ -572,17 +572,18 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 padding: '12px 14px',
               },
               '.Input:focus': {
-                border: `1px solid ${CUSTOMER_SURFACE.text}`,
-                boxShadow: '0 0 0 3px rgba(27,44,91,0.18)',
+                border: `1px solid ${DOC.navyLiteral}`,
+                boxShadow: SHADOW.focusRing,
               },
               '.Label': {
-                fontSize: '13px',
-                fontWeight: '500',
+                // 13px is banned on customer surfaces — 14 is the doc body size.
+                fontSize: `${FS.body}px`,
+                fontWeight: `${FW.medium}`,
                 color: COLORS.textBody,
               },
               '.Tab': {
                 border: '1px solid #E2E8F0',
-                borderRadius: '8px',
+                borderRadius: `${RADIUS.input}px`,
               },
               '.Tab--selected': {
                 borderColor: COLORS.blueDeeper,
@@ -1006,14 +1007,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     return (
       <div style={{
         display: 'grid',
-        gap: 12,
-        padding: 16,
-        borderRadius: 8,
+        gap: SP.sm,
+        padding: SP.md,
+        borderRadius: RADIUS.input,
         background: '#FFF7ED',
         border: '1px solid #FED7AA',
         textAlign: 'center',
       }}>
-        <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text)' }}>
+        <div style={{ fontSize: FS.body, lineHeight: LH.body, color: DOC.ink }}>
           We couldn’t load the secure payment form. This is usually a brief network hiccup.
         </div>
         <button
@@ -1022,12 +1023,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           style={{
             justifySelf: 'center',
             padding: '10px 20px',
-            borderRadius: 8,
+            borderRadius: RADIUS.input,
             border: 'none',
-            background: 'var(--brand, #0a6cff)',
+            background: DOC.brand,
             color: '#fff',
-            fontSize: 14,
-            fontWeight: 500,
+            fontSize: FS.body,
+            fontWeight: FW.medium,
             cursor: 'pointer',
           }}
         >
@@ -1038,28 +1039,28 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   }
 
   return (
-    <div style={{ display: 'grid', gap: 16 }}>
+    <div style={{ display: 'grid', gap: SP.md }}>
       <div style={{
         display: 'flex',
         alignItems: 'flex-start',
-        gap: 12,
-        padding: 14,
-        borderRadius: 8,
+        gap: SP.sm,
+        padding: SP.md,
+        borderRadius: RADIUS.input,
         background: '#EEF6FF',
         border: '1px solid #BFE4F8',
-        fontSize: 14,
-        lineHeight: 1.5,
-        color: 'var(--text)',
+        fontSize: FS.body,
+        lineHeight: LH.body,
+        color: DOC.ink,
       }}>
         <span data-glass="soft" style={{
           width: 32,
           height: 32,
-          borderRadius: 8,
+          borderRadius: RADIUS.input,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
-          background: '#FFFFFF',
+          background: DOC.surface,
           color: '#065A8C',
           border: '1px solid #BFE4F8',
         }}>
@@ -1072,10 +1073,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       </div>
 
       <div>
-        <div style={{ ...eyebrow, marginBottom: 8 }}>
+        <div style={{ ...eyebrow, marginBottom: SP.xs }}>
           Payment method
         </div>
-        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: SP.sm }}>
           {methodOptions.map((method) => {
             const active = selectedMethod === method.value;
             return (
@@ -1087,40 +1088,44 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 disabled={methodControlsDisabled}
                 {...(active ? {} : { 'data-glass': 'chip' })}
                 style={{
+                  // Segment control — deliberately NOT docButton (different
+                  // anatomy: icon tile + two-line label, aria-pressed state).
                   minHeight: 72,
-                  borderRadius: 8,
-                  border: `1px solid ${active ? COLORS.blueDeeper : 'var(--border)'}`,
-                  background: active ? '#F8FCFE' : COLORS.white,
-                  color: 'var(--text)',
-                  padding: 12,
+                  borderRadius: RADIUS.input,
+                  border: `1px solid ${active ? DOC.navyLiteral : DOC.border}`,
+                  background: active ? DOC.soft : DOC.surface,
+                  color: DOC.ink,
+                  padding: SP.sm,
                   textAlign: 'left',
                   cursor: methodControlsDisabled ? 'not-allowed' : 'pointer',
                   opacity: methodControlsDisabled ? 0.72 : 1,
+                  // Selected ring stays brand-blue (#009CDE @ 13%) — a distinct
+                  // selected-state wash, not the navy focus ring.
                   boxShadow: active ? '0 0 0 3px rgba(0,156,222,0.13)' : 'none',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 10,
+                  gap: SP.sm,
                 }}
               >
                 <span {...(active ? { 'data-glass': 'soft' } : { 'data-glass-clear': '' })} style={{
                   width: 34,
                   height: 34,
-                  borderRadius: 8,
+                  borderRadius: RADIUS.input,
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   flexShrink: 0,
-                  background: active ? '#FFFFFF' : CUSTOMER_SURFACE.page,
+                  background: active ? DOC.surface : CUSTOMER_SURFACE.page,
                   border: `1px solid ${CUSTOMER_SURFACE.border}`,
-                  color: active ? COLORS.blueDeeper : 'var(--text-muted)',
+                  color: active ? DOC.navyLiteral : DOC.muted,
                 }}>
                   <Icon name={method.icon} size={17} strokeWidth={2} />
                 </span>
                 <span style={{ minWidth: 0 }}>
-                  <span style={{ display: 'block', fontWeight: 850, fontSize: 14, marginBottom: 3 }}>
+                  <span style={{ display: 'block', fontWeight: FW.heavy, fontSize: FS.body, marginBottom: SP.xxs }}>
                     {method.title}
                   </span>
-                  <span style={{ display: 'block', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                  <span style={{ display: 'block', fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug }}>
                     {method.detail}
                   </span>
                 </span>
@@ -1159,41 +1164,41 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       )}
 
       <div data-glass-clear="" style={{
-        padding: 16,
-        borderRadius: 8,
+        padding: SP.md,
+        borderRadius: RADIUS.input,
         background: CUSTOMER_SURFACE.page,
         border: `1px solid ${CUSTOMER_SURFACE.border}`,
-        fontFamily: FONTS.mono,
-        fontSize: 14,
+        fontFamily: DOC_FONT,
+        fontSize: FS.body,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-          <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+          <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
             Invoice total
           </span>
-          <span style={{ color: 'var(--text)' }}>{fmtCurrency(displayedBase)}</span>
+          <span style={{ color: DOC.ink }}>{fmtCurrency(displayedBase)}</span>
         </div>
         {isCardFamily && displayedSurcharge > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+            <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
               Credit card surcharge ({pct}%)
             </span>
-            <span style={{ color: 'var(--text)' }}>+ {fmtCurrency(displayedSurcharge)}</span>
+            <span style={{ color: DOC.ink }}>+ {fmtCurrency(displayedSurcharge)}</span>
           </div>
         )}
         {isCardFamily && quoteData && quoteData.funding !== 'credit' && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+            <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
               No card surcharge ({quoteData.funding || 'debit'} card)
             </span>
-            <span style={{ color: 'var(--text)' }}>$0.00</span>
+            <span style={{ color: DOC.ink }}>$0.00</span>
           </div>
         )}
         <div style={{
           display: 'flex', justifyContent: 'space-between',
-          paddingTop: 10, marginTop: 8, borderTop: '1px solid var(--border)',
-          fontWeight: 700, color: 'var(--text)',
+          paddingTop: 12, marginTop: SP.xs, borderTop: `1px solid ${DOC.border}`,
+          fontWeight: FW.bold, color: DOC.ink,
         }}>
-          <span style={{ fontFamily: FONTS.body }}>
+          <span style={{ fontFamily: DOC_FONT }}>
             {isCardFamily ? 'Total charged' : 'Total (bank transfer)'}
           </span>
           <span>{fmtCurrency(buttonAmount)}</span>
@@ -1203,11 +1208,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       {elementError && (
         <div style={{
           background: 'rgba(200,16,46,0.06)',
-          border: '1px solid var(--danger)',
-          borderRadius: 8,
-          padding: '12px 14px',
-          fontSize: 14,
-          color: 'var(--danger)',
+          border: `1px solid ${DOC.danger}`,
+          borderRadius: RADIUS.input,
+          padding: '12px 16px',
+          fontSize: FS.body,
+          color: DOC.danger,
         }}>
           {elementError}
         </div>
@@ -1216,12 +1221,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       {showManualEntryHint && !isCardFamily && (
         <div style={{
           background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
-          border: '1px solid var(--border)',
-          borderRadius: 8,
-          padding: '12px 14px',
-          fontSize: 14,
-          lineHeight: 1.5,
-          color: 'var(--text)',
+          border: `1px solid ${DOC.border}`,
+          borderRadius: RADIUS.input,
+          padding: '12px 16px',
+          fontSize: FS.body,
+          lineHeight: LH.body,
+          color: DOC.ink,
         }}>
           <strong>Trouble linking your bank?</strong> Some banks don't support instant
           linking. Choose <strong>“Enter bank details manually”</strong> above and type
@@ -1250,9 +1255,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
-        gap: 7,
-        fontSize: 14,
-        color: 'var(--text-muted)',
+        gap: SP.xs,
+        fontSize: FS.body,
+        color: DOC.muted,
       }}>
         <Icon name="lock" size={14} strokeWidth={2} />
         <span>256-bit encrypted · Processed by Stripe</span>
@@ -1293,8 +1298,8 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
-              fontFamily: FONTS.body,
-              borderRadius: '8px',
+              fontFamily: DOC_FONT,
+              borderRadius: `${RADIUS.input}px`,
             },
           },
         });
@@ -1357,7 +1362,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: SP.md }}>
       <div ref={mountRef} style={{ minHeight: 90 }} />
       <SaveCardConsent
         checked
@@ -1369,11 +1374,11 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       {formError && (
         <div style={{
           background: 'rgba(200,16,46,0.06)',
-          border: '1px solid var(--danger)',
-          borderRadius: 8,
-          padding: '10px 12px',
-          fontSize: 14,
-          color: 'var(--danger)',
+          border: `1px solid ${DOC.danger}`,
+          borderRadius: RADIUS.input,
+          padding: '12px 12px',
+          fontSize: FS.body,
+          color: DOC.danger,
         }}>
           {formError}
         </div>
@@ -1383,14 +1388,8 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
         onClick={submit}
         disabled={!ready || processing}
         style={{
-          padding: '14px 18px',
-          borderRadius: 10,
-          border: 'none',
-          background: COLORS.blueDeeper,
-          color: '#fff',
-          fontFamily: FONTS.body,
-          fontSize: 16,
-          fontWeight: 700,
+          ...docButton('primary'),
+          fontSize: FS.lead,
           cursor: !ready || processing ? 'default' : 'pointer',
           opacity: !ready || processing ? 0.6 : 1,
         }}
@@ -1859,7 +1858,7 @@ export default function PayPageV2() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ padding: '64px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+        <div style={{ padding: '64px 20px', textAlign: 'center', color: DOC.muted }}>
           Loading invoice…
         </div>
       </WavesShell>
@@ -1871,8 +1870,8 @@ export default function PayPageV2() {
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            <SerifHeading style={{ marginBottom: 12 }}>We couldn't find that invoice</SerifHeading>
-            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't find that invoice</SerifHeading>
+            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
               The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
             </p>
           </BrandCard>
@@ -1894,24 +1893,24 @@ export default function PayPageV2() {
           <BrandCard>
             {setupCapture && setupCapture.status !== 'done' ? (
               <>
-                <SerifHeading style={{ marginBottom: 12 }}>Covered by credit — one more step</SerifHeading>
-                <p style={{ margin: '0 0 16px', fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                <SerifHeading style={{ marginBottom: SP.sm }}>Covered by credit — one more step</SerifHeading>
+                <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
                   Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
                   covered by your account credit — there's no payment today. Your recurring plan
                   does need a payment method on file for future visits, so add one below to finish up.
                 </p>
                 {setupCapture.status === 'minting' && (
-                  <p style={{ margin: 0, fontSize: 14, color: 'var(--text-muted)' }}>Loading secure form…</p>
+                  <p style={{ margin: 0, fontSize: FS.body, color: DOC.muted }}>Loading secure form…</p>
                 )}
                 {setupCapture.status === 'mint-error' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: SP.sm }}>
                     <div style={{
                       background: 'rgba(200,16,46,0.06)',
-                      border: '1px solid var(--danger)',
-                      borderRadius: 8,
-                      padding: '10px 12px',
-                      fontSize: 14,
-                      color: 'var(--danger)',
+                      border: `1px solid ${DOC.danger}`,
+                      borderRadius: RADIUS.input,
+                      padding: '12px 12px',
+                      fontSize: FS.body,
+                      color: DOC.danger,
                     }}>
                       {setupCapture.message || 'Could not start the payment method setup.'}
                     </div>
@@ -1919,9 +1918,8 @@ export default function PayPageV2() {
                       type="button"
                       onClick={() => setSetupCapture({ status: 'minting' })}
                       style={{
-                        padding: '12px 16px', borderRadius: 10, border: 'none',
-                        background: COLORS.blueDeeper, color: '#fff',
-                        fontFamily: FONTS.body, fontSize: 15, fontWeight: 700, cursor: 'pointer',
+                        ...docButton('primary'),
+                        fontSize: FS.bodyLg,
                       }}
                     >
                       Try again
@@ -1929,7 +1927,7 @@ export default function PayPageV2() {
                   </div>
                 )}
                 {setupCapture.status === 'bank-pending' && (
-                  <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.55 }}>
+                  <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
                     Your bank needs to be verified first: in the next 1–2 business days your bank
                     statement will show two small deposits from Stripe — confirm those amounts using
                     the link in the email Stripe sent you, and your payment method will be saved and
@@ -1961,8 +1959,8 @@ export default function PayPageV2() {
               </>
             ) : (
               <>
-                <SerifHeading style={{ marginBottom: 12 }}>You're all set — nothing due</SerifHeading>
-                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                <SerifHeading style={{ marginBottom: SP.sm }}>You're all set — nothing due</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
                   Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
                   covered by your account credit, so there's no payment to make. Thanks for being a
                   Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
@@ -1987,8 +1985,8 @@ export default function PayPageV2() {
           <BrandCard>
             {microdepositVerifying ? (
               <>
-                <SerifHeading style={{ marginBottom: 12 }}>Verify your bank to finish paying</SerifHeading>
-                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                <SerifHeading style={{ marginBottom: SP.sm }}>Verify your bank to finish paying</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
                   You started a bank (ACH) payment for invoice {invoiceLabel}. In the next 1–2
                   business days your bank will show two small deposits from Stripe — enter those
                   amounts using the link in the email Stripe sent you to confirm and complete the
@@ -1998,8 +1996,8 @@ export default function PayPageV2() {
               </>
             ) : (
               <>
-                <SerifHeading style={{ marginBottom: 12 }}>Your bank payment is processing</SerifHeading>
-                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                <SerifHeading style={{ marginBottom: SP.sm }}>Your bank payment is processing</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
                   We’ve got a bank (ACH) payment in progress for invoice {invoiceLabel}. Bank transfers
                   take a few business days to clear — there’s nothing more you need to do, and we’ll
                   email your receipt once it settles. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
@@ -2047,17 +2045,17 @@ export default function PayPageV2() {
       <div className="waves-customer-page waves-receipt-page">
         {isOverdue && (
           <div style={{
-            marginBottom: 16,
-            padding: 14,
-            borderRadius: 8,
+            marginBottom: SP.md,
+            padding: SP.md,
+            borderRadius: RADIUS.input,
             background: 'rgba(200,16,46,0.08)',
             border: '1px solid rgba(200,16,46,0.28)',
-            color: 'var(--danger)',
-            fontSize: 14,
-            fontWeight: 750,
+            color: DOC.danger,
+            fontSize: FS.body,
+            fontWeight: FW.bold,
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
+            gap: SP.sm,
           }}>
             <Icon name="warning" size={17} strokeWidth={2} />
             <span>This invoice is overdue. Please pay at your earliest convenience.</span>
@@ -2075,18 +2073,18 @@ export default function PayPageV2() {
           <div style={{
             display: 'flex',
             justifyContent: 'space-between',
-            gap: 16,
+            gap: SP.md,
             alignItems: 'flex-start',
             flexWrap: 'wrap',
-            marginBottom: 18,
+            marginBottom: SP.lg,
           }}>
-            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: SP.md, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>
                   Invoice · {invoice.invoiceNumber}
                 </div>
-                <SerifHeading style={{ marginBottom: 8 }}>Review and pay</SerifHeading>
-                <p style={{ margin: 0, fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.muted, lineHeight: LH.body }}>
                   {serviceLabel}
                   {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
                 </p>
@@ -2099,19 +2097,19 @@ export default function PayPageV2() {
 
           <div data-glass-clear="" style={{
             ...subtlePanel,
-            padding: 18,
-            marginBottom: 20,
+            padding: SP.md,
+            marginBottom: SP.lg,
             display: 'grid',
             gridTemplateColumns: 'minmax(0, 1fr) auto',
-            gap: 18,
+            gap: SP.lg,
             alignItems: 'center',
           }}>
             <div>
               <div style={eyebrow}>Amount due</div>
-              <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
+              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.heavy, color: DOC.ink, fontFamily: DOC_FONT }}>
                 {fmtCurrency(invoice.amountDue ?? invoice.total)}
               </div>
-              <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+              <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
                 Pay securely online. Credit card surcharge, if any, is shown before payment.
               </div>
             </div>
@@ -2122,17 +2120,17 @@ export default function PayPageV2() {
               <div style={{
                 display: 'flex',
                 alignItems: 'flex-start',
-                gap: 12,
-                padding: 16,
-                borderRadius: 8,
-                marginBottom: 20,
+                gap: SP.sm,
+                padding: SP.md,
+                borderRadius: RADIUS.input,
+                marginBottom: SP.lg,
                 background: '#EEF6FF',
                 border: '1px solid #BFE4F8',
               }}>
                 {/* Calendar icon tile removed (owner 2026-07-09 — no decorative icons). */}
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ ...eyebrow, color: '#065A8C', marginBottom: 5 }}>Annual prepayment</div>
-                  <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.5 }}>
+                  <div style={{ ...eyebrow, color: '#065A8C', marginBottom: SP.xxs }}>Annual prepayment</div>
+                  <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
                     {prepayCalloutText}
                   </div>
                   <CoverageVisitsList
@@ -2148,22 +2146,22 @@ export default function PayPageV2() {
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-              gap: 16,
-              marginBottom: 20,
+              gap: SP.md,
+              marginBottom: SP.lg,
             }}>
               <DetailBlock label="Billed to">
                 {payer ? (
                   <>
-                    <div style={{ fontWeight: 800 }}>{payer.name}</div>
+                    <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
                     {payer.address && <div>{payer.address}</div>}
                     {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                       <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
                     )}
-                    {payer.poNumber && <div style={{ color: 'var(--text-muted)' }}>PO: {payer.poNumber}</div>}
+                    {payer.poNumber && <div style={{ color: DOC.muted }}>PO: {payer.poNumber}</div>}
                   </>
                 ) : (
                   <>
-                    <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                    <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
                     {customer.address && <div>{customer.address}</div>}
                     {locationLine && <div>{locationLine}</div>}
                   </>
@@ -2171,31 +2169,28 @@ export default function PayPageV2() {
               </DetailBlock>
               {payer && (
                 <DetailBlock label="Service address">
-                  <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                 </DetailBlock>
               )}
               <DetailBlock label="Service">
-                <div style={{ fontWeight: 800 }}>{serviceLabel}</div>
+                <div style={{ fontWeight: FW.heavy }}>{serviceLabel}</div>
                 {serviceDateLabel && <div>{serviceDateLabel}</div>}
-                {service.techName && <div style={{ color: 'var(--text-muted)' }}>Technician: {service.techName}</div>}
+                {service.techName && <div style={{ color: DOC.muted }}>Technician: {service.techName}</div>}
               </DetailBlock>
             </div>
 
             {visibleLineItems.length > 0 && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice items</div>
-                <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+              <div style={{ marginBottom: SP.lg }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Invoice items</div>
+                <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
                   <div data-glass-clear="" style={{
+                    ...eyebrow,
                     display: 'grid',
                     gridTemplateColumns: '1fr auto auto',
-                    gap: '0 14px',
-                    padding: '10px 12px',
-                    fontSize: 12,
-                    color: 'var(--text-muted)',
-                    fontWeight: 850,
-                    textTransform: 'uppercase',
+                    gap: '0 16px',
+                    padding: '12px',
                     background: CUSTOMER_SURFACE.page,
                     borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                   }}>
@@ -2209,19 +2204,19 @@ export default function PayPageV2() {
                       style={{
                         display: 'grid',
                         gridTemplateColumns: '1fr auto auto',
-                        gap: '0 14px',
+                        gap: '0 16px',
                         padding: '12px',
-                        borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
-                        fontSize: 14,
-                        color: 'var(--text)',
+                        borderBottom: idx < visibleLineItems.length - 1 ? `1px solid ${DOC.border}` : 'none',
+                        fontSize: FS.body,
+                        color: DOC.ink,
                         alignItems: 'start',
                       }}
                     >
-                      <div style={{ lineHeight: 1.45, minWidth: 0 }}>{item.description}</div>
-                      <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
+                      <div style={{ lineHeight: LH.snug, minWidth: 0 }}>{item.description}</div>
+                      <div style={{ textAlign: 'right', fontFamily: DOC_FONT }}>
                         {item.quantity || 1}
                       </div>
-                      <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 82, fontWeight: 650 }}>
+                      <div style={{ textAlign: 'right', fontFamily: DOC_FONT, minWidth: 82, fontWeight: FW.semibold }}>
                         {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
                       </div>
                     </div>
@@ -2231,9 +2226,9 @@ export default function PayPageV2() {
             )}
 
             {invoiceAttachments.length > 0 && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Attachments</div>
-                <div style={{ display: 'grid', gap: 8 }}>
+              <div style={{ marginBottom: SP.lg }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Attachments</div>
+                <div style={{ display: 'grid', gap: SP.xs }}>
                   {invoiceAttachments.map((attachment) => (
                     <a
                       key={attachment.id}
@@ -2246,39 +2241,39 @@ export default function PayPageV2() {
                         display: 'grid',
                         gridTemplateColumns: 'auto minmax(0, 1fr) auto',
                         alignItems: 'center',
-                        gap: 10,
-                        padding: '10px 12px',
-                        borderRadius: 8,
-                        border: '1px solid var(--border)',
-                        color: 'var(--text)',
+                        gap: SP.sm,
+                        padding: '12px 12px',
+                        borderRadius: RADIUS.input,
+                        border: `1px solid ${DOC.border}`,
+                        color: DOC.ink,
                         textDecoration: 'none',
-                        background: '#FFFFFF',
+                        background: DOC.surface,
                       }}
                     >
                       <Icon name="paperclip" size={16} strokeWidth={2} />
                       <span style={{ minWidth: 0 }}>
                         <span style={{
                           display: 'block',
-                          fontSize: 14,
-                          fontWeight: 750,
+                          fontSize: FS.body,
+                          fontWeight: FW.bold,
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
                         }}>
                           {attachment.fileName}
                         </span>
-                        <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                        <span style={{ display: 'block', fontSize: FS.caption, color: DOC.muted, marginTop: 2 }}>
                           {fmtFileSize(attachment.fileSizeBytes)}
                         </span>
                       </span>
-                      <Icon name="download" size={16} strokeWidth={2} style={{ color: 'var(--brand)' }} />
+                      <Icon name="download" size={16} strokeWidth={2} style={{ color: DOC.brand }} />
                     </a>
                   ))}
                 </div>
               </div>
             )}
 
-            <div data-glass-clear="" style={{ ...subtlePanel, padding: 16, marginBottom: 24 }}>
+            <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -2296,9 +2291,9 @@ export default function PayPageV2() {
             </div>
 
             {invoice.notes && (
-              <div data-glass-clear="" style={{ marginBottom: 24, ...subtlePanel, padding: 16 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
-                <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              <div data-glass-clear="" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
+                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                   {invoice.notes}
                 </p>
               </div>
@@ -2309,15 +2304,15 @@ export default function PayPageV2() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              gap: 12,
-              marginBottom: 16,
+              gap: SP.sm,
+              marginBottom: SP.md,
             }}>
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
-                <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--text)', lineHeight: 1 }}>
+                <div style={{ fontSize: FS.h2, fontWeight: FW.heavy, color: DOC.ink, lineHeight: LH.solid }}>
                   {fmtCurrency(invoice.amountDue ?? invoice.total)}
                 </div>
-                <div style={{ marginTop: 6, fontSize: 14, color: 'var(--text-muted)' }}>
+                <div style={{ marginTop: 6, fontSize: FS.body, color: DOC.muted }}>
                   {invoiceStatusLabel}
                 </div>
               </div>
@@ -2330,13 +2325,13 @@ export default function PayPageV2() {
             {paymentError && (
               <div style={{
                 background: 'rgba(200,16,46,0.06)',
-                border: '1px solid var(--danger)',
-                borderRadius: 8,
-                padding: '12px 14px',
-                fontSize: 14,
-                color: 'var(--danger)',
-                marginBottom: 16,
-                lineHeight: 1.45,
+                border: `1px solid ${DOC.danger}`,
+                borderRadius: RADIUS.input,
+                padding: '12px 16px',
+                fontSize: FS.body,
+                color: DOC.danger,
+                marginBottom: SP.md,
+                lineHeight: LH.body,
               }}>
                 {paymentError}
               </div>
@@ -2361,7 +2356,7 @@ export default function PayPageV2() {
                 onPaymentIntentReplaced={handlePaymentIntentReplaced}
               />
             ) : paymentState === 'error' ? null : (
-              <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
+              <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>
                 Loading payment form…
               </div>
             )}

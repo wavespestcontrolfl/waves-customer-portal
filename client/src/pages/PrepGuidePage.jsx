@@ -1,24 +1,33 @@
 import { useState, useEffect } from 'react';
-import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
+import {
+  DOC,
+  DOC_FONT,
+  DOC_FONT_SERIF,
+  DOC_COLUMN_MAX,
+  FS,
+  FW,
+  LH,
+  SP,
+  RADIUS,
+  SHADOW,
+  docButton,
+} from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-const FONT_BODY = "'Inter', system-ui, sans-serif";
-const FONT_SERIF = "'Source Serif 4', 'Georgia', serif";
-
 const SURFACE = {
-  page: '#FAF8F3',
-  card: '#FFFFFF',
-  border: '#E7E2D7',
-  text: '#1B2C5B',
-  body: '#3F4A65',
-  muted: CUSTOMER_SURFACE.muted,
+  page: DOC.page,
+  card: DOC.surface,
+  border: DOC.border,
+  text: DOC.ink,
+  body: DOC.muted,
+  muted: DOC.supporting,
   calloutBg: '#FDF6EC',
   // Glass gold, not the old marketing #FFD700 — border colors aren't
   // repainted by the glass theme CSS, so the literal must be spec-correct.
@@ -40,15 +49,15 @@ function BlockRenderer({ blocks }) {
     switch (block.type) {
       case 'paragraph':
         return (
-          <p key={i} style={{ fontSize: 15, lineHeight: 1.65, color: SURFACE.body, margin: '0 0 16px' }}>
+          <p key={i} style={{ fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body, margin: `0 0 ${SP.md}px` }}>
             {block.content}
           </p>
         );
       case 'heading':
         return (
           <h2 key={i} style={{
-            fontFamily: FONT_SERIF, fontSize: 22, fontWeight: 600,
-            color: SURFACE.text, margin: '28px 0 16px', lineHeight: 1.3,
+            fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.semibold,
+            color: SURFACE.text, margin: `28px 0 ${SP.md}px`, lineHeight: LH.heading,
           }}>
             {block.content}
           </h2>
@@ -56,18 +65,18 @@ function BlockRenderer({ blocks }) {
       case 'details':
         return (
           <div key={i} data-glass="soft" style={{
-            background: SURFACE.detailBg, borderRadius: 8,
-            padding: '14px 18px', margin: '0 0 20px',
+            background: SURFACE.detailBg, borderRadius: RADIUS.input,
+            padding: `${SP.md}px ${SP.lg}px`, margin: `0 0 ${SP.lg}px`,
           }}>
             {(block.rows || []).map((row, j) => (
               <div key={j} style={{
                 display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-                padding: '5px 0', borderBottom: j < block.rows.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
+                padding: `${SP.xxs}px 0`, borderBottom: j < block.rows.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
               }}>
-                <span style={{ fontSize: 14, fontWeight: 500, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                <span style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                   {row.label}
                 </span>
-                <span style={{ fontSize: 14, color: SURFACE.text, fontWeight: 500, textAlign: 'right', maxWidth: '60%' }}>
+                <span style={{ fontSize: FS.body, color: SURFACE.text, fontWeight: FW.medium, textAlign: 'right', maxWidth: '60%' }}>
                   {row.value}
                 </span>
               </div>
@@ -79,10 +88,10 @@ function BlockRenderer({ blocks }) {
           <div key={i} style={{
             borderLeft: `4px solid ${SURFACE.calloutBorder}`,
             background: SURFACE.calloutBg,
-            borderRadius: '0 8px 8px 0',
-            padding: '14px 18px',
-            margin: '20px 0',
-            fontSize: 14, lineHeight: 1.6, color: SURFACE.body,
+            borderRadius: `0 ${RADIUS.input}px ${RADIUS.input}px 0`,
+            padding: `${SP.md}px ${SP.lg}px`,
+            margin: `${SP.lg}px 0`,
+            fontSize: FS.body, lineHeight: LH.body, color: SURFACE.body,
           }}>
             {block.content}
           </div>
@@ -95,11 +104,11 @@ function BlockRenderer({ blocks }) {
 
 function LoadingSkeleton() {
   return (
-    <div style={{ padding: '24px 16px 40px', maxWidth: 792, width: '100%', margin: '0 auto' }}>
-      <div style={{ height: 28, width: '70%', background: SURFACE.border, borderRadius: 6, marginBottom: 16 }} />
-      <div style={{ height: 80, background: SURFACE.border, borderRadius: 8, marginBottom: 20 }} />
-      <div style={{ height: 16, width: '90%', background: SURFACE.border, borderRadius: 4, marginBottom: 12 }} />
-      <div style={{ height: 16, width: '80%', background: SURFACE.border, borderRadius: 4, marginBottom: 12 }} />
+    <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto' }}>
+      <div style={{ height: 28, width: '70%', background: SURFACE.border, borderRadius: RADIUS.tag, marginBottom: SP.md }} />
+      <div style={{ height: 80, background: SURFACE.border, borderRadius: RADIUS.input, marginBottom: SP.lg }} />
+      <div style={{ height: 16, width: '90%', background: SURFACE.border, borderRadius: 4, marginBottom: SP.sm }} />
+      <div style={{ height: 16, width: '80%', background: SURFACE.border, borderRadius: 4, marginBottom: SP.sm }} />
       <div style={{ height: 16, width: '85%', background: SURFACE.border, borderRadius: 4 }} />
     </div>
   );
@@ -107,21 +116,17 @@ function LoadingSkeleton() {
 
 function NotFound() {
   return (
-    <div style={{ padding: '48px 24px', textAlign: 'center', maxWidth: 440, margin: '0 auto' }}>
-      <div style={{ fontSize: 20, fontWeight: 600, color: SURFACE.text, marginBottom: 12, fontFamily: FONT_SERIF }}>
+    <div style={{ padding: `${SP.gap}px ${SP.xl}px`, textAlign: 'center', maxWidth: 440, margin: '0 auto' }}>
+      <h2 style={{ fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading, fontFamily: DOC_FONT_SERIF }}>
         Prep guide not found
-      </div>
-      <p style={{ fontSize: 15, color: SURFACE.body, lineHeight: 1.6, margin: '0 0 24px' }}>
+      </h2>
+      <p style={{ fontSize: FS.bodyLg, color: SURFACE.body, lineHeight: LH.body, margin: `0 0 ${SP.xl}px` }}>
         This link may have expired or is no longer available. If you need help preparing for your service, give us a call.
       </p>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
         data-glass-accent=""
-        style={{
-          display: 'inline-block', padding: '12px 28px',
-          background: SURFACE.text, color: '#fff', borderRadius: 8,
-          fontWeight: 600, fontSize: 15, textDecoration: 'none',
-        }}
+        style={docButton('primary')}
       >
         Call {WAVES_SUPPORT_PHONE_DISPLAY}
       </a>
@@ -159,27 +164,27 @@ export default function PrepGuidePage() {
     : error || !data
       ? <NotFound />
       : (
-        <div style={{ padding: '24px 16px 40px', maxWidth: 792, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
+        <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: DOC_FONT, color: SURFACE.text }}>
           {/* No server-side prep-guide PDF render — Share + Print only. */}
           <DocumentActionBar shareTitle={`Waves ${data.projectTypeLabel || ''} prep guide`.replace(/\s+/g, ' ')} />
           <div
             className="prep-card"
             data-glass="card"
             style={{
-              background: SURFACE.card, borderRadius: 12,
+              background: SURFACE.card, borderRadius: RADIUS.card,
               border: `1px solid ${SURFACE.border}`,
-              boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+              boxShadow: SHADOW.card,
               padding: '28px 24px 32px',
             }}
           >
             <h1 style={{
-              fontFamily: FONT_SERIF, fontSize: 24, fontWeight: 700,
-              color: SURFACE.text, margin: '0 0 4px', lineHeight: 1.25,
+              fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
+              color: SURFACE.text, margin: `0 0 ${SP.xxs}px`, lineHeight: LH.heading,
             }}>
               {data.projectTypeLabel} Prep Guide
             </h1>
             {data.technicianName && (
-              <p style={{ fontSize: 14, color: SURFACE.muted, margin: '0 0 4px' }}>
+              <p style={{ fontSize: FS.body, color: SURFACE.muted, margin: `0 0 ${SP.xxs}px` }}>
                 Your technician: {data.technicianName}
               </p>
             )}
@@ -197,20 +202,20 @@ export default function PrepGuidePage() {
                 data.propertyAddress,
               ].map((line) => String(line || '').trim()).filter(Boolean);
               return contactLines.length ? (
-                <div style={{ margin: '10px 0 24px', display: 'grid', gap: 4 }}>
+                <div style={{ margin: `${SP.sm}px 0 ${SP.xl}px`, display: 'grid', gap: SP.xxs }}>
                   {contactLines.map((line) => (
-                    <div key={line} style={{ fontSize: 14, color: SURFACE.muted, letterSpacing: '0.04em', textTransform: 'uppercase', lineHeight: 1.5 }}>{line}</div>
+                    <div key={line} style={{ fontSize: FS.body, color: SURFACE.muted, letterSpacing: '0.04em', textTransform: 'uppercase', lineHeight: LH.body }}>{line}</div>
                   ))}
                 </div>
-              ) : <div style={{ marginBottom: 20 }} />;
+              ) : <div style={{ marginBottom: SP.lg }} />;
             })()}
 
             <BlockRenderer blocks={data.blocks} />
 
-            <div style={{ marginTop: 28, paddingTop: 20, borderTop: `1px solid ${SURFACE.border}` }}>
-              <p style={{ fontSize: 14, color: SURFACE.muted, lineHeight: 1.5, margin: 0 }}>
+            <div style={{ marginTop: 28, paddingTop: SP.lg, borderTop: `1px solid ${SURFACE.border}` }}>
+              <p style={{ fontSize: FS.body, color: SURFACE.muted, lineHeight: LH.body, margin: 0 }}>
                 Questions? Call or text us at{' '}
-                <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: SURFACE.text, fontWeight: 500 }}>
+                <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: SURFACE.text, fontWeight: FW.medium }}>
                   {data.supportPhone || WAVES_SUPPORT_PHONE_DISPLAY}
                 </a>
               </p>
@@ -229,7 +234,7 @@ export default function PrepGuidePage() {
       <WavesShell variant="customer" topBar="solid">
         <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
-          <div className="prep-no-print" style={{ maxWidth: 792, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+          <div className="prep-no-print" style={{ maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: `0 ${SP.md}px 40px`, fontFamily: DOC_FONT }}>
             {/* Newsletter signup lives only on the newsletter pages
                 (owner 2026-07-09, supersedes same-day card ruling). */}
             <BrandFooter />

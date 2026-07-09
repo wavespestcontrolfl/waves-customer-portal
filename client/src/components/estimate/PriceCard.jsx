@@ -133,9 +133,9 @@ function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
 function RowInclusions({ items, collapsible = false }) {
   const [open, setOpen] = useState(false);
   const list = (
-    <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
+    <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 8 }}>
       {items.map((item) => (
-        <li key={item} style={{ position: 'relative', paddingLeft: 20, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
+        <li key={item} style={{ position: 'relative', paddingLeft: 20, color: W.textBody, fontSize: 14, fontWeight: 600, lineHeight: 1.35 }}>
           <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
           {item}
         </li>
@@ -259,7 +259,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         <span style={{
           // Promoted 26->40 (design audit 2026-07-06): the price is the
           // decision number — SSR renders it 62-84px; 26px lost to headings.
-          fontSize: quoteRequired ? 24 : showLowConfidenceRange ? 32 : PRICE_FONT,
+          fontSize: quoteRequired ? 24 : showLowConfidenceRange ? 34 : PRICE_FONT,
           fontWeight: 600,
           color: W.blueDeeper,
           lineHeight: 1,
@@ -277,11 +277,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         {waveGuardTier ? (
           <span style={{
             display: 'inline-block',
-            padding: '5px 11px',
+            padding: '4px 12px',
             background: W.badgeWash,
             color: W.blueDeeper,
             borderRadius: 6,
-            fontSize: 13,
+            fontSize: 14,
             fontWeight: 700,
             letterSpacing: '0.02em',
           }}>
@@ -314,7 +314,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       ) : null}
 
       {quoteRequired && quoteReason ? (
-        <div style={{ fontSize: 15, color: W.noticeText, marginTop: 12, lineHeight: 1.45, fontWeight: 700 }}>
+        <div style={{ fontSize: 15, color: W.noticeText, marginTop: 12, lineHeight: 1.5, fontWeight: 700 }}>
           {quoteReason}
         </div>
       ) : null}
@@ -383,7 +383,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                   </div>
                 )}
               </div>
-              <div style={{ marginTop: 3, fontSize: 12, color: W.textCaption, lineHeight: 1.4 }}>
+              <div style={{ marginTop: 4, fontSize: 12, color: W.textCaption, lineHeight: 1.35 }}>
                 {Number(row.visitsPerYear) > 0 ? `${row.visitsPerYear} applications/year` : 'Service applications/year'}
                 {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
