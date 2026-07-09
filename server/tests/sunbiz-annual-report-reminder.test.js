@@ -16,6 +16,7 @@ function chain({ first } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
+  q.whereNotIn = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.insert = jest.fn(async () => undefined);
@@ -73,27 +74,45 @@ describe('runSunbizAnnualReportReminder', () => {
   });
 
   test('past May 1 with the report still unfiled: bumps amount_due by the $400 late fee', async () => {
-    const rowQ = chain({ first: { id: 'row-1', amount_due: '138.75', notes: 'File at sunbiz.org.' } });
+    const ensureQ = chain({ first: { id: 'row-1' } }); // year row already exists
+    const sweepQ = chain({ first: { id: 'row-1', amount_due: '138.75', notes: 'File at sunbiz.org.' } });
     const updateQ = chain();
-    db.mockReturnValueOnce(rowQ).mockReturnValueOnce(updateQ);
+    db.mockReturnValueOnce(ensureQ).mockReturnValueOnce(sweepQ).mockReturnValueOnce(updateQ);
 
     const result = await runSunbizAnnualReportReminder(new Date('2027-07-09T12:00:00Z'));
 
-    expect(result).toEqual({ fired: false, lateFeeApplied: true, reason: 'past_due_sweep' });
-    expect(rowQ.whereIn).toHaveBeenCalledWith('status', ['upcoming', 'prepared']);
+    expect(result).toEqual({ fired: false, filingRowCreated: false, lateFeeApplied: true, reason: 'past_due_sweep' });
+    expect(sweepQ.whereNotIn).toHaveBeenCalledWith('status', ['filed', 'paid']);
     expect(updateQ.update).toHaveBeenCalledWith(expect.objectContaining({ amount_due: 538.75 }));
     expect(updateQ.update.mock.calls[0][0].notes).toContain('$400 statutory late fee');
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('past May 1 but already filed (or fee already applied): leaves the row alone', async () => {
-    const rowQ = chain({ first: undefined }); // filed/paid rows fall out of the whereIn
-    db.mockReturnValueOnce(rowQ);
+    const ensureQ = chain({ first: { id: 'row-1' } });
+    const sweepQ = chain({ first: undefined }); // filed/paid rows fall out of the whereNotIn
+    db.mockReturnValueOnce(ensureQ).mockReturnValueOnce(sweepQ);
 
     const result = await runSunbizAnnualReportReminder(new Date('2027-07-09T12:00:00Z'));
 
-    expect(result).toEqual({ fired: false, lateFeeApplied: false, reason: 'past_due_sweep' });
-    expect(db).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ fired: false, filingRowCreated: false, lateFeeApplied: false, reason: 'past_due_sweep' });
+    expect(db).toHaveBeenCalledTimes(2);
+  });
+
+  test('past May 1 in an environment where January never ran: creates the row, then applies the fee', async () => {
+    const ensureQ = chain({ first: undefined }); // no row for the year
+    const insertQ = chain();
+    const sweepQ = chain({ first: { id: 'row-new', amount_due: '138.75', notes: 'File at sunbiz.org.' } });
+    const updateQ = chain();
+    db.mockReturnValueOnce(ensureQ).mockReturnValueOnce(insertQ)
+      .mockReturnValueOnce(sweepQ).mockReturnValueOnce(updateQ);
+
+    const result = await runSunbizAnnualReportReminder(new Date('2027-07-09T12:00:00Z'));
+
+    expect(result).toEqual({ fired: false, filingRowCreated: true, lateFeeApplied: true, reason: 'past_due_sweep' });
+    expect(insertQ.insert).toHaveBeenCalledWith(expect.objectContaining({ period_label: '2027', status: 'upcoming' }));
+    expect(updateQ.update).toHaveBeenCalledWith(expect.objectContaining({ amount_due: 538.75 }));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('notification insert failure leaves the dedupe unset so the next tick retries', async () => {

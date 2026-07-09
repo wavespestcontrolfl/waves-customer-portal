@@ -32,8 +32,15 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   const has = await knex.schema.hasTable('tax_filing_calendar');
   if (!has) return;
+  // Delete only the pristine seeded row. If up() skipped the insert (a row
+  // already existed) or the operator has since touched the row (marked
+  // filed/paid, edited amount/notes), rollback preserves it.
   await knex('tax_filing_calendar')
     .where('filing_type', 'sunbiz_annual_report')
     .where('period_label', '2026')
+    .where('title', 'Florida LLC Annual Report (Sunbiz) — 2026')
+    .where('status', 'upcoming')
+    .where('amount_due', 538.75)
+    .where('notes', 'Filed late — $138.75 report fee + $400 statutory late fee (non-waivable after May 1). Mark paid once Sunbiz confirms. From 2027 on, a Jan-1 admin reminder fires automatically.')
     .del();
 };

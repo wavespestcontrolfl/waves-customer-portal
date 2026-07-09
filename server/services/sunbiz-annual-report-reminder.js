@@ -74,10 +74,12 @@ async function ensureFilingRow(year) {
 // shows the real payable instead of understating it by $400.
 async function applyLateFee(year) {
   try {
+    // Exclude only filed/paid — the admin dropdown can set 'late', and a
+    // 'late' row is still unfiled and still owes the fee.
     const row = await db('tax_filing_calendar')
       .where('filing_type', FILING_TYPE)
       .where('period_label', String(year))
-      .whereIn('status', ['upcoming', 'prepared'])
+      .whereNotIn('status', ['filed', 'paid'])
       .first();
     if (!row || parseFloat(row.amount_due) >= REPORT_FEE + LATE_FEE) return false;
     await db('tax_filing_calendar').where({ id: row.id }).update({
@@ -96,10 +98,13 @@ async function applyLateFee(year) {
 async function runSunbizAnnualReportReminder(now = new Date()) {
   const { year, month, day } = etParts(now);
 
-  // Past the May 1 deadline: reflect the late fee on a still-unfiled row.
+  // Past the May 1 deadline: self-heal the row even if January never ran
+  // (fresh environment, job down all month), then reflect the late fee on a
+  // still-unfiled row.
   if (month > 5 || (month === 5 && day > 1)) {
+    const filingRowCreated = await ensureFilingRow(year);
     const lateFeeApplied = await applyLateFee(year);
-    return { fired: false, lateFeeApplied, reason: 'past_due_sweep' };
+    return { fired: false, filingRowCreated, lateFeeApplied, reason: 'past_due_sweep' };
   }
 
   // The bell only rings during the January filing-window open.
