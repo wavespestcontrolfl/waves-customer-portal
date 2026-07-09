@@ -78,7 +78,7 @@ describe('POST /ai/chat/report', () => {
 
   test('files an ai_escalations review row linked to the chat session and customer', async () => {
     const { sessionQuery, escalationInsert } = mockReportTables({
-      session: { id: 'conv-1', customer_id: 'cust-from-session' },
+      session: { id: 'conv-1', customer_id: 'cust-1' },
     });
     const token = jwt.sign({ customerId: 'cust-1' }, process.env.JWT_SECRET);
 
@@ -103,6 +103,48 @@ describe('POST /ai/chat/report', () => {
         priority: 'normal',
         status: 'pending',
       }));
+    });
+  });
+
+  test("never links another customer's conversation to the report", async () => {
+    const { escalationInsert } = mockReportTables({
+      session: { id: 'conv-other', customer_id: 'someone-else' },
+    });
+    const token = jwt.sign({ customerId: 'cust-1' }, process.env.JWT_SECRET);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ sessionId: 'chat-guessed', messageContent: 'Bad AI reply' }),
+      });
+      expect(res.status).toBe(200);
+      expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
+        conversation_id: null,
+        customer_id: 'cust-1',
+      }));
+    });
+  });
+
+  test('per-client rate limit caps report submissions at 10 per window', async () => {
+    const { escalationInsert } = mockReportTables({ session: null });
+    // Own bucket: the limiter keys authenticated requests by JWT subject, so
+    // this test's counts don't collide with the other tests' anonymous (IP) hits.
+    const token = jwt.sign({ customerId: 'rate-limit-cust' }, process.env.JWT_SECRET);
+
+    await withServer(async (baseUrl) => {
+      const send = () => fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ sessionId: 'chat-flood', messageContent: 'Bad AI reply' }),
+      });
+      for (let i = 0; i < 10; i += 1) {
+        const res = await send();
+        expect(res.status).toBe(200);
+      }
+      const blocked = await send();
+      expect(blocked.status).toBe(429);
+      expect(escalationInsert).toHaveBeenCalledTimes(10);
     });
   });
 

@@ -1,6 +1,8 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { rateLimitKey } = require('../middleware/rate-limit-key');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
@@ -123,9 +125,23 @@ function aiContentReportEnabled() {
   return process.env.GATE_AI_CONTENT_REPORT !== 'false';
 }
 
+// The report endpoint is default-on and accepts unauthenticated traffic, and
+// every accepted body inserts a pending ai_escalations row — without its own
+// limiter a single client inside the broad global /api allowance could bury
+// real escalations under junk reports. Keyed like the global limiter (JWT
+// subject when authenticated, /64-collapsed IP otherwise).
+const chatReportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: rateLimitKey,
+  message: { error: 'Too many reports. Please try again later.' },
+});
+
 // POST /api/ai/chat/report — customer flags an AI reply as inappropriate.
 // Lands in the existing ai_escalations review queue (admin AI page).
-router.post('/chat/report', async (req, res, next) => {
+router.post('/chat/report', chatReportLimiter, async (req, res, next) => {
   try {
     if (!aiContentReportEnabled()) return res.status(404).json({ error: 'Not found' });
 
@@ -151,6 +167,12 @@ router.post('/chat/report', async (req, res, next) => {
         .where({ channel: 'portal_chat', channel_identifier: sessionId })
         .orderBy('created_at', 'desc')
         .first();
+      // Session IDs are client-generated and guessable — never link (and via
+      // resolution, never close) another customer's conversation. Anonymous
+      // sessions (customer_id null) stay linkable to whoever holds the ID.
+      if (conversation?.customer_id && conversation.customer_id !== customerId) {
+        conversation = null;
+      }
     }
 
     await db('ai_escalations').insert({
