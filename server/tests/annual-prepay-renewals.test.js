@@ -1781,6 +1781,9 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
     );
 
     expect(replacementQ.where).toHaveBeenCalledWith('term_end', '>=', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    // A paid FUTURE term (not started) is not coverage today either (Codex
+    // round-12) — the window must contain today on BOTH ends.
+    expect(replacementQ.where).toHaveBeenCalledWith('term_start', '<=', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     expect(resetQ.update).toHaveBeenCalledWith(
       expect.objectContaining({ billing_mode: 'per_application' }),
     );

@@ -97,33 +97,48 @@ function dueDateFromVisit(v) {
 }
 
 // Shared base query for uninvoiced completed visits, with the full no-cost
-// allowlist applied. Returns priced visits only (estimated_price > 0). All
-// req-derived values are bound, never interpolated.
-function uninvoicedLeakQuery(days) {
+// allowlist applied. Returns visits with an effective price: the row's
+// estimated_price, or — when the billing_mode column exists (perAppAware) —
+// the customer-level per_application_fee for per-application customers,
+// whose follow-up rows seed estimated_price NULL by design (Codex round-12;
+// same row-price → fee precedence as completion and the bill route, never
+// monthly_rate). All req-derived values are bound, never interpolated.
+function uninvoicedLeakQuery(days, { perAppAware = false } = {}) {
   const autopay = autopayActivePredicate();
+  const effectivePriceSql = perAppAware
+    ? "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
+    : 'COALESCE(ss.estimated_price, 0)';
   const q = db({ ss: 'scheduled_services' })
     .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
     .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
     .leftJoin({ d: 'visit_billing_dispositions' }, 'd.scheduled_service_id', 'ss.id')
     .whereRaw("ss.completed_at >= now() - (? * interval '1 day')", [days])
-    .whereRaw('COALESCE(ss.estimated_price, 0) > 0')
+    .whereRaw(`${effectivePriceSql} > 0`)
     .whereNull('d.id')                                   // not already dispositioned
     .whereRaw("sr.status = 'completed'")                 // completed record only (excludes office-handoff 'incomplete' + missing)
     .whereRaw(`NOT ${HAS_INVOICE_SQL}`)                  // no existing invoice
     .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
     .whereRaw('COALESCE(sr.is_callback, false) = false')
-    .whereRaw('COALESCE(ss.prepaid_amount, 0) < ss.estimated_price') // not FULLY prepaid (partial surfaces in needs-review)
+    .whereRaw(`COALESCE(ss.prepaid_amount, 0) < ${effectivePriceSql}`) // not FULLY prepaid (partial surfaces in needs-review)
     .whereRaw('COALESCE(ss.payer_id, c.payer_id) IS NULL') // self-pay only (v1); payer-billed = payer AP flow
-    // Conservative v1 scope (owner priority: never risk double-billing an autopay
-    // customer). The completion predicate only treats autopay as covering NO-price
-    // visits, so an autopay customer's one-off explicitly-priced visit is
-    // technically billable — surfacing those is a deliberate follow-up, kept out of
-    // v1 to avoid any double-bill exposure.
-    .whereRaw(`NOT ${autopay.sql}`, [autopay.binding])   // exclude active-autopay customers
     .whereRaw(
       `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${ALWAYS_FREE_PATTERNS.map(() => '?').join(',')}]::text[])`,
       ALWAYS_FREE_PATTERNS,
     );
+  // Conservative v1 scope (owner priority: never risk double-billing an autopay
+  // customer). The completion predicate only treats autopay as covering NO-price
+  // visits, so an autopay customer's one-off explicitly-priced visit is
+  // technically billable — surfacing those is a deliberate follow-up, kept out of
+  // v1 to avoid any double-bill exposure. EXCEPTION (Codex round-12, mirrors the
+  // bill route's round-7 exemption): per-application customers are on autopay BY
+  // DESIGN — the saved card is HOW per-visit charges collect and the monthly cron
+  // skips them — so their leaked visits are exactly what this workbench recovers
+  // and must surface in the UI, not just be billable by direct POST.
+  if (perAppAware) {
+    q.whereRaw(`(NOT ${autopay.sql} OR c.billing_mode = 'per_application')`, [autopay.binding]);
+  } else {
+    q.whereRaw(`NOT ${autopay.sql}`, [autopay.binding]); // exclude active-autopay customers
+  }
   if (INTERNAL_TEST_CUSTOMERS.length) {
     q.whereNotIn(db.raw(INTERNAL_NAME_SQL), INTERNAL_TEST_CUSTOMERS);
   }
@@ -139,7 +154,13 @@ function uninvoicedLeakQuery(days) {
 router.get('/leaks', async (req, res) => {
   try {
     const days = clampDays(req.query.days);
-    const rows = await uninvoicedLeakQuery(days)
+    // Column-guarded per-app awareness — pre-migration environments keep the
+    // exact legacy query shape.
+    let perAppAware = false;
+    try {
+      perAppAware = await db.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep legacy */ }
+    const rows = await uninvoicedLeakQuery(days, { perAppAware })
       .select(
         'ss.id as scheduled_service_id',
         'sr.id as service_record_id',
@@ -155,6 +176,7 @@ router.get('/leaks', async (req, res) => {
         'c.last_name',
         'c.monthly_rate',
         'c.waveguard_tier',
+        ...(perAppAware ? ['c.billing_mode', 'c.per_application_fee'] : []),
       )
       .orderBy('ss.completed_at', 'desc');
 
@@ -169,25 +191,36 @@ router.get('/leaks', async (req, res) => {
     );
     const activeRows = rows.filter((_, i) => !coveredFlags[i]);
 
+    // Effective price mirrors the query + the bill route: row price →
+    // per-application fee (never monthly_rate).
+    const effectivePrice = (r) => {
+      const rowPrice = parseFloat(r.estimated_price || 0);
+      if (rowPrice > 0) return rowPrice;
+      return r.billing_mode === 'per_application' ? parseFloat(r.per_application_fee || 0) : 0;
+    };
     const shape = (r) => ({
       scheduled_service_id: r.scheduled_service_id,
       service_record_id: r.service_record_id,
       customer_id: r.customer_id,
       customer: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
       service_type: r.service_type,
-      price: parseFloat(r.estimated_price || 0),
+      price: effectivePrice(r),
       prepaid: parseFloat(r.prepaid_amount || 0),
       completed_at: r.completed_at,
       monthly_rate: parseFloat(r.monthly_rate || 0),
       waveguard_tier: r.waveguard_tier || null,
+      billing_mode: r.billing_mode || null,
       billable: !!r.service_record_id, // cannot invoice without a service record
     });
 
-    // Recurring (monthly_rate>0), partially-prepaid, or ambiguous-type
-    // (inspection/rodent — could be paid or free) visits need a human eye before
-    // billing — they aren't safe one-click leaks.
+    // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type
+    // (inspection/rodent — could be paid or free), or per-application
+    // (autopay-active by design — a human confirms completion billing really
+    // did miss it before re-billing) visits need a human eye before billing —
+    // they aren't safe one-click leaks.
     const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0
       || parseFloat(r.prepaid_amount || 0) > 0
+      || r.billing_mode === 'per_application'
       || isReviewServiceType(r.service_type);
     const leaks = activeRows.filter((r) => !isReview(r)).map(shape);
     const needsReview = activeRows.filter(isReview).map(shape);

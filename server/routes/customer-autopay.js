@@ -74,6 +74,7 @@ router.get('/', async (req, res, next) => {
         'id', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_pause_reason',
         'autopay_payment_method_id', 'billing_day', 'next_charge_date',
+        'ach_status',
       )
       .first();
 
@@ -101,7 +102,14 @@ router.get('/', async (req, res, next) => {
         autopay_enabled: true,
       })
       .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
-    const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
+    // Mirror customerOnAutopay's ACH-health rule (Codex round-12): when
+    // customers.ach_status is non-empty and not 'active'
+    // (needs_verification / suspended), collection refuses everything but a
+    // card — reporting 'active' for an unhealthy bank default would promise
+    // auto-charges that will actually fall back to manual payment.
+    const achHealthBlocked = !!customer.ach_status && customer.ach_status !== 'active'
+      && chargeableAutopayMethod?.method_type !== 'card';
+    const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod) && !achHealthBlocked;
     // Per-application customers pay per completed visit — their autopay card
     // is HOW each visit charge collects, not a monthly subscription, and the
     // monthly cron skips them (GUARD 3b). Never project a monthly next-charge

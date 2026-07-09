@@ -352,6 +352,33 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  test('GET /leaks surfaces per-application fee-only visits under needs_review with the fee as price', async () => {
+    // Per-app follow-up rows seed estimated_price NULL by design — the
+    // effective price is customers.per_application_fee, and per-app
+    // customers surface (they're autopay-active BY DESIGN) but always in
+    // needs_review, never as one-click leaks (Codex round-12).
+    const rows = [
+      { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
+      { scheduled_service_id: 'ss-5', service_record_id: 'sr-5', service_type: 'Pest Control', estimated_price: null, prepaid_amount: null, completed_at: '2026-06-12', customer_id: 'cust-5', first_name: 'Taras', last_name: 'Malyshev', monthly_rate: '55.30', waveguard_tier: null, billing_mode: 'per_application', per_application_fee: '55.30' },
+    ];
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.leaks.map((r) => r.customer)).toEqual(['Tyler Levin']);
+      const perApp = body.needs_review.find((r) => r.customer === 'Taras Malyshev');
+      expect(perApp).toBeDefined();
+      expect(perApp.price).toBe(55.3);
+      expect(perApp.billing_mode).toBe('per_application');
+    });
+    delete db.schema;
+  });
+
   test('GET /aging proxies the dashboard outstanding-balances tool', async () => {
     executeDashboardTool.mockResolvedValue({ total_outstanding: 500, aging: { current: 100, days_30: 400, days_60: 0, days_90_plus: 0 } });
     await withServer(async (baseUrl) => {
