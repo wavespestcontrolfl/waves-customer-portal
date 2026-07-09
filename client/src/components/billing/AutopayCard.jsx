@@ -415,7 +415,7 @@ export default function AutopayCard({ onStateChange }) {
           <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
             {state === 'active'
               ? (perApplicationBilling
-                ? 'Auto Pay is on — your card is charged after each visit.'
+                ? 'Auto Pay is on — your saved payment method is charged after each visit.'
                 : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
               : state === 'paused'
                 ? `Paused until ${formatDate(paused_until)}`
@@ -428,7 +428,7 @@ export default function AutopayCard({ onStateChange }) {
           )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {activeCard.brand || 'card'} ending in {activeCard.last4}
+              Charging {activeCard.method_type === 'ach' ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>

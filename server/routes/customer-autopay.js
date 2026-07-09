@@ -85,7 +85,7 @@ router.get('/', async (req, res, next) => {
         'id',
         db.raw('card_brand as brand'),
         db.raw('last_four as last4'),
-        'exp_month', 'exp_year', 'is_default', 'autopay_enabled',
+        'exp_month', 'exp_year', 'is_default', 'autopay_enabled', 'method_type',
       )
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
@@ -113,15 +113,11 @@ router.get('/', async (req, res, next) => {
       billingMode = modeRow?.billing_mode || null;
     } catch { /* billing_mode column absent pre-migration */ }
     const perApplicationBilling = billingMode === 'per_application';
-    // Per-application collection is card-only (the completion collector and
-    // chargeInvoiceWithSavedCard refuse ACH): an ACH default must read as
-    // Auto Pay OFF for a per-application customer, or the portal claims
-    // "charged after each visit" while every visit actually falls back to a
-    // pay-link invoice (Codex round-3). Monthly/legacy customers keep ACH
-    // autopay — the monthly cron charges bank methods.
-    const perAppMethodChargeable = !perApplicationBilling
-      || chargeableAutopayMethod?.method_type === 'card';
-    const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod && perAppMethodChargeable;
+    // Per-application collection takes ANY saved tender (owner ruling
+    // 2026-07-09): chargeInvoiceWithSavedCard locks the PI to the saved
+    // method's family (card settles inline, ACH rides processing→paid), so
+    // an ACH default is a genuinely active Auto Pay state here too.
+    const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;

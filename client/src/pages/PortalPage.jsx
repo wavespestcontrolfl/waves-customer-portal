@@ -3762,7 +3762,7 @@ function BillingTab({ customer }) {
           ? 'Auto Pay is processing today'
           : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
       detail: perApplicationBilling
-        ? 'Your saved card is charged for each service visit after it is completed.'
+        ? 'Your saved payment method is charged for each service visit after it is completed.'
         : daysUntilDue === 0
           ? `Amount: ${money(amountDue)}`
           : autopaySurcharge > 0

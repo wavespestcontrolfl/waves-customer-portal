@@ -1184,14 +1184,24 @@ const StripeService = {
         // also yields a fresh key as expected.
         const minuteBucket = Math.floor(Date.now() / 60_000);
         const idempotencyKey = `inv_card_on_file_${invoiceId}_${invTotalCents}_${card.id}_${minuteBucket}`;
+        // Saved-method charges support BOTH tender families (owner ruling
+        // 2026-07-09: per-application collects whatever method the customer
+        // saved, card or bank). A PI without payment_method_types defaults to
+        // ['card'] and Stripe refuses to confirm it with a us_bank_account pm
+        // — lock the PI to the saved method's family. An ACH confirm lands
+        // 'processing' (not 'succeeded'); the status mapping below + the
+        // webhook's processing→paid settlement already handle that lifecycle,
+        // and computeChargeAmount already priced ACH surcharge-free.
+        const savedMethodIsBank = card.method_type === 'ach';
         const invPiParams = {
           amount: invTotalCents,
           currency: 'usd',
           customer: stripeCustomerId,
           payment_method: card.stripe_payment_method_id,
+          payment_method_types: [savedMethodIsBank ? 'us_bank_account' : 'card'],
           off_session: true,
           confirm: true,
-          description: `Invoice ${invoice.invoice_number} — card on file`,
+          description: `Invoice ${invoice.invoice_number} — ${savedMethodIsBank ? 'bank account' : 'card'} on file`,
           metadata: {
             waves_invoice_id: invoiceId,
             invoice_number: invoice.invoice_number,
@@ -1222,7 +1232,11 @@ const StripeService = {
             processor: 'stripe',
             stripe_payment_intent_id: paymentIntent.id,
             stripe_charge_id: paymentIntent.latest_charge || null,
-            payment_method: 'card',
+            // Same tender convention as confirmInvoicePayment: ACH lands as
+            // 'us_bank_account' (never 'card' — that leaked the wrong tender
+            // into receipts/reporting) and the bank last4 reuses the
+            // card_last_four column, mirroring `cardLastFour || bankLastFour`.
+            payment_method: savedMethodIsBank ? 'us_bank_account' : 'card',
             card_brand: card.card_brand || null,
             card_last_four: card.last_four || null,
             // `total` here is the CASH charged (amount due + surcharge); add back
@@ -1249,7 +1263,7 @@ const StripeService = {
           status,
           description: surcharge > 0
             ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} credit card surcharge)`
-            : `Invoice ${invoice.invoice_number} — card on file`,
+            : `Invoice ${invoice.invoice_number} — ${savedMethodIsBank ? 'bank account' : 'card'} on file`,
           metadata: JSON.stringify({
             // Link to the invoice so /api/receipt/:token + the receipt email find
             // this row (and its actual cash amount) instead of falling back to the

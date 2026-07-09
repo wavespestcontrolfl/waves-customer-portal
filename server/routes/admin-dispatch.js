@@ -4778,32 +4778,50 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // surcharge/tax/ledger/receipt rail the card-on-file flows use (single
     // surcharge authority, invoice-locked against double collection). Runs
     // AFTER account credit (charges the reduced residual), only on a
-    // collectible self-pay invoice, and only for a card method — an ACH
-    // default keeps the pay-link flow (chargeInvoiceWithSavedCard is
-    // card-only). Failure is non-blocking by design: the invoice stays open
-    // and the completion SMS carries the pay link exactly as before, so the
-    // customer experience degrades to manual pay — never a blocked completion
-    // and never a double charge (the helper fail-closes on a live
-    // PaymentIntent). On success the SMS branch flips to receipt (no pay
-    // link), mirroring the card-hold convention below.
+    // collectible self-pay invoice. ANY saved tender collects (owner ruling
+    // 2026-07-09: capture a payment method at signup and auto-charge it after
+    // every visit — card or bank): chargeInvoiceWithSavedCard locks the PI to
+    // the saved method's family, and customerOnAutopay already forces
+    // card-only when the customer's ach_status is unhealthy. A card charge
+    // settles inline (receipt SMS); an ACH debit lands 'processing' — money
+    // in flight, so the pay link is suppressed and the webhook settles
+    // processing→paid (receipt delivers then). Failure is non-blocking by
+    // design: the invoice stays open and the completion SMS carries the pay
+    // link exactly as before, so the customer experience degrades to manual
+    // pay — never a blocked completion and never a double charge (the helper
+    // fail-closes on a live PaymentIntent).
     if (perApplicationBilling && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       try {
         const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
         const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
-        if (isChargeableAutopayMethod(autopayPm) && autopayPm.method_type === 'card') {
+        if (isChargeableAutopayMethod(autopayPm)) {
           const StripeService = require('../services/stripe');
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id);
           const fresh = await db('invoices').where({ id: invoice.id }).first();
           if (fresh) invoice = fresh;
-          if (['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
+          const freshStatus = String(invoice.status || '').toLowerCase();
+          if (['paid', 'prepaid'].includes(freshStatus)) {
             alreadyPaid = true;
             invoiceCreated = false;
             payUrl = null;
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
                 details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id },
+              });
+            } catch (e) { /* log-only */ }
+          } else if (freshStatus === 'processing') {
+            // ACH debit initiated — money in flight. NOT paid yet (the
+            // receipt waits for the webhook's processing→paid settlement),
+            // but the customer must not be invited to pay again either:
+            // suppress the pay link and let the invoice ride 'processing'
+            // (uncollectible everywhere by INVOICE_UNCOLLECTIBLE_STATUSES).
+            invoiceCreated = false;
+            payUrl = null;
+            try {
+              await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
+                details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id, ach_processing: true },
               });
             } catch (e) { /* log-only */ }
           }
