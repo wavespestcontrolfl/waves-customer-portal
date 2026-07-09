@@ -249,11 +249,27 @@ router.post('/cards', async (req, res, next) => {
       userAgent: req.get('user-agent') || null,
     });
     const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-    await enrollConsentedMethod({
+    const enrollment = await enrollConsentedMethod({
       customerId: req.customerId,
       paymentMethodId: card.id,
       source: 'portal_add_card',
     });
+    // A REFUSED enrollment (ach_blocked bank save while the customer's ACH
+    // state is unhealthy, or a vanished row) must not 200 (Codex #2507
+    // round-8 P2): the client refreshes Auto Pay off this response, so a
+    // success-looking reply turns the universal-save promise into a silent
+    // saved-only method with no retry or error path. already_enrolled is
+    // the benign incumbent case. The method row itself stays saved either
+    // way — a retry re-enters through the lookup-first save above.
+    if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+      logger.warn(`[billing-v2] add-card enrollment refused (${enrollment.reason}) for customer ${req.customerId} pm ${card.id}`);
+      return res.status(409).json({
+        error: enrollment.reason === 'ach_blocked'
+          ? 'Payment method saved, but Auto Pay can’t use this bank account until its verification clears — add a card to enable Auto Pay, or try again once the bank account is verified.'
+          : 'Payment method saved, but Auto Pay could not be enabled — please try again.',
+        enrollReason: enrollment.reason,
+      });
+    }
 
     res.json({
       success: true,

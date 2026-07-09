@@ -1895,7 +1895,7 @@ async function handleSetupIntentSucceeded(setupIntent) {
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-      await enrollConsentedMethod({
+      const enrollment = await enrollConsentedMethod({
         customerId: wavesCustomerId,
         paymentMethodId: saved.id,
         source: 'save_card_consent',
@@ -1907,9 +1907,19 @@ async function handleSetupIntentSucceeded(setupIntent) {
       // is the only place the settle can happen. Idempotent — a
       // setup-complete race or a pre-hold prepaid invoice skips inside.
       // invoice_id was stamped server-side at /capture-setup mint;
-      // ownership double-checked against the SI's customer.
+      // ownership double-checked against the SI's customer. A REFUSED
+      // enrollment (ach_blocked — e.g. micro-deposits verified but a
+      // separate ACH failure suspended the customer meanwhile) must NOT
+      // settle (round-8 P2): the invoice stays collectible, the capture
+      // state re-derives on the customer's next visit, and the next
+      // /capture-setup mint is card-only. No rethrow — a webhook retry
+      // can't change the bank state.
+      const enrollmentOk = enrollment.enrolled || enrollment.reason === 'already_enrolled';
+      if (!enrollmentOk) {
+        logger.warn(`[stripe-webhook] covered-capture enrollment refused (${enrollment.reason}) for customer ${wavesCustomerId} pm ${stripePmId} — held coverage NOT settled`);
+      }
       const capturedInvoiceId = setupIntent.metadata?.invoice_id || null;
-      if (capturedInvoiceId) {
+      if (enrollmentOk && capturedInvoiceId) {
         const capturedInvoice = await db('invoices').where({ id: capturedInvoiceId }).first('id', 'customer_id');
         if (capturedInvoice && String(capturedInvoice.customer_id) === String(wavesCustomerId)) {
           const settle = await StripeService.settleHeldCoverage(capturedInvoice.id);

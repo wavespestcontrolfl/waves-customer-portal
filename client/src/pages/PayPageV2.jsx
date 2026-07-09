@@ -1268,7 +1268,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 // confirms the SetupIntent /setup minted and persists the method via
 // /setup-complete. Money is already settled; the consent box renders
 // locked exactly like every required save.
-function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, onDone, onBankPending }) {
+function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, onDone, onBankPending, onAchBlocked }) {
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -1343,6 +1343,11 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (body.microdepositPending) { onBankPending?.(); return; }
+        // The bank method saved but enrollment was refused (ACH state
+        // unhealthy) — this SetupIntent already succeeded and can't be
+        // re-confirmed, so restart capture: the fresh mint is card-only
+        // while the bank state is unhealthy (Codex #2507 round-8).
+        if (body.enrollReason === 'ach_blocked') { onAchBlocked?.(body.error); return; }
         throw new Error(body.error || 'Could not save the payment method');
       }
       onDone?.(body);
@@ -1944,6 +1949,7 @@ export default function PayPageV2() {
                       setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
                     }}
                     onBankPending={() => setSetupCapture({ status: 'bank-pending' })}
+                    onAchBlocked={() => setSetupCapture({ status: 'minting' })}
                   />
                 )}
               </>

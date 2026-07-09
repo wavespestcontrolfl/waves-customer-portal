@@ -1051,12 +1051,28 @@ router.post('/:token/setup-complete', async (req, res) => {
       });
     }
     const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-    await enrollConsentedMethod({
+    const enrollment = await enrollConsentedMethod({
       customerId: invoice.customer_id,
       paymentMethodId: saved.id,
       source: 'save_card_consent',
       details: { via: 'covered_by_credit_setup', invoice_id: invoice.id },
     });
+    // A REFUSED enrollment must leave the invoice collectible (Codex
+    // #2507 round-8 P2): settling here would complete the required-save
+    // signup prepaid with nothing chargeable enrolled. ach_blocked =
+    // the customer's ACH state went unhealthy after /capture-setup
+    // minted card_or_bank (or its health lookup failed open) and the
+    // customer saved a bank method — the capture state stays
+    // re-derivable, and the next /capture-setup mint is card-only while
+    // the bank state is unhealthy, so the client restarts capture.
+    // already_enrolled is the benign incumbent case.
+    if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+      logger.warn(`[pay-v2] setup-complete enrollment refused (${enrollment.reason}) for invoice ${invoice.id} pm ${saved.id} — held coverage NOT settled`);
+      return res.status(409).json({
+        error: 'This bank account can’t power Auto Pay until its verification clears — please use a card instead.',
+        enrollReason: enrollment.reason,
+      });
+    }
 
     // The capture is done — apply the HELD credit coverage and settle the
     // invoice (Codex #2507 round-7 P1). Idempotent: already-prepaid
