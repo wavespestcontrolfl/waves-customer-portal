@@ -1562,6 +1562,7 @@ describe('annual_prepay billing_mode stamp timing', () => {
     setDbQueues({
       annual_prepay_terms: [
         query({ rows: [PENDING] }), // terms select for the paid invoice
+        query({ rows: [] }), // dispute-cancel revival lookup — none
         query({ returning: [ACTIVE] }), // pending→active transition update
         query({ returning: [ACTIVE] }), // refreshTermSnapshot snapshot update
         query({}), // prior_billing_mode record on the term
