@@ -367,9 +367,9 @@ export default function App() {
           <Route path="/report/project/:token" element={<WavesShell><ProjectReportViewPage /></WavesShell>} />
           <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
-          <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
-          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
-          <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
+          <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
+          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
+          <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
@@ -379,7 +379,8 @@ export default function App() {
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The
               /estimate quote wizard keeps #FAF8F3 (deliberately un-glassed),
-              /newsletter keeps its dark hero, /pay group keeps the pro wash. */}
+              /newsletter keeps its dark hero. The /pay group joined the full
+              scene 2026-07-09 (pro wash retired), so it uses the same wash. */}
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
           <Route path="/pest-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><PestReportViewPage /></WavesShell></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />

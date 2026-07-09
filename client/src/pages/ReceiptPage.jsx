@@ -46,6 +46,7 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -200,9 +201,10 @@ function SuccessCheck({ size = 56 }) {
 }
 
 export default function ReceiptPage() {
-  // Liquid-glass 'pro' variant (visual only).
+  // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
+  // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'pro');
+  useGlassSurface(true, 'full');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -771,10 +773,12 @@ export default function ReceiptPage() {
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
-        {/* Standard identity footer — every glass surface carries the same
-            footer as /track (owner 2026-07-08). Hidden from the receipt
-            printout via waves-no-print. */}
+        {/* Standard pre-footer newsletter card + identity footer — every
+            glass surface carries the same footer as /track (owner
+            2026-07-08/09). Hidden from the receipt printout via
+            waves-no-print. */}
         <div className="waves-no-print">
+          <GlassNewsletterCard source="receipt_footer" />
           <BrandFooter />
         </div>
       </div>
