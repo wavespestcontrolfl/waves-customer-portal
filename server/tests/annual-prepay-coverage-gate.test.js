@@ -1,7 +1,8 @@
 // Fail-closed completion-billing coverage gate. annualPrepayCoversVisit decides
 // whether a completing visit is covered by an annual prepay — by a still-LIVE
-// term (coveredTermsAsOf: in-window + paid status + prepay invoice/payment not
-// void/refunded), NOT the per-visit amount. A discounted plan stamps each visit
+// term (coveredTermsAsOf with NO date window: paid status + prepay
+// invoice/payment not void/refunded, keyed on the stamp's own term id), NOT
+// the per-visit amount and NOT the visit's position on the calendar. A discounted plan stamps each visit
 // BELOW its undiscounted estimated_price, so the legacy `prepaid_amount >= price`
 // gate would re-bill an already-prepaid visit (the double-bill this closes).
 // The covered-term SQL is exercised via getActivelyCoveredCustomerIds' own tests;
@@ -76,10 +77,36 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
     await expect(annualPrepayCoversVisit(stampedVisit({ prepaid_amount: 55 }))).resolves.toBe(true);
   });
 
-  test('no live covered term (cancelled / refunded / void-invoice / out-of-window / other customer): NOT covered', async () => {
+  test('no live covered term (cancelled / refunded / void-invoice / other customer): NOT covered', async () => {
     // coveredTermsAsOf + the customer_id guard filter all of those out → no row.
     coveredQuery({ liveTerm: undefined });
     await expect(annualPrepayCoversVisit(stampedVisit())).resolves.toBe(false);
+  });
+
+  test('stamped gate applies NO date window — a covered visit rescheduled past term_end stays covered', async () => {
+    // The stamp is the allocation of specific prepaid dollars to THIS visit;
+    // re-billing it is double-billing regardless of the calendar. The old
+    // term_start<=date<=term_end window minted a live completion invoice +
+    // pay-link SMS for an ordinary weather reschedule of the final covered
+    // visit across term_end (money-path audit P1). Pin: the term query is
+    // keyed on the stamp's term id with NO term_start/term_end clauses.
+    let capturedStub = null;
+    db.mockImplementation((table) => {
+      if (table !== 'annual_prepay_terms as t') throw new Error(`Unexpected db table ${table}`);
+      capturedStub = chainable({ id: 'term-1' });
+      return capturedStub;
+    });
+
+    await expect(annualPrepayCoversVisit(
+      stampedVisit({ scheduled_date: '2027-09-01' }), // far past any term_end
+    )).resolves.toBe(true);
+
+    const windowClauses = capturedStub.where.mock.calls
+      .filter(([col]) => col === 't.term_start' || col === 't.term_end');
+    expect(windowClauses).toHaveLength(0);
+    // Still keyed to the stamp's own term + customer.
+    expect(capturedStub.where).toHaveBeenCalledWith('t.id', 'term-1');
+    expect(capturedStub.where).toHaveBeenCalledWith('t.customer_id', 'cust-1');
   });
 
   test('live term whose coverage service still matches the visit: COVERED', async () => {

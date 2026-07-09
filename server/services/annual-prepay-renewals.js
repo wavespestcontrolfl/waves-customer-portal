@@ -1150,8 +1150,18 @@ function coveredTermsAsOf(conn, coverageDate = null) {
 // fail-closed twice over: (1) requires an explicit stamp AND a live term, so a
 // stale stamp left by a best-effort void/refund clear (clearPrepaidStampsForTerm
 // swallows errors on the webhook path) can't suppress; (2) revalidates the prepay
-// invoice/payment isn't void/refunded and the visit date is inside the term, so a
-// term whose status drifts from its paid state can't suppress either.
+// invoice/payment isn't void/refunded, so a term whose status drifts from its
+// paid state can't suppress either.
+// The stamp is validated against ITS OWN term id with NO date window
+// (coveredTermsAsOf(conn, null)): the stamp is the allocation of specific
+// prepaid dollars to THIS visit, so re-billing it is double-billing by
+// definition regardless of where the visit sits on the calendar. A
+// term_start<=date<=term_end window here re-billed an ordinary weather
+// reschedule of the final covered visit across term_end — a live completion
+// invoice + pay-link SMS for a visit the customer already paid inside the
+// prepay (money-path audit P1). Terms that lost their paid state (void/
+// refunded/disputed invoice, chargeback claw-back) still fail the query's
+// paid-coverage checks, which is what the window was actually guarding.
 // Absence/ambiguity => false; the caller then falls back to the numeric
 // prepaid_amount >= amount comparison for other (cash/Zelle) methods.
 async function annualPrepayCoversVisit(scheduledService, conn = db) {
@@ -1162,8 +1172,7 @@ async function annualPrepayCoversVisit(scheduledService, conn = db) {
   if (!termId) return false;
   if (!(await annualPrepayTableExists())) return false;
   try {
-    const coverageDate = dateOnly(scheduledService.scheduled_date) || etDateString();
-    const term = await coveredTermsAsOf(conn, coverageDate)
+    const term = await coveredTermsAsOf(conn, null)
       .where('t.id', termId)
       // The stamp must belong to THIS visit's customer — a stale stamp pointing at
       // another customer's live term can't suppress.
@@ -2176,7 +2185,17 @@ async function createTermForAnnualPrepay({
             .andWhere(detachOutOfWindow)
             .update({ annual_prepay_term_id: null, updated_at: new Date() });
         } catch (err) {
-          logger.warn(`[annual-prepay] scheduled service detach skipped: ${err.message}`);
+          // The completion-billing gate (annualPrepayCoversVisit) is
+          // calendar-independent: a stamped visit is covered while its term
+          // stays paid, wherever the visit sits on the calendar. That is only
+          // sound because THIS detach is the one place a window edit strips
+          // stamps from the visits it removed from coverage — a best-effort
+          // log-and-continue here left the shrunken window silently
+          // suppressing billing for those visits. Fail the edit loudly
+          // instead; the operator retries and the detach re-runs. (Partial
+          // failure is billing-safe: the stamp clear runs before the
+          // term-link detach and the gate requires BOTH fields.)
+          throw new Error(`annual prepay window edit for term ${existing.id} could not detach out-of-window visits — edit aborted: ${err.message}`);
         }
       }
     }

@@ -1313,6 +1313,58 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
   });
 });
 
+describe('createTermForAnnualPrepay window edit — out-of-window detach is NOT best-effort', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('a failed stamp detach ABORTS the window edit instead of logging on', async () => {
+    // annualPrepayCoversVisit is calendar-independent (no term window), which
+    // is only sound because a window edit ALWAYS strips the stamps of visits
+    // it pushed out of coverage. Pin: when that detach fails, the edit throws
+    // — a swallowed failure here would leave the shrunken window silently
+    // suppressing completion billing for the removed visits.
+    const EXISTING = {
+      id: 'term-9',
+      customer_id: 'customer-1',
+      source_estimate_id: 'est-9',
+      prepay_invoice_id: null,
+      plan_label: 'WaveGuard Annual Prepay',
+      monthly_rate: 100,
+      prepay_amount: 1200,
+      status: 'active',
+      renewal_decision: null,
+      term_start: '2026-01-10',
+      term_end: '2027-01-10',
+    };
+    const failingStampClear = query();
+    failingStampClear.andWhere = jest.fn(() => failingStampClear);
+    failingStampClear.then = (resolve, reject) => Promise.reject(new Error('deadlock detected')).then(resolve, reject);
+
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: {} }), // annualPrepayColumns
+        query({ first: EXISTING }), // source-estimate existing-term lookup
+        query({}), // the window update itself
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {}, annual_prepay_term_id: {}, prepaid_amount: {}, prepaid_method: {} } }), // scheduledServiceColumns
+        failingStampClear, // out-of-window stamp clear — fails
+      ],
+    });
+
+    await expect(AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-1',
+      sourceEstimateId: 'est-9',
+      termStart: '2026-03-01', // explicit window change → detach must run
+      prepayAmount: 1200,
+    })).rejects.toThrow(/could not detach out-of-window visits/);
+  });
+});
+
 describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics)', () => {
   const { postCreditMovement } = require('../services/customer-credit');
 
