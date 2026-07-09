@@ -153,37 +153,38 @@ async function isSuppressedContact(phone) {
 
 // Is an estimate-followup cadence stage going to fire for this estimate
 // within the next `soonHours`? Mirrors the stage predicates in
-// estimate-follow-up.js checkAll() (flag unset + status + trigger window),
-// widened by the lookahead — if the cadence is about to nudge anyway, the
-// click-followup draft would stack a second touch on top of it.
+// estimate-follow-up.js checkAll() (stamp unclaimed + status + trigger
+// window), widened by the lookahead — if the cadence is about to nudge
+// anyway, the click-followup draft would stack a second touch on top of it.
 function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
   if (!est || est.archived_at) return false;
   if (TERMINAL_STATUSES.has(est.status)) return false;
+  if (!['sent', 'viewed'].includes(est.status)) return false;
   const H = 3600000;
   const nowMs = now.getTime();
   const overlapsSoon = (startMs, endMs) => startMs <= nowMs + soonHours * H && endMs >= nowMs;
-  const flagUnset = (flag) => est[flag] === false || est[flag] == null;
+  const unclaimed = (col) => est[col] == null;
   const ts = (v) => {
     if (!v) return null;
     const t = new Date(v).getTime();
     return Number.isNaN(t) ? null : t;
   };
   const sentAt = ts(est.sent_at);
-  const viewedAt = ts(est.viewed_at);
   const expiresAt = ts(est.expires_at);
 
-  // 1. Unviewed nudge: sent 24–48h ago.
-  if (est.status === 'sent' && !viewedAt && sentAt && flagUnset('followup_unviewed_sent')
-      && overlapsSoon(sentAt + 24 * H, sentAt + 48 * H)) return true;
-  // 2. Viewed-not-accepted: viewed 48–72h ago.
-  if (est.status === 'viewed' && viewedAt && flagUnset('followup_viewed_sent')
-      && overlapsSoon(viewedAt + 48 * H, viewedAt + 72 * H)) return true;
-  // 3. Final nudge: viewed 5–6d ago.
-  if (est.status === 'viewed' && viewedAt && flagUnset('followup_final_sent')
-      && overlapsSoon(viewedAt + 5 * 24 * H, viewedAt + 6 * 24 * H)) return true;
-  // 4. Expiring notice: expires in 1–3d.
-  if (['sent', 'viewed'].includes(est.status) && expiresAt && flagUnset('followup_expiring_sent')
-      && overlapsSoon(expiresAt - 3 * 24 * H, expiresAt - 24 * H)) return true;
+  // 1. Questions opener: sent 48h–5d ago (QUESTIONS_WINDOW). Anchored on
+  //    sent_at whether or not the estimate was viewed — only the copy varies.
+  if (sentAt && unclaimed('followup_questions_sent_at')
+      && overlapsSoon(sentAt + 48 * H, sentAt + 120 * H)) return true;
+  // 2. Day-5 check-in: sent 5–8d ago (CHECKIN_WINDOW); yields when expiry is
+  //    inside 48h (CHECKIN_EXPIRY_YIELD_HOURS — the last-day notice owns
+  //    short-fuse estimates).
+  if (sentAt && unclaimed('followup_credit_sent_at')
+      && expiresAt && expiresAt > nowMs + 48 * H
+      && overlapsSoon(sentAt + 5 * 24 * H, sentAt + 8 * 24 * H)) return true;
+  // 3. Last-day notice: expires within 30h (EXPIRING_HORIZON_HOURS).
+  if (expiresAt && unclaimed('followup_expiring_sent_at')
+      && overlapsSoon(expiresAt - 30 * H, expiresAt)) return true;
   return false;
 }
 
@@ -191,13 +192,13 @@ function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
 // checkDepositAbandoned): fires when the estimate's latest PENDING deposit
 // intent was last touched minAge–maxAge hours ago. Not modelable from the
 // estimate row alone (the anchor lives in estimate_deposits), so it gets its
-// own async check beside the four timestamp stages. Only live while its gate
-// is on — off, that stage only shadow-logs and can't double-touch. Fails
+// own async check beside the three row-predicate stages. Only live while its
+// gate is on — off, that stage only shadow-logs and can't double-touch. Fails
 // toward suppression: an unreadable deposits table holds this attempt.
 async function depositStageDueSoon(est, now = new Date(), soonHours = 24) {
   if (!isEnabled('estimateDepositAbandonmentSms')) return false;
   if (!est || !['sent', 'viewed'].includes(est.status)) return false;
-  if (!(est.followup_deposit_abandoned_sent === false || est.followup_deposit_abandoned_sent == null)) return false;
+  if (est.followup_deposit_abandoned_sent_at != null) return false;
   try {
     const row = await db('estimate_deposits')
       .where({ estimate_id: est.id, status: 'pending' })

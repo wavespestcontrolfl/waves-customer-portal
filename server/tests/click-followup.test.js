@@ -98,10 +98,10 @@ function makeEstimate(overrides = {}) {
     sent_at: new Date(NOW.getTime() - 10 * 24 * H),
     viewed_at: new Date(NOW.getTime() - 9 * 24 * H),
     expires_at: new Date(NOW.getTime() + 15 * 24 * H),
-    followup_unviewed_sent: true,
-    followup_viewed_sent: true,
-    followup_final_sent: true,
-    followup_expiring_sent: true,
+    followup_questions_sent_at: new Date(NOW.getTime() - 7 * 24 * H),
+    followup_credit_sent_at: new Date(NOW.getTime() - 4 * 24 * H),
+    followup_expiring_sent_at: new Date(NOW.getTime() - 24 * H),
+    followup_deposit_abandoned_sent_at: new Date(NOW.getTime() - 24 * H),
     ...overrides,
   };
 }
@@ -422,9 +422,9 @@ describe('runQueue — gate + suppression', () => {
   test('cadence stage due within 24h → dismissed (never stack nudges)', async () => {
     enqueue('short_code_clicks as scc', { rows: [makeClick()] });
     enqueue('estimates', {
-      // viewed 49h ago with the viewed-stage flag unset → stage window
-      // [viewed+48h, viewed+72h] overlaps the next 24h.
-      first: makeEstimate({ viewed_at: new Date(NOW.getTime() - 49 * H), followup_viewed_sent: false }),
+      // sent 50h ago with the questions stamp unclaimed → stage window
+      // [sent+48h, sent+120h] overlaps the next 24h.
+      first: makeEstimate({ sent_at: new Date(NOW.getTime() - 50 * H), followup_questions_sent_at: null }),
     });
     enqueue('click_followup_actions', { insert: [{ id: 'act-1' }] });
 
@@ -499,7 +499,7 @@ describe('runQueue — gate + suppression', () => {
   test('deposit-abandonment stage due (gate on, pending deposit 2-72h old) → dismissed, never stacked', async () => {
     enqueue('short_code_clicks as scc', { rows: [makeClick()] });
     enqueue('estimates', {
-      first: makeEstimate({ status: 'viewed', followup_deposit_abandoned_sent: false }),
+      first: makeEstimate({ status: 'viewed', followup_deposit_abandoned_sent_at: null }),
     });
     enqueue('estimate_deposits', {
       first: { latest_pending_at: new Date(NOW.getTime() - 5 * H) }, // inside the 2-72h window
@@ -518,7 +518,7 @@ describe('runQueue — gate + suppression', () => {
     isEnabled.mockImplementation((key) => key === 'clickFollowup');
     enqueue('short_code_clicks as scc', { rows: [makeClick()] });
     enqueue('estimates', {
-      first: makeEstimate({ status: 'viewed', followup_deposit_abandoned_sent: false }),
+      first: makeEstimate({ status: 'viewed', followup_deposit_abandoned_sent_at: null }),
     });
     enqueueCleanChecks();
 
@@ -691,32 +691,51 @@ describe('runQueue — gate + suppression', () => {
 describe('cadenceStageDueSoon', () => {
   const { cadenceStageDueSoon } = _internals;
 
-  test('unviewed stage inside its 24-48h window → due', () => {
+  test('questions opener inside its 48h-5d send window → due (viewed or not)', () => {
     const est = makeEstimate({
       status: 'sent', viewed_at: null,
-      sent_at: new Date(NOW.getTime() - 25 * H),
-      followup_unviewed_sent: false,
+      sent_at: new Date(NOW.getTime() - 50 * H),
+      followup_questions_sent_at: null,
     });
     expect(cadenceStageDueSoon(est, NOW)).toBe(true);
   });
 
-  test('all stage flags already sent → not due', () => {
+  test('all stage stamps already claimed → not due', () => {
     expect(cadenceStageDueSoon(makeEstimate(), NOW)).toBe(false);
   });
 
-  test('expiring stage: expires in 2 days with flag unset → due', () => {
+  test('check-in: sent 6d ago, expiry far out, stamp unclaimed → due', () => {
     const est = makeEstimate({
-      expires_at: new Date(NOW.getTime() + 2 * 24 * H),
-      followup_expiring_sent: false,
+      sent_at: new Date(NOW.getTime() - 6 * 24 * H),
+      followup_credit_sent_at: null,
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(true);
+  });
+
+  test('check-in yields when expiry is inside its 48h yield window', () => {
+    const est = makeEstimate({
+      sent_at: new Date(NOW.getTime() - 6 * 24 * H),
+      followup_credit_sent_at: null,
+      // Short fuse: the last-day notice owns this estimate (its stamp is
+      // already claimed here, so nothing is due).
+      expires_at: new Date(NOW.getTime() + 36 * H),
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(false);
+  });
+
+  test('expiring: inside the 30h last-day window with stamp unclaimed → due', () => {
+    const est = makeEstimate({
+      expires_at: new Date(NOW.getTime() + 20 * H),
+      followup_expiring_sent_at: null,
     });
     expect(cadenceStageDueSoon(est, NOW)).toBe(true);
   });
 
   test('windows long past → not due', () => {
     const est = makeEstimate({
-      viewed_at: new Date(NOW.getTime() - 20 * 24 * H),
-      followup_viewed_sent: false,
-      followup_final_sent: false,
+      sent_at: new Date(NOW.getTime() - 20 * 24 * H),
+      followup_questions_sent_at: null,
+      followup_credit_sent_at: null,
     });
     expect(cadenceStageDueSoon(est, NOW)).toBe(false);
   });
@@ -887,7 +906,7 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
   test('cadence_due: a stage window overlapping the next 24h', async () => {
     const v = await gate.evaluateClickFollowupGate({
       ...baseInput(),
-      estimate: makeEstimate({ viewed_at: new Date(NOW.getTime() - 49 * H), followup_viewed_sent: false }),
+      estimate: makeEstimate({ sent_at: new Date(NOW.getTime() - 50 * H), followup_questions_sent_at: null }),
     });
     expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
   });
