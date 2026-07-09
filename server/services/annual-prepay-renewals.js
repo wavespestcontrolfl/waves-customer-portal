@@ -1401,6 +1401,25 @@ async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
           .where({ id: termId })
           .whereNull('prior_billing_mode')
           .update({ prior_billing_mode: current.billing_mode || 'none' });
+      } else if (current) {
+        // Already annual_prepay (a renewal or a second manual term) — carry
+        // the ORIGINAL prior forward from the earlier term, or a later
+        // refund of this new term would fall back to the heuristic and
+        // restore the wrong mode (Codex round-8: a manual renewal term has
+        // no source estimate, so a per_application-origin customer would
+        // land on legacy monthly).
+        const prev = await conn('annual_prepay_terms')
+          .where({ customer_id: customerId })
+          .whereNot({ id: termId })
+          .whereNotNull('prior_billing_mode')
+          .orderBy('created_at', 'desc')
+          .first('prior_billing_mode');
+        if (prev?.prior_billing_mode) {
+          await conn('annual_prepay_terms')
+            .where({ id: termId })
+            .whereNull('prior_billing_mode')
+            .update({ prior_billing_mode: prev.prior_billing_mode });
+        }
       }
     }
     await conn('customers')
@@ -1422,15 +1441,17 @@ async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
 async function resetBillingModeAfterTermCancel(term, conn) {
   try {
     if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
-    // Replacement coverage keeps the mode: if ANOTHER live/pending prepay
-    // term exists (e.g. the refunded term was a decided lapse and the
-    // customer already renewed into a new term), the customer is still
-    // genuinely annual-prepay — only reset when nothing remains
-    // (Codex round-6 P1).
+    // Replacement coverage keeps the mode — but only a PAID (genuinely
+    // covering) term counts: a payment_pending replacement is deliberately
+    // NOT stamped (pre-payment completions bill per application/monthly),
+    // so keeping 'annual_prepay' for it would strand the customer in a
+    // nothing-bills limbo — cron skips the mode, completion refuses it,
+    // and the pending invoice may never be paid (Codex round-8 P1). When
+    // the pending term DOES pay, syncTermForInvoicePayment re-stamps.
     const replacement = await conn('annual_prepay_terms')
       .where({ customer_id: term.customer_id })
       .whereNot({ id: term.id })
-      .whereIn('status', [PAYMENT_PENDING_STATUS, ...ACTIVE_STATUSES])
+      .whereIn('status', ACTIVE_STATUSES)
       .first('id');
     if (replacement) return;
     // Restore the EXACT prior mode when the stamp recorded it ('none' =

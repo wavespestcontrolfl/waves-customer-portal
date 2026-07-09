@@ -4462,6 +4462,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
       serviceType: svc.service_type,
       isCallback: svc.is_callback,
+      // inspection_only / customer_declined = no application performed
+      // (mirrors referralVisitPerformed; 'incomplete' returned earlier).
+      visitPerformed: visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined',
     });
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
@@ -7431,6 +7434,7 @@ function shouldAutoInvoiceCompletion({
   autoInvoicePricedVisits,
   serviceType,
   isCallback,
+  visitPerformed = true,
 }) {
   if (recapReviewOnly || alreadyPaid || prepaidCovered || autopayCoversVisit
     || preMintedInvoice || existingCompletionInvoice) {
@@ -7454,7 +7458,12 @@ function shouldAutoInvoiceCompletion({
   // answer first would bill their free visit types the moment a fee/rate
   // gives them a positive invoiceAmount (Codex P1). Tier-less/commercial
   // per-application rows are covered here too.
-  if (perApplicationBilling) return !isCallback && !isAlwaysFreeServiceType(serviceType);
+  // A per-application customer is billed per performed APPLICATION — an
+  // inspection_only or customer_declined outcome performed none, so nothing
+  // is owed (Codex round-8 P1: the fee would otherwise invoice and even
+  // auto-charge the saved method). Same performed-visit rule the referral
+  // credit uses; 'incomplete' never reaches this gate (early return).
+  if (perApplicationBilling) return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
   if (waveguardTier) return true;
   // GATED new path: a priced visit qualifies — but NEVER an always-free type
   // (appointment / estimate / re-service / follow-up) or a callback/re-treat,

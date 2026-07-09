@@ -1178,6 +1178,15 @@ const EstimateConverter = {
     const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
       && Number(customer.monthly_rate) > 0
       && !['per_application', 'annual_prepay'].includes(customer.billing_mode || '');
+    // Pre-migration compatibility (Codex round-8): billing_mode +
+    // per_application_fee ship in migration 20260709000010 — on a database
+    // that hasn't run it (preview env, deploy window) the update keys would
+    // fail the whole acceptance with "column does not exist". One probe
+    // covers both columns (same migration).
+    let billingModeColumnsExist = false;
+    try {
+      billingModeColumnsExist = await database.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy update shape */ }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -1218,10 +1227,12 @@ const EstimateConverter = {
           // re-stamped 'annual_prepay' at their term choke point
           // (createTermForAnnualPrepay), which every prepay path runs through.
           // CURRENT monthly members accepting an add-on keep their existing
-          // model (see preservesExistingMembership above).
-          billing_mode: preservesExistingMembership
-            ? (customer.billing_mode || null)
-            : 'per_application',
+          // model (see preservesExistingMembership above). Column-guarded —
+          // pre-migration accepts keep the legacy update shape.
+          ...(billingModeColumnsExist ? {
+            billing_mode: preservesExistingMembership
+              ? (customer.billing_mode || null)
+              : 'per_application',
           // Exact per-visit charge at the accepted billing cadence (quarterly
           // derives from the exact annual: $98.00, not 3 x rounded-monthly
           // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
@@ -1230,14 +1241,15 @@ const EstimateConverter = {
           // customer-level whole-plan fee would bill the full package on
           // EVERY row's completion (Codex P1). Multi-service plans leave the
           // fee NULL so completion keeps its existing per-row precedence.
-          per_application_fee: preservesExistingMembership
-            ? (customer.per_application_fee ?? null)
-            : ((recurringServicesForConversion.length === 1
-              && billingCadence && Number(billingCadence.amount) > 0)
-              ? Number(billingCadence.amount)
-              : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
-                ? Number(monthlyRate)
-                : null)),
+            per_application_fee: preservesExistingMembership
+              ? (customer.per_application_fee ?? null)
+              : ((recurringServicesForConversion.length === 1
+                && billingCadence && Number(billingCadence.amount) > 0)
+                ? Number(billingCadence.amount)
+                : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+                  ? Number(monthlyRate)
+                  : null)),
+          } : {}),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former

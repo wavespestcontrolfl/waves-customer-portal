@@ -200,3 +200,23 @@ describe('shouldAutoInvoiceCompletion — annual-prepay billing', () => {
     })).toBe(true);
   });
 });
+
+// Per-application bills per performed APPLICATION (Codex round-8 P1): an
+// inspection_only / customer_declined outcome performed none — no invoice,
+// no auto-charge of the saved method.
+describe('shouldAutoInvoiceCompletion — per-application visit outcome', () => {
+  const perApp = { ...base, perApplicationBilling: true, invoiceAmount: 55.3 };
+
+  test('inspection_only / customer_declined outcomes never bill the fee', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: false })).toBe(false);
+  });
+
+  test('a performed visit still bills (default true preserves all other callers)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: true })).toBe(true);
+    expect(shouldAutoInvoiceCompletion(perApp)).toBe(true);
+  });
+
+  test('the explicit scheduler flag still outranks a non-performed outcome (operator intent)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: false, createInvoiceOnComplete: true })).toBe(true);
+  });
+});
