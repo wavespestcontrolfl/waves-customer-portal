@@ -67,6 +67,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -3215,6 +3216,58 @@ const CallRecordingProcessor = {
           extracted.email = null;
           logger.info(`[call-proc-dictation] Demoted unconfirmed dictated email to email_raw for ${maskSid(callSid)}`);
         }
+
+        // ── Quarantine arbiter (dark: CONTACT_QUARANTINE_ARBITER_ENABLED) ──
+        // A quarantined email no longer just sits null awaiting review: a
+        // second agent rules on the candidates using evidence the transcripts
+        // can't provide (DNS deliverability per domain, cross-customer
+        // ownership, business-name coherence). adopt/adopt_with_confirmation
+        // fills extracted.email before the customer/lead upserts and
+        // first-touch sends read it; a decisive adopt also releases the
+        // forced read-back flag below. The module re-checks every hard gate
+        // deterministically (candidate membership, deliverable domain,
+        // ownership) before returning an adoptable verdict — and fails open
+        // to the existing quarantine on any error.
+        if (dictationEmailPayload?.email_candidates?.length && !extracted.email) {
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const arbiter = await arbitrateQuarantinedEmail({
+            entry: contactDictation.emails?.[0] || null,
+            demotedEmail: extracted.email_raw || null,
+            transcripts: { primary: transcription, contactPass: contactPassTranscript },
+            callerContext: {
+              first_name: extracted.first_name || null,
+              last_name: extracted.last_name || null,
+              organization: v2Result?.extraction?.caller?.organization_name || null,
+              call_summary: extracted.call_summary || null,
+            },
+            ownCustomerId,
+          });
+          if (arbiter) {
+            dictationEmailPayload.arbiter = {
+              verdict: arbiter.verdict,
+              chosen_value: arbiter.chosenValue,
+              confidence: arbiter.confidence,
+              reasoning: arbiter.reasoning,
+              eliminated: arbiter.eliminated,
+              domain_evidence: arbiter.domainEvidence,
+              ...(arbiter.confirmationQuestion ? { confirmation_question: arbiter.confirmationQuestion } : {}),
+            };
+            // adopt_with_confirmation ALSO writes — owner ruling (2026-07-09):
+            // a quarantined profile never ships email-less when a candidate
+            // passes every hard gate; the promised first-touch email goes out
+            // and the read-back card stays open for the human confirm. The
+            // gates (candidate membership, deliverable domain, cross-customer
+            // ownership) are enforced deterministically inside the module.
+            if (arbiter.chosenValue && (arbiter.verdict === 'adopt' || arbiter.verdict === 'adopt_with_confirmation')) {
+              extracted.email = arbiter.chosenValue;
+              logger.info(`[quarantine-arbiter] ${arbiter.verdict} email for ${maskSid(callSid)} (confidence ${arbiter.confidence})`);
+            } else {
+              logger.info(`[quarantine-arbiter] review verdict for ${maskSid(callSid)} — quarantine stands`);
+            }
+          }
+        }
       }
     } catch (dictationErr) {
       logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
@@ -3435,7 +3488,11 @@ const CallRecordingProcessor = {
         // silent, which would drop the decoder's candidates/question on the
         // floor — exactly the malformed dictation this pass quarantines.
         // Force a read-back reason so the triage item (with payload) exists.
+        // A decisive arbiter adopt resolved the dictation — the read-back
+        // card would only re-ask a settled question. adopt_with_confirmation
+        // and review verdicts still get the flag (card stays open).
         if (dictationEmailPayload
+            && dictationEmailPayload.arbiter?.verdict !== 'adopt'
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
@@ -3532,7 +3589,10 @@ const CallRecordingProcessor = {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
         // Same decoder-only fallback as the shadow branch: dictation evidence
         // with no extracted email must still open a read-back triage item.
+        // Same arbiter release as the shadow branch: a decisive adopt closed
+        // the question; anything less keeps the read-back card.
         if (dictationEmailPayload
+            && dictationEmailPayload.arbiter?.verdict !== 'adopt'
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
