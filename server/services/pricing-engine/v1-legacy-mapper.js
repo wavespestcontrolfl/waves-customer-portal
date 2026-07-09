@@ -453,9 +453,12 @@ function mapV1ToLegacyShape(v1Result) {
     R.tsMeta = {
       eb: tsLI.bedArea || 0,
       et: tsLI.treeCount || 0,
-      // Anything other than an explicit operator-entered bed area is an
-      // estimate — drives the T&S "FIELD VERIFY" badge in the admin builder.
-      bedAreaIsEstimated: !!tsLI.bedAreaSource && tsLI.bedAreaSource !== 'explicit',
+      // Badge only the pure-heuristic bases (lot density / fallback). The V2
+      // estimator folds an operator-TYPED bed area into estimatedBedAreaSf,
+      // which the adapter marks bedAreaSource:'estimated' — badging that
+      // would make the FIELD VERIFY warning impossible to clear after an
+      // operator override (codex P3).
+      bedAreaIsEstimated: tsLI.bedAreaSource === 'lot_based' || tsLI.bedAreaSource === 'fallback',
     };
   }
 

@@ -241,7 +241,7 @@ describe('v1-legacy-mapper T&S bed-area badge (#12b)', () => {
       services: { treeShrub: {} },
     });
     const ts = estimate.lineItems.find((i) => i.service === 'tree_shrub');
-    expect(['lot_based', 'estimated', 'fallback']).toContain(ts.bedAreaSource);
+    expect(['lot_based', 'fallback']).toContain(ts.bedAreaSource);
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.results.tsMeta.bedAreaIsEstimated).toBe(true);
   });
@@ -255,6 +255,24 @@ describe('v1-legacy-mapper T&S bed-area badge (#12b)', () => {
     });
     const ts = estimate.lineItems.find((i) => i.service === 'tree_shrub');
     expect(ts.bedAreaSource).toBe('explicit');
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.results.tsMeta.bedAreaIsEstimated).toBe(false);
+  });
+
+  test('operator-typed bed area (arrives as estimated via the V2 adapter) does NOT badge', () => {
+    // The V2 estimator folds form.bedArea into estimatedBedAreaSf, which the
+    // adapter marks bedAreaSource:'estimated' — the badge must be clearable
+    // by an operator override (codex P3).
+    const estimate = generateEstimate({
+      homeSqFt: 2000,
+      lotSqFt: 12000,
+      estimatedBedAreaSf: 1500,
+      bedArea: 1500,
+      bedAreaSource: 'estimated',
+      services: { treeShrub: {} },
+    });
+    const ts = estimate.lineItems.find((i) => i.service === 'tree_shrub');
+    expect(ts.bedAreaSource).toBe('estimated');
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.results.tsMeta.bedAreaIsEstimated).toBe(false);
   });
