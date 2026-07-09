@@ -896,6 +896,39 @@ function matchedSlotEntry(customer, phone) {
   return null;
 }
 
+// Disambiguation leg (b): an AV-DECISIVE call address that matches exactly
+// one candidate's mirror address or active property is a deterministic
+// second signal. Shared by the single-match branch (an agent-role slot hit
+// calling about the very property they're stored on must attach, not
+// duplicate the customer — codex round-9 P2) and the multi-match cascade.
+// Returns the owning candidate or null; never throws.
+async function avAddressUniqueOwner(matches, opts) {
+  if (!opts.avDecisive || !opts.callAddress?.address_line1) return null;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const callKey = addressKey(opts.callAddress);
+    if (!callKey) return null;
+    const candidateIds = matches.map((m) => m.id);
+    const props = await db('customer_properties')
+      .whereIn('customer_id', candidateIds)
+      .where({ active: true })
+      .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
+    const owners = new Set();
+    for (const m of matches) {
+      if (addressKey(m) === callKey) owners.add(m.id);
+    }
+    for (const p of props) {
+      if (addressKey(p) === callKey) owners.add(p.customer_id);
+    }
+    if (owners.size !== 1) return null;
+    const ownerId = [...owners][0];
+    return matches.find((m) => m.id === ownerId) || null;
+  } catch (e) {
+    logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
+    return null;
+  }
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -970,6 +1003,13 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     const only = matches[0];
     if (matchedViaPrimary(only)) return only;
     if (slotOnlyLinkAllowed(only, phone, extracted)) return only;
+    // The slot-role gate blocks agent-type roles because a realtor/property
+    // manager calls about MANY properties — but when the AV-decisive call
+    // address matches THIS customer's mirror or active property, the call is
+    // about this account and must attach rather than spawn a duplicate
+    // customer (codex round-9 P2). Same deterministic second signal as
+    // multi-match leg (b).
+    if (await avAddressUniqueOwner(matches, opts)) return only;
     // Anything weaker falls through to the legacy create/lead path exactly
     // as before slot matching existed.
     return null;
@@ -1002,32 +1042,9 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     // (b) AV-validated call address matches exactly one candidate (their
     //     mirror address or one of their active properties). Gated on a
     //     decisive AV verdict so a raw mis-transcribed street can't link.
-    if (opts.avDecisive && opts.callAddress?.address_line1) {
-      try {
-        const { addressKey } = require('./customer-properties');
-        const callKey = addressKey(opts.callAddress);
-        if (callKey) {
-          const candidateIds = matches.map((m) => m.id);
-          const props = await db('customer_properties')
-            .whereIn('customer_id', candidateIds)
-            .where({ active: true })
-            .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
-          const owners = new Set();
-          for (const m of matches) {
-            if (addressKey(m) === callKey) owners.add(m.id);
-          }
-          for (const p of props) {
-            if (addressKey(p) === callKey) owners.add(p.customer_id);
-          }
-          if (owners.size === 1) {
-            const ownerId = [...owners][0];
-            const owner = matches.find((m) => m.id === ownerId);
-            if (owner) return owner;
-          }
-        }
-      } catch (e) {
-        logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
-      }
+    {
+      const owner = await avAddressUniqueOwner(matches, opts);
+      if (owner) return owner;
     }
     // (c) All candidates share one address key — a household sharing a line;
     //     any of them is the household, most-recently-active wins.

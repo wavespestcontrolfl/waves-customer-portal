@@ -29,13 +29,17 @@ async function safeBuild(label, fn) {
 async function loadServiceRecordForDynamicContext(recordId, knex = db) {
   const customerCols = await knex('customers').columnInfo().catch(() => ({}));
   const customerSelect = [
-    'customers.zip',
+    // Pest-pressure context keys off the VISIT's location: the stamped
+    // service ZIP when present (a rental in another town has that town's
+    // pest pressure), the customer mirror otherwise (codex round-9 P2 class).
+    knex.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
     customerCols.county ? 'customers.county' : null,
     customerCols.timezone ? 'customers.timezone' : null,
   ].filter(Boolean);
   return knex('service_records')
     .where({ 'service_records.id': recordId })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .select(
       'service_records.*',
       ...customerSelect,

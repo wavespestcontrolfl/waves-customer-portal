@@ -68,6 +68,9 @@ function makeKnex(service) {
     return query;
   });
   knex.updates = updates;
+  // loadServiceRecordForPdf selects knex.raw(...) stamped-address
+  // expressions — mirror knex's raw so building the select can't throw.
+  knex.raw = (sql) => ({ toString: () => sql });
   return knex;
 }
 

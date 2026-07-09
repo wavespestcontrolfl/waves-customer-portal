@@ -1,4 +1,10 @@
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const mock = jest.fn();
+  // loadServiceRecord selects db.raw(...) stamped-address expressions —
+  // mirror knex's raw so building the select can't throw.
+  mock.raw = (sql) => ({ toString: () => sql });
+  return mock;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),

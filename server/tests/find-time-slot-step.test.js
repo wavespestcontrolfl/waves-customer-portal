@@ -59,3 +59,19 @@ test('earliestStartMin default (0) is a no-op — identical legacy behavior', as
   const { slots } = await findAvailableSlots(BASE);
   expect(slots[0].start_time).toBe('08:01');
 });
+
+test('a coordless stop (divergent stamped rental) degrades to zero drive, not hidden gaps (round-9 P2)', async () => {
+  const stop = {
+    id: 's1', scheduled_date: '2026-09-01', technician_id: 't1',
+    window_start: '10:00', window_end: '11:00', service_type: 'pest',
+    estimated_duration_minutes: 60,
+    svc_lat: null, svc_lng: null, cust_lat: null, cust_lng: null,
+    first_name: 'Rental', last_name: 'Stop', city: 'Venice',
+  };
+  db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([stop])));
+  const { slots } = await findAvailableSlots(BASE);
+  const starts = slots.map((s) => s.start_time);
+  // Both gaps around the coordless stop must still offer slots.
+  expect(starts.some((t) => t < '10:00')).toBe(true);
+  expect(starts.some((t) => t >= '11:00')).toBe(true);
+});

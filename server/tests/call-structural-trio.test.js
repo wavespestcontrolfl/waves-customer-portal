@@ -281,6 +281,30 @@ describe('findCustomerForCallContact cascade', () => {
     expect(out.candidates[0].id).toBe('a');
   });
 
+  test('agent-role single slot match + AV-decisive address for that property → attaches (round-9 P2)', async () => {
+    const landlord = {
+      id: 'landlord', first_name: 'Pat', phone: '+19415559999',
+      service_contact_phone: PHONE, service_contact_name: 'Maria Lopez',
+      service_contact_role: 'real_estate_agent',
+      address_line1: '1 Elm St', city: 'Venice', zip: '34285',
+    };
+    // The realtor calls about the very property they're stored on: the
+    // AV-decisive address is the deterministic second signal that lets the
+    // slot hit attach instead of duplicating the customer.
+    mockDbQueue({
+      customers: [[landlord]],
+      customer_properties: [[{ customer_id: 'landlord', address_line1: '456 Pine Ave', address_line2: null, city: 'Venice', zip: '34285' }]],
+    });
+    const result = await findCustomerForCallContact(PHONE, {}, {
+      avDecisive: true,
+      callAddress: { address_line1: '456 Pine Ave', address_line2: null, city: 'Venice', zip: '34285' },
+    });
+    expect(result?.id).toBe('landlord');
+    // Without the AV signal, the agent role still never links.
+    mockDbQueue({ customers: [[landlord]] });
+    expect(await findCustomerForCallContact(PHONE, {})).toBeNull();
+  });
+
   test('AV-address leg: decisive verdict + one property owner → linked', async () => {
     const a = { id: 'a', first_name: 'Mary', phone: PHONE, address_line1: '1 Elm St', city: 'Venice', zip: '34285' };
     const b = { id: 'b', first_name: 'Sue', phone: PHONE, address_line1: '9 Ash Ct', city: 'Nokomis', zip: '34275' };

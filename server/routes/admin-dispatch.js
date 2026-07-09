@@ -1100,6 +1100,11 @@ router.get('/:serviceId/completion-profile', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// SQL NULL must reach buildPropertyMapPayload as NaN, not Number(null)=0 —
+// 0 is finite, so a coordless row would render an "available" map centered
+// at 0,0 instead of the missing_coordinates state (codex round-9 P2).
+const coordOrNaN = (v) => (v == null ? NaN : Number(v));
+
 // Satellite basemap + the customer's existing zones for the zone-marking
 // surfaces (completion-flow capture step and the office desk-backfill flow).
 // The image params (center / zoom / 640x340) are built through the SAME
@@ -1198,7 +1203,9 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
       )
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
-    return res.json(await buildPropertyMapPayload(svc.customer_id, Number(svc.latitude), Number(svc.longitude)));
+    // Number(null) is 0 — a finite value that would sail past the payload's
+    // missing_coordinates check and center the map at 0,0 (codex round-9 P2).
+    return res.json(await buildPropertyMapPayload(svc.customer_id, coordOrNaN(svc.latitude), coordOrNaN(svc.longitude)));
   } catch (err) { next(err); }
 });
 
@@ -1212,7 +1219,8 @@ router.get('/customers/:customerId/property-map', requireAdmin, async (req, res,
       .select('id', 'latitude', 'longitude')
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    return res.json(await buildPropertyMapPayload(customer.id, Number(customer.latitude), Number(customer.longitude)));
+    // Same Number(null)=0 trap as the service-scoped handler above.
+    return res.json(await buildPropertyMapPayload(customer.id, coordOrNaN(customer.latitude), coordOrNaN(customer.longitude)));
   } catch (err) { next(err); }
 });
 

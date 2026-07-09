@@ -231,7 +231,11 @@ async function findAvailableSlots(opts) {
 
         if (earliestEnd > latestEnd) continue; // doesn't fit
         if (earliestEnd > dayClose) continue;  // past end of day
-        if (!prev.lat || !next.lat) continue;  // missing coords — skip
+        // A coordless anchor (ungeocoded stop, or a divergent stamped rental
+        // whose primary-coord fallback the SELECT suppressed) degrades to
+        // zero drive time via driveMin() rather than hiding the gaps on
+        // either side of it — skipping here starved otherwise-valid slots
+        // around every coordless stop (codex round-9 P2).
 
         // Day delay penalty — prefer sooner days (0.5 min/day)
         const daysOut = Math.max(0, (new Date(date + 'T12:00:00') - new Date(dateFrom + 'T12:00:00')) / (1000 * 60 * 60 * 24));

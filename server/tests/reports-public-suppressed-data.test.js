@@ -8,6 +8,9 @@
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
+  // The /data loader selects db.raw(...) stamped-address expressions —
+  // mirror knex's raw so building the select can't throw.
+  mock.raw = (sql) => ({ toString: () => sql });
   return mock;
 });
 jest.mock('../config', () => ({

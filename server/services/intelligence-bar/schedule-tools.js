@@ -11,6 +11,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { stampedDivergesSql } = require('../stamped-address');
 
 const SCHEDULE_TOOLS = [
   {
@@ -196,8 +197,12 @@ async function optimizeAllRoutes(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
-      db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-      db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+      // Primary-home coords only stand in when the visit's stamped address
+      // doesn't DIVERGE from the primary — a divergent stamped rental with
+      // no coords drops from the optimize set (stopsWithCoords filter)
+      // instead of being modeled at the wrong house (codex round-9 P1).
+      db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+      db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
     );
 
   if (!services.length) return { message: 'No services found for this date', date };
@@ -273,8 +278,9 @@ async function optimizeTechRoute(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.city',
-      db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-      db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+      // Same divergence guard as optimize_all_routes (codex round-9 P1).
+      db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+      db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
     );
 
   if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
