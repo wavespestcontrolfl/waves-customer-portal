@@ -1177,6 +1177,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // settle their open invoices as coverage / credit back their slice.
       // Idempotent, so retried webhooks and later syncs are safe.
       await reconcilePendingWindowCompletions(refreshed || current, conn);
+      // Payment confirmed → the customer is now genuinely annual-prepay.
+      // Term creation deliberately does NOT stamp payment_pending terms
+      // (pre-payment completions bill per application), so this transition
+      // is where the pending case picks up its stamp. Idempotent re-stamp
+      // for already-active terms; best-effort + column-guarded inside.
+      await stampAnnualPrepayBillingMode(current.customer_id, conn);
       results.push(refreshed || current);
     } else {
       results.push(current);
@@ -1360,10 +1366,13 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
 // suppressor: the monthly cron keeps trusting its coverage-dated term
 // guards, so a later term cancel/refund returns the customer to normal
 // billing without this stamp needing cleanup. The estimate converter stamps
-// every recurring accept 'per_application'; the term choke point here
+// every recurring accept 'per_application'; the term choke point
 // (portal accept, prepay-on-book, Customer 360 record-prepay all run through
-// it) re-stamps the prepay ones. Best-effort + column-guarded: term creation
-// must never fail on this stamp.
+// createTermForAnnualPrepay) re-stamps the prepay ones — but ONLY once the
+// term is ACTIVE (paid). payment_pending terms stay 'per_application' so
+// pre-payment completions keep billing per application; the payment sync
+// stamps on the pending→active transition. Best-effort + column-guarded:
+// term creation must never fail on this stamp.
 async function stampAnnualPrepayBillingMode(customerId, conn) {
   try {
     if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
@@ -1566,8 +1575,14 @@ async function createTermForAnnualPrepay({
       // caller trx); idempotent, so terms that DID arrive through the
       // payment sync are unaffected.
       await reconcileBornPaidTerm(refreshed, conn);
+      // Stamp only once the term is genuinely ACTIVE (paid). A
+      // payment_pending term must leave the customer 'per_application':
+      // pending-window completions bill per application until the annual
+      // invoice is paid, and the annual_prepay stamp would divert them to
+      // the monthly-membership dispatch path (Codex round-2). The payment
+      // sync (syncTermForInvoicePayment) stamps on pending→active.
+      await stampAnnualPrepayBillingMode(customerId, conn);
     }
-    await stampAnnualPrepayBillingMode(customerId, conn);
     return refreshed;
   }
 
@@ -1603,8 +1618,11 @@ async function createTermForAnnualPrepay({
     // it here (post-commit when inside a caller trx) or its pending-window
     // completed visits stay double-billed.
     await reconcileBornPaidTerm(refreshed, conn);
+    // ACTIVE (born-paid) only — a payment_pending term keeps the customer
+    // 'per_application' so pre-payment completions bill per application; the
+    // payment sync stamps when the invoice pays (Codex round-2).
+    await stampAnnualPrepayBillingMode(customerId, conn);
   }
-  await stampAnnualPrepayBillingMode(customerId, conn);
   return refreshed;
 }
 

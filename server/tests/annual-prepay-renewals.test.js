@@ -1445,3 +1445,136 @@ describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
 });
+
+// billing_mode stamp timing (Codex round-2): the annual_prepay stamp must
+// only land once the term is genuinely ACTIVE (paid). A payment_pending term
+// keeps the customer 'per_application' so pre-payment completions bill per
+// application; the payment sync stamps on the pending→active transition.
+describe('annual_prepay billing_mode stamp timing', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = {
+      hasTable: jest.fn().mockResolvedValue(true),
+      hasColumn: jest.fn().mockResolvedValue(true),
+    };
+    _private.resetCachesForTests();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('a term born payment_pending does NOT stamp billing_mode (customer stays per_application until paid)', async () => {
+    const PENDING = {
+      id: 'term-p',
+      customer_id: 'customer-1',
+      status: 'payment_pending',
+      prepay_amount: 400,
+      term_start: '2026-07-09',
+      term_end: '2027-07-09',
+    };
+    setDbQueues({
+      invoices: [
+        query({ first: { id: 'inv-pre', status: 'sent', paid_at: null } }), // statusForPrepayInvoice → unpaid
+        query({ columnInfo: {} }), // syncInvoiceTerm column probe (no term column → no-op)
+      ],
+      annual_prepay_terms: [
+        query({ columnInfo: {} }), // annualPrepayColumns
+        query({ first: undefined }), // existing-term lookup (by invoice/estimate)
+        query({ first: undefined }), // existing-term lookup (customer + window)
+        query({ returning: [PENDING] }), // insert
+        query({ first: PENDING }), // refreshTermSnapshot term read
+        query({ returning: [PENDING] }), // refreshTermSnapshot snapshot update
+      ],
+      scheduled_services: [
+        query({ first: undefined }), // findLastScheduledServiceForTerm
+      ],
+      // NO customers queue: any customers access (renewal-date sync or the
+      // billing_mode stamp) would throw and fail the test.
+    });
+
+    const created = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-1',
+      prepayInvoiceId: 'inv-pre',
+      termStart: '2026-07-09',
+      prepayAmount: 400,
+    });
+
+    expect(created).toEqual(PENDING);
+    expect(db.schema.hasColumn).not.toHaveBeenCalled(); // stamp never ran
+  });
+
+  test('a term born ACTIVE stamps billing_mode annual_prepay at creation', async () => {
+    const ACTIVE = {
+      id: 'term-a',
+      customer_id: 'customer-1',
+      status: 'active',
+      prepay_amount: null,
+      term_start: '2026-07-09',
+      term_end: '2027-07-09',
+    };
+    const stampQ = query({});
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: {} }), // annualPrepayColumns
+        query({ first: undefined }), // existing-term lookup
+        query({ returning: [ACTIVE] }), // insert
+        query({ first: ACTIVE }), // refreshTermSnapshot term read
+        query({ returning: [ACTIVE] }), // refreshTermSnapshot snapshot update
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {}, service_type: {} } }), // scheduledServiceColumns (attach no-ops)
+        query({ first: undefined }), // findLastScheduledServiceForTerm
+      ],
+      customers: [
+        query({ columnInfo: {} }), // syncCustomerRenewalDate probe (no renewal column)
+        stampQ, // billing_mode stamp update
+      ],
+    });
+
+    const created = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-1',
+      termStart: '2026-07-09',
+    });
+
+    expect(created).toEqual(ACTIVE);
+    expect(stampQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: 'annual_prepay' }),
+    );
+  });
+
+  test('syncTermForInvoicePayment stamps billing_mode on the pending→active transition', async () => {
+    const PENDING = {
+      id: 'term-s',
+      customer_id: 'customer-1',
+      status: 'payment_pending',
+      prepay_amount: null,
+      term_start: '2026-07-09',
+      term_end: '2027-07-09',
+    };
+    const ACTIVE = { ...PENDING, status: 'active' };
+    const stampQ = query({});
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [PENDING] }), // terms select for the paid invoice
+        query({ returning: [ACTIVE] }), // pending→active transition update
+        query({ returning: [ACTIVE] }), // refreshTermSnapshot snapshot update
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {}, service_type: {} } }), // scheduledServiceColumns
+        query({ first: undefined }), // findLastScheduledServiceForTerm
+      ],
+      customers: [
+        query({ columnInfo: {} }), // syncCustomerRenewalDate probe
+        stampQ, // billing_mode stamp update
+      ],
+    });
+
+    const results = await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-paid', status: 'paid', paid_at: '2026-07-09' },
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe('active');
+    expect(stampQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: 'annual_prepay' }),
+    );
+  });
+});

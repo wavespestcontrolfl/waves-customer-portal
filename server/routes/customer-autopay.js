@@ -103,10 +103,21 @@ router.get('/', async (req, res, next) => {
       .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
     const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
     const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
+    // Per-application customers pay per completed visit — their autopay card
+    // is HOW each visit charge collects, not a monthly subscription, and the
+    // monthly cron skips them (GUARD 3b). Never project a monthly next-charge
+    // from monthly_rate for them (Codex round-2): it advertises a charge that
+    // will never run. Column-guarded read — pre-migration keeps legacy shape.
+    let billingMode = null;
+    try {
+      const modeRow = await db('customers').where({ id: req.customerId }).first('billing_mode');
+      billingMode = modeRow?.billing_mode || null;
+    } catch { /* billing_mode column absent pre-migration */ }
+    const perApplicationBilling = billingMode === 'per_application';
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;
-    const nextCharge = customerAutopayEnabled
+    const nextCharge = customerAutopayEnabled && !perApplicationBilling
       ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: autopayFunding })
       : null;
 
@@ -123,7 +134,8 @@ router.get('/', async (req, res, next) => {
       pause_reason: customer.autopay_pause_reason,
       autopay_payment_method_id: hasAutopayMethod ? chargeableAutopayMethod.id : null,
       billing_day: customer.billing_day || 1,
-      next_charge_date: customer.next_charge_date,
+      billing_mode: billingMode,
+      next_charge_date: perApplicationBilling ? null : customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,
       next_charge_surcharge_amount: nextCharge?.surcharge ?? null,

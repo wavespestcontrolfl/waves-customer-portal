@@ -1187,10 +1187,31 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           .first('billing_mode');
         enrollAutopay = ['per_application', 'annual_prepay'].includes(custRow?.billing_mode);
       } catch (modeErr) { /* billing_mode column absent — keep false */ }
-      const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
-        enableAutopay: enrollAutopay,
-        makeDefault: !currentAutopayMethod,
-      });
+      let saved = existing;
+      if (!saved) {
+        saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+          enableAutopay: enrollAutopay,
+          makeDefault: !currentAutopayMethod,
+        });
+      } else if (enrollAutopay && !currentAutopayMethod && existing.customer_id === wavesCustomerId) {
+        // The pm was already on file (saved card-on-file before this signup,
+        // or a duplicate webhook) — the short-circuit skips savePaymentMethod,
+        // so enroll here or the signup's autopay consent is silently dropped
+        // and completion collection (getChargeableAutopayMethod: is_default
+        // AND autopay_enabled) never finds a card (Codex round-2). Same
+        // semantics as the fresh-save path: only claim default when no
+        // chargeable autopay method exists; an existing one stays in charge.
+        // Ownership guard: `existing` is looked up by pm id alone.
+        await db('payment_methods')
+          .where({ customer_id: wavesCustomerId })
+          .whereNot({ id: existing.id })
+          .update({ is_default: false });
+        await db('payment_methods')
+          .where({ id: existing.id })
+          .update({ autopay_enabled: true, is_default: true });
+        saved = { ...existing, autopay_enabled: true, is_default: true };
+        logger.info(`[stripe-webhook] Autopay enrolled on existing pm ${stripePmId} for customer ${wavesCustomerId} (estimate-flow signup)`);
+      }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({

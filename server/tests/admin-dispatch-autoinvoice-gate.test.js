@@ -125,3 +125,44 @@ describe('shouldAutoInvoiceCompletion — per-application billing', () => {
     expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount: 0 })).toBe(false);
   });
 });
+
+// Completion invoice amount precedence: explicit visit price → per-app fee →
+// (legacy only) monthly_rate. A per-application customer must NEVER fall back
+// to monthly_rate: a multi-service accept intentionally leaves the fee and
+// row prices NULL, and monthly_rate is the whole-plan amount — the fallback
+// would bill the full package on every service row (Codex round-2 P1).
+describe('completionInvoiceAmount', () => {
+  const { completionInvoiceAmount } = require('../routes/admin-dispatch')._test;
+  const base = {
+    estimatedPrice: null,
+    isCallback: false,
+    perApplicationBilling: false,
+    perApplicationFee: null,
+    monthlyRate: null,
+  };
+
+  test('explicit visit price wins for everyone', () => {
+    expect(completionInvoiceAmount({ ...base, estimatedPrice: '129.00', monthlyRate: 55 })).toBe(129);
+    expect(completionInvoiceAmount({ ...base, estimatedPrice: 89, perApplicationBilling: true, perApplicationFee: 55.3 })).toBe(89);
+  });
+
+  test('per-application: acceptance fee when no explicit price', () => {
+    expect(completionInvoiceAmount({ ...base, perApplicationBilling: true, perApplicationFee: '55.30', monthlyRate: 55.3 })).toBe(55.3);
+  });
+
+  test('per-application multi-service (no fee, no row price) returns 0 — NEVER the whole-plan monthly_rate (Codex round-2 P1)', () => {
+    expect(completionInvoiceAmount({ ...base, perApplicationBilling: true, perApplicationFee: null, monthlyRate: 145 })).toBe(0);
+  });
+
+  test('per-application callback is $0 even with a fee on file', () => {
+    expect(completionInvoiceAmount({ ...base, perApplicationBilling: true, perApplicationFee: 55.3, isCallback: true })).toBe(0);
+  });
+
+  test('legacy customers keep the monthly_rate fallback (WaveGuard membership flows)', () => {
+    expect(completionInvoiceAmount({ ...base, monthlyRate: '49.00' })).toBe(49);
+  });
+
+  test('legacy callback never falls back to monthly_rate', () => {
+    expect(completionInvoiceAmount({ ...base, monthlyRate: 49, isCallback: true })).toBe(0);
+  });
+});

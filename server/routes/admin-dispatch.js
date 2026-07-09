@@ -4280,13 +4280,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // no-charge re-service would bill a full month's dues. Honour an explicit
     // positive price if the operator set one; otherwise the visit is $0.
     // Per-application precedence: explicit visit price → acceptance fee →
-    // legacy monthly_rate fallback (a per-application customer with no fee on
-    // file, e.g. classified before the fee backfill).
-    const invoiceAmount = hasVisitPrice
-      ? Number(svc.estimated_price)
-      : (perApplicationBilling && !svc.is_callback && Number(svc.cust_per_application_fee) > 0)
-        ? Number(svc.cust_per_application_fee)
-        : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    // nothing (never monthly_rate — see completionInvoiceAmount).
+    const invoiceAmount = completionInvoiceAmount({
+      estimatedPrice: svc.estimated_price,
+      isCallback: svc.is_callback,
+      perApplicationBilling,
+      perApplicationFee: svc.cust_per_application_fee,
+      monthlyRate: svc.cust_monthly_rate,
+    });
+    // A billable per-application visit with no amount on file (multi-service
+    // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
+    // it loudly so the visit gets billed manually instead of leaking.
+    if (perApplicationBilling && !(invoiceAmount > 0)
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      logger.warn(`[dispatch] per-application visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (no visit price, no per_application_fee — multi-service plan?) — invoice manually`);
+    }
     // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
     // so the service customer's autopay/prepay must neither suppress the AP
     // invoice (autopayCoversVisit / prepaidCovered) nor be credited against it
@@ -7317,6 +7325,31 @@ function shouldCaptureApplicationConditions({
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 
+// Completion invoice amount precedence (extracted for unit testing).
+// Per-application customers bill the explicit visit price, else the
+// acceptance-stamped per_application_fee — NEVER the customer-level
+// monthly_rate: a multi-service accept intentionally leaves both the fee and
+// each row's estimated_price NULL (whole-plan fee on every row = overbill),
+// and monthly_rate IS that same whole-plan number, so falling back to it
+// re-opens the identical overbilling on every row (Codex round-2 P1). A
+// per-application row with no amount returns 0, the auto-invoice gate
+// declines it, and the visit is billed manually. Legacy (non-per-app) rows
+// keep the monthly_rate fallback the WaveGuard-membership flows depend on.
+function completionInvoiceAmount({
+  estimatedPrice,
+  isCallback,
+  perApplicationBilling,
+  perApplicationFee,
+  monthlyRate,
+}) {
+  if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
+  if (isCallback) return 0;
+  if (perApplicationBilling) {
+    return Number(perApplicationFee) > 0 ? Number(perApplicationFee) : 0;
+  }
+  return monthlyRate && Number(monthlyRate) > 0 ? Number(monthlyRate) : 0;
+}
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -7510,5 +7543,6 @@ module.exports._test = {
   internalOnlyProductsBlockPayload,
   serviceReportEmailEligible,
   shouldAutoInvoiceCompletion,
+  completionInvoiceAmount,
   shouldCaptureApplicationConditions,
 };
