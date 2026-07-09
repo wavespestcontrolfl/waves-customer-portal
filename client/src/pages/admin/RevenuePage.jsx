@@ -209,7 +209,7 @@ function AdAttributionSection({ period }) {
 
   const sourceIcons = {
     "Google Ads": "",
-    "Google LSA": "️",
+    "Google LSA": "",
     Organic: "",
     Referral: "",
     "Domain Sites": "",

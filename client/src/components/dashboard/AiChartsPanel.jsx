@@ -384,7 +384,7 @@ export default function AiChartsPanel() {
             <div className="text-13 font-medium text-ink-primary">{preview.spec.title}</div>
             <div className="flex gap-2">
               <button type="button" onClick={onPin} disabled={pinning} className="text-12 text-ink-secondary hover:text-ink-primary u-focus-ring">
-                {pinning ? "Pinning…" : "📌 Pin"}
+                {pinning ? "Pinning…" : "Pin"}
               </button>
               <button type="button" onClick={() => setPreview(null)} className="text-12 text-ink-tertiary hover:text-ink-secondary u-focus-ring">Discard</button>
             </div>

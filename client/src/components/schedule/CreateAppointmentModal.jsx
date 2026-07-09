@@ -2112,7 +2112,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 }}
                 title="Rank the best slots by drive-time detour"
               >
-                ✨ {findingTimes ? 'Finding...' : 'Find best times'}
+                {findingTimes ? 'Finding...' : 'Find best times'}
               </button>
             )}
           </div>

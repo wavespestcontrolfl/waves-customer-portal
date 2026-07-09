@@ -261,7 +261,7 @@ export default function BillingRecoveryPage() {
                   </TBody>
                 </Table>
               ) : (
-                <div className="text-13 text-zinc-500 py-6 text-center">No uninvoiced visits in this window. 🎉</div>
+                <div className="text-13 text-zinc-500 py-6 text-center">No uninvoiced visits in this window.</div>
               )}
             </CardBody>
           </Card>
@@ -350,7 +350,7 @@ export default function BillingRecoveryPage() {
                 </Table>
               ) : (
                 <div className="text-13 text-zinc-500 py-4 text-center">
-                  {atRiskMrr ? "Every recurring account is clear to bill. 🎉" : "At-risk accounts couldn't be loaded — refresh to retry."}
+                  {atRiskMrr ? "Every recurring account is clear to bill." : "At-risk accounts couldn't be loaded — refresh to retry."}
                 </div>
               )}
             </CardBody>

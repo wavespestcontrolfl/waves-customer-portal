@@ -205,8 +205,8 @@ export default function MobileNewCustomerSheet({
             style={{ height: 56, paddingLeft: 14, paddingRight: 14 }}
           >
             {" "}
-            <span style={{ fontSize: 22, lineHeight: 1 }} aria-hidden="true">
-              🇺🇸
+            <span className="text-zinc-500" style={{ fontSize: 15, lineHeight: 1 }}>
+              +1
             </span>{" "}
             <span className="text-zinc-400" style={{ fontSize: 15 }}>
               ▾
@@ -249,9 +249,6 @@ export default function MobileNewCustomerSheet({
             style={{ height: 64, paddingLeft: 14, paddingRight: 14 }}
           >
             {" "}
-            <span style={{ fontSize: 22, lineHeight: 1 }} aria-hidden="true">
-              🇺🇸
-            </span>{" "}
             <div className="flex-1 min-w-0" style={{ lineHeight: 1.2 }}>
               {" "}
               <div
