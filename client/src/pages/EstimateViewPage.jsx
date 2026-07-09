@@ -34,8 +34,6 @@ import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
 import CustomerReviews from '../components/estimate/CustomerReviews';
-import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
-import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
@@ -447,10 +445,11 @@ function Page({ children }) {
       <EstimateGlassTheme active />
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
-      {/* Bottom padding: enough that the floating book bar doesn't sit on
-          the last card, without the old 110px dead zone above the footer
-          (owner 2026-07-07: "leave a smaller gap"). */}
-      <div style={{ flex: 1, padding: '32px 20px 48px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Bottom padding: minimal — the pre-footer newsletter card is the
+          buffer under the last content card now (owner 2026-07-09: "close
+          the gap"), and it also gives the floating book bar something
+          non-critical to overlap at full scroll. */}
+      <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
       {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
@@ -2431,8 +2430,8 @@ export function ServiceSection({
                   'bundle' key, slug null) keeps the generic wording (codex
                   rd3). */}
               {sectionSlug === 'pest_control'
-                ? 'Pest Protection by Waves — ride the wave that fits your home.'
-                : 'Same protection — pick the rhythm that fits your home.'}
+                ? 'Pest Protection by Waves — ride the wave that fits your home'
+                : 'Same protection — pick the rhythm that fits your home'}
             </h2>
             <GlassFrequencyPills
               frequencies={frequencies}
@@ -3306,7 +3305,7 @@ export default function EstimateViewPage() {
   // read-only recap on an accepted estimate, so reopening an accepted link
   // still shows the services + pricing the customer booked (legacy parity).
   // `readOnly` disables every selector (incl. the add-on toggles) and drops
-  // booking-only extras (app-showcase upsell, one-time add-on pickers).
+  // booking-only extras (one-time add-on pickers).
   // `modeOverride` pins the recap to the mode actually accepted — the live
   // `serviceMode` can derive 'recurring' for a one-time acceptance on a mixed
   // estimate, so the accepted recap passes `acceptedServiceMode`.
@@ -3507,8 +3506,6 @@ export default function EstimateViewPage() {
           appointmentServiceType={cta.terminalState === 'accepted' ? existingAppointment?.serviceType || null : null}
         />
         {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
-        <AppShowcaseCard />
-        <ReportShowcaseCard />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -3573,8 +3570,6 @@ export default function EstimateViewPage() {
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
-        <AppShowcaseCard />
-        <ReportShowcaseCard />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -3800,12 +3795,7 @@ export default function EstimateViewPage() {
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
                   : null}
               />
-              {/* GBP proof directly after the review quotes; the report
-                  showcase directly after the app card it extends. This
-                  branch's approved reviews-before-app order is preserved. */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
-              <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <ReportShowcaseCard />
               {/* GBP proof directly above Ask Waves (owner 2026-07-06). */}
               <GoogleProfilesCard />
               <EstimateAskBar
@@ -3831,8 +3821,6 @@ export default function EstimateViewPage() {
           tail above, so only the contact hatch + guarantee remain here. */}
       {glassContent && !(ctaPhase === 'review' && reservation) ? null : (
         <>
-          <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
-          <ReportShowcaseCard />
           <CustomerReviews />
           <GoogleProfilesCard />
         </>
