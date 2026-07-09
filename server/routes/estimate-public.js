@@ -7799,6 +7799,35 @@ router.put('/:token/accept', async (req, res, next) => {
         if (!customerId) {
           throw estimateAcceptError('annual prepay acceptance requires a customer record before creating the prepay invoice');
         }
+        // ATOMIC overlap guard (money-path audit P1): every ADMIN term-creation
+        // surface asserts no overlapping term under the per-customer advisory
+        // lock — this customer-facing accept was the one unguarded lane. The
+        // converter's own dedupe only matches an exact-window term, so an
+        // overlapping accept (e.g. an unlinked re-quote whose accept-time phone
+        // match links back to an existing prepay customer) minted a SECOND
+        // active term + a second auto-delivered full-year invoice, while
+        // term-agnostic coverage selection silently shorted the new term's
+        // visits. Same lock + assertion as estimate-manual-acceptance, inside
+        // this accept transaction; termStart = today is conservative (any
+        // active term still running today overlaps a term minted now).
+        const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
+        try {
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx,
+            customerId,
+            etDateString(),
+            false,
+            'Customer already has an annual prepay term through',
+          );
+        } catch (overlapErr) {
+          if (overlapErr && overlapErr.annualPrepayOverlap) {
+            throw estimateAcceptError(
+              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+              409,
+            );
+          }
+          throw overlapErr;
+        }
         const EstimateConverter = require('../services/estimate-converter');
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
