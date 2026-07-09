@@ -285,6 +285,7 @@
           "enum": [
             "pest_general", "termite", "rodent", "mosquito",
             "stinging_insect", "lawn_care", "palm_injection",
+            "bed_bug", "wdo",
             "exclusion", "inspection_only", "bundled_waveguard", "other"
           ]
         },
@@ -295,6 +296,7 @@
             "enum": [
               "pest_general", "termite", "rodent", "mosquito",
               "stinging_insect", "lawn_care", "palm_injection",
+              "bed_bug", "wdo",
               "exclusion", "inspection_only", "bundled_waveguard", "other"
             ]
           }
@@ -325,7 +327,8 @@
                   "silverfish", "earwigs", "millipedes", "centipedes",
                   "chinch_bugs", "sod_webworms", "armyworms", "mole_crickets", "grubs", "fire_ants_lawn",
                   "palm_weevils", "scale_insects", "whiteflies",
-                  "iguanas", "snakes", "other_wildlife",
+                  "iguanas", "snakes", "moles", "bats", "other_wildlife",
+                  "no_see_ums", "flies_gnats", "scorpions", "love_bugs",
                   "unspecified", "other"
                 ]
               },
@@ -334,6 +337,7 @@
                 "type": "string",
                 "enum": [
                   "sighting_single", "sighting_multiple", "active_infestation",
+                  "swarmers_seen",
                   "structural_damage_visible", "lawn_damage_visible",
                   "person_stung_or_bitten", "unknown"
                 ]
@@ -413,7 +417,7 @@
         "confirmed_start_at": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 datetime in Eastern Time when appointment is confirmed. Only set when status='confirmed' AND both specific date AND specific time agreed."
+          "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to)."
         },
         "requested_date_range_start": { "type": ["string", "null"], "format": "date" },
         "requested_date_range_end": { "type": ["string", "null"], "format": "date" },
@@ -539,11 +543,16 @@
           "manual_review_requested",
           "ambiguous_scheduling",
           "reschedule_or_cancel",
+          "existing_appointment_coordination",
           "multi_property_call",
           "quote_promised"
         ]
       },
       "uniqueItems": true
+    },
+    "other_parties_mentioned": {
+      "type": ["boolean", "null"],
+      "description": "true when the call names MORE people as parties to the service than the single secondary_contact captured (buyer + co-buyer + agent; tenant + owner) — tells the office to re-listen for the additional parties. null/false otherwise. 1.2.0 additive."
     }
   }
 }

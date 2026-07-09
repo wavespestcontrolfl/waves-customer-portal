@@ -28,8 +28,8 @@
           "description": "Foreign key to call_log.id. Server-owned — injected after model response."
         },
         "schema_version": {
-          "enum": ["1.0.0", "1.1.0", "1.2.0"],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact) — older payloads remain valid."
+          "enum": ["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -232,6 +232,7 @@
           "enum": [
             "pest_general", "termite", "rodent", "mosquito",
             "stinging_insect", "lawn_care", "palm_injection",
+            "bed_bug", "wdo",
             "exclusion", "inspection_only", "bundled_waveguard", "other"
           ]
         },
@@ -242,6 +243,7 @@
             "enum": [
               "pest_general", "termite", "rodent", "mosquito",
               "stinging_insect", "lawn_care", "palm_injection",
+              "bed_bug", "wdo",
               "exclusion", "inspection_only", "bundled_waveguard", "other"
             ]
           }
@@ -271,7 +273,8 @@
                   "silverfish", "earwigs", "millipedes", "centipedes",
                   "chinch_bugs", "sod_webworms", "armyworms", "mole_crickets", "grubs", "fire_ants_lawn",
                   "palm_weevils", "scale_insects", "whiteflies",
-                  "iguanas", "snakes", "other_wildlife",
+                  "iguanas", "snakes", "moles", "bats", "other_wildlife",
+                  "no_see_ums", "flies_gnats", "scorpions", "love_bugs",
                   "unspecified", "other"
                 ]
               },
@@ -280,6 +283,7 @@
                 "type": "string",
                 "enum": [
                   "sighting_single", "sighting_multiple", "active_infestation",
+                  "swarmers_seen",
                   "structural_damage_visible", "lawn_damage_visible",
                   "person_stung_or_bitten", "unknown"
                 ]
@@ -459,11 +463,16 @@
           "manual_review_requested",
           "ambiguous_scheduling",
           "reschedule_or_cancel",
+          "existing_appointment_coordination",
           "multi_property_call",
           "quote_promised"
         ]
       },
       "uniqueItems": true
+    },
+    "other_parties_mentioned": {
+      "type": ["boolean", "null"],
+      "description": "true when the call named MORE people as parties to the service than the single secondary_contact captured. 1.3.0 additive — absent in older payloads."
     }
   }
 }

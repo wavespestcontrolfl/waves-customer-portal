@@ -93,6 +93,19 @@ function buildTriageItem({
     address_validation_unavailable: 'address_review',
     ambiguous_scheduling: 'time_ambiguous',
     reschedule_or_cancel: 'time_ambiguous',
+    // Gate-rejection reason strings double as flags on the Needs Review row —
+    // unmapped they filed under service_unknown, so a caller who said
+    // "Tuesday, first slot" was buried with billing questions instead of
+    // showing up as a booking that needs a time.
+    not_confirmed: 'time_ambiguous',
+    confirmed_without_start_time: 'time_ambiguous',
+    cancellation_request: 'time_ambiguous',
+    after_hours_emergency: 'time_ambiguous',
+    existing_appointment_coordination: 'time_ambiguous',
+    auto_booking_skipped_after_approval: 'time_ambiguous',
+    existing_appointment_same_date: 'time_ambiguous',
+    auto_booking_previously_cancelled: 'time_ambiguous',
+    multi_property_call: 'address_review',
     caller_not_authorized: 'customer_field_conflict',
     hoa_common_area_requires_approval: 'customer_field_conflict',
     commercial_requires_quote: 'customer_field_conflict',
@@ -110,7 +123,10 @@ function buildTriageItem({
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     address_recovered: 'address_review',
+    address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
+    secondary_contact_is_existing_customer: 'customer_field_conflict',
+    unassigned_auto_booking: 'time_ambiguous',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
@@ -122,8 +138,42 @@ function buildTriageItem({
   // attach the extraction's own secondary_contact here, where every insert
   // site flows through, instead of relying on the caller to pass it.
   const flagPayload = (flag === 'secondary_contact_captured' && extraction?.secondary_contact)
-    ? { secondary_contact: extraction.secondary_contact }
+    ? {
+      secondary_contact: extraction.secondary_contact,
+      // The call may have named MORE parties than the one contact captured —
+      // cue the office to re-listen instead of assuming the card is complete.
+      ...(extraction?.other_parties_mentioned === true ? { other_parties_mentioned: true } : {}),
+    }
     : {};
+
+  // Multi-property cards previously carried no addresses — the one surface
+  // built to tell the office "there's a second property" required transcript
+  // archaeology to learn WHICH property.
+  if (flag === 'multi_property_call' && Array.isArray(extraction?.property?.additional_properties) && extraction.property.additional_properties.length) {
+    flagPayload.additional_properties = extraction.property.additional_properties;
+  }
+
+  // Scheduling-shaped cards carry the model's captured window fields so the
+  // office can book "Tuesday, first slot" from the card instead of re-listening
+  // — these fields were extracted all along but had zero readers.
+  const SCHEDULING_PAYLOAD_FLAGS = new Set([
+    'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
+    'reschedule_or_cancel', 'cancellation_request',
+    'existing_appointment_coordination', 'auto_booking_skipped_after_approval',
+  ]);
+  if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
+    const s = extraction.scheduling;
+    flagPayload.scheduling_window = {
+      status: s.status ?? null,
+      confirmed_start_at: s.confirmed_start_at ?? null,
+      requested_date_range_start: s.requested_date_range_start ?? null,
+      requested_date_range_end: s.requested_date_range_end ?? null,
+      preferred_time_of_day: s.preferred_time_of_day ?? null,
+      callback_window_start: s.callback_window_start ?? null,
+      callback_window_end: s.callback_window_end ?? null,
+      scheduling_notes_raw: s.scheduling_notes_raw ?? null,
+    };
+  }
 
   return {
     call_log_id: callLogId,

@@ -35,8 +35,9 @@ const GOOGLE_KEY = () => process.env.GOOGLE_ADDRESS_VALIDATION_API_KEY
 
 const ENABLED = () => process.env.ADDRESS_RECOVERY_ENABLED !== 'false';
 
+// Literal default (NOT chained to GEMINI_EXTRACTION_MODEL): an extraction
+// rollback must not silently downgrade street recovery.
 const RECOVERY_MODEL = () => process.env.GEMINI_RECOVERY_MODEL
-  || process.env.GEMINI_EXTRACTION_MODEL
   || 'gemini-2.5-pro';
 
 // AV statuses where the input street may simply be a mis-hearing worth a
