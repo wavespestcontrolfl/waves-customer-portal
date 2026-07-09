@@ -1535,12 +1535,41 @@ function resolveRecurringMonthlyParts(estimate, parsedData) {
   };
 }
 
-function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount) {
+// pestFloorLift: pest post-discount program-floor give-back (see
+// pestFloorMonthlyLift). Added before the manual/pref offs — the floor caps
+// the WaveGuard tier percent only; manual discounts stay warn-only.
+function monthlyForRecurringPartsExact(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount, pestFloorLift = 0) {
   const discountable = Number(parts.discountableBaseMonthly || 0);
   const nonDiscountable = Number(parts.nonDiscountableMonthly || 0);
   const off = Number(monthlyOff || 0);
-  const total = discountable * (1 - discountResolver(tier)) + nonDiscountable - off;
-  return Math.max(0, Math.round(total * 100) / 100);
+  const lift = Number(pestFloorLift) || 0;
+  return Math.max(0, discountable * (1 - discountResolver(tier)) + lift + nonDiscountable - off);
+}
+
+function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount, pestFloorLift = 0) {
+  return Math.round(monthlyForRecurringPartsExact(parts, tier, monthlyOff, discountResolver, pestFloorLift) * 100) / 100;
+}
+
+// Pest post-discount program floor for the stored-payload repricers
+// (select-tier / preferences / tier ladder): v1-legacy-mapper stamps
+// floorAnn/floorMo on results.pest for estimates generated with enforcement
+// on. The WaveGuard tier percent may not take pest's collected monthly below
+// the floor for the SELECTED cadence, so these paths add back the pest
+// line's overshoot — mirroring discount-engine.applyMarginGuard. Returns 0
+// for legacy payloads without floor metadata. The exact (unrounded)
+// floorAnn/12 basis keeps ×12 derivations from shaving the floor by cents.
+function pestFloorMonthlyLift(estData, tierName, discountResolver = tierDiscount) {
+  const root = estData && typeof estData === 'object'
+    ? (estData.result && typeof estData.result === 'object' ? estData.result : estData)
+    : null;
+  const pest = root?.results?.pest;
+  const floorAnn = Number(pest?.floorAnn);
+  const pestMo = Number(pest?.mo ?? pest?.monthly);
+  if (!Number.isFinite(floorAnn) || floorAnn <= 0 || !Number.isFinite(pestMo) || pestMo <= 0) return 0;
+  const disc = Number(discountResolver(tierName)) || 0;
+  if (disc <= 0) return 0;
+  const floorMoExact = Math.min(floorAnn / 12, pestMo);
+  return Math.max(0, floorMoExact - pestMo * (1 - disc));
 }
 
 function normalizeManualDiscountSummary(estData = {}) {
@@ -3596,16 +3625,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? recurring.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))
     : recurring;
   const baseMonthly = displayPestOnly ? Number(pestRecurring.monthlyBase || 0) : storedBaseMonthly;
+  // Pest program floor give-back for the displayed prices (0 for legacy
+  // payloads) — keeps the tier ladder consistent with what select-tier will
+  // actually persist.
+  const currentTierPestLift = pestFloorMonthlyLift(estData, null, () => estimateTierDiscount);
   const recurringMonthlyBeforeDiscounts = displayPestOnly
-    ? Math.round(baseMonthly * (1 - estimateTierDiscount) * 100) / 100
+    ? Math.round((baseMonthly * (1 - estimateTierDiscount) + currentTierPestLift) * 100) / 100
     : Math.max(0, Math.round((Number(est.monthlyTotal || 0) + manualDiscountMonthly + prefMonthlyOff) * 100) / 100);
 
   const tierPrices = {};
   const discountResolver = (t) => tierDiscountForEstimate(estData, t);
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
+    const tierPestLift = pestFloorMonthlyLift(estData, t, discountResolver);
     tierPrices[t] = displayPestOnly
-      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) - manualDiscountMonthly - prefMonthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, t, manualDiscountMonthly + prefMonthlyOff, discountResolver);
+      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) + tierPestLift - manualDiscountMonthly - prefMonthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, t, manualDiscountMonthly + prefMonthlyOff, discountResolver, tierPestLift);
   });
 
   const monthlyTotal = Math.max(0, Math.round((recurringMonthlyBeforeDiscounts - manualDiscountMonthly - prefMonthlyOff) * 100) / 100);
@@ -8430,13 +8464,28 @@ router.put('/:token/select-tier', async (req, res, next) => {
     const recurringMonthlyParts = resolveRecurringMonthlyParts(estimate, parsedData);
     const { baseMonthly, source: baseSource } = recurringMonthlyParts;
     const manualMonthlyOff = manualDiscountMonthlyAmount(parsedData);
+    const tierResolver = (tierName) => tierDiscountForEstimate(parsedData, tierName);
+    // Pest program floor: the selected tier's percent may not take pest's
+    // collected monthly below the floor for its cadence (0 for legacy
+    // payloads without floor metadata).
+    const pestLift = pestFloorMonthlyLift(parsedData, selectedTier, tierResolver);
     const monthlyTotal = monthlyForRecurringParts(
       recurringMonthlyParts,
       selectedTier,
       manualMonthlyOff,
-      (tierName) => tierDiscountForEstimate(parsedData, tierName),
+      tierResolver,
+      pestLift,
     );
-    const annualTotal = anchoredAnnualTotal(parsedData, monthlyTotal);
+    let annualTotal = anchoredAnnualTotal(parsedData, monthlyTotal);
+    if (pestLift > 0) {
+      // Same exact-floor invariant as shapeFromV1's acceptance amount:
+      // rounding the lifted monthly to cents can shave the ×12 annual a few
+      // cents under the floor — never persist below the exact figure.
+      const exactMonthly = monthlyForRecurringPartsExact(
+        recurringMonthlyParts, selectedTier, manualMonthlyOff, tierResolver, pestLift,
+      );
+      annualTotal = Math.max(annualTotal, Math.round(exactMonthly * 12 * 100) / 100);
+    }
 
     // Self-heal estimate_data.baseMonthly when we resolved it from the
     // engine result or summed services. Doesn't write when source is
@@ -8551,13 +8600,25 @@ router.put('/:token/preferences', async (req, res, next) => {
 
     const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
     const manualMonthlyOff = manualDiscountMonthlyAmount(parsedData);
+    // Pest program floor give-back per tier (0 for legacy payloads). Applies
+    // to BOTH branches — the pest-only price is the same pest line the pooled
+    // path discounts.
+    const prefPestLift = (tierName) => pestFloorMonthlyLift(parsedData, tierName, preferenceDiscountResolver);
+    const currentPestLift = prefPestLift(currentTier);
     const recurringMonthlyBeforeManualAndPrefs = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-      ? Math.max(0, Math.round(baseMonthly * (1 - currentDiscount) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, 0, preferenceDiscountResolver);
+      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) + currentPestLift) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, 0, preferenceDiscountResolver, currentPestLift);
     const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - manualMonthlyOff - monthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
-    const annualTotal  = anchoredAnnualTotal(parsedData, monthlyTotal);
+      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) + currentPestLift - manualMonthlyOff - monthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver, currentPestLift);
+    let annualTotal  = anchoredAnnualTotal(parsedData, monthlyTotal);
+    if (currentPestLift > 0) {
+      // Exact-floor invariant on the persisted annual (see select-tier above).
+      const exactMonthly = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
+        ? Math.max(0, baseMonthly * (1 - currentDiscount) + currentPestLift - manualMonthlyOff - monthlyOff)
+        : monthlyForRecurringPartsExact(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver, currentPestLift);
+      annualTotal = Math.max(annualTotal, Math.round(exactMonthly * 12 * 100) / 100);
+    }
     const derivedOneTimeChoiceBase = estimate.show_one_time_option
       ? oneTimeChoiceAmountForEstimate(
           { ...estimate, estimate_data: parsedData },
@@ -8570,8 +8631,8 @@ router.put('/:token/preferences', async (req, res, next) => {
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
       tierPrices[t] = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) - manualMonthlyOff - monthlyOff) * 100) / 100)
-        : monthlyForRecurringParts(recurringMonthlyParts, t, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
+        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) + prefPestLift(t) - manualMonthlyOff - monthlyOff) * 100) / 100)
+        : monthlyForRecurringParts(recurringMonthlyParts, t, manualMonthlyOff + monthlyOff, preferenceDiscountResolver, prefPestLift(t));
     });
 
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
@@ -12515,6 +12576,16 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     ? Math.min(pestFloorMoRaw, pestMoBefore)
     : null;
   const pestFloorPaRaw = pestTier ? Number(pestTier.floorPa) : NaN;
+  const pestFloorAnnRaw = pestTier ? Number(pestTier.floorAnn) : NaN;
+  // Exact annual floor for the acceptance amount (falls back to the rounded
+  // monthly ×12 if a payload only carries floorMo), capped at the
+  // pre-discount annual.
+  const pestFloorAnnExact = pestFloorMo !== null
+    ? Math.min(
+        Number.isFinite(pestFloorAnnRaw) && pestFloorAnnRaw > 0 ? pestFloorAnnRaw : pestFloorMoRaw * 12,
+        pestAnnBefore > 0 ? pestAnnBefore : Infinity,
+      )
+    : null;
   const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
   const pestRecurring = pestTier
     ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
@@ -12540,7 +12611,19 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const manualDiscount = manualDiscountForRecurringBase(v1.manualDiscount, manualDiscountableAnnual);
   const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
   const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 100) / 100);
-  const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+  let totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+  // Acceptance amount keeps the EXACT floor: floorMo rounds to cents for the
+  // display monthly, and ×12 can shave the billed annual a few cents under
+  // floorAnn (bimonthly: 37.82 × 12 = 453.84 vs the 453.90 floor). When the
+  // clamp is binding, rebuild the annual from the exact floor contribution
+  // and take the larger figure.
+  if (pestFloorAnnExact !== null && pestMoDiscounted < pestFloorAnnExact / 12) {
+    const exactAnn = Math.max(
+      0,
+      (pestFloorAnnExact / 12 + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 12,
+    );
+    totalAnnAfter = Math.max(totalAnnAfter, Math.round(exactAnn * 100) / 100);
+  }
   const treatmentDisplayPrice = (perTreatment, svc) => {
     const amount = Number(perTreatment);
     if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -13382,6 +13465,8 @@ module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
+module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
+module.exports.pestFloorMonthlyLift = pestFloorMonthlyLift;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;

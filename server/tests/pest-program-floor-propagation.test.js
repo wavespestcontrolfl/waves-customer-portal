@@ -15,6 +15,8 @@ const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-map
 const {
   nonPestTierBaseMap,
   comboPricingEntry,
+  monthlyForRecurringParts,
+  pestFloorMonthlyLift,
 } = require('../routes/estimate-public');
 
 const ORIGINAL_PEST_BASE = constants.PEST.base;
@@ -118,6 +120,32 @@ describe('shapeFromV1 public reprice honors the stored floor (via comboPricingEn
     expect(pestRow.displayPrice).toBe(Math.round(89 * 0.8 * 100) / 100);
   });
 
+  test('acceptance annual keeps the EXACT floor when the rounded monthly ×12 would shave it', () => {
+    // Bimonthly at the $89 floor: floorAnn 453.90 but floorMo rounds to 37.82,
+    // and 37.82 × 12 = 453.84 — six cents under the floor. The annual must be
+    // rebuilt from the exact floor contribution (codex r2).
+    const BIMONTHLY = { key: 'bimonthly', label: 'Bi-Monthly' };
+    const v1 = {
+      pestTiers: [
+        { label: 'Bi-Monthly', mo: 37.82, ann: 453.90, pa: 75.65, apps: 6, floorPa: 75.65, floorAnn: 453.90, floorMo: 37.82 },
+      ],
+      services: [
+        { name: 'Pest Control', service: 'pest_control', mo: 37.82, ann: 453.90, perTreatment: 75.65, visitsPerYear: 6 },
+        { name: 'Lawn Care', service: 'lawn_care', mo: 66.75, ann: 801, perTreatment: 89, visitsPerYear: 9 },
+        { name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, visitsPerYear: 12 },
+        { name: 'Tree & Shrub', service: 'tree_shrub', mo: 45, ann: 540, perTreatment: 90, visitsPerYear: 6 },
+      ],
+      discount: 0.20,
+      manualDiscount: null,
+    };
+    const entry = comboPricingEntry(v1, BIMONTHLY, v1.pestTiers[0], {}, nonPestTierBaseMap({}), {});
+    // Display monthly uses the rounded floorMo; the billed annual carries the
+    // exact 453.90 pest contribution: (453.90/12 + 152.60) × 12 = 2285.10.
+    expect(entry.monthly).toBe(Math.round((37.82 + (66.75 + 79 + 45) * 0.8) * 100) / 100);
+    expect(entry.annual).toBe(2285.10);
+    expect(entry.annual).toBeGreaterThanOrEqual(453.90 + (66.75 + 79 + 45) * 0.8 * 12 - 1e-9);
+  });
+
   test('floor never lifts the pest price above its pre-discount figure', () => {
     // Corrupted/oversized floor metadata must clamp to the list price, not raise it.
     const v1 = floorPricedPlatinumV1({ withFloorMetadata: true });
@@ -126,5 +154,43 @@ describe('shapeFromV1 public reprice honors the stored floor (via comboPricingEn
     const entry = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, nonPestTierBaseMap({}), {});
     const expected = Math.round((29.67 + (66.75 + 79 + 45) * 0.8) * 100) / 100;
     expect(entry.monthly).toBe(expected);
+    expect(entry.annual).toBe(Math.round((29.67 + (66.75 + 79 + 45) * 0.8) * 12 * 100) / 100);
+  });
+});
+
+describe('pestFloorMonthlyLift — stored-payload repricers (select-tier / preferences / ladder)', () => {
+  // Stored estimate_data shape: results.pest carries the selected cadence's
+  // pre-discount monthly + the floor stamped by v1-legacy-mapper.
+  const floorPricedEstData = {
+    result: {
+      results: {
+        pest: { pa: 89, apps: 4, mo: 29.67, ann: 356, floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+      },
+    },
+  };
+  const platinum = () => 0.20;
+
+  test('gives back exactly the overshoot below the floor (exact floorAnn/12 basis)', () => {
+    const lift = pestFloorMonthlyLift(floorPricedEstData, 'Platinum', platinum);
+    // 356/12 − 29.67 × 0.8 = 29.6667 − 23.736
+    expect(lift).toBeCloseTo(356 / 12 - 29.67 * 0.8, 6);
+  });
+
+  test('no lift at 0% discount, for legacy payloads, or when the discount stays above floor', () => {
+    expect(pestFloorMonthlyLift(floorPricedEstData, 'Bronze', () => 0)).toBe(0);
+    expect(pestFloorMonthlyLift({ result: { results: { pest: { mo: 29.67, ann: 356 } } } }, 'Platinum', platinum)).toBe(0);
+    const aboveFloor = { result: { results: { pest: { mo: 39, ann: 468, floorAnn: 356, floorMo: 29.67 } } } };
+    expect(pestFloorMonthlyLift(aboveFloor, 'Silver', () => 0.10)).toBe(0);
+  });
+
+  test('monthlyForRecurringParts applies the lift before the manual/pref offs', () => {
+    // Pest 29.67 + lawn/mosquito/ts 190.75, all WaveGuard-discountable.
+    const parts = { discountableBaseMonthly: 220.42, nonDiscountableMonthly: 0 };
+    const lift = pestFloorMonthlyLift(floorPricedEstData, 'Platinum', platinum);
+    const total = monthlyForRecurringParts(parts, 'Platinum', 0, platinum, lift);
+    // Pest holds the floor; the other services keep the full 20%.
+    expect(total).toBe(Math.round((356 / 12 + 190.75 * 0.8) * 100) / 100);
+    // Manual/pref offs still subtract after the lift (warn-only manual).
+    expect(monthlyForRecurringParts(parts, 'Platinum', 10, platinum, lift)).toBe(Math.round((356 / 12 + 190.75 * 0.8 - 10) * 100) / 100);
   });
 });
