@@ -1166,9 +1166,17 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   for (const term of terms) {
     let current = term;
     if (nextStatus === 'active' && term.status === PAYMENT_PENDING_STATUS) {
+      const reactivation = { status: 'active', updated_at: new Date() };
+      // A dispute-suspended term returning to active (won dispute /
+      // re-collection) sheds its suspension marker, or GUARD 5 would treat
+      // a LATER unrelated payment_pending hop as dispute-suspended and
+      // wrongly lift the monthly-billing suppression. Column-guarded.
+      if ((await annualPrepayColumns(conn)).dispute_suspended_at) {
+        reactivation.dispute_suspended_at = null;
+      }
       const [updated] = await conn('annual_prepay_terms')
         .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
-        .update({ status: 'active', updated_at: new Date() })
+        .update(reactivation)
         .returning('*');
       current = updated || term;
     } else if (nextStatus === 'cancelled') {
@@ -1227,13 +1235,22 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (nextStatus === 'active') {
     // Decided-coverage terms (renewed / switch_plan / decided lapse) never
     // enter the loop above (it selects pending/active only), but a dispute
-    // suspension reset their customer's billing_mode — a won dispute /
-    // re-collection must restore it or uncovered completions keep billing
-    // per-visit against the renewal-flow ruling. coveredTermsAsOf
-    // re-validates the coverage is genuinely paid-backed and live before
-    // re-stamping; stampAnnualPrepayBillingMode is idempotent and its
-    // first-stamp-wins prior recording never overwrites the original.
-    // Best-effort: a miss here self-heals on the next sync of this invoice.
+    // suspension reset their customer's billing_mode AND cleared their
+    // per-visit prepaid stamps — a won dispute / re-collection must restore
+    // both, or uncovered completions keep billing per-visit against the
+    // renewal-flow ruling. coveredTermsAsOf re-validates the coverage is
+    // genuinely paid-backed and live before restoring anything;
+    // stampAnnualPrepayBillingMode is idempotent and its first-stamp-wins
+    // prior recording never overwrites the original. The coverage re-stamp
+    // (applyPrepaidCoverageForTerm) restores stamps only to this term's
+    // remaining non-terminal in-window visits (rows covered by a DIFFERENT
+    // term or carrying an out-of-band cash/Zelle stamp are skipped), and
+    // the reconcile settles/credits visits that completed and billed
+    // per-visit while the dispute was open — mirroring the active-term
+    // path's refreshTermSnapshot + reconcilePendingWindowCompletions.
+    // Both no-op for legacy no-config terms, same as the active path.
+    // Best-effort: a miss here self-heals on the next sync of this invoice
+    // (and the reconcile leg via the daily covered-term sweep).
     try {
       const decidedTerms = await conn('annual_prepay_terms')
         .where({ prepay_invoice_id: invoice.id })
@@ -1243,10 +1260,18 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         const live = await coveredTermsAsOf(conn, etDateString())
           .where('t.id', decidedTerm.id)
           .first('t.id');
-        if (live) await stampAnnualPrepayBillingMode(decidedTerm.customer_id, conn, decidedTerm.id);
+        if (!live) continue;
+        await stampAnnualPrepayBillingMode(decidedTerm.customer_id, conn, decidedTerm.id);
+        const normalized = {
+          ...decidedTerm,
+          term_start: dateOnly(decidedTerm.term_start),
+          term_end: dateOnly(decidedTerm.term_end),
+        };
+        await applyPrepaidCoverageForTerm(normalized, conn);
+        await reconcilePendingWindowCompletions(normalized, conn);
       }
     } catch (err) {
-      logger.warn(`[annual-prepay] decided-coverage mode restore skipped for invoice ${invoice.id}: ${err.message}`);
+      logger.warn(`[annual-prepay] decided-coverage restore skipped for invoice ${invoice.id}: ${err.message}`);
     }
   }
 
@@ -1404,15 +1429,38 @@ async function activatePaidPendingTerms(conn = db) {
  * demotes to payment_pending and returns as 'active' on a won dispute;
  * the renewal alert recomputes from dates, so only the contacted flag's
  * status is lost — acceptable, logged.
+ * Retry-safe end to end (Codex #2533 round-2): the demotion also stamps
+ * dispute_suspended_at, and the follow-up work below re-selects EVERY
+ * payment_pending term on this invoice carrying that marker — not just the
+ * rows this call's UPDATE demoted. A crash between the status flip and the
+ * stamp-clear / mode-reset leaves the event unprocessed; Stripe's retry
+ * re-enters here, the UPDATE matches nothing (already payment_pending),
+ * and the marker re-selection still runs the follow-ups. The follow-ups
+ * themselves are fail-fast (throwOnError) because the webhook caller
+ * deliberately has no .catch — a transient DB error must fail the event so
+ * Stripe retries it, not get swallowed into a half-suspended term.
  */
 async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
   if (!invoiceId || !(await annualPrepayTableExists())) return [];
+  const termCols = await annualPrepayColumns(conn);
+  const demotion = { status: PAYMENT_PENDING_STATUS, updated_at: new Date() };
+  if (termCols.dispute_suspended_at) demotion.dispute_suspended_at = new Date();
   const suspended = await conn('annual_prepay_terms')
     .where({ prepay_invoice_id: invoiceId })
     .whereIn('status', ACTIVE_STATUSES)
-    .update({ status: PAYMENT_PENDING_STATUS, updated_at: new Date() })
+    .update(demotion)
     .returning('*');
-  const rows = Array.isArray(suspended) ? suspended : [];
+  let rows = Array.isArray(suspended) ? suspended : [];
+  if (termCols.dispute_suspended_at) {
+    // Marker re-selection: pick up terms a crashed earlier attempt demoted
+    // without finishing. Pre-migration boots fall back to the demoted rows
+    // alone (degraded but never wrong — same column-guard pattern as
+    // prior_billing_mode).
+    rows = await conn('annual_prepay_terms')
+      .where({ prepay_invoice_id: invoiceId, status: PAYMENT_PENDING_STATUS })
+      .whereNotNull('dispute_suspended_at')
+      .select('*');
+  }
   for (const term of rows) {
     logger.warn(`[annual-prepay] term ${term.id} suspended (active→payment_pending) — prepay invoice ${invoiceId} disputed`);
     // Clear the per-visit prepaid stamps exactly like a cancel does
@@ -1426,7 +1474,7 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
     // settles/credits them. Pre-dispute covered completions keep their
     // stamps (terminal statuses excluded) and the reconcile skips them via
     // the covered-term invoice marker.
-    await clearPrepaidStampsForTerm(term.id, conn);
+    await clearPrepaidStampsForTerm(term.id, conn, { throwOnError: true });
     // A suspended term must not strand the customer in billing_mode
     // 'annual_prepay': the completion gate deliberately never auto-invoices
     // unpriced annual-prepay visits (uncovered = renewal flow's problem), so
@@ -1439,9 +1487,11 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
     // paying dues mid-dispute and the dues-cover suppression stays
     // honest). A won dispute re-pays the invoice and the payment sync's
     // stampAnnualPrepayBillingMode re-stamps the mode (first-stamp-wins
-    // keeps the ORIGINAL prior). Best-effort like every billing_mode
-    // write.
-    await resetBillingModeAfterTermCancel(term, conn);
+    // keeps the ORIGINAL prior). Fail-fast here (unlike the cancel paths):
+    // a swallowed error would leave mid-dispute completions unbillable
+    // with nothing retrying, while a thrown one fails the webhook and
+    // Stripe re-delivers into the marker re-selection above.
+    await resetBillingModeAfterTermCancel(term, conn, { throwOnError: true });
   }
   const decided = await conn('annual_prepay_terms')
     .where({ prepay_invoice_id: invoiceId })
@@ -1454,13 +1504,22 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
     .select('*');
   for (const term of decided) {
     logger.warn(`[annual-prepay] term ${term.id} has decided coverage on disputed invoice ${invoiceId} — status kept (renewal state), coverage suspends via the decided paid-invoice gate once the invoice reopens`);
+    // Decided-term stamps must clear exactly like the suspended terms above
+    // (Codex #2533 round-2 P1): a stamped visit completing mid-dispute
+    // bills per-visit (the coverage gate correctly refuses the suspended
+    // term), but a surviving stamp makes the won-dispute reconcile skip
+    // that row as "already delivered" — the customer pays the annual AND
+    // the dispute-window visit invoice. The won-dispute payment sync
+    // re-stamps live decided coverage and settles/credits the mid-dispute
+    // per-visit charges (see its decided-coverage restore block).
+    await clearPrepaidStampsForTerm(term.id, conn, { throwOnError: true });
     // Decided terms keep their status, but the customer must still leave
     // billing_mode 'annual_prepay' or mid-dispute completions hit the
     // never-invoice branch and go out free — same reset as the suspend
     // above (self-checks replacement coverage; 'renewed' terms usually
     // no-op because the successor term IS live coverage). The won-dispute
     // payment sync restores the mode for decided coverage explicitly.
-    await resetBillingModeAfterTermCancel(term, conn);
+    await resetBillingModeAfterTermCancel(term, conn, { throwOnError: true });
   }
   return rows;
 }
@@ -1568,9 +1627,10 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
  * annual-prepay invoice is pending review/payment. Bounded to terms whose
  * window has not ended and whose linked invoice is still open (not paid, void,
  * cancelled, or refunded) so a stale/void pending row cannot suppress billing
- * indefinitely. Dispute-SUSPENDED terms (once-active, identified by a
- * recorded prior_billing_mode) are excluded — their money was provisionally
- * clawed back, so normal billing resumes for the dispute window.
+ * indefinitely. Dispute-SUSPENDED terms (identified by the
+ * dispute_suspended_at marker the suspend path stamps) are excluded — their
+ * money was provisionally clawed back, so normal billing resumes for the
+ * dispute window.
  */
 async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
   if (!(await annualPrepayTableExists())) return new Set();
@@ -1587,12 +1647,21 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
   // its invoice awaits first payment — but a suspended term's money was
   // provisionally clawed back, and for a prior-monthly customer the
   // suppression here plus the dues-cover completion fiction would leave
-  // dispute-window visits entirely unbilled. prior_billing_mode is only
-  // ever written when a term ACTIVATES (stampAnnualPrepayBillingMode), so
-  // payment_pending + prior recorded ⟺ once-active ⟺ dispute-suspended;
-  // accept-pending terms (prior NULL) keep the suppression. Column-guarded
-  // for pre-migration boots.
-  if (termCols.prior_billing_mode) pendingQuery.whereNull('t.prior_billing_mode');
+  // dispute-window visits entirely unbilled. The dispute_suspended_at
+  // marker (stamped by the suspend demotion, cleared on reactivation) is
+  // the classifier: accept-pending terms never carry it, so they keep the
+  // suppression. It supersedes the prior_billing_mode heuristic — prior is
+  // only written at ACTIVATION, so a LEGACY term that activated before
+  // that column existed suspends with prior still NULL and the heuristic
+  // would wrongly keep suppressing its customer's monthly dues (Codex
+  // #2533 round-2). The heuristic remains only as the pre-migration
+  // fallback, where it can't be wrong the other way: prior recorded ⟹
+  // once-active ⟹ the only pending hop back is a dispute suspension.
+  if (termCols.dispute_suspended_at) {
+    pendingQuery.whereNull('t.dispute_suspended_at');
+  } else if (termCols.prior_billing_mode) {
+    pendingQuery.whereNull('t.prior_billing_mode');
+  }
   const rows = await pendingQuery
     .whereRaw(
       `lower(coalesce(i.status, 'draft')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
@@ -1672,8 +1741,11 @@ async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
 // manual prepays (no source estimate — often legacy monthly members who
 // prepaid a year) return to legacy monthly semantics (NULL). Guarded on the
 // current mode so a customer who already switched models isn't clobbered.
-// Best-effort + column-guarded, same contract as the stamp.
-async function resetBillingModeAfterTermCancel(term, conn) {
+// Best-effort + column-guarded, same contract as the stamp — except the
+// dispute-suspend path, which opts into throwOnError so a transient failure
+// fails the webhook (Stripe retries) instead of stranding mid-dispute
+// completions in the never-invoice branch with nothing to retry.
+async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = false } = {}) {
   try {
     if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
     // Replacement coverage keeps the mode — but only a PAID (genuinely
@@ -1721,6 +1793,7 @@ async function resetBillingModeAfterTermCancel(term, conn) {
         updated_at: new Date(),
       });
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[annual-prepay] billing_mode reset skipped for customer ${term.customer_id}: ${err.message}`);
   }
 }
