@@ -47,6 +47,28 @@ exports.up = async function up(knex) {
     WHERE e.id = n.id AND e.estimate_slug IS NULL
   `);
 
+  // Re-run safety (codex P1): rollback drops the sequence but keeps stamped
+  // slugs, so a recreated sequence would restart at 1 and duplicate numbers
+  // customers already saw. Continue from the highest existing EST-* suffix.
+  await knex.raw(`
+    SELECT setval('estimate_slug_seq', GREATEST(
+      (SELECT last_value FROM estimate_slug_seq),
+      COALESCE((
+        SELECT max((regexp_match(estimate_slug, '^EST-\\d{4}-(\\d+)$'))[1]::bigint)
+        FROM estimates
+        WHERE estimate_slug ~ '^EST-\\d{4}-\\d+$'
+      ), 1)
+    ))
+  `);
+
+  // Duplicates are a P1 in their own right — make them impossible at the
+  // schema level (partial: legacy NULLs stay legal until stamped).
+  await knex.raw(`
+    CREATE UNIQUE INDEX IF NOT EXISTS estimates_estimate_slug_unique
+    ON estimates (estimate_slug)
+    WHERE estimate_slug IS NOT NULL
+  `);
+
   await knex.raw(`
     CREATE OR REPLACE FUNCTION waves_stamp_estimate_slug()
     RETURNS trigger AS $$
@@ -82,4 +104,5 @@ exports.down = async function down(knex) {
   await knex.raw('DROP TRIGGER IF EXISTS estimates_stamp_slug ON estimates');
   await knex.raw('DROP FUNCTION IF EXISTS waves_stamp_estimate_slug()');
   await knex.raw('DROP SEQUENCE IF EXISTS estimate_slug_seq');
+  await knex.raw('DROP INDEX IF EXISTS estimates_estimate_slug_unique');
 };
