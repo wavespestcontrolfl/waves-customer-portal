@@ -204,7 +204,10 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
           needs_reply: false,
           occurred_at: new Date(),
           title: 'Customer reported an AI chat reply',
-          summary: messageContent.slice(0, 200),
+          // Full reported reply (already capped at 4000 chars) — the Agent Ops
+          // card renders this summary and nothing links the ai_escalations row,
+          // so truncation here could hide the objectionable part from review.
+          summary: messageContent,
           metadata: JSON.stringify({
             escalation_id: escalation?.id || escalation || null,
             conversation_id: conversation?.id || null,

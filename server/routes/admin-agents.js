@@ -1043,7 +1043,7 @@ router.post('/tasks/:taskId/state', async (req, res, next) => {
     if (current.source === 'operator_inbox_items' && current.sourceId) {
       try {
         if (await tableExists('operator_inbox_items')) {
-          await db('operator_inbox_items')
+          const [closedInbox] = await db('operator_inbox_items')
             .where({ id: String(current.sourceId) })
             .update({
               status: status === 'done' ? 'resolved' : 'dismissed',
@@ -1051,7 +1051,21 @@ router.post('/tasks/:taskId/state', async (req, res, next) => {
               acted_by: uuidOrNull(req.technicianId),
               last_action_at: now,
               updated_at: now,
-            });
+            })
+            .returning(['source', 'source_id']);
+          // An ai_report mirror points at its durable ai_escalations row —
+          // resolve that too, or handled reports keep counting as pending in
+          // the escalation queue and stats.
+          if (closedInbox?.source === 'ai_report' && closedInbox.source_id
+            && await tableExists('ai_escalations')) {
+            await db('ai_escalations')
+              .where({ id: closedInbox.source_id })
+              .update({
+                status: status === 'done' ? 'resolved' : 'dismissed',
+                resolution_notes: `Closed from Agent Ops by ${actorName(req)}`,
+                updated_at: now,
+              });
+          }
         }
       } catch (err) {
         logger.warn(`[admin-agents] operator inbox close failed for ${current.sourceId}: ${err.message}`);
