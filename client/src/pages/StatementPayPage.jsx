@@ -414,7 +414,7 @@ export default function StatementPayPage() {
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 760, margin: "48px auto", padding: "0 16px" }}>
+      <div style={{ maxWidth: 792, margin: "48px auto", padding: "0 16px" }}>
         {children}
         {/* Newsletter signup lives only on the newsletter pages (owner
             2026-07-09, supersedes the 2026-07-08 glass-footer ruling). */}

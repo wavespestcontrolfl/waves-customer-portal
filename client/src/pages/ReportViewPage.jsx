@@ -4546,7 +4546,7 @@ function LegacyReport({ data, token, glass = false }) {
         </div>
       </header>
       ) : null}
-      <main style={{ flex: 1, maxWidth: 760, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <main style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -4793,7 +4793,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           white-space: nowrap;
         }
         .sr-shell {
-          max-width: 760px;
+          max-width: 800px;
           width: 100%;
           margin: 0 auto;
           padding: 32px 20px 64px;

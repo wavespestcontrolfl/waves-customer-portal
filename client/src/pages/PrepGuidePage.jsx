@@ -95,7 +95,7 @@ function BlockRenderer({ blocks }) {
 
 function LoadingSkeleton() {
   return (
-    <div style={{ padding: '24px 16px 40px', maxWidth: 760, width: '100%', margin: '0 auto' }}>
+    <div style={{ padding: '24px 16px 40px', maxWidth: 792, width: '100%', margin: '0 auto' }}>
       <div style={{ height: 28, width: '70%', background: SURFACE.border, borderRadius: 6, marginBottom: 16 }} />
       <div style={{ height: 80, background: SURFACE.border, borderRadius: 8, marginBottom: 20 }} />
       <div style={{ height: 16, width: '90%', background: SURFACE.border, borderRadius: 4, marginBottom: 12 }} />
@@ -159,7 +159,7 @@ export default function PrepGuidePage() {
     : error || !data
       ? <NotFound />
       : (
-        <div style={{ padding: '24px 16px 40px', maxWidth: 760, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
+        <div style={{ padding: '24px 16px 40px', maxWidth: 792, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
           {/* No server-side prep-guide PDF render — Share + Print only. */}
           <DocumentActionBar shareTitle={`Waves ${data.projectTypeLabel || ''} prep guide`.replace(/\s+/g, ' ')} />
           <div
@@ -229,7 +229,7 @@ export default function PrepGuidePage() {
       <WavesShell variant="customer" topBar="solid">
         <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
-          <div className="prep-no-print" style={{ maxWidth: 760, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+          <div className="prep-no-print" style={{ maxWidth: 792, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
             {/* Newsletter signup lives only on the newsletter pages
                 (owner 2026-07-09, supersedes same-day card ruling). */}
             <BrandFooter />
