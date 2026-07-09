@@ -60,7 +60,11 @@ function sqlStreetKey(col) {
   // same street as "100 Main St" (codex round-6 P2: JS/SQL drift here
   // suppressed fallbacks for ordinary primary-unit bookings).
   let expr = `LOWER(COALESCE(${col}, ''))`;
-  expr = `regexp_replace(${expr}, '\\s+(apt|apartment|unit|ste|suite|#)\\.?\\s*[a-z0-9-]+\\s*$', '')`;
+  // {0,1} not ? — these snippets are interpolated into knex db.raw() strings,
+  // and any literal ? is counted as a positional binding placeholder when the
+  // query also passes a bindings array (broke /api/admin/dispatch/board:
+  // "Expected 1 bindings, saw 11"). No ? may appear anywhere in helper output.
+  expr = `regexp_replace(${expr}, '\\s+(apt|apartment|unit|ste|suite|#)\\.{0,1}\\s*[a-z0-9-]+\\s*$', '')`;
   // punctuation to spaces, matching canonicalizeAddress()
   expr = `regexp_replace(${expr}, '[.,#]', ' ', 'g')`;
   for (const [abbr, full] of SQL_SUFFIX_CANON) {
@@ -98,7 +102,7 @@ function stampedDivergesSql(sAlias, cAlias) {
 // otherwise append onto the wrong door (codex round-7 P2).
 function stampedLine2Sql(sAlias, cAlias) {
   const sLine1 = `${sAlias}.service_address_line1`;
-  const inlineUnit = `${sLine1} ~* '\\s(apt|apartment|unit|ste|suite|#)\\.?\\s*[a-z0-9-]+\\s*$'`;
+  const inlineUnit = `${sLine1} ~* '\\s(apt|apartment|unit|ste|suite|#)\\.{0,1}\\s*[a-z0-9-]+\\s*$'`;
   return `CASE WHEN ${stampedDivergesSql(sAlias, cAlias)} THEN ${sAlias}.service_address_line2`
     + ` WHEN ${sLine1} IS NOT NULL AND ${inlineUnit} THEN ${sAlias}.service_address_line2`
     + ` ELSE COALESCE(${sAlias}.service_address_line2, ${cAlias}.address_line2) END`;
