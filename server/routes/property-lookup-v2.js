@@ -1308,12 +1308,23 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // TURF_COUNTY_PRIOR_RATIO × that ceiling instead of leaving 0 — the
   // pricing engine's lot-based fallback otherwise prices near the ceiling
   // itself. Never silent: a HIGH-priority verify flag rides with it below.
-  const visionTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf) || 0;
+  // An EXPLICIT vision 0 (paved / artificial / no-lawn property) is a real
+  // measurement, not a miss — it must never be overwritten (codex P2).
+  const visionTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf);
+  const visionTurfKnown = visionTurfSf !== undefined;
+  // County-COMPLETE facts only: the extra-features roll must actually have
+  // been parsed (imperviousKnown — an unparsed table reads as 0 hardscape
+  // and inflates the ceiling) and the story count must be real (a missing
+  // count defaults the footprint to the full living area and shrinks the
+  // ceiling). Either gap → stay on the existing fallback/verify path
+  // (codex P2 ×2).
   const countyTurfPriorSf = (
-    !visionTurfSf
+    !visionTurfKnown
     && !commercialProfile
     && !turfCountyPriorDisabled()
     && footprintTurf
+    && footprintTurf.parts.imperviousKnown
+    && firstNonNegativeNumber(rc?.stories) >= 1
     && footprintTurf.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
     && !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase())
   ) ? Math.round(footprintTurf.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
@@ -1430,11 +1441,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ── TURF ──
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
-    estimatedTurfSf: visionTurfSf || countyTurfPriorSf || 0,
-    // 'vision' = satellite estimate; 'county_prior' = seeded from the county
-    // ceiling (see countyTurfPriorSf above); 'none' = no basis — pricing
-    // falls back to its lot-based estimate.
-    turfSource: visionTurfSf ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
+    estimatedTurfSf: (visionTurfKnown ? visionTurfSf : countyTurfPriorSf) || 0,
+    // 'vision' = satellite estimate (including an explicit 0 — a measured
+    // no-lawn property); 'county_prior' = seeded from the county ceiling
+    // (see countyTurfPriorSf above); 'none' = no basis — pricing falls back
+    // to its lot-based estimate.
+    turfSource: visionTurfKnown ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
     countyTurfPriorSf,
     // Shadow comparison fields — see computeFootprintTurf. Not a pricing
     // input; estimatedTurfSf above remains the engine's turf source.

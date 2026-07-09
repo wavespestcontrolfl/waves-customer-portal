@@ -219,6 +219,26 @@ describe('county turf prior (vision-missing seed)', () => {
     expect(profile.estimatedTurfSf).toBe(0);
     expect(profile.turfSource).toBe('none');
   });
+
+  test('an EXPLICIT vision 0 (measured no-lawn property) is never overwritten (codex P2)', () => {
+    const profile = buildEnrichedProfile(countyRecord(), { estimatedTurfSf: 0, confidenceScore: 85 }, 27.4, -82.4);
+    expect(profile.estimatedTurfSf).toBe(0);
+    expect(profile.turfSource).toBe('vision');
+    expect(profile.countyTurfPriorSf).toBeNull();
+  });
+
+  test('unparsed extra-features roll (imperviousKnown=false) → no seed (codex P2)', () => {
+    const profile = buildEnrichedProfile(countyRecord({ imperviousAreaSf: undefined }), null, 27.4, -82.4);
+    expect(profile.footprintTurfParts?.imperviousKnown).toBe(false);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('missing story count (footprint unreliable) → no seed (codex P2)', () => {
+    const profile = buildEnrichedProfile(countyRecord({ stories: null }), null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+  });
 });
 
 describe('shadow wiring (no pricing impact)', () => {
