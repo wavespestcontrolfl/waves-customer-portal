@@ -538,13 +538,16 @@ async function persistCallSecondaryContact(customerId, contact) {
   // buyer and myself" needs the WDO report too). A channel where a reachable
   // slot already existed keeps its existing admin-configured choice.
   const prefsToSet = {};
-  // Only default a notify-primary pref that has never been set: an admin's
-  // explicit false (deliberately keeping the primary out of a channel) must
-  // survive a later call-persisted contact — the unconditional merge used to
-  // re-enroll them.
-  const existingPrefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
-  if (contact.phone && !hadSlotPhone && existingPrefs.appointment_notify_primary == null) prefsToSet.appointment_notify_primary = true;
-  if (slotEmail && !hadSlotEmail && existingPrefs.service_report_notify_primary == null) prefsToSet.service_report_notify_primary = true;
+  // Unconditional per-channel flip on the FIRST reachable slot contact:
+  // prefs rows default both notify-primary columns to FALSE (call-created
+  // customers insert one moments before this), so "preserve an existing
+  // false" would leave prefsToSet empty for virtually every first secondary
+  // contact and silently cut the caller out of the updates they asked for
+  // (codex P1). Tradeoff accepted: an admin's deliberate opt-out set while
+  // the customer had zero slot contacts can be re-enabled by a later call —
+  // rare, visible on the prefs UI, and strictly better than the inverse.
+  if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
+  if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
       .insert({ customer_id: customerId, ...prefsToSet })
@@ -905,6 +908,13 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
 function v2IsoToEtWallClock(value) {
   const raw = String(value || '');
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
+  // An ET offset (either season) means the model encoded the agreed LOCAL
+  // wall clock — that wall clock is what was agreed on the call, so keep it
+  // verbatim even when the seasonal offset is wrong (codex P1: converting a
+  // July "-05:00" as an instant shifted a real 10 AM booking to 11 AM).
+  if (/(?:-04:?00|-05:?00)$/.test(raw)) return raw.slice(0, 16);
+  // UTC "Z" or any non-ET offset: the wall clock is NOT ET — trust the
+  // encoded instant and render its ET wall clock.
   if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
     const parsed = new Date(raw);
     if (!Number.isNaN(parsed.getTime())) {
@@ -4091,10 +4101,15 @@ const CallRecordingProcessor = {
       // flatView.matched_service is the coarse category→legacy map ("Termite
       // Inspection" for every termite call). Overwriting V1's specific label
       // with it downgraded e.g. a pre-slab soil-treatment booking to a plain
-      // inspection whenever the catalog didn't anchor the request. Only adopt
-      // it when V2 anchored a catalog service (specific_service_name drives
-      // the booking then anyway) or V1 produced no label at all.
-      if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service)) {
+      // inspection whenever the catalog didn't anchor the request. Adopt it
+      // when V2 anchored a catalog service (specific_service_name drives the
+      // booking then anyway), when V1 produced no label at all, or when the
+      // V2 category maps one-to-one to a concrete service (bed_bug/wdo) —
+      // those are more precise than any coarse V1 fallback (codex P2).
+      const v2Category = v2Flat.primary_service_category
+        || v2ApprovedExtraction?.service_request?.primary_service_category || null;
+      const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+      if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
         extracted.matched_service = v2Flat.matched_service;
       }
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
@@ -4520,7 +4535,9 @@ const CallRecordingProcessor = {
                   .where({ customer_id: customerId })
                   .whereNull('parent_service_id')
                   .where('scheduled_date', scheduledDate)
-                  .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+                  // completed is excluded: a morning job already done must not
+                  // block booking a second visit later the same day (codex P2).
+                  .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped', 'completed'])
                   .orderBy('created_at', 'asc')
                   .first();
                 if (sameDayExisting) {
@@ -4658,8 +4675,10 @@ const CallRecordingProcessor = {
               if (svc && svc.__held) {
                 // Booking held for human review (same-day duplicate or a
                 // previously-cancelled auto-booking). No schedule row, no SMS,
-                // no side effects — the consolidated skip-triage below opens
-                // the review card.
+                // no side effects. The review card is inserted HERE — not only
+                // in the enforce-gated consolidated block below — because the
+                // hold also fires in shadow/legacy mode, where a silent hold
+                // would otherwise vanish (codex P2).
                 appointmentResult = {
                   service: serviceType,
                   dateTime: extracted.preferred_date_time,
@@ -4669,6 +4688,22 @@ const CallRecordingProcessor = {
                   existingScheduledServiceId: svc.__held.existingId || null,
                 };
                 logger.warn(`[call-proc] Held auto-booking for ${callSid}: ${svc.__held.reason} (existing ${svc.__held.existingId || 'n/a'}, status ${svc.__held.existingStatus || 'n/a'})`);
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: svc.__held.reason,
+                    extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                    extraPayload: {
+                      existing_scheduled_service_id: svc.__held.existingId || null,
+                      existing_status: svc.__held.existingStatus || null,
+                      existing_service: svc.__held.existingService || null,
+                      preferred_date_time: extracted.preferred_date_time || null,
+                      service: serviceType || null,
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((triageErr) => logger.warn(`[call-proc] held-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
               } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
@@ -4922,7 +4957,9 @@ const CallRecordingProcessor = {
     // + forward-audit pointer.
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
-      if (!bookedServiceId) {
+      // Held bookings already opened their own reason-specific card above.
+      const heldReasons = new Set(['existing_appointment_same_date', 'auto_booking_previously_cancelled']);
+      if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
           || appointmentResult?.error

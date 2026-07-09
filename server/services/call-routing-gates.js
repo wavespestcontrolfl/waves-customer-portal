@@ -103,6 +103,8 @@ function buildTriageItem({
     after_hours_emergency: 'time_ambiguous',
     existing_appointment_coordination: 'time_ambiguous',
     auto_booking_skipped_after_approval: 'time_ambiguous',
+    existing_appointment_same_date: 'time_ambiguous',
+    auto_booking_previously_cancelled: 'time_ambiguous',
     multi_property_call: 'address_review',
     caller_not_authorized: 'customer_field_conflict',
     hoa_common_area_requires_approval: 'customer_field_conflict',

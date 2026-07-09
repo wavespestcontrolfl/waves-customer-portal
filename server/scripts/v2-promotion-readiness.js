@@ -66,18 +66,20 @@ async function main() {
 
   const totalAttempted = parseInt((await baseQuery().count('* as n').first())?.n || 0, 10);
 
-  // PREFIX match, not equality: the processor stamps a catalog-suffixed
-  // version (`${PROMPT_HASH}-cat.<hash>`, see extractionPromptVersion) whenever
-  // the bookable catalog is non-empty — which it always is in prod — so an
+  // The processor stamps a catalog-suffixed version
+  // (`${PROMPT_HASH}-cat.<hash>`, see extractionPromptVersion) whenever the
+  // bookable catalog is non-empty — which it always is in prod — so the old
   // exact match on the bare hash matched ZERO rows and the gate reported "no
-  // shadow extractions" forever. Catalog-content cohorts are deliberately
-  // merged here: the base prompt+schema hash still fences real prompt changes,
-  // and the model column above fences model swaps.
+  // shadow extractions" forever. Compute the LIVE catalog's version the same
+  // way the processor does and match THAT (not a bare `-cat.%` prefix, which
+  // would fold stale catalog cohorts into the current gate).
+  const { loadBookableCallServices } = require('../services/call-booking-catalog');
+  const liveCatalogNames = (await loadBookableCallServices(db)).map((s) => s.name).filter(Boolean);
+  const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const rows = await baseQuery()
     .where('ai_extraction_model', CURRENT_MODEL)
-    .where((qb) => qb
-      .where('ai_extraction_prompt_version', CURRENT_PROMPT_VERSION)
-      .orWhereRaw('ai_extraction_prompt_version LIKE ?', [`${CURRENT_PROMPT_VERSION}-cat.%`]))
+    .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction');
 
   const staleExcluded = totalAttempted - rows.length;

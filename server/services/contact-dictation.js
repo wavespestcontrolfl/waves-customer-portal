@@ -48,10 +48,14 @@ const ADOPT_CONFIDENCE = 0.75;
 
 const EMAIL_SIGNAL_RE = /\b(e-?mail|at g ?mail|at gmail|gmail dot|yahoo dot|outlook dot|hotmail dot|dot com|dot net|dot org)\b/i;
 const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like|for) in [a-z]+|[a-z] for [a-z]+)\b/i;
-// Suffix list covers the service area's actual street vocabulary — Fruitville
-// ROAD, Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
-// dictation-focused second STT pass never ran for those calls.
-const ADDRESS_SIGNAL_RE = /\b(address is|service address|street|avenue|boulevard|drive|road|way|loop|place|cove|point|parkway|run|bend|pass|glen|trail|terrace|court|circle|lane|zip( code)?|unit \d|apartment)\b/i;
+// Suffix coverage for the service area's street vocabulary — Fruitville ROAD,
+// Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
+// dictation-focused second STT pass never ran for those calls. The common
+// words (way/run/pass/point/place/road/...) are QUALIFIED — they only signal
+// when preceded by a house number + street name ("8224 Abalone Loop"), so
+// "what's the best way to prevent ants" / "can you run my card" don't buy a
+// paid second transcription pass (codex P2).
+const ADDRESS_SIGNAL_RE = /\b(address is|service address|street|avenue|boulevard|drive|trail|terrace|court|circle|lane|zip( code)?|unit \d|apartment)\b|\b\d{1,6}\s+[a-z][a-z.'-]*\s+(road|rd|way|loop|place|cove|point|parkway|run|bend|pass|glen)\b/i;
 
 /**
  * Cheap gate for whether the call dictated contact info worth a decoder pass.

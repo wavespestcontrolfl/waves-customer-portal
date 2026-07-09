@@ -45,11 +45,14 @@ describe('v2IsoToEtWallClock', () => {
   test('UTC Z timestamp converts to the ET wall clock instead of booking 4h late', () => {
     // 14:00Z during EDT == 10:00 ET. The old slice(0,16) booked 14:00.
     expect(v2IsoToEtWallClock('2026-07-14T14:00:00Z')).toBe('2026-07-14T10:00');
+    // Non-ET numeric offset also converts via the instant.
+    expect(v2IsoToEtWallClock('2026-07-14T14:00:00+00:00')).toBe('2026-07-14T10:00');
   });
 
-  test('wrong-season offset is corrected via the encoded instant', () => {
-    // Model used the EST offset in July: -05:00 at 10:00 == 11:00 EDT wall clock.
-    expect(v2IsoToEtWallClock('2026-07-14T10:00:00-05:00')).toBe('2026-07-14T11:00');
+  test('wrong-season ET offset keeps the agreed WALL clock (codex P1)', () => {
+    // Model used the EST offset in July: the 10:00 the caller agreed to is
+    // authoritative — converting the instant would book 11:00, an hour late.
+    expect(v2IsoToEtWallClock('2026-07-14T10:00:00-05:00')).toBe('2026-07-14T10:00');
   });
 
   test('zone-less wall clock passes through; garbage returns null', () => {

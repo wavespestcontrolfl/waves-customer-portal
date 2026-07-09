@@ -14,7 +14,9 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
   // Per-call variable like the transcript/phone/date — deliberately NOT part
   // of the version hash, which hashes the empty-render template.
   const knownCallerBlock = opts.knownCaller
-    ? `\nKNOWN CALLER: this number matches existing customer ${opts.knownCaller.name || '(name on file)'}${opts.knownCaller.hasUpcomingAppointment ? ' who has an UPCOMING appointment already on the schedule' : ''}. Calls from existing customers are often coordination about service they already have — apply the EXISTING APPOINTMENT rule below strictly.\n`
+    ? (opts.knownCaller.accountType === 'established_customer'
+      ? `\nKNOWN CALLER: this number matches existing customer ${opts.knownCaller.name || '(name on file)'}${opts.knownCaller.hasUpcomingAppointment ? ' who has an UPCOMING appointment already on the schedule' : ''}. Calls from existing customers are often coordination about service they already have — apply the EXISTING APPOINTMENT rule below strictly.\n`
+      : `\nKNOWN CALLER: this number matches ${opts.knownCaller.name || 'a contact'} already in our pipeline as a PROSPECT (not yet a customer). A booking on this call is likely their FIRST visit — treat an agreed date+time as a real "confirmed" booking, NOT existing-appointment coordination.\n`)
     : '';
   return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
 

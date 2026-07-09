@@ -482,16 +482,17 @@ describe('persistCallSecondaryContact', () => {
     expect(writes.prefsMerges).toHaveLength(0);
   });
 
-  test("an admin's explicit notify-primary FALSE survives a call-persisted contact", async () => {
+  test('a default-FALSE prefs row still flips notify-primary on the first slot contact (codex P1)', async () => {
+    // Prefs rows default both columns to false (call-created customers insert
+    // one moments before persistence) — a "preserve existing false" guard
+    // would leave the caller cut out of the updates they asked for.
     const writes = makeDb({
       customer: bareCustomer,
-      prefs: { customer_id: 'cust-1', appointment_notify_primary: false, service_report_notify_primary: null },
+      prefs: { customer_id: 'cust-1', appointment_notify_primary: false, service_report_notify_primary: false },
     });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
-    // The phone channel's explicit false stands; only the never-set report
-    // flag defaults on.
     expect(writes.prefsMerges).toHaveLength(1);
-    expect(writes.prefsMerges[0].mergePayload).toEqual({ service_report_notify_primary: true });
+    expect(writes.prefsMerges[0].mergePayload).toEqual({ appointment_notify_primary: true, service_report_notify_primary: true });
   });
 
   test('email-only contact dedups against emails on record', async () => {
