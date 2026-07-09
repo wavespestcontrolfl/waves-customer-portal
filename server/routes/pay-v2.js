@@ -104,6 +104,21 @@ function respondWithPaymentError(req, res, {
 // =========================================================================
 // GET /api/pay/:token — Invoice data + processor info + Stripe key
 // =========================================================================
+// A recurring estimate-flow signup REQUIRES a payment method on file (owner
+// ruling 2026-07-09): the accepting customer is stamped billing_mode
+// per_application/annual_prepay BEFORE the acceptance invoice is paid, so the
+// customer's mode — never a client-editable URL param (Codex #2507 P1) — is
+// the authority. Payer-billed invoices never save on the homeowner account.
+// Column-guarded: pre-migration environments require nothing.
+async function invoiceRequiresSavedMethod(invoice) {
+  const customerId = invoice?.customer_id || invoice?.customer?.id;
+  if (!customerId || invoice?.payer_id) return false;
+  try {
+    const row = await db('customers').where({ id: customerId }).first('billing_mode');
+    return ['per_application', 'annual_prepay'].includes(row?.billing_mode);
+  } catch { return false; }
+}
+
 router.get('/:token', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
@@ -143,6 +158,9 @@ router.get('/:token', async (req, res, next) => {
         invoiceNumber: data.invoice_number,
         title: data.title,
         status: data.status,
+        // Server-authoritative "payment method on file is required" flag —
+        // the client locks the consent box from THIS, not the URL.
+        saveRequired: await invoiceRequiresSavedMethod(data),
         lineItems,
         subtotal: parseFloat(data.subtotal),
         discountAmount: parseFloat(data.discount_amount),
@@ -273,7 +291,11 @@ router.post('/:token/setup', async (req, res, next) => {
       return res.status(400).json({ error: err.message });
     }
 
-    const result = await StripeService.createInvoicePaymentIntent(invoice.id, { saveCard: !!saveCard, cardOnly: !!cardOnly });
+    // Required-save invoices force the flag server-side — stripping the URL
+    // param or editing the POST body must not produce a recurring signup
+    // with no method on file (Codex #2507 P1).
+    const requireSave = await invoiceRequiresSavedMethod(invoice);
+    const result = await StripeService.createInvoicePaymentIntent(invoice.id, { saveCard: !!saveCard || requireSave, cardOnly: !!cardOnly });
 
     res.json({
       clientSecret: result.clientSecret,
@@ -365,7 +387,8 @@ router.post('/:token/update-amount', async (req, res, next) => {
       invoice.id,
       paymentIntentId,
       methodCategory,
-      { saveCard: !!saveCard },
+      // Required-save invoices force the flag server-side (see /setup).
+      { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) },
     );
 
     res.json(result);
@@ -453,7 +476,8 @@ router.post('/:token/finalize', async (req, res, next) => {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
 
-    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteToken, { saveCard: !!saveCard });
+    // Required-save invoices force the flag server-side (see /setup).
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteToken, { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) });
     res.json(result);
   } catch (err) {
     logger.error(`[pay-v2] Finalize error: ${err.message}`);

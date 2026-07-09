@@ -1920,6 +1920,11 @@ const EstimateConverter = {
             payUrlParams: {
               source: 'estimate',
               saveCard: '1',
+              // Recurring accepts require a method on file — keeps this
+              // inline param set in lockstep with estimateInvoicePayUrlParams
+              // (Codex #2507 P1). Display hint only: the pay endpoints
+              // enforce the requirement server-side from billing_mode.
+              saveRequired: '1',
               billingTerm,
             },
           });

@@ -1188,25 +1188,21 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       }
       // Autopay enrollment is CONSENT-gated, not billing-mode-gated (owner
       // ruling 2026-07-09: Auto Pay is enabled for every customer who saves
-      // a method, regardless of per-app / prepay / monthly). The v8+ consent
-      // text the customer just checked explicitly authorizes charging the
-      // method "for future service visits and invoices as agreed" (card) /
-      // per-invoice ACH debits (bank) — so the durable consent row is the
-      // enrollment signal, and billing_mode only decides WHAT charges it
-      // (per-visit completion, annual renewal, or the monthly cron). Pre-v8
-      // consent copy did not carry the autopay authorization, so older rows
-      // (and a missing/raced row) fail closed to card-on-file only — the
-      // pre-ruling behavior.
-      let enrollAutopay = false;
+      // a method, regardless of per-app / prepay / monthly). The consent
+      // signal is the PI's Stripe-signed save_card_opt_in metadata — the
+      // flag this whole mirror block is already gated on, minted only when
+      // the customer checked the v8+ consent copy the pay page renders,
+      // whose text explicitly authorizes charging the method "for future
+      // service visits and invoices as agreed" (card) / per-invoice ACH
+      // debits (bank). Deliberately NOT the payment_method_consents row:
+      // Stripe can deliver payment_intent.succeeded before the browser's
+      // consent POST lands, and a row-based check would lose that race and
+      // never re-evaluate (Codex #2507 P1) — the row remains the immutable
+      // audit artifact (linkPaymentMethodId backfills its FK below).
+      // billing_mode only decides WHAT charges the method (per-visit
+      // completion, annual renewal, or the monthly cron).
+      const enrollAutopay = true;
       let signupBillingMode = null;
-      try {
-        const consentRow = await db('payment_method_consents')
-          .where({ stripe_payment_method_id: stripePmId, customer_id: wavesCustomerId })
-          .orderBy('created_at', 'desc')
-          .first('consent_text_version');
-        const versionMatch = String(consentRow?.consent_text_version || '').match(/^v(\d+)/i);
-        enrollAutopay = !!versionMatch && Number(versionMatch[1]) >= 8;
-      } catch (consentErr) { /* fail closed — card-on-file only */ }
       try {
         const custRow = await db('customers')
           .where({ id: wavesCustomerId })

@@ -113,6 +113,10 @@ function shouldDefaultSaveCard(search = '') {
 // (estimateInvoicePayUrlParams): a payment method on file is a signup
 // precondition (owner ruling 2026-07-09 — per-application visits and prepay
 // renewals auto-charge it), so the consent box renders checked + locked.
+// URL param = pre-load display hint ONLY; the authority is the server's
+// invoice.saveRequired (derived from billing_mode) and the pay endpoints
+// force the flag server-side regardless of what the client sends
+// (Codex #2507 P1 — a query param is user-editable).
 function shouldRequireSaveCard(search = '') {
   try {
     const params = new URLSearchParams(search);
@@ -1249,8 +1253,8 @@ export default function PayPageV2() {
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const saveCardRequired = shouldRequireSaveCard(location.search);
-  const saveCardDefault = shouldDefaultSaveCard(location.search) || saveCardRequired;
+  const urlSaveRequiredHint = shouldRequireSaveCard(location.search);
+  const saveCardDefault = shouldDefaultSaveCard(location.search) || urlSaveRequiredHint;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1276,6 +1280,14 @@ export default function PayPageV2() {
   // it as requires_payment_method and the stale-PI triage cancels/replaces it).
   const setupPostedRef = useRef(null);
   const [saveCard, setSaveCard] = useState(saveCardDefault);
+  // Server-authoritative requirement (invoice.saveRequired from the GET);
+  // the URL param only pre-locks the box before data arrives so it never
+  // flashes unlocked. Once the server says required, force the state on —
+  // the pay endpoints enforce it server-side anyway.
+  const saveCardRequired = data?.invoice?.saveRequired ?? urlSaveRequiredHint;
+  useEffect(() => {
+    if (data?.invoice?.saveRequired) setSaveCard(true);
+  }, [data?.invoice?.saveRequired]);
 
   useEffect(() => {
     fetch(`${API_BASE}/pay/${token}`)
