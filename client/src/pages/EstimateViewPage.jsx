@@ -3599,7 +3599,6 @@ export default function EstimateViewPage() {
 
       {ctaPhase === 'review' && reservation ? (
         <>
-          <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
           {existingAppointment ? (
             <>
               <ExistingAppointmentCard appointment={existingAppointment} />
@@ -3617,6 +3616,11 @@ export default function EstimateViewPage() {
               />
             </>
           ) : null}
+          {/* Anchor sits directly on the confirm card — in the existing-
+              appointment mode the appointment + payment cards stack above
+              ReviewPhase, and anchoring the group leaves the confirm action
+              below the fold on mobile (Codex #2545). */}
+          <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
           <ReviewPhase
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
