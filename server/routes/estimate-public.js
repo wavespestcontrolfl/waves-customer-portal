@@ -13070,6 +13070,27 @@ const dataLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
+// GET /api/estimates/:token/pdf — customer-facing estimate PDF for the
+// estimate page's Download button (owner ask 2026-07-09: Download/Share/
+// Print/Portal Login on every estimate). Same generator as the admin
+// proposal.pdf download and the emailed proposal attachment, so every copy
+// of the document is byte-identical. Gated by isEstimateCustomerViewable —
+// identical exposure rules to /:token/data (drafts/expired/send_failed 404;
+// accepted/declined terminal views stay downloadable).
+router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Lazy require: pdfkit only loads when a PDF is actually requested.
+    const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
+    generateEstimateProposalPDF(estimate, res);
+  } catch (err) { next(err); }
+});
+
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
     // This JSON carries the customer's address, phone/email, notes, pricing,
