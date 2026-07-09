@@ -459,7 +459,7 @@ export default function ProjectReportViewPage() {
       `}</style>
       {/* Page-local top bar removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 760, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           {/* The kicker carries what the project is FOR (its title) when one
               is recorded — the bare type alone reads generic; the type still

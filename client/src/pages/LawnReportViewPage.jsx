@@ -60,7 +60,7 @@ function Page({ children }) {
       `}</style>
       {/* Page-local header removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main style={{ flex: 1, width: '100%', maxWidth: 720, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
+      <main style={{ flex: 1, width: '100%', maxWidth: 760, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       <BrandFooter variant="light" />
     </div>

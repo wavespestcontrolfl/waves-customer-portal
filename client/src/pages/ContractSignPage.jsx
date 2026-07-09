@@ -63,7 +63,7 @@ function Field({ label, value }) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page waves-contract-single">
+      <div className="waves-contract-page waves-contract-single" style={{ width: 'min(100% - 32px, 760px)' }}>
         <BrandCard padding={28}>
           <StatusPill>Contract unavailable</StatusPill>
           <SerifHeading style={{ marginTop: 14, marginBottom: 12 }}>{title}</SerifHeading>
@@ -202,7 +202,7 @@ export default function ContractSignPage() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div className="waves-contract-page waves-contract-single">
+        <div className="waves-contract-page waves-contract-single" style={{ width: 'min(100% - 32px, 760px)' }}>
           <BrandCard padding={28}>
             <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>Loading contract...</div>
           </BrandCard>
@@ -228,7 +228,7 @@ export default function ContractSignPage() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page">
+      <div className="waves-contract-page" style={{ width: 'min(100% - 32px, 760px)' }}>
         <div className="waves-flow-header">
           <div>
             <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>

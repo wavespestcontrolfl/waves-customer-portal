@@ -1600,7 +1600,12 @@ export default function PayPageV2() {
   const annualPrepay = invoice.annualPrepay || null;
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
-  const serviceLabel = invoice.title || service.type || 'Service';
+  // Generated invoice titles carry a "— Month YYYY" suffix that doubles
+  // the service date in the header — strip it when a service date renders.
+  const rawServiceLabel = invoice.title || service.type || 'Service';
+  const serviceLabel = service.date
+    ? rawServiceLabel.replace(/\s+[—–-]+\s+[A-Z][a-z]+ \d{4}$/, '')
+    : rawServiceLabel;
   const dueLabel = invoice.dueDate ? fmtDate(invoice.dueDate) : null;
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
@@ -1946,9 +1951,7 @@ export default function PayPageV2() {
                 at the top of the page (owner 2026-07-09). */}
           </BrandCard>
 
-        <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-          Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
-        </div>
+        {/* "Questions about this invoice?" help line removed (owner 2026-07-09). */}
         {/* Newsletter signup lives only on the newsletter pages (owner
             2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
             Hidden from the invoice printout via waves-no-print. */}
