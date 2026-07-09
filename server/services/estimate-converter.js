@@ -779,8 +779,8 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
 }
 
 // The lawn program minimum's floor-protected annual (owner directive
-// 2026-07-09): the slice of each recurring lawn line up to $50/mo × 12 that
-// no discount — including the annual-prepay % — may cut into. Scans the same
+// 2026-07-09): the first $50/mo × 12 of each recurring lawn line that no
+// discount — including the annual-prepay % — may cut into. Scans the same
 // dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
 // lineItems) and dedupes by key so a lawn line is only protected once.
 function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
@@ -789,13 +789,21 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
   const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
     const annual = recurringLineAnnualAmount(item);
-    return annual > 0 ? sum + Math.min(annual, floorAnnual) : sum;
+    // Protect the FULL floor per line, not min(annual, floor): the floor is
+    // what the customer is actually billed — public render/accept clamp every
+    // recurring lawn line up to the program minimum, so a stale pre-floor
+    // stored annual (e.g. $408 on an outstanding link whose bundle re-clamps
+    // to $600) must not leave the clamped-up slice discountable, or the
+    // prepay % lands the invoice below the minimum. Over-protection is the
+    // safe direction: the caller's Math.min(base, floor) cap means it can
+    // only shrink the prepay discount, never raise the invoice above base.
+    return annual > 0 ? sum + floorAnnual : sum;
   }, 0) * 100) / 100;
   // Acceptance restamps recurring.services (NOT engine lineItems), so a
-  // stale pre-floor line item must never shrink the protection below what
-  // the accepted rows warrant — take the larger of the two sources. Both
-  // are per-line capped at the floor, so overlap can only over-protect
-  // (shrinking the prepay discount), never under-protect.
+  // stale source must never shrink the protection below what the accepted
+  // rows warrant — take the larger of the two sources. Both protect exactly
+  // the floor per line, so a source disagreement (differing line counts) can
+  // only over-protect (shrinking the prepay discount), never under-protect.
   const fromLineItems = protectedSum(estimateLineItemsFromData(estimateData)
     .filter((i) => recurringServiceKey(i) === 'lawn_care'));
   const fromRecurringRows = protectedSum(recurringServicesFromEstimateData(estimateData)

@@ -143,6 +143,30 @@ describe('estimate converter annual prepay amount', () => {
       },
     })).toEqual({ amount: 600, discount: 0, rate: 0 });
 
+    // Outstanding pre-floor link: BOTH stored sources still carry the old
+    // $408 annual while the public bundle re-clamps the billed base up to
+    // the $600 floor. The protection must cover the FULL floor — not the
+    // stale $408 — so the prepay 5% never discounts the clamped-up slice
+    // and the invoice never lands below the program minimum.
+    const staleBothSources = {
+      result: {
+        lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 408 }],
+        recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', ann: 408 }] },
+      },
+    };
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 600,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: staleBothSources,
+    })).toEqual({ amount: 600, discount: 0, rate: 0 });
+    // Same stale rows with above-floor headroom: only the $60 above the
+    // floor earns the 5%.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: staleBothSources,
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+
     // Pest/mosquito: setup-waiver path, no extra discount.
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,

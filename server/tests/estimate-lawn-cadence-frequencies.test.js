@@ -3,6 +3,7 @@ const {
   lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
   recurringLawnRowAtRetiredCadence,
+  resolveEstimateQuoteRequirement,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
 } = require('../routes/estimate-public');
@@ -191,6 +192,36 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
     ))).toBe(false);
+  });
+
+  test('quote gate: an explicitly-quarterly lawn row with NO lawn tier rows is quote-required UP FRONT', () => {
+    // Legacy/mixed shape with no results.lawn ladder to inspect but a stored
+    // recurring lawn row explicitly at the retired cadence: /data and
+    // /deposit-intent must enter the quote-required state BEFORE the deposit
+    // step — the accept-time backstop alone would 409 only after the
+    // customer had already paid the deposit.
+    const quarterlyRowNoLadder = {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', service: 'pest_control', mo: 50 },
+            { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: 'quarterly' },
+          ],
+        },
+      },
+    };
+    const quoteState = resolveEstimateQuoteRequirement(null, quarterlyRowNoLadder);
+    expect(quoteState.quoteRequired).toBe(true);
+    expect(quoteState.reason).toBe('retired_lawn_cadence_requote');
+    // A lawn row with NO cadence data and no ladder stays self-serve here —
+    // never inferred as quarterly by default.
+    expect(resolveEstimateQuoteRequirement(null, {
+      result: {
+        recurring: {
+          services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55 }],
+        },
+      },
+    }).quoteRequired).toBe(false);
   });
 
   test('a manual discount fully blocked by the floor is SUPPRESSED, not just dropped', () => {

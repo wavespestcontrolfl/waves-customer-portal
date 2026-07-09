@@ -1144,6 +1144,64 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.snapshotHit).not.toBe(true);
   });
 
+  test('no-engine fallback: a below-floor recurring-lawn estimate is quote-required, not rendered verbatim', async () => {
+    // Legacy shape whose lawn row lives at the estData top level — no
+    // result.* (so no v1 shape) and no engineInputs — takes the no-engine
+    // single-frequency fallback, which renders stored totals verbatim with
+    // no ladder rebuild and no clamp. A pre-floor lawn quote must flip to
+    // quote-required there instead of staying acceptable below the minimum.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-lawn-below-floor-test',
+      monthly_total: 34,
+      annual_total: 408,
+      estimate_data: {
+        recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 34 }] },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('no-engine fallback: a MIXED bundle with a lawn slice is quote-required even above the floor', async () => {
+    // $80/mo across lawn + tree: the fallback totals can't attribute the
+    // lawn slice, so floor compliance is unprovable — requote.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-lawn-mixed-test',
+      monthly_total: 80,
+      annual_total: 960,
+      estimate_data: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care', service: 'lawn_care', mo: 30 },
+            { name: 'Tree & Shrub', service: 'tree_shrub', mo: 50 },
+          ],
+        },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('no-engine fallback: a lawn-only estimate at/above the floor keeps self-serve accept', async () => {
+    // Lawn-only is the one fallback shape whose lawn slice IS the stored
+    // total — provably compliant at $55/mo, so it stays self-serve.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-lawn-compliant-test',
+      monthly_total: 55,
+      annual_total: 660,
+      estimate_data: {
+        recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55 }] },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).not.toBe(true);
+  });
+
   test('a lawn-only estimate whose stored rows are ALL retired is quote-required (no self-serve accept)', async () => {
     // Legacy quote that stored only the Basic/4-app row: the ladder filters
     // it, and the generic fallback must NOT offer a silently-billable

@@ -1677,6 +1677,8 @@ const FRIENDLY_QUOTE_REASONS = {
     'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
   retired_lawn_cadence_selection:
     'This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.',
+  legacy_lawn_pricing_requote:
+    'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
 };
 
 function humanizeQuoteReason(value) {
@@ -6857,7 +6859,8 @@ router.put('/:token/accept', async (req, res, next) => {
       const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
       const commercialRiskType = quoteRequirement.reason === 'commercial_risk_type_review';
       const commercialLowConfidence = quoteRequirement.reason === 'commercial_low_confidence_site_confirmation';
-      const retiredLawnRequote = quoteRequirement.reason === 'retired_lawn_cadence_requote';
+      const retiredLawnRequote = quoteRequirement.reason === 'retired_lawn_cadence_requote'
+        || quoteRequirement.reason === 'legacy_lawn_pricing_requote';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
@@ -9431,7 +9434,14 @@ function retiredLawnRequoteNeeded(estData = null) {
   const tierKeys = rows
     .map((row) => lawnTierKey(row))
     .filter((key) => ['basic', 'standard', 'enhanced', 'premium'].includes(key));
-  if (!tierKeys.length) return false;
+  // No lawn tier rows to inspect (legacy/mixed shape): if the stored
+  // recurring lawn row is EXPLICITLY at a retired cadence, the accept-time
+  // backstop would 409 it — but only AFTER /data and /deposit-intent had
+  // already let the customer pay the deposit. Surface quote-required up
+  // front so those stale links never collect money for an acceptance that
+  // must fail. Rows with no explicit cadence stay self-serve (the check
+  // never infers quarterly by default).
+  if (!tierKeys.length) return recurringLawnRowAtRetiredCadence(estData);
   if (!tierKeys.every((key) => isRetiredLawnTierKey(key))) return false;
   const { recurringSvcList } = acceptanceServiceLists(estData);
   const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
@@ -13056,7 +13066,28 @@ async function buildPricingBundle(estimate) {
       ? oneTimeChoiceAmountForEstimate(estimate, estData, { oneTimeBreakdown: storedOneTimeBreakdown })
       : null;
     const manualDiscount = normalizeManualDiscountSummary(estData);
+    // A recurring-LAWN estimate on this fallback is uninspectable: the stored
+    // totals render verbatim (no ladder rebuild, no clamp), so a pre-floor
+    // lawn quote — or a mixed bundle whose lawn slice can't be attributed —
+    // could still be accepted below the program minimum. Mark it
+    // quote-required (accept + deposit-intent gate on the same resolver)
+    // UNLESS the estimate is lawn-only AND its stored monthly already
+    // satisfies the floor: that's the one shape whose lawn slice IS the
+    // stored total and is provably compliant.
+    let legacyLawnRequote = false;
+    const fallbackMinMonthly = lawnProgramMinimumMonthly();
+    if (fallbackMinMonthly > 0 && estimateDataHasRecurringLawn(estData)) {
+      const { recurringSvcList } = acceptanceServiceLists(estData);
+      const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
+      const lawnOnly = recurringKeys.length > 0 && recurringKeys.every((key) => key === 'lawn_care');
+      const storedMonthly = Number(estimate.monthly_total || 0)
+        || (Number(estimate.annual_total || 0) > 0 ? Number(estimate.annual_total) / 12 : 0);
+      legacyLawnRequote = !(lawnOnly && storedMonthly >= fallbackMinMonthly - 0.005);
+    }
     const payload = finalizePricingBundle(withManualDiscount({
+      ...(legacyLawnRequote
+        ? { quoteRequired: true, quoteRequiredReason: 'legacy_lawn_pricing_requote' }
+        : {}),
       frequencies: [{
         key: 'quarterly',
         label: 'Quarterly',

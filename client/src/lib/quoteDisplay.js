@@ -14,6 +14,8 @@ const FRIENDLY_QUOTE_REASONS = {
     "Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.",
   retired_lawn_cadence_selection:
     "This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.",
+  legacy_lawn_pricing_requote:
+    "Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.",
 };
 
 export function humanizeQuoteReason(value) {
