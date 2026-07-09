@@ -598,8 +598,11 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
+  // Name leads the contact block in the headline's own color (owner ask
+  // 2026-07-09, live review screen); email/phone/address follow in the same
+  // face at body size — no more uppercase caption treatment.
+  const nameLine = String(customerName || '').trim();
   const contactLines = [
-    customerName,
     customerEmail,
     phoneDisplay,
     address,
@@ -618,10 +621,6 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   };
   const issuedDisplay = fmtDate(createdAt);
   const expiresDisplay = fmtDate(expiresAt);
-  const dateLine = [
-    issuedDisplay ? `Estimate issued ${issuedDisplay}` : null,
-    expiresDisplay ? `Valid through ${expiresDisplay}` : null,
-  ].filter(Boolean).join(' · ');
   return (
     <div style={{ padding: '8px 0 24px' }}>
       <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 8 }}>
@@ -644,24 +643,33 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
           {subline}
         </p>
       ) : null}
-      {contactLines.length ? (
+      {(nameLine || contactLines.length) ? (
+        /* data-gt="" on every line: the glass auto-tier tags 12px text as
+           caption/fine and uppercases short names as eyebrows, which split
+           this block across three different faces — the block styles itself. */
         <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
+          {nameLine ? (
+            <div data-gt="" style={{ fontSize: 17, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.4 }}>{nameLine}</div>
+          ) : null}
           {contactLines.map((line) => (
-            <div key={line} style={{ ...HEADER_EYEBROW_STYLE, lineHeight: 1.5 }}>{line}</div>
+            <div key={line} data-gt="" style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{line}</div>
           ))}
         </div>
       ) : null}
-      {(slug || dateLine) ? (
-        /* Estimate # + dates at body size (design audit 2026-07-06): the
-           expiry is action-relevant — it should not carry the page's lowest
-           emphasis, and the quote number was not shown anywhere. Dates sit on
-           their own line under the number, same weight (owner ask 07-07). */
+      {(slug || issuedDisplay || expiresDisplay) ? (
+        /* Estimate # + expiration directly under the contact block on every
+           estimate (owner ask 2026-07-09; supersedes the 07-07 "Estimate
+           {slug} · dates" line format). Body size — the expiry is
+           action-relevant and must not carry the page's lowest emphasis. */
         <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.5 }}>
           {slug ? (
-            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong>
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate #: {slug}</strong>
           ) : null}
-          {dateLine ? (
-            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>{dateLine}</strong>
+          {issuedDisplay ? (
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate issued: {issuedDisplay}</strong>
+          ) : null}
+          {expiresDisplay ? (
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate expiration: {expiresDisplay}</strong>
           ) : null}
         </div>
       ) : null}
@@ -2670,6 +2678,17 @@ export default function EstimateViewPage() {
     [services, serviceMode, data?.estimate?.membership]
   );
   const reportShowcaseVariant = useMemo(() => reportShowcaseVariantForServices(services), [services]);
+  // Download PDF / Share / Print / Portal Login at the top of every estimate
+  // render (owner ask 2026-07-09, live review screen) — the same shared bar
+  // as the report/pay/receipt/contract pages. The PDF endpoint streams the
+  // same proposal generator as the admin download and the emailed attachment.
+  const estimateActionBar = (
+    <DocumentActionBar
+      pdfUrl={`${API_BASE}/estimates/${token}/pdf`}
+      pdfFileName="Waves_Estimate.pdf"
+      shareTitle="Your Waves estimate"
+    />
+  );
 
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
@@ -3524,6 +3543,7 @@ export default function EstimateViewPage() {
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
+        {estimateActionBar}
         <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
@@ -3553,7 +3573,6 @@ export default function EstimateViewPage() {
         <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
-        <DocumentActionBar shareTitle="Your Waves estimate" />
       </Page>
     );
   }
@@ -3568,6 +3587,7 @@ export default function EstimateViewPage() {
           headline={TERMINAL_HERO.accepted.h1}
           eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
+        {estimateActionBar}
         <SuccessCard acceptResult={acceptResult} />
       </Page>
     );
@@ -3613,6 +3633,7 @@ export default function EstimateViewPage() {
           eyebrowOverride={glassPack?.eyebrow || null}
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
+        {estimateActionBar}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -3620,7 +3641,6 @@ export default function EstimateViewPage() {
         <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
-        <DocumentActionBar shareTitle="Your Waves estimate" />
       </Page>
     );
   }
@@ -3637,6 +3657,7 @@ export default function EstimateViewPage() {
         // the table — terminal and success states keep the plain hero.
         subline={fillGlassTokens(glassPack?.heroSub) || null}
       />
+      {estimateActionBar}
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner
@@ -3872,11 +3893,6 @@ export default function EstimateViewPage() {
                 requestState={addServiceRequestState}
                 onRequest={handleAddServiceRequest}
               />
-              {/* Share / Print / Portal Login on every estimate (owner ask
-                  2026-07-09, live review screen) — same shared bar as the
-                  report/pay/contract/project pages. No public estimate PDF
-                  endpoint exists, so Download stays hidden (pdfUrl=null). */}
-              <DocumentActionBar shareTitle="Your Waves estimate" />
             </>
           ) : null}
         </>
@@ -3892,7 +3908,6 @@ export default function EstimateViewPage() {
           <ReportShowcaseCard variant={reportShowcaseVariant} />
           <CustomerReviews />
           <GoogleProfilesCard />
-          <DocumentActionBar shareTitle="Your Waves estimate" />
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +

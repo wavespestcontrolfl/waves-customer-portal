@@ -36,6 +36,16 @@ export default defineConfig({
       '/estimate': {
         target: apiProxyTarget,
         changeOrigin: true,
+        // Dev-only: browser DOCUMENT loads render the SPA estimate view
+        // (EstimateViewPage) instead of proxying to the API server. The
+        // server's use_v2_view fallthrough serves the SPA from client/dist,
+        // which doesn't exist in dev, so proxied v2 estimates 404'd. The
+        // page's /api/estimates/:token/data fetch still proxies normally.
+        // To view the LEGACY server-HTML renderer in dev, hit the API
+        // origin directly (e.g. localhost:3001/estimate/<token>).
+        bypass(req) {
+          if (req.headers.accept && req.headers.accept.includes('text/html')) return '/index.html';
+        },
       },
       // Socket.io needs ws: true for the upgrade handshake. Without
       // this, the client connects to localhost:5173/socket.io/ and

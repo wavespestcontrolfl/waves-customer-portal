@@ -29,7 +29,12 @@ const CONTACT = {
 const BASE_ESTIMATE = {
   id: 1,
   token: 'preview-token',
-  slug: null,
+  // Estimate # + issued/expiration render under the hero contact block on
+  // every estimate — the harness carries real-shaped values so the block is
+  // exercised in preview.
+  slug: 'WPC-2026-0512',
+  createdAt: '2026-07-09T14:00:00.000Z',
+  expiresAt: '2026-07-16T14:00:00.000Z',
   ...CONTACT,
   askToken: 'preview-ask-token',
   category: 'RESIDENTIAL',
