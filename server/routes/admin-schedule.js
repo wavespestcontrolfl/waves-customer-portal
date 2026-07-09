@@ -4086,6 +4086,81 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
 // double-charge window. See services/prepaid-pi-guard.
 const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
 
+// Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
+// estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
+// of calling InvoiceService.createFromService (the only other roll-forward
+// site), so a mint here that skips the deposit credit permanently strands the
+// customer's paid deposit — accepted estimates are deliberately outside the
+// terminal-refund sweep — and the visit double-collects (deposit + full price).
+// Same discipline as createFromService: request the full unapplied balance,
+// let create() cap it against the after-tax total, consume exactly the
+// effective amount in the SAME transaction; a mismatch throws (the mint rolls
+// back), one retry re-reads the fresh balance, and a second failure falls back
+// to an UNCREDITED mint + reconcile alert — deposit machinery failures never
+// block door collection. The advisory lock serializes the two mint callers
+// (this helper's callers and Charge-now) so a double-tap can't race a visit
+// into two open invoices; the in-lock re-check returns the first request's
+// invoice to the replay.
+async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }) {
+  const InvoiceService = require('../services/invoice');
+  const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
+  const sourceEstimateId = svc.source_estimate_id || null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const withDeposit = attempt < 2 && !!sourceEstimateId;
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['schedule.invoice.mint', String(svc.id)],
+        );
+        const replayed = await trx('invoices')
+          .where({ scheduled_service_id: svc.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first();
+        if (replayed) return { invoice: replayed, reused: true };
+        const depositCredit = withDeposit
+          ? await pendingDepositCredit(sourceEstimateId, trx)
+          : null;
+        const created = await InvoiceService.create({
+          ...buildCreateParams(),
+          database: trx,
+          ...(depositCredit && Number(depositCredit.amount) > 0
+            ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }
+            : {}),
+        });
+        const effective = Number(created?.applied_deposit_credit) || 0;
+        if (effective > 0) {
+          const allocated = await consumeDepositCredit({
+            estimateId: sourceEstimateId,
+            amount: effective,
+            invoiceId: created.id,
+            trx,
+          });
+          if (Math.round(allocated * 100) !== Math.round(effective * 100)) {
+            throw new Error(`deposit allocation mismatch (applied ${effective}, allocated ${allocated})`);
+          }
+        }
+        return { invoice: created, reused: false };
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!withDeposit) throw err;
+      logger.warn(`[schedule] mint deposit roll-forward failed for service ${svc.id} (attempt ${attempt + 1}): ${err.message}`);
+      if (attempt === 1) {
+        try {
+          const { triggerNotification } = require('../services/notification-triggers');
+          await triggerNotification('estimate_deposit_reconcile_needed', { estimateId: sourceEstimateId });
+        } catch (notifyErr) {
+          logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
+        }
+      }
+    }
+  }
+  throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
+}
+
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
 // (no operator extras — that's the Charge-now sheet's job, which is why that
 // route keeps its own inline mint). Serialized on the SAME advisory lock as
@@ -4109,19 +4184,9 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return db.transaction(async (trx) => {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['schedule.invoice.mint', String(svc.id)],
-    );
-    const replayed = await trx('invoices')
-      .where({ scheduled_service_id: svc.id })
-      .whereNot('status', 'void')
-      .orderBy('created_at', 'desc')
-      .first();
-    if (replayed) return { invoice: replayed, reused: true };
-    const created = await InvoiceService.create({
-      database: trx,
+  return mintScheduledServiceInvoiceWithDeposit({
+    svc,
+    buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       title: formatServiceDisplay(svc.service_type, []),
@@ -4130,8 +4195,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
       trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
       dueDate: etDateString(),
-    });
-    return { invoice: created, reused: false };
+    }),
   });
 }
 
@@ -4697,29 +4761,18 @@ router.post('/:id/invoice', async (req, res, next) => {
       extraLineItems: invoiceExtraLines,
     });
 
-    // Mint inside a transaction holding an advisory xact lock keyed on the
-    // scheduled_service_id (same pattern as services/stripe.js
-    // 'stripe.pi.payment'). invoices.scheduled_service_id has no unique
+    // Mint through the shared deposit-aware helper: advisory xact lock keyed on
+    // the scheduled_service_id (invoices.scheduled_service_id has no unique
     // index, so the unlocked check above can race a double-tap into TWO open
-    // invoices — and applyPrepaidCredit dedupes per invoice id, so the
-    // prepaid credit would then apply in full to both. The lock serializes
-    // concurrent mints; the re-check inside the lock returns the first
-    // request's invoice to the replay instead of minting a second one.
-    // InvoiceService.create rides the same trx (database: trx), so the
-    // invoice row commits atomically with the lock release.
-    const minted = await db.transaction(async (trx) => {
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['schedule.invoice.mint', String(svc.id)],
-      );
-      const replayed = await trx('invoices')
-        .where({ scheduled_service_id: svc.id })
-        .whereNot('status', 'void')
-        .orderBy('created_at', 'desc')
-        .first();
-      if (replayed) return { invoice: replayed, reused: true };
-      const created = await InvoiceService.create({
-        database: trx,
+    // invoices — and applyPrepaidCredit dedupes per invoice id, so the prepaid
+    // credit would then apply in full to both; the in-lock re-check returns the
+    // first request's invoice to the replay), plus the estimate-deposit
+    // roll-forward — completion reuses this pre-minted invoice, so skipping the
+    // credit here would strand the customer's paid deposit and collect full
+    // price on top of it.
+    const minted = await mintScheduledServiceInvoiceWithDeposit({
+      svc,
+      buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
         title: formatServiceDisplay(svc.service_type, []),
@@ -4728,8 +4781,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
         trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
         dueDate: etDateString(),
-      });
-      return { invoice: created, reused: false };
+      }),
     });
 
     let invoice = minted.invoice;
@@ -6732,6 +6784,7 @@ router._test = {
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
+  mintScheduledServiceInvoiceWithDeposit,
 };
 
 module.exports = router;
