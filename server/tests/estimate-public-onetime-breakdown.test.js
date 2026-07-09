@@ -6482,7 +6482,7 @@ describe('public estimate one-time breakdown', () => {
       success: true,
       nextStep: 'pay_invoice',
       serviceMode: 'recurring',
-      invoicePayUrl: '/pay/annual-token?source=estimate&saveCard=1&billingTerm=prepay_annual',
+      invoicePayUrl: '/pay/annual-token?source=estimate&saveCard=1&saveRequired=1&billingTerm=prepay_annual',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
     }));
@@ -6799,7 +6799,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoiceId: 'inv-123',
-      invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&billingTerm=standard',
+      invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&saveRequired=1&billingTerm=standard',
     }));
   });
 
@@ -6810,6 +6810,9 @@ describe('public estimate one-time breakdown', () => {
     })).toEqual({
       source: 'estimate',
       saveCard: '1',
+      // Recurring accepts lock the consent box: a method on file is a
+      // signup precondition (owner ruling 2026-07-09).
+      saveRequired: '1',
       billingTerm: 'standard',
     });
 

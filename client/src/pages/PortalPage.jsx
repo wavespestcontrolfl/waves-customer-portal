@@ -3786,6 +3786,11 @@ function BillingTab({ customer }) {
         clearReturnedSetupIntent();
         setShowAddCard(false);
         await refreshCards();
+        // Same as the inline confirmSetup path (Codex #2507 round-7): a
+        // consented save can ENROLL Auto Pay server-side — remount the
+        // AutopayCard so a redirected save (3DS, bank auth) never leaves
+        // the page showing Auto Pay off after the server enabled it.
+        setAutopayRefreshKey((k) => k + 1);
       })
       .catch((err) => {
         setStripeError(err.message || 'Failed to finish bank account setup');
@@ -3851,6 +3856,11 @@ function BillingTab({ customer }) {
       elementsRef.current = null;
       stripeRef.current = null;
       await refreshCards();
+      // A consented save can ENROLL Auto Pay server-side (saveStripeCard →
+      // enrollConsentedMethod) — remount the AutopayCard so the page never
+      // shows Auto Pay off while the server has enabled off-session
+      // charging (Codex #2507 round-6), same as the remove-card path below.
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       setStripeError(err.message || 'Failed to save card');
     }

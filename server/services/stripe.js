@@ -235,7 +235,7 @@ const StripeService = {
    * @param {string} [paymentMethodType] — 'card', 'us_bank_account', or 'card_or_bank'
    * @returns {{ clientSecret: string, setupIntentId: string }}
    */
-  async createSetupIntent(customerId, paymentMethodType = 'card') {
+  async createSetupIntent(customerId, paymentMethodType = 'card', opts = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -251,7 +251,11 @@ const StripeService = {
       const setupIntent = await stripe.setupIntents.create({
         customer: stripeCustomerId,
         payment_method_types: paymentMethodTypes,
+        // Callers may tag a purpose (e.g. 'covered_capture') so the
+        // setup_intent.succeeded webhook can route completion; the
+        // waves_customer_id key always wins over caller metadata.
         metadata: {
+          ...(opts.metadata || {}),
           waves_customer_id: customerId,
         },
       });
@@ -1742,6 +1746,7 @@ const StripeService = {
     let cardSurcharge;
     let cardTotal;
     let coveredByCredit = false;
+    let captureHeld = false;
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -1842,6 +1847,25 @@ const StripeService = {
         // prepaid transition (return, NOT throw → no rollback) and skips minting
         // a PaymentIntent; settled after the transaction below.
         if (require('../config/feature-gates').gates.autoApplyAccountCredit && availableCredit > 0) {
+          // Required-save signup with nothing chargeable on file: full
+          // coverage is only PROBED, never applied (Codex #2507 round-7
+          // P1). Applying here transitions the invoice to prepaid before
+          // any SetupIntent exists, so an abandoned capture form would
+          // leave the recurring signup complete with no saved method. The
+          // hold keeps the invoice collectible; settleHeldCoverage applies
+          // the credit from /setup-complete (or the covered_capture
+          // webhook) AFTER save→consent→enroll succeeds. Partial coverage
+          // falls through to the normal apply + PI mint — the PI itself
+          // captures the method via setup_future_usage. An attached PI
+          // means money may be in flight: never hold, let the existing
+          // reuse/409 lifecycle decide.
+          if (opts.holdCoverageForCapture
+            && !lockedInvoice.stripe_payment_intent_id
+            && availableCredit >= invoiceAmountDue(lockedInvoice)) {
+            coveredByCredit = true;
+            captureHeld = true;
+            return;
+          }
           const { applyAccountCreditToInvoice } = require('./customer-credit');
           await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
             logger.warn(`[stripe] pay-page account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
@@ -2021,6 +2045,14 @@ const StripeService = {
       });
 
       if (coveredByCredit) {
+        if (captureHeld) {
+          // Coverage was only probed — the invoice is untouched (still
+          // collectible, credit balance intact). The route surfaces
+          // captureNeeded and the credit applies via settleHeldCoverage
+          // once the capture completes.
+          logger.info(`[stripe] Pay-page: account credit fully covers invoice ${invoice.invoice_number} — coverage HELD pending required-save capture`);
+          return { covered_by_credit: true, capture_held: true, status: invoice.status, clientSecret: null, paymentIntentId: null, amount: 0 };
+        }
         // Account credit fully covered the invoice in the committed transaction
         // above — no PaymentIntent to mint. Run the same post-payment side effects
         // a real payment would, and return a covered state (no clientSecret) so
@@ -2067,6 +2099,49 @@ const StripeService = {
       logger.error(`[stripe] Invoice PaymentIntent failed for invoice ${invoiceId}: ${err.type || 'Error'} — ${err.message}${err.code ? ` [code=${err.code}]` : ''}${err.param ? ` [param=${err.param}]` : ''}`);
       throw new Error(`Failed to create payment intent for invoice: ${err.message}`);
     }
+  },
+
+  /**
+   * Settle a required-save invoice whose full credit coverage was HELD until
+   * method capture completed (Codex #2507 round-7 P1):
+   * createInvoicePaymentIntent with holdCoverageForCapture only PROBES
+   * coverage, so the invoice stays collectible until save→consent→enroll
+   * succeeds. Called from POST /pay/:token/setup-complete and the
+   * covered_capture webhook — idempotent both directions:
+   * applyAccountCreditToInvoice skips uncollectible / PI-attached /
+   * payer-billed invoices, and fullCoverageOnly refuses to partially drain
+   * credit that shrank in the meantime (the invoice then simply stays
+   * payable through the normal pay flow — reminders never stopped because
+   * it was never settled).
+   *
+   * Returns { settled, alreadySettled, reason } — alreadySettled marks the
+   * benign "someone else settled it first" skip so callers don't treat a
+   * completed race as a coverage failure.
+   */
+  async settleHeldCoverage(invoiceId) {
+    const { applyAccountCreditToInvoice } = require('./customer-credit');
+    const result = await applyAccountCreditToInvoice({ invoiceId, fullCoverageOnly: true });
+    if (!result?.fullyCovered) {
+      return {
+        settled: false,
+        alreadySettled: result?.skipped === 'uncollectible',
+        reason: result?.skipped || 'not_fully_covered',
+      };
+    }
+    // Same post-payment side effects the immediate covered path runs.
+    try {
+      await require('./invoice-followups').stopOnPayment(invoiceId);
+    } catch (e) {
+      logger.warn(`[stripe] stopOnPayment after held-coverage settle failed for ${invoiceId}: ${e.message}`);
+    }
+    try {
+      const fresh = await db('invoices').where({ id: invoiceId }).first();
+      if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+    } catch (e) {
+      logger.warn(`[stripe] term sync after held-coverage settle failed for ${invoiceId}: ${e.message}`);
+    }
+    logger.info(`[stripe] Held credit coverage settled for invoice ${invoiceId} after required-save capture`);
+    return { settled: true, alreadySettled: false, reason: null };
   },
 
   /**

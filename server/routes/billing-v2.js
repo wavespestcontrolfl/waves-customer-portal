@@ -202,31 +202,73 @@ router.post('/cards', async (req, res, next) => {
       .whereNotNull('stripe_payment_method_id')
       .first('id');
 
-    // Adding a saved card is not the same as enrolling in Auto Pay. The
-    // customer-facing Auto Pay card explicitly selects and enables the
-    // payment method through /api/billing/autopay after save. If another
-    // method already powers autopay, keep it as the default until then.
-    const card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
-      enableAutopay: false,
-      makeDefault: !currentAutopayMethod,
-    });
+    // Idempotent save (lookup-first like /setup-complete): a retry after a
+    // partial first attempt (saved, but consent/enrollment failed below)
+    // must continue with the existing row — savePaymentMethod is a plain
+    // insert and stripe_payment_method_id is unique. Ownership fails
+    // closed.
+    let card = await db('payment_methods')
+      .where({ stripe_payment_method_id: resolvedPaymentMethodId })
+      .first();
+    if (card && card.customer_id !== req.customerId) {
+      logger.warn(`[billing-v2] add-card pm ownership mismatch: pm ${resolvedPaymentMethodId} belongs to ${card.customer_id}, caller ${req.customerId}`);
+      return res.status(409).json({ error: 'Payment method belongs to another account' });
+    }
+    if (!card) {
+      card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
+        enableAutopay: false,
+        makeDefault: !currentAutopayMethod,
+      });
+    }
 
     // Record consent — the portal add-card modal shows SaveCardConsent
     // as locked + checked because saving is the whole point of the
-    // modal. Arriving here means the customer saw the copy.
-    try {
-      const ConsentService = require('../services/payment-method-consents');
-      await ConsentService.recordConsent({
-        customerId: req.customerId,
-        paymentMethodId: card.id,
-        stripePaymentMethodId: resolvedPaymentMethodId,
-        source: 'portal_add_card',
-        methodType: card.method_type || 'card',
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
+    // modal. Arriving here means the customer saw the copy. Enrollment is
+    // consent-gated and UNIVERSAL across save surfaces (Codex #2507): the
+    // same locked copy that enrolls a pay-page save enrolls a portal save,
+    // so a customer who adds a method here is on Auto Pay too — a healthy
+    // method already powering autopay keeps the default role
+    // (enrollConsentedMethod's incumbent semantics), matching the old
+    // "don't displace the current autopay card" behavior. If the consent
+    // insert fails, NO enrollment happens (the gate is the row).
+    //
+    // Consent/enrollment failures FAIL the request (Codex #2507 round-7
+    // P2): this route has no webhook or later /consent retry behind it,
+    // and the client refreshes the Auto Pay card off this response — a
+    // swallowed failure would show Auto Pay off with no retry path while
+    // the method sits saved-only. The save above is idempotent, so the
+    // customer's retry re-enters here and completes consent + enrollment.
+    const ConsentService = require('../services/payment-method-consents');
+    await ConsentService.recordConsent({
+      customerId: req.customerId,
+      paymentMethodId: card.id,
+      stripePaymentMethodId: resolvedPaymentMethodId,
+      source: 'portal_add_card',
+      methodType: card.method_type || 'card',
+      ip: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+    const enrollment = await enrollConsentedMethod({
+      customerId: req.customerId,
+      paymentMethodId: card.id,
+      source: 'portal_add_card',
+    });
+    // A REFUSED enrollment (ach_blocked bank save while the customer's ACH
+    // state is unhealthy, or a vanished row) must not 200 (Codex #2507
+    // round-8 P2): the client refreshes Auto Pay off this response, so a
+    // success-looking reply turns the universal-save promise into a silent
+    // saved-only method with no retry or error path. already_enrolled is
+    // the benign incumbent case. The method row itself stays saved either
+    // way — a retry re-enters through the lookup-first save above.
+    if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+      logger.warn(`[billing-v2] add-card enrollment refused (${enrollment.reason}) for customer ${req.customerId} pm ${card.id}`);
+      return res.status(409).json({
+        error: enrollment.reason === 'ach_blocked'
+          ? 'Payment method saved, but Auto Pay can’t use this bank account until its verification clears — add a card to enable Auto Pay, or try again once the bank account is verified.'
+          : 'Payment method saved, but Auto Pay could not be enabled — please try again.',
+        enrollReason: enrollment.reason,
       });
-    } catch (consentErr) {
-      logger.error(`[billing-v2] Consent record failed: ${consentErr.message}`);
     }
 
     res.json({
