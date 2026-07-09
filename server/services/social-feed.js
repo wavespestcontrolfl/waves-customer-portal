@@ -109,19 +109,96 @@ async function fetchInstagram() {
 }
 
 // ----------------------------------------------------------------- Facebook
+// Graph builds permalink_url from the page id it was queried with. Our
+// FACEBOOK_PAGE_ID is a New-Pages-Experience alias id, so permalink_url
+// comes back as /{alias-id}/posts/{story} (verified in prod 2026-07-09:
+// alias 942895248777384 vs true page id 110336442031847 in the post's own
+// id field). Desktop web resolves the alias; the Facebook mobile app's
+// deep-link handler does not — "View Post" opens "This isn't available"
+// even though the post is live and public. Legacy shapes (permalink.php,
+// photo-viewer links) fail in the app the same way.
+//
+// Fix: rebuild the known-bad shapes onto the page's vanity handle —
+// /{username}/posts/{story} — the form Facebook's own share links use,
+// which resolves in both the app and the browser. The story id and true
+// owner id come from the post's id ("{pageId}_{storyId}"); the handle comes
+// from a one-time page-username lookup, with the true owner id as fallback.
+// Every other permalink shape (reels, videos, already-vanity paths) passes
+// through untouched.
+function normalizeFacebookPermalink(permalinkUrl, postId, pageHandle = null) {
+  let url;
+  try {
+    url = new URL(permalinkUrl);
+  } catch {
+    return permalinkUrl;
+  }
+
+  const [idOwner, idStory, ...rest] = String(postId || '').split('_');
+  const postIdParts = idOwner && idStory && rest.length === 0 ? { owner: idOwner, story: idStory } : null;
+
+  // What we can recover from the URL itself, per known-bad shape.
+  let urlOwner = null;
+  let urlStory = null;
+  const numericPosts = url.pathname.match(/^\/(\d+)\/posts\/([^/]+)\/?$/);
+  if (numericPosts) {
+    [, urlOwner, urlStory] = numericPosts;
+  } else if (url.pathname === '/permalink.php') {
+    urlStory = url.searchParams.get('story_fbid');
+    urlOwner = url.searchParams.get('id');
+    if (!urlStory || !urlOwner) return permalinkUrl;
+  } else {
+    const photoViewer =
+      url.pathname === '/photo.php' ||
+      url.pathname === '/photo' ||
+      url.pathname === '/photo/' ||
+      /^\/[^/]+\/photos\//.test(url.pathname);
+    if (!photoViewer) return permalinkUrl;
+    // Photo-viewer links point at the photo, not the story; only the post id
+    // can get us back to the post itself.
+    if (!postIdParts) return permalinkUrl;
+  }
+
+  const story = urlStory || postIdParts?.story;
+  const owner = pageHandle || postIdParts?.owner || urlOwner;
+  if (!story || !owner) return permalinkUrl;
+  return `https://www.facebook.com/${owner}/posts/${story}`;
+}
+
+// The page's vanity username (e.g. "wavespestcontrol"), fetched once and
+// cached for the process lifetime. Null until resolved; a failed lookup is
+// retried on the next feed rebuild.
+let FB_PAGE_USERNAME = null;
+async function resolveFacebookPageHandle() {
+  if (FB_PAGE_USERNAME) return FB_PAGE_USERNAME;
+  try {
+    const page = await graphGet(String(FACEBOOK_PAGE_ID), { fields: 'username' });
+    if (page?.username) FB_PAGE_USERNAME = page.username;
+  } catch (err) {
+    logger.warn(`[social-feed] page username lookup failed: ${err.message}`);
+  }
+  return FB_PAGE_USERNAME;
+}
+
 async function fetchFacebook() {
   if (!token() || !FACEBOOK_PAGE_ID) return { status: 'skipped', posts: [] };
-  const data = await graphGet(`${FACEBOOK_PAGE_ID}/posts`, {
-    fields: 'id,message,full_picture,permalink_url,created_time',
-    limit: String(FB_LIMIT),
-  });
+  // The username lookup is an optional nicety and must never eat into the
+  // per-source budget build() enforces: run it alongside the posts fetch
+  // under its own short deadline, falling back to the true-owner id (from
+  // each post's own id) when it is slow or fails.
+  const [data, pageHandle] = await Promise.all([
+    graphGet(`${FACEBOOK_PAGE_ID}/posts`, {
+      fields: 'id,message,full_picture,permalink_url,created_time',
+      limit: String(FB_LIMIT),
+    }),
+    withTimeout(resolveFacebookPageHandle(), 'facebook username lookup', 2500).catch(() => null),
+  ]);
   const posts = (data.data || [])
     .filter((p) => (p.message || p.full_picture) && p.permalink_url)
     .map((p) => ({
       platform: 'facebook',
       caption: clip(p.message),
       postedAt: p.created_time || null,
-      postUrl: p.permalink_url,
+      postUrl: normalizeFacebookPermalink(p.permalink_url, p.id, pageHandle),
       image: p.full_picture || null,
       video: false,
       location: null,
@@ -274,4 +351,4 @@ async function getFeed({ force = false } = {}) {
   return INFLIGHT;
 }
 
-module.exports = { getFeed };
+module.exports = { getFeed, normalizeFacebookPermalink };
