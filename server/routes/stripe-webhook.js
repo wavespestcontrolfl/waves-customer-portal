@@ -1262,17 +1262,35 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       // enroll a method that belongs to another customer (Codex round-2
       // short-circuit note).
       if (!existing || existing.customer_id === wavesCustomerId) {
-        if (await ConsentService.hasConsentFor(wavesCustomerId, stripePmId)) {
-          const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-          await enrollConsentedMethod({
+        if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+          // Record the consent snapshot SERVER-SIDE — same recipe as the
+          // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
+          // micro-deposit signup, confirmPayment returned requires_action
+          // so the browser never posted /consent (that endpoint refuses
+          // non-processing/succeeded PIs), and by the time this succeeded
+          // event arrives days later there is no browser left to post it —
+          // deferring would leave a required-save signup paid with the
+          // method saved-but-unenrolled forever. The round-2 gate stands:
+          // enrollment still requires the immutable consent ROW — it is
+          // CREATED here from the Stripe-signed artifact (save_card_opt_in
+          // + setup_future_usage written together by the controlled /setup
+          // and /update-amount paths, and the customer confirmed that PI),
+          // never inferred at charge time.
+          await ConsentService.recordConsent({
             customerId: wavesCustomerId,
             paymentMethodId: saved.id,
-            source: 'save_card_consent',
-            details: { billing_mode: signupBillingMode },
+            stripePaymentMethodId: stripePmId,
+            source: 'pay_page',
+            methodType: saved.method_type || 'card',
           });
-        } else {
-          logger.info(`[stripe-webhook] Save-card mirror: consent row not yet recorded for pm ${stripePmId} (customer ${wavesCustomerId}) — autopay enrollment deferred to the /consent endpoint`);
         }
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        await enrollConsentedMethod({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          details: { billing_mode: signupBillingMode },
+        });
       }
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
@@ -1286,9 +1304,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       }
       logger.info(`[stripe-webhook] Save-card opt-in persisted: pm ${stripePmId} → payment_methods ${saved.id}`);
     } catch (err) {
-      // Non-fatal — the charge already succeeded. Log loudly so we can
-      // manually reconcile if the save failed.
-      logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}): ${err.message}`);
+      // Re-throw so the dispatcher 500s and Stripe retries (Codex #2507
+      // round-7 P1): for micro-deposit ACH signups THIS event is the only
+      // completion path (no browser returns days later), so a swallowed
+      // transient error would leave the signup paid with nothing
+      // enrolled, permanently. Every step above is idempotent
+      // (lookup-first save, hasConsentFor-gated consent, idempotent
+      // enrollment) and the payment settle earlier in this handler is
+      // status-guarded, so the retry re-runs safely.
+      logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}) — rethrowing for Stripe retry: ${err.message}`);
+      throw err;
     }
   }
 
@@ -1876,6 +1901,26 @@ async function handleSetupIntentSucceeded(setupIntent) {
         source: 'save_card_consent',
         details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
       });
+      // Capture done → apply the HELD credit coverage (Codex #2507
+      // round-7 P1): under the hold flow the invoice stayed collectible
+      // until this point, and when the browser never returns this webhook
+      // is the only place the settle can happen. Idempotent — a
+      // setup-complete race or a pre-hold prepaid invoice skips inside.
+      // invoice_id was stamped server-side at /capture-setup mint;
+      // ownership double-checked against the SI's customer.
+      const capturedInvoiceId = setupIntent.metadata?.invoice_id || null;
+      if (capturedInvoiceId) {
+        const capturedInvoice = await db('invoices').where({ id: capturedInvoiceId }).first('id', 'customer_id');
+        if (capturedInvoice && String(capturedInvoice.customer_id) === String(wavesCustomerId)) {
+          const settle = await StripeService.settleHeldCoverage(capturedInvoice.id);
+          if (!settle.settled && !settle.alreadySettled) {
+            // Not an error — credit shrank mid-capture; the invoice simply
+            // stays payable through the normal pay flow (reminders never
+            // stopped). Retrying the webhook can't change that.
+            logger.warn(`[stripe-webhook] covered-capture settle skipped for invoice ${capturedInvoice.id}: ${settle.reason}`);
+          }
+        }
+      }
       logger.info(`[stripe-webhook] covered-capture completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
     } catch (err) {
       // Re-throw so the dispatcher returns 500 and Stripe retries (Codex

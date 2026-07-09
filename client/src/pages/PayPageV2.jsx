@@ -1345,7 +1345,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
         if (body.microdepositPending) { onBankPending?.(); return; }
         throw new Error(body.error || 'Could not save the payment method');
       }
-      onDone?.();
+      onDone?.(body);
     } catch (err) {
       setFormError(err.message || 'Could not save the payment method');
       setProcessing(false);
@@ -1494,11 +1494,18 @@ export default function PayPageV2() {
           body: JSON.stringify({ setupIntentId: returnedSetupIntentId }),
         })
           .then(async (r) => {
+            const body = await r.json().catch(() => ({}));
             if (r.ok) {
+              // settled:false = the held credit no longer fully covers —
+              // the invoice is still payable; re-derive real state instead
+              // of showing "covered, nothing due".
+              if (body?.settled === false) {
+                window.location.replace(window.location.pathname);
+                return;
+              }
               setSetupCapture({ status: 'done' });
               setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
             } else {
-              const body = await r.json().catch(() => ({}));
               setSetupCapture(body.microdepositPending ? { status: 'bank-pending' } : { status: 'minting' });
             }
           })
@@ -1924,7 +1931,15 @@ export default function PayPageV2() {
                     clientSecret={setupCapture.clientSecret}
                     setupIntentId={setupCapture.setupIntentId}
                     token={token}
-                    onDone={() => {
+                    onDone={(body) => {
+                      // settled:false = the held credit no longer fully
+                      // covers (spent elsewhere mid-capture) — the invoice
+                      // is still payable, so re-derive real state instead
+                      // of showing "covered, nothing due".
+                      if (body?.settled === false) {
+                        window.location.replace(window.location.pathname);
+                        return;
+                      }
                       setSetupCapture({ status: 'done' });
                       setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
                     }}

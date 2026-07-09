@@ -202,10 +202,24 @@ router.post('/cards', async (req, res, next) => {
       .whereNotNull('stripe_payment_method_id')
       .first('id');
 
-    const card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
-      enableAutopay: false,
-      makeDefault: !currentAutopayMethod,
-    });
+    // Idempotent save (lookup-first like /setup-complete): a retry after a
+    // partial first attempt (saved, but consent/enrollment failed below)
+    // must continue with the existing row — savePaymentMethod is a plain
+    // insert and stripe_payment_method_id is unique. Ownership fails
+    // closed.
+    let card = await db('payment_methods')
+      .where({ stripe_payment_method_id: resolvedPaymentMethodId })
+      .first();
+    if (card && card.customer_id !== req.customerId) {
+      logger.warn(`[billing-v2] add-card pm ownership mismatch: pm ${resolvedPaymentMethodId} belongs to ${card.customer_id}, caller ${req.customerId}`);
+      return res.status(409).json({ error: 'Payment method belongs to another account' });
+    }
+    if (!card) {
+      card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
+        enableAutopay: false,
+        makeDefault: !currentAutopayMethod,
+      });
+    }
 
     // Record consent — the portal add-card modal shows SaveCardConsent
     // as locked + checked because saving is the whole point of the
@@ -217,26 +231,29 @@ router.post('/cards', async (req, res, next) => {
     // (enrollConsentedMethod's incumbent semantics), matching the old
     // "don't displace the current autopay card" behavior. If the consent
     // insert fails, NO enrollment happens (the gate is the row).
-    try {
-      const ConsentService = require('../services/payment-method-consents');
-      await ConsentService.recordConsent({
-        customerId: req.customerId,
-        paymentMethodId: card.id,
-        stripePaymentMethodId: resolvedPaymentMethodId,
-        source: 'portal_add_card',
-        methodType: card.method_type || 'card',
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
-      });
-      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-      await enrollConsentedMethod({
-        customerId: req.customerId,
-        paymentMethodId: card.id,
-        source: 'portal_add_card',
-      });
-    } catch (consentErr) {
-      logger.error(`[billing-v2] Consent record/enrollment failed: ${consentErr.message}`);
-    }
+    //
+    // Consent/enrollment failures FAIL the request (Codex #2507 round-7
+    // P2): this route has no webhook or later /consent retry behind it,
+    // and the client refreshes the Auto Pay card off this response — a
+    // swallowed failure would show Auto Pay off with no retry path while
+    // the method sits saved-only. The save above is idempotent, so the
+    // customer's retry re-enters here and completes consent + enrollment.
+    const ConsentService = require('../services/payment-method-consents');
+    await ConsentService.recordConsent({
+      customerId: req.customerId,
+      paymentMethodId: card.id,
+      stripePaymentMethodId: resolvedPaymentMethodId,
+      source: 'portal_add_card',
+      methodType: card.method_type || 'card',
+      ip: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+    await enrollConsentedMethod({
+      customerId: req.customerId,
+      paymentMethodId: card.id,
+      source: 'portal_add_card',
+    });
 
     res.json({
       success: true,
