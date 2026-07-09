@@ -10,7 +10,7 @@
 // the content.
 
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
@@ -123,8 +123,8 @@ export default function NewsletterArchivePage() {
         <p style={{ fontFamily: FONTS.body, color: BODY, marginBottom: 24 }}>
           It may have been removed or the link is incorrect.
         </p>
-        <Link
-          to="/newsletter"
+        <a
+          href="https://www.wavespestcontrol.com/newsletter/"
           data-glass-accent=""
           style={{
             fontFamily: FONTS.ui,
@@ -141,7 +141,7 @@ export default function NewsletterArchivePage() {
           }}
         >
           See the latest issues
-        </Link>
+        </a>
       </div>
       </WavesShell>
     );
@@ -157,8 +157,10 @@ export default function NewsletterArchivePage() {
       {/* Header strip */}
       <div style={{ background: B.blueDeeper, color: '#fff', padding: '16px 24px' }}>
         <div style={{ maxWidth: 760, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-          <Link
-            to="/newsletter"
+          {/* Portal /newsletter landing retired 2026-07-09 — the astro site
+              is the single newsletter landing. */}
+          <a
+            href="https://www.wavespestcontrol.com/newsletter/"
             style={{
               fontFamily: FONTS.ui,
               fontSize: 12,
@@ -168,7 +170,7 @@ export default function NewsletterArchivePage() {
               color: '#fff',
               textDecoration: 'none',
             }}
-          >← The Waves Newsletter</Link>
+          >← The Waves Newsletter</a>
           {dateLabel && (
             <span style={{ fontFamily: FONTS.body, fontSize: 12, color: 'rgba(255,255,255,0.78)' }}>
               {dateLabel}

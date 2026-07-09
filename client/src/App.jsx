@@ -1,4 +1,4 @@
-import React, { Component } from 'react';
+import React, { Component, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
@@ -111,6 +111,17 @@ function BookEstimateRedirect() {
 function RecapLinkRedirect() {
   const { token } = useParams();
   return <Navigate to={`/report/${token}#visit-recap`} replace />;
+}
+
+// The portal-domain newsletter landing was retired 2026-07-09 — the astro
+// site's wavespestcontrol.com/newsletter is the single landing (owner call:
+// one page, not two mirrors). Already-shared portal links keep working via
+// this hard redirect; /newsletter/archive/:id stays (the Learn tab's reader).
+function NewsletterExternalRedirect() {
+  useEffect(() => {
+    window.location.replace('https://www.wavespestcontrol.com/newsletter/');
+  }, []);
+  return null;
 }
 
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
@@ -267,7 +278,6 @@ const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'
 const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
 const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareIncludedPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
-const NewsletterLandingPage = lazyWithRetry(() => import('./pages/NewsletterLandingPage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
 
 function EstimatePublicGateway() {
@@ -389,7 +399,7 @@ export default function App() {
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
           <Route path="/quote" element={<Navigate to="/estimate" replace />} />
-          <Route path="/newsletter" element={<Suspense fallback={<div style={{background:'#1B2C5B',minHeight:'100vh'}}/>}><NewsletterLandingPage /></Suspense>} />
+          <Route path="/newsletter" element={<NewsletterExternalRedirect />} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
