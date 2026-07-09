@@ -38,9 +38,9 @@ class TwitterService {
     return !!process.env.ZERNIO_API_KEY;
   }
 
-  async _zernio(path, { method = 'GET', body } = {}) {
+  async _zernio(path, { method = 'GET', body, timeoutMs = 15000 } = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
       res = await fetch(`${ZERNIO_API}/${path}`, {
@@ -56,7 +56,11 @@ class TwitterService {
       clearTimeout(timeout);
     }
     if (!res.ok) {
-      throw new Error(`Zernio ${method} /${path} ${res.status}: ${(await res.text()).slice(0, 500)}`);
+      const bodyText = (await res.text()).slice(0, 500);
+      const err = new Error(`Zernio ${method} /${path} ${res.status}: ${bodyText}`);
+      err.status = res.status;
+      err.bodyText = bodyText;
+      throw err;
     }
     return res.json();
   }
@@ -71,12 +75,27 @@ class TwitterService {
     }
     const data = await this._zernio('accounts');
     const accounts = Array.isArray(data) ? data : (data?.accounts || []);
-    const x = accounts.find((a) => a?.platform === 'twitter' && a?.isActive !== false);
-    if (!x?._id) {
+    const matches = accounts.filter((a) => a?.platform === 'twitter' && a?.isActive !== false && a?._id);
+    if (!matches.length) {
       throw new Error('No active X (twitter) account connected in Zernio — connect one in the Zernio dashboard');
     }
-    this._account = { id: x._id, fetchedAt: Date.now() };
-    return x._id;
+    // Fail closed on ambiguity: a shared workspace with a second X profile
+    // must never receive brand posts by list-order accident.
+    if (matches.length > 1) {
+      throw new Error('Multiple active X (twitter) accounts connected in Zernio — set ZERNIO_TWITTER_ACCOUNT_ID to pin the brand account');
+    }
+    this._account = { id: matches[0]._id, fetchedAt: Date.now() };
+    return matches[0]._id;
+  }
+
+  _parseExistingPostId(bodyText) {
+    try {
+      const body = JSON.parse(bodyText);
+      const id = body?.existingPostId || body?.post?._id || body?.error?.existingPostId;
+      return typeof id === 'string' && id ? id : null;
+    } catch {
+      return null;
+    }
   }
 
   // Compose the tweet text: caption + blank line + article URL, trimming the
@@ -96,13 +115,17 @@ class TwitterService {
   // partial failure (same reason the old direct path surfaced X's 402s)
   // instead of dying silently in the queue. Still-pending after the budget is
   // treated as accepted — the Zernio dashboard is the async monitor surface.
-  async _waitForPlatformResult(postId, { attempts = 5, delayMs = 2000 } = {}) {
+  // The budget is WALL-CLOCK, and status reads use a short per-read timeout:
+  // hung reads must never stretch an already-created post into a long
+  // publish block for the calling request.
+  async _waitForPlatformResult(postId, { budgetMs = 12000, delayMs = 2000, readTimeoutMs = 3000 } = {}) {
+    const deadline = Date.now() + budgetMs;
     let last = null;
-    for (let i = 0; i < attempts; i++) {
+    while (Date.now() + delayMs < deadline) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       let data;
       try {
-        data = await this._zernio(`posts/${postId}`);
+        data = await this._zernio(`posts/${postId}`, { timeoutMs: readTimeoutMs });
       } catch (err) {
         // Transient read failures never fail the (already-created) post.
         logger.warn(`[twitter] Zernio status read failed for ${postId}: ${err.message}`);
@@ -116,7 +139,7 @@ class TwitterService {
         throw new Error(`Zernio X publish failed: ${(last?.error || post?.error || status).toString().slice(0, 300)}`);
       }
     }
-    logger.info(`[twitter] Zernio post ${postId} still pending after ${attempts} checks — treating as accepted`);
+    logger.info(`[twitter] Zernio post ${postId} still pending at the ${budgetMs}ms poll budget — treating as accepted`);
     return last;
   }
 
@@ -131,14 +154,26 @@ class TwitterService {
     // NOT retried: like the direct create-Tweet call this replaced, publish
     // is non-idempotent — a lost response on a successful create would
     // duplicate the tweet.
-    const created = await this._zernio('posts', {
-      method: 'POST',
-      body: {
-        content: status,
-        platforms: [{ platform: 'twitter', accountId }],
-        publishNow: true,
-      },
-    });
+    let created;
+    try {
+      created = await this._zernio('posts', {
+        method: 'POST',
+        body: {
+          content: status,
+          platforms: [{ platform: 'twitter', accountId }],
+          publishNow: true,
+        },
+      });
+    } catch (err) {
+      // Zernio dedupes identical content by hash: a replayed create (e.g. an
+      // operator channel-retry after a lost response) 409s with the id of the
+      // post that already exists. Converge on that post instead of recording
+      // a permanent failure the retry path could never clear.
+      const existingId = err.status === 409 ? this._parseExistingPostId(err.bodyText) : null;
+      if (!existingId) throw err;
+      logger.info(`[twitter] Zernio deduped a replayed create → existing post ${existingId}`);
+      created = { post: { _id: existingId } };
+    }
     const zernioPostId = (created?.post || created)?._id;
     if (!zernioPostId) {
       throw new Error(`Zernio create returned no post id: ${JSON.stringify(created).slice(0, 300)}`);

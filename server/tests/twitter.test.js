@@ -123,6 +123,34 @@ describe('twitter service', () => {
       expect(JSON.parse(createCall[1].body).platforms).toEqual([{ platform: 'twitter', accountId: 'pinned-id' }]);
     }, 15000);
 
+    test('replayed create (Zernio 409 dedupe) converges on the existing post instead of failing', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/posts` && opts.method === 'POST') {
+          return { ok: false, status: 409, text: async () => JSON.stringify({ existingPostId: 'zp1' }) };
+        }
+        return base(url, opts);
+      });
+
+      const res = await twitter.createPost({ text: 'T', link: LINK });
+      expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
+    }, 20000);
+
+    test('multiple active X accounts without a pin → fail closed', async () => {
+      setCreds();
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => ({ accounts: [
+          { _id: 'x-one', platform: 'twitter', isActive: true },
+          { _id: 'x-two', platform: 'twitter', isActive: true },
+        ] }),
+        text: async () => '',
+      }));
+      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/Multiple active X \(twitter\) accounts.*ZERNIO_TWITTER_ACCOUNT_ID/);
+      expect(global.fetch.mock.calls.every(([u]) => u === `${ZERNIO_API}/accounts`)).toBe(true);
+    });
+
     test('no connected X account in Zernio → clear error before any create', async () => {
       setCreds();
       global.fetch = jest.fn(async () => ({
