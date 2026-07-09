@@ -77,6 +77,32 @@ const turfCountyPriorDisabled = () => ['1', 'true'].includes(String(process.env.
 // county prior so the exemptions can't drift apart.
 const SHARED_TURF_TYPE_RE = /CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/;
 
+// The county-facts ceiling, trusted for prior/review use only when it is
+// COUNTY-COMPLETE: the extra-features roll was actually parsed
+// (imperviousKnown — an unparsed table reads as 0 hardscape and inflates
+// the ceiling), the story count is real (a missing count defaults the
+// footprint to the full living area and shrinks it), and the lot/building
+// dimensions themselves won from county/cadastral/verified evidence — a
+// hybrid merge can carry listing-sourced dims with only the GIS impervious
+// backfilled (codex P2). Anything weaker returns null and callers stay on
+// the existing fallback/verify paths. The raw computeFootprintTurf value
+// still rides the profile as the untrusted SHADOW fields.
+const COUNTY_DIM_SOURCES = new Set(['county', 'cadastral', 'verified']);
+function trustedCountyTurfCeiling(rc) {
+  const ceiling = computeFootprintTurf(rc);
+  if (!ceiling || !ceiling.parts.imperviousKnown) return null;
+  if (!(firstNonNegativeNumber(rc?.stories) >= 1)) return null;
+  // Merged records carry { field: { sourceType } }; a raw single-source
+  // record carries { field: [items] } — accept either shape.
+  const dimSourced = (field) => {
+    const entry = rc?._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return COUNTY_DIM_SOURCES.has(String(sourceType || '').toLowerCase());
+  };
+  if (!dimSourced('lotSize') || !dimSourced('squareFootage')) return null;
+  return ceiling;
+}
+
 function positiveIntEnv(name, fallback) {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
@@ -1312,22 +1338,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // measurement, not a miss — it must never be overwritten (codex P2).
   const visionTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf);
   const visionTurfKnown = visionTurfSf !== undefined;
-  // County-COMPLETE facts only: the extra-features roll must actually have
-  // been parsed (imperviousKnown — an unparsed table reads as 0 hardscape
-  // and inflates the ceiling) and the story count must be real (a missing
-  // count defaults the footprint to the full living area and shrinks the
-  // ceiling). Either gap → stay on the existing fallback/verify path
-  // (codex P2 ×2).
+  // Trusted = county-complete AND county-sourced dimensions — see
+  // trustedCountyTurfCeiling. Anything weaker stays on the existing
+  // fallback/verify path (codex P2s).
+  const countyCeiling = trustedCountyTurfCeiling(rc);
   const countyTurfPriorSf = (
     !visionTurfKnown
     && !commercialProfile
     && !turfCountyPriorDisabled()
-    && footprintTurf
-    && footprintTurf.parts.imperviousKnown
-    && firstNonNegativeNumber(rc?.stories) >= 1
-    && footprintTurf.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
+    && countyCeiling
+    && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
     && !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase())
-  ) ? Math.round(footprintTurf.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
+  ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
   if (countyTurfPriorSf) {
@@ -1448,6 +1470,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // to its lot-based estimate.
     turfSource: visionTurfKnown ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
     countyTurfPriorSf,
+    // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
+    // exceeds-ceiling review reason; null when the facts are too weak to
+    // judge against (codex P3).
+    countyTurfCeilingSf: countyCeiling ? countyCeiling.turfSf : null,
     // Shadow comparison fields — see computeFootprintTurf. Not a pricing
     // input; estimatedTurfSf above remains the engine's turf source.
     footprintTurfSf: footprintTurf ? footprintTurf.turfSf : null,
@@ -1820,11 +1846,12 @@ function turfRiskReasons(source = {}) {
   if (lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO) {
     reasons.push(`estimated turf is ${Math.round((estimatedTurfSf / lotSqFt) * 100)}% of lot`);
   }
-  // Above the county-facts ceiling (lot − building − assessed impervious) —
-  // observed on only 4/95 prod lookups, always an obstructed-imagery
-  // overshoot. Pricing already caps at its own plausible max; this surfaces
-  // the disagreement to the operator.
-  const countyCeilingSf = firstNonNegativeNumber(source.footprintTurfSf);
+  // Above the TRUSTED county-facts ceiling (county-complete + county-sourced
+  // dims only — trustedCountyTurfCeiling; an incomplete ceiling would flag
+  // spuriously). Observed on only 4/95 prod lookups, always an
+  // obstructed-imagery overshoot. Pricing already caps at its own plausible
+  // max; this surfaces the disagreement to the operator.
+  const countyCeilingSf = firstNonNegativeNumber(source.countyTurfCeilingSf);
   if (countyCeilingSf > 0 && estimatedTurfSf && estimatedTurfSf > countyCeilingSf) {
     reasons.push(`exceeds the county-facts ceiling of ${Math.round(countyCeilingSf).toLocaleString()} sq ft (lot − building − assessed hardscape)`);
   }
@@ -2529,9 +2556,10 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     ...ai,
     lotSqFt: rc?.lotSize,
     aiConfidence: ai?.confidenceScore,
-    // County-facts ceiling for the exceeds-ceiling reason — ai carries no
-    // county figures; the profile path passes its own footprintTurfSf.
-    footprintTurfSf: computeFootprintTurf(rc)?.turfSf,
+    // TRUSTED county ceiling only (county-complete + county-sourced dims) —
+    // ai carries no county figures; the profile path passes its own
+    // countyTurfCeilingSf.
+    countyTurfCeilingSf: trustedCountyTurfCeiling(rc)?.turfSf,
   });
   if (estimatedTurfSf > 0 && turfReviewReasons.length > 0) {
     flags.push({

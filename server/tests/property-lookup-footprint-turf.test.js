@@ -147,6 +147,8 @@ describe('county turf prior (vision-missing seed)', () => {
   const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
 
   // County-complete residential record: ceiling = 10000 − 1200 − 800 = 8000.
+  // The lot/building dims carry county evidence — the prior requires the
+  // dimensions THEMSELVES to be county-sourced, not just the impervious.
   function countyRecord(overrides = {}) {
     return {
       propertyType: 'Single Family',
@@ -154,6 +156,10 @@ describe('county turf prior (vision-missing seed)', () => {
       squareFootage: 2400,
       stories: 2,
       imperviousAreaSf: 800,
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+      },
       ...overrides,
     };
   }
@@ -238,6 +244,34 @@ describe('county turf prior (vision-missing seed)', () => {
     const profile = buildEnrichedProfile(countyRecord({ stories: null }), null, 27.4, -82.4);
     expect(profile.countyTurfPriorSf).toBeNull();
     expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('listing-sourced dimensions never seed, even with GIS impervious backfilled (codex P2)', () => {
+    // Hybrid merge shape: lot won from a listing, impervious backfilled
+    // from county GIS — the ceiling is not county-grade.
+    const profile = buildEnrichedProfile(countyRecord({
+      _fieldEvidence: {
+        lotSize: { sourceType: 'listing' },
+        squareFootage: { sourceType: 'county' },
+      },
+    }), null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+    // …and the untrusted ceiling never feeds the review reason either.
+    expect(profile.countyTurfCeilingSf).toBeNull();
+    // The shadow fields still ride along untrusted, for the log series.
+    expect(profile.footprintTurfSf).toBe(8000);
+  });
+
+  test('trusted ceiling is exposed for the review reason on county-complete records', () => {
+    const profile = buildEnrichedProfile(countyRecord(), { estimatedTurfSf: 9500, confidenceScore: 80 }, 27.4, -82.4);
+    expect(profile.countyTurfCeilingSf).toBe(8000);
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'estimatedTurfSf',
+        reason: expect.stringContaining('county-facts ceiling of 8,000 sq ft'),
+      }),
+    ]));
   });
 });
 
