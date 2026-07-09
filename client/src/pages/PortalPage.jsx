@@ -3890,8 +3890,16 @@ function BillingTab({ customer }) {
       : autopay?.autopay_enabled
         ? 'active'
         : 'disabled';
+  // Per-application customers pay per completed visit — no monthly charge to
+  // project, so never fall back to monthly_rate for them (the server also
+  // sends next_charge_amount/date as null).
+  const perApplicationBilling = autopay?.billing_mode === 'per_application';
+  // Annual prepay is term-covered — no monthly charge runs; the saved method
+  // is used at renewal.
+  const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
   const amountDue = Number(autopayState === 'active'
-    ? (autopay?.next_charge_amount ?? autopay?.monthly_rate ?? 0)
+    ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
   const autopayBaseAmount = Number(autopay?.next_charge_base_amount ?? 0);
   const autopaySurcharge = Number(autopay?.next_charge_surcharge_amount ?? 0);
@@ -3953,14 +3961,22 @@ function BillingTab({ customer }) {
     active: {
       bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
       badge: 'Auto Pay active', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
-      title: daysUntilDue === 0
-        ? 'Auto Pay is processing today'
-        : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
-      detail: daysUntilDue === 0
-        ? `Amount: ${money(amountDue)}`
-        : autopaySurcharge > 0
-          ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`
-          : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
+      title: perApplicationBilling
+        ? 'Auto Pay is on — charged per visit'
+        : annualPrepayBilling
+          ? 'Auto Pay is on — plan prepaid'
+          : daysUntilDue === 0
+            ? 'Auto Pay is processing today'
+            : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
+      detail: perApplicationBilling
+        ? 'Your saved payment method is charged for each service visit after it is completed.'
+        : annualPrepayBilling
+          ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
+          : daysUntilDue === 0
+          ? `Amount: ${money(amountDue)}`
+          : autopaySurcharge > 0
+            ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`
+            : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
     },
     paused: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'clock',
@@ -4180,7 +4196,7 @@ function BillingTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? `Next ${dueDateLabel}` : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per visit' : annualPrepayBilling ? 'Plan prepaid' : `Next ${dueDateLabel}`) : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             { label: 'Monthly plan', value: money(monthlyRate), sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan') },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },

@@ -74,6 +74,7 @@ router.get('/', async (req, res, next) => {
         'id', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_pause_reason',
         'autopay_payment_method_id', 'billing_day', 'next_charge_date',
+        'ach_status',
       )
       .first();
 
@@ -85,7 +86,7 @@ router.get('/', async (req, res, next) => {
         'id',
         db.raw('card_brand as brand'),
         db.raw('last_four as last4'),
-        'exp_month', 'exp_year', 'is_default', 'autopay_enabled',
+        'exp_month', 'exp_year', 'is_default', 'autopay_enabled', 'method_type',
       )
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
@@ -101,12 +102,40 @@ router.get('/', async (req, res, next) => {
         autopay_enabled: true,
       })
       .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
-    const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
+    // Mirror customerOnAutopay's ACH-health rule (Codex round-12): when
+    // customers.ach_status is non-empty and not 'active'
+    // (needs_verification / suspended), collection refuses everything but a
+    // card — reporting 'active' for an unhealthy bank default would promise
+    // auto-charges that will actually fall back to manual payment.
+    const achHealthBlocked = !!customer.ach_status && customer.ach_status !== 'active'
+      && chargeableAutopayMethod?.method_type !== 'card';
+    const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod) && !achHealthBlocked;
+    // Per-application customers pay per completed visit — their autopay card
+    // is HOW each visit charge collects, not a monthly subscription, and the
+    // monthly cron skips them (GUARD 3b). Never project a monthly next-charge
+    // from monthly_rate for them (Codex round-2): it advertises a charge that
+    // will never run. Column-guarded read — pre-migration keeps legacy shape.
+    let billingMode = null;
+    try {
+      const modeRow = await db('customers').where({ id: req.customerId }).first('billing_mode');
+      billingMode = modeRow?.billing_mode || null;
+    } catch { /* billing_mode column absent pre-migration */ }
+    const perApplicationBilling = billingMode === 'per_application';
+    // Both non-monthly modes must suppress the monthly projection: the
+    // monthly cron never charges per_application, and annual_prepay is
+    // term-covered (renewal collects via its own flow) — projecting
+    // monthly_rate for either advertises a charge that will not run
+    // (Codex round-2 + round-5).
+    const nonMonthlyBilling = perApplicationBilling || billingMode === 'annual_prepay';
+    // Per-application collection takes ANY saved tender (owner ruling
+    // 2026-07-09): chargeInvoiceWithSavedCard locks the PI to the saved
+    // method's family (card settles inline, ACH rides processing→paid), so
+    // an ACH default is a genuinely active Auto Pay state here too.
     const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;
-    const nextCharge = customerAutopayEnabled
+    const nextCharge = customerAutopayEnabled && !nonMonthlyBilling
       ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: autopayFunding })
       : null;
 
@@ -123,7 +152,8 @@ router.get('/', async (req, res, next) => {
       pause_reason: customer.autopay_pause_reason,
       autopay_payment_method_id: hasAutopayMethod ? chargeableAutopayMethod.id : null,
       billing_day: customer.billing_day || 1,
-      next_charge_date: customer.next_charge_date,
+      billing_mode: billingMode,
+      next_charge_date: nonMonthlyBilling ? null : customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,
       next_charge_surcharge_amount: nextCharge?.surcharge ?? null,

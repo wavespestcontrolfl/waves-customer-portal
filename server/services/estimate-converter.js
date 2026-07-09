@@ -1167,6 +1167,26 @@ const EstimateConverter = {
         })
       : null;
 
+    // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
+    // their membership model — an unconditional per_application stamp would
+    // stop the monthly cron for them and start billing every completion per
+    // visit (Codex round-7 P1). "Current member" = live pipeline stage + a
+    // positive monthly_rate + not already an estimate-flow mode. Everyone
+    // else (new signups, leads, churned/dormant re-signups) converts to
+    // per-visit billing per the owner ruling; annual-prepay accepts are
+    // re-stamped at the term choke point either way.
+    const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+      && Number(customer.monthly_rate) > 0
+      && !['per_application', 'annual_prepay'].includes(customer.billing_mode || '');
+    // Pre-migration compatibility (Codex round-8): billing_mode +
+    // per_application_fee ship in migration 20260709000010 — on a database
+    // that hasn't run it (preview env, deploy window) the update keys would
+    // fail the whole acceptance with "column does not exist". One probe
+    // covers both columns (same migration).
+    let billingModeColumnsExist = false;
+    try {
+      billingModeColumnsExist = await database.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy update shape */ }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -1200,6 +1220,44 @@ const EstimateConverter = {
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
           monthly_rate: monthlyRate,
+          // Estimate-flow recurring customers bill PER VISIT (owner ruling
+          // 2026-07-09), never as a monthly membership subscription: the
+          // monthly billing cron skips non-membership modes and completion
+          // collects per_application_fee each visit. Annual-prepay accepts are
+          // re-stamped 'annual_prepay' at their term choke point
+          // (createTermForAnnualPrepay), which every prepay path runs through.
+          // CURRENT monthly members accepting an add-on keep their existing
+          // model (see preservesExistingMembership above). Column-guarded —
+          // pre-migration accepts keep the legacy update shape.
+          ...(billingModeColumnsExist ? {
+            billing_mode: preservesExistingMembership
+              ? (customer.billing_mode || null)
+              : 'per_application',
+          // Exact per-visit charge at the accepted billing cadence (quarterly
+          // derives from the exact annual: $98.00, not 3 x rounded-monthly
+          // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
+          // only — the same gate the scheduled-row estimated_price writer
+          // uses: a multi-service plan creates one row per service, and a
+          // customer-level whole-plan fee would bill the full package on
+          // EVERY row's completion (Codex P1). Multi-service plans leave the
+          // fee NULL so completion keeps its existing per-row precedence.
+            // An already-per_application customer accepting an ADD-ON keeps
+            // their established fee (Codex round-10): the customer-level fee
+            // is the fallback for EVERY per-app visit without a row price,
+            // so overwriting it with the add-on's cadence amount would
+            // re-price the ORIGINAL series; the add-on's own rows carry
+            // their explicit estimated_price (single-service writer).
+            per_application_fee: preservesExistingMembership
+              ? (customer.per_application_fee ?? null)
+              : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
+                ? Number(customer.per_application_fee)
+                : ((recurringServicesForConversion.length === 1
+                  && billingCadence && Number(billingCadence.amount) > 0)
+                  ? Number(billingCadence.amount)
+                  : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+                    ? Number(monthlyRate)
+                    : null))),
+          } : {}),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former

@@ -233,7 +233,15 @@ export default function AutopayCard({ onStateChange }) {
   const rawState = data.state;
   const state = ['active', 'paused', 'disabled'].includes(rawState) ? rawState : 'disabled';
   const { next_charge_date, next_charge_amount, monthly_rate, payment_methods = [], paused_until } = data;
-  const nextChargeAmount = Number(next_charge_amount ?? monthly_rate ?? 0);
+  // Per-application customers pay per completed visit — there is no monthly
+  // charge to project, so never fall back to monthly_rate for them (the
+  // server also sends next_charge_amount/date as null).
+  const perApplicationBilling = data.billing_mode === 'per_application';
+  // Annual prepay is term-covered — no monthly charge runs either; the saved
+  // method is used at renewal.
+  const annualPrepayBilling = data.billing_mode === 'annual_prepay';
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
+  const nextChargeAmount = Number(next_charge_amount ?? (nonMonthlyBilling ? 0 : monthly_rate) ?? 0);
   // Surcharge disclosure lives here now that the healthy-state banner above is
   // hidden — this card is the only place an active autopay customer sees the
   // base + credit-card-surcharge breakdown before the charge runs.
@@ -410,7 +418,11 @@ export default function AutopayCard({ onStateChange }) {
           </div>
           <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
             {state === 'active'
-              ? `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`
+              ? (perApplicationBilling
+                ? 'Auto Pay is on — your saved payment method is charged after each visit.'
+                : annualPrepayBilling
+                  ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
+                  : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
               : state === 'paused'
                 ? `Paused until ${formatDate(paused_until)}`
                 : 'Auto Pay is off. Charges will not run automatically.'}
@@ -422,7 +434,7 @@ export default function AutopayCard({ onStateChange }) {
           )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {activeCard.brand || 'card'} ending in {activeCard.last4}
+              Charging {activeCard.method_type === 'ach' ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>

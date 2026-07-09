@@ -28,12 +28,25 @@ async function sendPreChargeReminders() {
   logger.info(`[autopay-notifications] Pre-charge reminders for billing_day=${targetDay}`);
 
   // Active autopay customers whose billing_day matches 3 days from now
-  const customers = await db('customers')
+  let customersQuery = db('customers')
     .where({ active: true, autopay_enabled: true })
     .where('monthly_rate', '>', 0)
     .where('billing_day', targetDay)
     .whereNull('deleted_at')
     .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until');
+  // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
+  // but the monthly cron never charges them (GUARD 3b) — never text a
+  // reminder for a monthly charge that will not run (Codex round-2 + 5):
+  // per_application collects per completed visit, annual_prepay is
+  // term-covered and collects at renewal. Column-guarded pre-migration.
+  try {
+    if (await db.schema.hasColumn('customers', 'billing_mode')) {
+      customersQuery = customersQuery.where(function () {
+        this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
+      });
+    }
+  } catch { /* billing_mode column absent — keep legacy selection */ }
+  const customers = await customersQuery;
 
   let sent = 0;
   let skipped = 0;

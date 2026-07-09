@@ -1166,6 +1166,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // issued — the full-annual refund would otherwise refund those
         // slices twice (once inside the refund, once as kept credit).
         await reversePendingWindowCompletionCredits(updated, conn);
+        // Coverage is gone — return the customer to a billable mode (the
+        // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
+        await resetBillingModeAfterTermCancel(updated, conn);
       }
     }
 
@@ -1177,6 +1180,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // settle their open invoices as coverage / credit back their slice.
       // Idempotent, so retried webhooks and later syncs are safe.
       await reconcilePendingWindowCompletions(refreshed || current, conn);
+      // Payment confirmed → the customer is now genuinely annual-prepay.
+      // Term creation deliberately does NOT stamp payment_pending terms
+      // (pre-payment completions bill per application), so this transition
+      // is where the pending case picks up its stamp. Idempotent re-stamp
+      // for already-active terms; best-effort + column-guarded inside.
+      await stampAnnualPrepayBillingMode(current.customer_id, conn, current.id);
       results.push(refreshed || current);
     } else {
       results.push(current);
@@ -1198,7 +1207,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             this.where('status', 'cancelled').whereNotNull('renewal_decision');
           });
       })
-      .select('id', 'customer_id');
+      .select('id', 'customer_id', 'source_estimate_id');
     for (const decided of decidedCoveredTerms) {
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
@@ -1209,6 +1218,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
       }
       await reversePendingWindowCompletionCredits(decided, conn);
+      // A decided-lapse term (status 'cancelled' + renewal_decision) whose
+      // invoice refunds never passes through the active loop's reset — the
+      // customer would stay 'annual_prepay' with the cron skipping them and
+      // completion refusing to bill: unbilled forever (Codex round-6 P1).
+      // The helper self-checks for replacement coverage, so a renewed
+      // customer (live follow-on term) keeps their mode.
+      await resetBillingModeAfterTermCancel(decided, conn);
     }
   }
 
@@ -1351,6 +1367,127 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
     .whereNull('i.paid_at')
     .distinct('t.customer_id');
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
+}
+
+// Owner ruling 2026-07-09: annual-prepay customers carry billing_mode
+// 'annual_prepay' as their classification — it drives autopay enrollment at
+// signup (stripe-webhook save-card mirror) and marks them NOT
+// per-application for completion billing. Deliberately NOT a billing
+// suppressor: the monthly cron keeps trusting its coverage-dated term
+// guards, so a later term cancel/refund returns the customer to normal
+// billing without this stamp needing cleanup. The estimate converter stamps
+// every recurring accept 'per_application'; the term choke point
+// (portal accept, prepay-on-book, Customer 360 record-prepay all run through
+// createTermForAnnualPrepay) re-stamps the prepay ones — but ONLY once the
+// term is ACTIVE (paid). payment_pending terms stay 'per_application' so
+// pre-payment completions keep billing per application; the payment sync
+// stamps on the pending→active transition. Best-effort + column-guarded:
+// term creation must never fail on this stamp.
+async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
+  try {
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    // Record what the customer was BEFORE prepay so a later void/refund can
+    // restore it EXACTLY (Codex round-7: a per_application customer buying a
+    // MANUAL prepay has no source_estimate_id on the term, and the heuristic
+    // alone would wrongly return them to legacy monthly). 'none' = prior
+    // mode was NULL; a NULL column value means "not recorded" (pre-column
+    // terms) and falls back to the heuristic. First stamp wins — renewal
+    // syncs / duplicate webhooks re-stamp the customer but never overwrite
+    // the recorded prior with 'annual_prepay'.
+    if (termId && (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode'))) {
+      const current = await conn('customers').where({ id: customerId }).first('billing_mode');
+      if (current && current.billing_mode !== 'annual_prepay') {
+        await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .whereNull('prior_billing_mode')
+          .update({ prior_billing_mode: current.billing_mode || 'none' });
+      } else if (current) {
+        // Already annual_prepay (a renewal or a second manual term) — carry
+        // the ORIGINAL prior forward from the earlier term, or a later
+        // refund of this new term would fall back to the heuristic and
+        // restore the wrong mode (Codex round-8: a manual renewal term has
+        // no source estimate, so a per_application-origin customer would
+        // land on legacy monthly).
+        const prev = await conn('annual_prepay_terms')
+          .where({ customer_id: customerId })
+          .whereNot({ id: termId })
+          .whereNotNull('prior_billing_mode')
+          .orderBy('created_at', 'desc')
+          .first('prior_billing_mode');
+        if (prev?.prior_billing_mode) {
+          await conn('annual_prepay_terms')
+            .where({ id: termId })
+            .whereNull('prior_billing_mode')
+            .update({ prior_billing_mode: prev.prior_billing_mode });
+        }
+      }
+    }
+    await conn('customers')
+      .where({ id: customerId })
+      .update({ billing_mode: 'annual_prepay', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[annual-prepay] billing_mode stamp skipped for customer ${customerId}: ${err.message}`);
+  }
+}
+
+// A true void/refund cancels the prepay coverage — the customer must return
+// to a billable mode, or the monthly cron's 'annual_prepay' skip (GUARD 3b,
+// Codex round-5) leaves them unbilled forever. Estimate-flow terms
+// (source_estimate_id set) return to per-visit billing; Customer 360 /
+// manual prepays (no source estimate — often legacy monthly members who
+// prepaid a year) return to legacy monthly semantics (NULL). Guarded on the
+// current mode so a customer who already switched models isn't clobbered.
+// Best-effort + column-guarded, same contract as the stamp.
+async function resetBillingModeAfterTermCancel(term, conn) {
+  try {
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    // Replacement coverage keeps the mode — but only a PAID (genuinely
+    // covering) term counts: a payment_pending replacement is deliberately
+    // NOT stamped (pre-payment completions bill per application/monthly),
+    // so keeping 'annual_prepay' for it would strand the customer in a
+    // nothing-bills limbo — cron skips the mode, completion refuses it,
+    // and the pending invoice may never be paid (Codex round-8 P1). When
+    // the pending term DOES pay, syncTermForInvoicePayment re-stamps.
+    // Same for a row whose window does not contain TODAY: coveredTermsAsOf
+    // only covers dates inside [term_start, term_end], so an EXPIRED
+    // active/renewal_pending row (lapsed renewal never decided — Codex
+    // round-11) or a paid FUTURE term that hasn't started yet (Codex
+    // round-12) is not coverage right now — keeping the stamp for either is
+    // the same nothing-bills limbo during the gap. Resetting under a future
+    // term is safe: once its window opens, coveredTermsAsOf / prepaidCovered
+    // protect covered visits regardless of billing_mode. Live window only,
+    // ET date convention.
+    const today = etDateString();
+    const replacement = await conn('annual_prepay_terms')
+      .where({ customer_id: term.customer_id })
+      .whereNot({ id: term.id })
+      .whereIn('status', ACTIVE_STATUSES)
+      .where('term_start', '<=', today)
+      .where('term_end', '>=', today)
+      .first('id');
+    if (replacement) return;
+    // Restore the EXACT prior mode when the stamp recorded it ('none' =
+    // legacy NULL); pre-column terms fall back to the source heuristic
+    // (estimate-flow term → per-visit, manual prepay → legacy monthly).
+    let restored;
+    if (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode')) {
+      const trow = await conn('annual_prepay_terms').where({ id: term.id }).first('prior_billing_mode');
+      if (trow?.prior_billing_mode) {
+        restored = trow.prior_billing_mode === 'none' ? null : trow.prior_billing_mode;
+      }
+    }
+    if (restored === undefined) {
+      restored = term.source_estimate_id ? 'per_application' : null;
+    }
+    await conn('customers')
+      .where({ id: term.customer_id, billing_mode: 'annual_prepay' })
+      .update({
+        billing_mode: restored,
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[annual-prepay] billing_mode reset skipped for customer ${term.customer_id}: ${err.message}`);
+  }
 }
 
 async function createTermForAnnualPrepay({
@@ -1544,6 +1681,13 @@ async function createTermForAnnualPrepay({
       // caller trx); idempotent, so terms that DID arrive through the
       // payment sync are unaffected.
       await reconcileBornPaidTerm(refreshed, conn);
+      // Stamp only once the term is genuinely ACTIVE (paid). A
+      // payment_pending term must leave the customer 'per_application':
+      // pending-window completions bill per application until the annual
+      // invoice is paid, and the annual_prepay stamp would divert them to
+      // the monthly-membership dispatch path (Codex round-2). The payment
+      // sync (syncTermForInvoicePayment) stamps on pending→active.
+      await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
     }
     return refreshed;
   }
@@ -1580,6 +1724,10 @@ async function createTermForAnnualPrepay({
     // it here (post-commit when inside a caller trx) or its pending-window
     // completed visits stay double-billed.
     await reconcileBornPaidTerm(refreshed, conn);
+    // ACTIVE (born-paid) only — a payment_pending term keeps the customer
+    // 'per_application' so pre-payment completions bill per application; the
+    // payment sync stamps when the invoice pays (Codex round-2).
+    await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
   }
   return refreshed;
 }
