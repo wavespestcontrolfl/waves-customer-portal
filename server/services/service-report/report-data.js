@@ -2418,12 +2418,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? reportWaveGuardTier
     : null;
 
-  // Lawn Report V2 — visual-insight payload (flag-gated, additive). Deterministic
-  // structure (diagnosis / water / mowing / treatment / trends) from the data already
-  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose per visit
-  // and falls back to the deterministic copy field-by-field. Never blocks the report.
+  // Lawn Report V2 — THE lawn report (owner ruling 2026-07-09; the
+  // LAWN_REPORT_V2 env flag is retired). Deterministic structure
+  // (diagnosis / water / mowing / treatment / trends) from the data already
+  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose
+  // per visit and falls back to the deterministic copy field-by-field. Built
+  // whenever the visit has a tech-confirmed linked assessment — visits
+  // without one (historical tokens predating the assessment flow) keep the
+  // legacy fallback layout client-side. Never blocks the report.
   let reportV2 = null;
-  if (serviceLine === 'lawn' && process.env.LAWN_REPORT_V2 === 'true' && lawnAssessment) {
+  if (serviceLine === 'lawn' && lawnAssessment) {
     try {
       // Phase 2: prefer the stored area water-intake snapshot (computed at
       // completion); compute + persist on the fly if absent so a permanent report

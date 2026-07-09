@@ -5135,7 +5135,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // source of truth) and run the consistency check, so the SMS below leads with
         // the same line as the report. Best-effort; never blocks completion.
         let lawnReportSmsSummary = null;
-        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && process.env.LAWN_REPORT_V2 === 'true') {
+        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
           try {
             const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
             const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });

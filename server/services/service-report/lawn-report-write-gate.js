@@ -41,8 +41,9 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // Freeze the SAME reportV2 the customer report renders — built from the full
     // inputs (applications, actions, mowing, customer concern, water snapshot) on a
     // customer-JOINED record (lat/lng for area weather) — so the frozen SMS line
-    // can't diverge from the report the link opens. (gated on LAWN_REPORT_V2 by the
-    // caller; buildReportV1Data only emits reportV2 under that flag.)
+    // can't diverge from the report the link opens. (buildReportV1Data emits
+    // reportV2 for every lawn visit with a confirmed linked assessment —
+    // the LAWN_REPORT_V2 flag is retired, owner ruling 2026-07-09.)
     const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
     const record = joined || service;
     const token = await ensureReportToken(service.id, knex);
