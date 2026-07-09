@@ -4,7 +4,7 @@
 // drops into any of the customer style systems (data-glass inline, BrandCard
 // pages, the Tailwind outline page) without page-local CSS.
 import { useState } from 'react';
-import { Download, Share2, Printer } from 'lucide-react';
+import { Download, Share2, Printer, Lock } from 'lucide-react';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import { COLORS as B } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -81,16 +81,26 @@ export default function DocumentActionBar({
       className="doc-action-bar"
       aria-label="Document tools"
       style={{
+        // Mirrors the report page's .report-action-bar geometry exactly
+        // (owner 2026-07-09: same format as the report bar).
         background: '#FFFFFF',
         border: `1px solid ${CUSTOMER_SURFACE.border}`,
-        borderRadius: 14,
-        padding: 18,
-        marginBottom: 20,
+        borderRadius: 16,
+        padding: '20px 22px',
+        margin: '0 0 18px',
         ...style,
       }}
     >
-      <style>{'@media print { .doc-action-bar { display: none !important; } }'}</style>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+      <style>{`
+        @media print { .doc-action-bar { display: none !important; } }
+        .doc-action-bar-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .doc-action-bar-buttons > a, .doc-action-bar-buttons > button { width: 100%; }
+        @media (max-width: 640px) {
+          .doc-action-bar { padding: 18px 16px; }
+          .doc-action-bar-buttons { grid-template-columns: 1fr; }
+        }
+      `}</style>
+      <div className="doc-action-bar-buttons">
         {pdfUrl ? (
           <a
             data-glass-accent=""
@@ -120,6 +130,9 @@ export default function DocumentActionBar({
             <Printer size={16} /> Print
           </button>
         )}
+        <a data-glass-accent="" href="/login" style={buttonStyle()}>
+          <Lock size={16} /> Portal Login
+        </a>
       </div>
     </section>
   );
