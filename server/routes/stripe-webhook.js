@@ -1170,8 +1170,25 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         })
         .whereNotNull('stripe_payment_method_id')
         .first('id');
+      // Estimate-flow signups (billing_mode 'per_application' /
+      // 'annual_prepay') enroll in autopay at signup (owner ruling
+      // 2026-07-09): the v8 save-card consent the customer just checked
+      // explicitly authorizes charging this card "for future service visits
+      // and invoices as agreed", and their acceptance-invoice pay links
+      // arrive with saveCard=1 (estimateInvoicePayUrlParams) so the consent
+      // box is presented by default. Legacy / unclassified customers keep
+      // the old behavior: saved for card-on-file only, autopay stays an
+      // explicit portal (AutopayCard) enrollment. Column-guarded read —
+      // pre-migration environments keep enrolling nothing.
+      let enrollAutopay = false;
+      try {
+        const custRow = await db('customers')
+          .where({ id: wavesCustomerId })
+          .first('billing_mode');
+        enrollAutopay = ['per_application', 'annual_prepay'].includes(custRow?.billing_mode);
+      } catch (modeErr) { /* billing_mode column absent — keep false */ }
       const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
-        enableAutopay: false,
+        enableAutopay: enrollAutopay,
         makeDefault: !currentAutopayMethod,
       });
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
