@@ -29,7 +29,6 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -4547,7 +4546,7 @@ function LegacyReport({ data, token, glass = false }) {
         </div>
       </header>
       ) : null}
-      <main style={{ flex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <main style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -4794,7 +4793,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           white-space: nowrap;
         }
         .sr-shell {
-          max-width: 720px;
+          max-width: 800px;
           width: 100%;
           margin: 0 auto;
           padding: 32px 20px 64px;
@@ -7770,7 +7769,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             footer — same as /track (owner 2026-07-08/09). PDF/static/
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
-        {mode === 'live' && <GlassNewsletterCard source="report_footer" />}
+        {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
         <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>

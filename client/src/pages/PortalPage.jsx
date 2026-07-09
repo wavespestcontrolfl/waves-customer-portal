@@ -9,7 +9,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
-import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
@@ -6541,24 +6540,8 @@ function LearnTab({ customer }) {
           />
         )}
 
-        {/* Glass material (owner 2026-07-09) — the sand wash read as the old
-            warm theme inside the glass Learn tab; sand stays as the non-glass
-            fallback. Nested inside a glass card → soft tier. */}
-        <div data-glass="soft" style={{
-          marginTop: 14,
-          padding: 16,
-          background: B.sand,
-          border: '1px solid #E7E2D7',
-          borderRadius: 8,
-          position: 'relative',
-        }}>
-          <NewsletterSignup
-            variant="light"
-            source="portal_learn"
-            heading="Get the next issue in your inbox"
-            blurb="Local SWFL events, seasonal pest tips, and the occasional deal - straight from the truck."
-          />
-        </div>
+        {/* Newsletter signup lives only on the newsletter pages
+            (owner 2026-07-09). */}
       </section>
 
       {renderFeedSection('Waves Newsletter', 'newspaper', sortedNewsletterPosts, 'Waves newsletter issues will appear here.')}

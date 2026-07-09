@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
+import DocumentActionBar from '../components/DocumentActionBar';
 import {
   WavesShell,
   BrandCard,
@@ -64,7 +63,7 @@ function Field({ label, value }) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page waves-contract-single">
+      <div className="waves-contract-page waves-contract-single" style={{ width: 'min(100% - 32px, 760px)' }}>
         <BrandCard padding={28}>
           <StatusPill>Contract unavailable</StatusPill>
           <SerifHeading style={{ marginTop: 14, marginBottom: 12 }}>{title}</SerifHeading>
@@ -203,7 +202,7 @@ export default function ContractSignPage() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div className="waves-contract-page waves-contract-single">
+        <div className="waves-contract-page waves-contract-single" style={{ width: 'min(100% - 32px, 760px)' }}>
           <BrandCard padding={28}>
             <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>Loading contract...</div>
           </BrandCard>
@@ -229,7 +228,7 @@ export default function ContractSignPage() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page">
+      <div className="waves-contract-page" style={{ width: 'min(100% - 32px, 760px)' }}>
         <div className="waves-flow-header">
           <div>
             <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
@@ -244,26 +243,26 @@ export default function ContractSignPage() {
           </div>
         </div>
 
+        {/* Unsigned render only: the customer-facing token is single-use and
+            BURNED after signing (contracts-public.js returns 410), so on the
+            signed-success state there is nothing valid to download OR share —
+            the whole bar hides rather than offering a dead link. */}
+        {!signed && (
+          <DocumentActionBar
+            pdfUrl={`${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf`}
+            pdfFileName="Waves_Agreement.pdf"
+            shareTitle="Waves service agreement"
+          />
+        )}
+
         <div className="waves-contract-grid">
           <BrandCard padding={28}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: 'var(--brand-soft)',
-                  color: 'var(--brand)',
-                }}>
-                  <Icon name="document" size={22} strokeWidth={2} />
-                </span>
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{documentTitle}</div>
-                  <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Waves Pest Control</div>
-                </div>
+              {/* Decorative document icon tile removed (owner 2026-07-09 —
+                  no decorative icons on customer document pages). */}
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{documentTitle}</div>
+                <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Waves Pest Control</div>
               </div>
               <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
             </div>
@@ -301,45 +300,14 @@ export default function ContractSignPage() {
               }}>
                 {contract.contractTextSnapshot}
               </div>
-              {!signed && (
-                <a
-                  href={`${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    marginTop: 14,
-                    fontSize: 14,
-                    fontWeight: 750,
-                    color: 'var(--brand)',
-                    textDecoration: 'none',
-                  }}
-                >
-                  <Icon name="download" size={16} strokeWidth={2} />
-                  Download PDF
-                </a>
-              )}
+              {/* In-card Download link superseded by the DocumentActionBar
+                  at the top of the page (owner 2026-07-09). */}
             </div>
           </BrandCard>
 
           <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
             {signed ? (
               <div>
-                <div style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: '#F0FDF4',
-                  color: '#047857',
-                  marginBottom: 14,
-                }}>
-                  <Icon name="checkCircle" size={24} strokeWidth={2} />
-                </div>
                 <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>
                 <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
                   Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
@@ -347,19 +315,6 @@ export default function ContractSignPage() {
               </div>
             ) : !needsSignature ? (
               <div>
-                <div style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: 'var(--brand-soft)',
-                  color: 'var(--brand)',
-                  marginBottom: 14,
-                }}>
-                  <Icon name="document" size={24} strokeWidth={2} />
-                </div>
                 <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>No signature required</div>
                 <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
                   This Waves document is ready to view. You can save this link or reply to the message that sent it if you have questions.
@@ -370,19 +325,7 @@ export default function ContractSignPage() {
               </div>
             ) : (
               <form onSubmit={submit}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                  <span style={{
-                    width: 38,
-                    height: 38,
-                    borderRadius: 8,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    background: 'var(--brand-soft)',
-                    color: 'var(--brand)',
-                  }}>
-                    <Icon name="pencil" size={18} strokeWidth={2} />
-                  </span>
+                <div style={{ marginBottom: 16 }}>
                   <div>
                     <div style={{ fontSize: 16, fontWeight: 850, color: 'var(--text)' }}>Sign {documentKind}</div>
                     <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Both fields and agreements are required.</div>
@@ -441,8 +384,8 @@ export default function ContractSignPage() {
           </BrandCard>
         </div>
 
-        {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
-        <GlassNewsletterCard source="contract_footer" />
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes same-day card ruling). */}
         <BrandFooter />
       </div>
     </WavesShell>

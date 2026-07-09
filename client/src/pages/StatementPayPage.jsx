@@ -23,7 +23,7 @@ import { useParams } from "react-router-dom";
 import { COLORS, FONTS } from "../theme-brand";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
 import BrandFooter from "../components/BrandFooter";
-import GlassNewsletterCard from "../components/GlassNewsletterCard";
+import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -414,12 +414,10 @@ export default function StatementPayPage() {
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 560, margin: "48px auto", padding: "0 16px" }}>
+      <div style={{ maxWidth: 792, margin: "48px auto", padding: "0 16px" }}>
         {children}
-        {/* Standard pre-footer newsletter card + identity footer — every
-            glass surface carries the same footer as /track (owner
-            2026-07-08/09). */}
-        <GlassNewsletterCard source="statement_footer" />
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes the 2026-07-08 glass-footer ruling). */}
         <BrandFooter />
       </div>
     </WavesShell>
@@ -511,7 +509,10 @@ export default function StatementPayPage() {
   const dueLabel = statement.due_date ? fmtDate(statement.due_date) : null;
 
   return shell(
-    <BrandCard padding={28}>
+    <>
+      {/* No server-side statement PDF render — Share + Print only. */}
+      <DocumentActionBar shareTitle={`Waves statement ${statement.number || ''}`.trim()} />
+      <BrandCard padding={28}>
       <SerifHeading style={{ marginBottom: 6 }}>Pay statement {statement.number}</SerifHeading>
       <p style={{ margin: "0 0 18px", fontSize: 14, color: COLORS.textCaption }}>
         {billTo?.company ? `Billed to ${billTo.company}. ` : ""}
@@ -570,7 +571,8 @@ export default function StatementPayPage() {
       <p style={{ marginTop: 20, fontSize: 14, color: COLORS.textCaption, lineHeight: 1.5 }}>
         Questions about this statement? <HelpPhoneLink tone="dark" inline /> or reply to the email it came from.
       </p>
-    </BrandCard>,
+      </BrandCard>
+    </>,
   );
 }
 

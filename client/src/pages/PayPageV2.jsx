@@ -79,7 +79,6 @@
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useGlassSurface } from '../glass/glass-engine';
-import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -91,7 +90,7 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
+import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
@@ -2020,7 +2019,12 @@ export default function PayPageV2() {
   const annualPrepay = invoice.annualPrepay || null;
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
-  const serviceLabel = invoice.title || service.type || 'Service';
+  // Generated invoice titles carry a "— Month YYYY" suffix that doubles
+  // the service date in the header — strip it when a service date renders.
+  const rawServiceLabel = invoice.title || service.type || 'Service';
+  const serviceLabel = service.date
+    ? rawServiceLabel.replace(/\s+[—–-]+\s+[A-Z][a-z]+ \d{4}$/, '')
+    : rawServiceLabel;
   const dueLabel = invoice.dueDate ? fmtDate(invoice.dueDate) : null;
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
@@ -2060,6 +2064,13 @@ export default function PayPageV2() {
           </div>
         )}
 
+        {/* Invoice PDF is the pre-existing server render; document icon tile
+            removed with the other decorative icons (owner 2026-07-09). */}
+        <DocumentActionBar
+          pdfUrl={`${API_BASE}/pay/${token}/invoice.pdf`}
+          pdfFileName="Waves_Invoice.pdf"
+          shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
+        />
         <BrandCard padding={28}>
           <div style={{
             display: 'flex',
@@ -2070,20 +2081,6 @@ export default function PayPageV2() {
             marginBottom: 18,
           }}>
             <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0 }}>
-              <span style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                background: isOverdue ? 'rgba(200,16,46,0.08)' : '#EEF6FF',
-                color: isOverdue ? 'var(--danger)' : '#065A8C',
-                border: `1px solid ${isOverdue ? 'rgba(200,16,46,0.22)' : '#BFE4F8'}`,
-              }}>
-                <Icon name={isOverdue ? 'warning' : 'document'} size={22} strokeWidth={2.4} />
-              </span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ ...eyebrow, marginBottom: 8 }}>
                   Invoice · {invoice.invoiceNumber}
@@ -2118,19 +2115,7 @@ export default function PayPageV2() {
                 Pay securely online. Credit card surcharge, if any, is shown before payment.
               </div>
             </div>
-            <span data-glass="soft" style={{
-              width: 42,
-              height: 42,
-              borderRadius: 8,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--brand)',
-              background: '#FFFFFF',
-              border: '1px solid var(--border)',
-            }}>
-              <Icon name="document" size={20} strokeWidth={2} />
-            </span>
+            {/* Document icon tile removed (owner 2026-07-09 — no decorative icons). */}
           </div>
 
             {prepayCalloutText && (
@@ -2144,20 +2129,7 @@ export default function PayPageV2() {
                 background: '#EEF6FF',
                 border: '1px solid #BFE4F8',
               }}>
-                <span data-glass="soft" style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 8,
-                  flexShrink: 0,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: '#FFFFFF',
-                  color: '#065A8C',
-                  border: '1px solid #BFE4F8',
-                }}>
-                  <Icon name="calendar" size={18} strokeWidth={2} />
-                </span>
+                {/* Calendar icon tile removed (owner 2026-07-09 — no decorative icons). */}
                 <div style={{ minWidth: 0 }}>
                   <div style={{ ...eyebrow, color: '#065A8C', marginBottom: 5 }}>Annual prepayment</div>
                   <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.5 }}>
@@ -2395,77 +2367,15 @@ export default function PayPageV2() {
             )}
             </div>
 
-            <div style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
-              <a
-                href={`${API_BASE}/pay/${token}/invoice.pdf`}
-                onClick={(e) => {
-                  // Capacitor webview: a bare PDF navigation replaces the SPA
-                  // with no back control — share sheet instead (F-046). Old
-                  // binaries without the plugins keep the legacy navigation.
-                  if (canSaveNative()) {
-                    e.preventDefault();
-                    saveUrlNative(`${API_BASE}/pay/${token}/invoice.pdf`, 'Waves_Invoice.pdf')
-                      .catch(() => window.alert('Could not save the PDF. Please try again.'));
-                  }
-                }}
-                data-glass="chip" data-glass-pill=""
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--brand)',
-                  textDecoration: 'none',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  background: '#FFFFFF',
-                }}
-              >
-                <Icon name="download" size={16} strokeWidth={2} />
-                Invoice PDF
-              </a>
-              {/* window.print() is a no-op in the Capacitor webview — hide the
-                  button there; the Invoice PDF share sheet carries Print on iOS. */}
-              {isNativeApp() ? null : (
-              <button
-                type="button"
-                onClick={() => window.print()}
-                data-glass="chip" data-glass-pill=""
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--brand)',
-                  background: '#FFFFFF',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                  fontFamily: FONTS.body,
-                }}
-              >
-                <Icon name="print" size={16} strokeWidth={2} />
-                Print
-              </button>
-              )}
-            </div>
+            {/* In-card PDF/Print chips superseded by the DocumentActionBar
+                at the top of the page (owner 2026-07-09). */}
           </BrandCard>
 
-        <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-          Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
-        </div>
-        {/* Standard pre-footer newsletter card + identity footer — every
-            glass surface carries the same footer as /track (owner
-            2026-07-08/09). Hidden from the invoice printout via
-            waves-no-print. */}
+        {/* "Questions about this invoice?" help line removed (owner 2026-07-09). */}
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
+            Hidden from the invoice printout via waves-no-print. */}
         <div className="waves-no-print">
-          <GlassNewsletterCard source="pay_footer" />
           <BrandFooter />
         </div>
       </div>

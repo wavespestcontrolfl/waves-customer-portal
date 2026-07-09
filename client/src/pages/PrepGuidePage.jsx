@@ -3,10 +3,9 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
+import DocumentActionBar from '../components/DocumentActionBar';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
-import { isNativeApp } from '../native/platform';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -96,7 +95,7 @@ function BlockRenderer({ blocks }) {
 
 function LoadingSkeleton() {
   return (
-    <div style={{ padding: '24px 16px 40px', maxWidth: 560, width: '100%', margin: '0 auto' }}>
+    <div style={{ padding: '24px 16px 40px', maxWidth: 792, width: '100%', margin: '0 auto' }}>
       <div style={{ height: 28, width: '70%', background: SURFACE.border, borderRadius: 6, marginBottom: 16 }} />
       <div style={{ height: 80, background: SURFACE.border, borderRadius: 8, marginBottom: 20 }} />
       <div style={{ height: 16, width: '90%', background: SURFACE.border, borderRadius: 4, marginBottom: 12 }} />
@@ -160,7 +159,9 @@ export default function PrepGuidePage() {
     : error || !data
       ? <NotFound />
       : (
-        <div style={{ padding: '24px 16px 40px', maxWidth: 560, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
+        <div style={{ padding: '24px 16px 40px', maxWidth: 792, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
+          {/* No server-side prep-guide PDF render — Share + Print only. */}
+          <DocumentActionBar shareTitle={`Waves ${data.projectTypeLabel || ''} prep guide`.replace(/\s+/g, ' ')} />
           <div
             className="prep-card"
             data-glass="card"
@@ -178,10 +179,31 @@ export default function PrepGuidePage() {
               {data.projectTypeLabel} Prep Guide
             </h1>
             {data.technicianName && (
-              <p style={{ fontSize: 14, color: SURFACE.muted, margin: '0 0 24px' }}>
+              <p style={{ fontSize: 14, color: SURFACE.muted, margin: '0 0 4px' }}>
                 Your technician: {data.technicianName}
               </p>
             )}
+            {(() => {
+              // Same contact block as the report/estimate heroes: name /
+              // email / phone / address, one line each, empties dropped.
+              const digits = String(data.customerPhone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+              const phone = digits.length === 10
+                ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+                : data.customerPhone;
+              const contactLines = [
+                data.customerName,
+                data.customerEmail,
+                phone,
+                data.propertyAddress,
+              ].map((line) => String(line || '').trim()).filter(Boolean);
+              return contactLines.length ? (
+                <div style={{ margin: '10px 0 24px', display: 'grid', gap: 4 }}>
+                  {contactLines.map((line) => (
+                    <div key={line} style={{ fontSize: 14, color: SURFACE.muted, letterSpacing: '0.04em', textTransform: 'uppercase', lineHeight: 1.5 }}>{line}</div>
+                  ))}
+                </div>
+              ) : <div style={{ marginBottom: 20 }} />;
+            })()}
 
             <BlockRenderer blocks={data.blocks} />
 
@@ -195,24 +217,8 @@ export default function PrepGuidePage() {
             </div>
           </div>
 
-          {/* window.print() is a no-op in the Capacitor webview (F-046) —
-              a dead button is worse than no button, so hide it in-app. */}
-          {isNativeApp() ? null : (
-          <div className="prep-no-print" style={{ textAlign: 'center', marginTop: 20 }}>
-            <button
-              onClick={() => window.print()}
-              data-glass="chip"
-              style={{
-                background: 'transparent', border: `1px solid ${SURFACE.border}`,
-                borderRadius: 8, padding: '10px 24px', cursor: 'pointer',
-                fontSize: 14, fontWeight: 500, color: SURFACE.muted,
-                fontFamily: FONT_BODY,
-              }}
-            >
-              Print this page
-            </button>
-          </div>
-          )}
+          {/* Bottom "Print this page" button superseded by the
+              DocumentActionBar above (owner 2026-07-09). */}
         </div>
       );
 
@@ -223,9 +229,9 @@ export default function PrepGuidePage() {
       <WavesShell variant="customer" topBar="solid">
         <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
-          <div className="prep-no-print" style={{ maxWidth: 560, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
-            {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
-            <GlassNewsletterCard source="prep_footer" />
+          <div className="prep-no-print" style={{ maxWidth: 792, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+            {/* Newsletter signup lives only on the newsletter pages
+                (owner 2026-07-09, supersedes same-day card ruling). */}
             <BrandFooter />
           </div>
         </div>
