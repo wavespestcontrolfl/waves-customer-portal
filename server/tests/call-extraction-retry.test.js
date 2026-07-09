@@ -46,15 +46,27 @@ function baseCall(overrides = {}) {
 // call_log.update() resolves 1 (claim + status writes) and exposes
 // .returning() resolving the post-increment attempts row; triage_items
 // .insert().onConflict().ignore() records the row.
-function mockDb(call, { attemptsAfterFailure }) {
-  const state = { callLogUpdates: [], triageInserts: [] };
+function mockDb(call, { attemptsAfterFailure, throwOnUpdateKey = null }) {
+  const state = { callLogUpdates: [], triageInserts: [], whereRawCalls: [] };
   db.mockImplementation((table) => {
     const builder = {};
-    const chain = () => builder;
-    ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin'].forEach((m) => { builder[m] = chain; });
+    const chain = (...args) => {
+      // Record raw conditions (claim-guard assertions) and recurse into
+      // knex-style grouped-where callbacks so nested conditions record too.
+      args.forEach((a) => { if (typeof a === 'function') a.call(builder, builder); });
+      return builder;
+    };
+    ['where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin'].forEach((m) => { builder[m] = chain; });
+    builder.whereRaw = (sql, bindings) => { if (table === 'call_log') state.whereRawCalls.push({ sql, bindings }); return builder; };
+    builder.orWhereRaw = builder.whereRaw;
     builder.first = () => Promise.resolve(table === 'call_log' ? call : null);
     builder.update = (payload) => {
-      if (table === 'call_log') state.callLogUpdates.push(payload);
+      if (table === 'call_log') {
+        if (throwOnUpdateKey && Object.prototype.hasOwnProperty.call(payload, throwOnUpdateKey)) {
+          throw new Error(`forced test failure on update containing ${throwOnUpdateKey}`);
+        }
+        state.callLogUpdates.push(payload);
+      }
       return {
         returning: () => Promise.resolve([{ extraction_attempts: attemptsAfterFailure }]),
         then: (resolve, reject) => Promise.resolve(1).then(resolve, reject),
@@ -127,6 +139,36 @@ describe('extraction failure: attempt counter + terminal triage card', () => {
     const payload = JSON.parse(item.payload);
     expect(payload.attempts).toBe(3);
     expect(payload.last_error).toMatch(/GEMINI_API_KEY/);
+  });
+
+  test('non-force claim enforces the retryable-failure guard atomically (cap + 10-min backoff in SQL)', async () => {
+    const state = mockDb(baseCall(), { attemptsAfterFailure: 1 });
+
+    await processor.processRecording(CALL_SID);
+
+    const sqls = state.whereRawCalls.map((w) => w.sql);
+    expect(sqls).toContain("processing_status IS DISTINCT FROM 'extraction_failed'");
+    const capClause = state.whereRawCalls.find((w) => w.sql.includes('COALESCE(extraction_attempts, 0) <'));
+    expect(capClause).toBeDefined();
+    expect(capClause.bindings).toEqual([3]);
+  });
+
+  test('outer-guard failure (post-claim throw) shares the retry budget and files the card at the cap', async () => {
+    // Force a throw on the first post-claim call_log write (the cached-
+    // transcript provenance update) so the run dies inside the outer guard,
+    // not the extraction catch.
+    const state = mockDb(baseCall({ extraction_attempts: 2 }), { attemptsAfterFailure: 3, throwOnUpdateKey: 'transcription_provider' });
+
+    await expect(processor.processRecording(CALL_SID)).rejects.toThrow(/forced test failure/);
+
+    const failWrite = state.callLogUpdates.find((u) => u.processing_status === 'extraction_failed');
+    expect(failWrite).toBeDefined();
+    expect(failWrite.extraction_attempts).toBe('COALESCE(extraction_attempts, 0) + 1');
+    expect(state.triageInserts).toHaveLength(1);
+    expect(state.triageInserts[0].reason_code).toBe('extraction_failed_permanent');
+    const payload = JSON.parse(state.triageInserts[0].payload);
+    expect(payload.attempts).toBe(3);
+    expect(payload.last_error).toMatch(/forced test failure/);
   });
 
   test('triage insert failure does not mask the extraction error result', async () => {

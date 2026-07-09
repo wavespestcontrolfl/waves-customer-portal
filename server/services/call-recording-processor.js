@@ -2729,6 +2729,28 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
 
 // ══════════════════════════════════════════════════════════════
 // MAIN PROCESSOR
+// Retry budget exhausted — surface a blocking Needs Review card. Without it
+// the call dies with no route decision, no lead, no customer, and nothing in
+// any inbox (exactly how six calls were silently lost to a retired-model 404
+// on 2026-07-09). Shared by BOTH failure writers: the AI-extraction catch and
+// processRecording's outer guard — every path that stamps extraction_failed
+// counts against the same budget and surfaces the same card at the cap. The
+// partial unique index dedupes re-files while a card is already open.
+async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) {
+  if (attempts < CALL_EXTRACTION_MAX_ATTEMPTS) return;
+  try {
+    const failTriageItem = buildTriageItem({
+      callLogId,
+      flag: 'extraction_failed_permanent',
+      extraction: { meta: { call_summary: `Call processing failed ${attempts} time(s); automatic retries exhausted. Fix the cause, then use Reprocess on the call recording.` } },
+      extraPayload: { attempts, last_error: String(err?.message || err).slice(0, 500) },
+    });
+    await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+  } catch (triageErr) {
+    logger.warn(`[call-proc] extraction-failure triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 const CallRecordingProcessor = {
   /**
@@ -2778,6 +2800,21 @@ const CallRecordingProcessor = {
         .where(function () {
           this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
             .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+        })
+        // Retryable-failure guard: the sweep's cap/backoff filter only
+        // protects sweep-originated runs — direct callers (the
+        // recording-status webhook's setTimeout, duplicate Twilio callbacks)
+        // land here too. Without this clause a burst of timers could re-claim
+        // a just-failed row back-to-back and burn the whole retry budget in
+        // seconds instead of the intended 10-minute spacing, or keep poking a
+        // row already at the cap. Enforce both atomically at claim time.
+        // Admin Reprocess (force=true) takes the other branch and is exempt.
+        .where(function () {
+          this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
+            .orWhere(function () {
+              this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            });
         })
         .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
       if (claimed === 0) {
@@ -3007,24 +3044,7 @@ const CallRecordingProcessor = {
         updated_at: new Date(),
       }).returning(['extraction_attempts']);
       const attempts = Number(failedRow?.extraction_attempts) || 0;
-      if (attempts >= CALL_EXTRACTION_MAX_ATTEMPTS) {
-        // Retry budget exhausted — surface a blocking Needs Review card.
-        // Without it the call dies with no route decision, no lead, no
-        // customer, and nothing in any inbox (exactly how six calls were
-        // silently lost to a retired-model 404 on 2026-07-09). The partial
-        // unique index dedupes re-files while a card is already open.
-        try {
-          const failTriageItem = buildTriageItem({
-            callLogId: call.id,
-            flag: 'extraction_failed_permanent',
-            extraction: { meta: { call_summary: `AI extraction failed ${attempts} time(s); automatic retries exhausted. Fix the cause, then use Reprocess on the call recording.` } },
-            extraPayload: { attempts, last_error: String(err.message || err).slice(0, 500) },
-          });
-          await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-        } catch (triageErr) {
-          logger.warn(`[call-proc] extraction-failure triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
-        }
-      }
+      await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
 
@@ -5881,17 +5901,30 @@ const CallRecordingProcessor = {
         // reclaim handed the lock to a peer, the peer's claim overwrote our
         // token and this UPDATE matches 0 rows — we log and bail without
         // disturbing the peer's lock or duplicating side effects.
-        const released = await db('call_log')
+        //
+        // This write shares the extraction retry budget: without the
+        // increment, a repeatable post-extraction error would come back
+        // through the sweep every 10 minutes with attempts still 0 —
+        // an uncapped retry loop over side-effect-laden code. Counting it
+        // here caps that loop at CALL_EXTRACTION_MAX_ATTEMPTS and files the
+        // same blocking card at the cap. (Re-running after partial side
+        // effects is bounded-safe: the idempotency keys, won-status skips,
+        // and same-date dup holds make reprocessing a supported operation.)
+        const releasedRows = await db('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
           .update({
             processing_status: 'extraction_failed',
+            extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
             processing_started_at: null,
             updated_at: new Date(),
-          });
-        if (released === 0) {
+          }).returning(['extraction_attempts']);
+        if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        } else {
+          const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
+          await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
       } catch (releaseErr) {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
