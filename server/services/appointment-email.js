@@ -62,6 +62,24 @@ function portalTabUrl(tab = 'visits') {
   return buildPortalUrl(`/?tab=${encodeURIComponent(tab || 'visits')}`);
 }
 
+// The visit-specific stamped address (call bookings for a secondary/rental
+// property) — the email's Property row must name the BOOKED property, not
+// the customer's primary mirror (codex round-8 P2). Null when the visit is
+// unstamped (callers keep the customer-based label).
+async function stampedPropertyLabel(scheduledServiceId) {
+  if (!scheduledServiceId) return null;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+    if (!clean(row?.service_address_line1)) return null;
+    const cityStateZip = [row.service_address_city, [row.service_address_state, row.service_address_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    return [[row.service_address_line1, row.service_address_line2].filter(Boolean).join(' '), cityStateZip].filter(Boolean).join(', ');
+  } catch {
+    return null;
+  }
+}
+
 async function loadCustomer(customerId) {
   if (!customerId) return null;
   return db('customers')
@@ -267,12 +285,16 @@ function apptStamp(apptTime) {
 
 async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null } = {}) {
   const apptTime = toDate(appointmentTime);
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
     recipientFilter,
     templateKey: 'appointment.confirmation',
     eventType: 'appointment.confirmation',
     payload: {
+      // Stamped visit address overrides the customer-derived property label
+      // (finalPayload spreads payload last).
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
@@ -308,12 +330,14 @@ async function technicianFirstName(scheduledServiceId) {
 async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
   const techName = await technicianFirstName(scheduledServiceId);
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
   // Empty reschedule_url hides the template's "Reschedule appointment" CTA
   // block (renderBlocks skips a cta with no href) — never a broken button.
   const payload = is72
     ? {
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
@@ -322,6 +346,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
       reschedule_url: clean(rescheduleUrl),
     }
     : {
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
       // The details card lists Date above Scheduled start (owner call

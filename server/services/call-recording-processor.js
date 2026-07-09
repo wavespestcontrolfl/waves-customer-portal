@@ -706,7 +706,30 @@ async function persistCallSecondaryContact(customerId, contact) {
     .map(last10).filter(Boolean);
   const knownEmails = [customer.email, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.email])]
     .map(lowerEmail).filter(Boolean);
-  if (contact.phone && knownPhones.includes(last10(contact.phone))) return 'skipped_phone_on_record';
+  // Role backfill on a known number: the person already sits in a slot
+  // (pre-migration write or admin-entered) whose role column is empty —
+  // record the relationship the call just identified, or future calls from
+  // that number can't pass the household-role matching gate unless the
+  // caller also repeats a matching first name (codex round-8 P2). The
+  // customer's OWN phone matches nothing here (no slot to backfill).
+  const backfillSlotRole = async () => {
+    const roleToRecord = String(contact.role || '').trim().toLowerCase();
+    if (!roleToRecord || roleToRecord === 'unknown') return false;
+    const matched = SERVICE_CONTACT_SLOTS.find((s) => (
+      (contact.phone && last10(customer[s.phone]) && last10(customer[s.phone]) === last10(contact.phone))
+      || (contact.email && lowerEmail(customer[s.email]) && lowerEmail(customer[s.email]) === lowerEmail(contact.email))
+    ));
+    if (!matched || String(customer[matched.roleCol] || '').trim()) return false;
+    const wrote = await db('customers')
+      .where({ id: customerId })
+      .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
+      .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
+    return !!wrote;
+  };
+  if (contact.phone && knownPhones.includes(last10(contact.phone))) {
+    if (await backfillSlotRole()) return 'skipped_phone_on_record_role_backfilled';
+    return 'skipped_phone_on_record';
+  }
   // Cross-customer guard: a secondary phone that belongs to a DIFFERENT
   // existing customer must never land in this customer's fan-out slots —
   // customer B would start receiving customer A's appointment texts at
@@ -726,7 +749,10 @@ async function persistCallSecondaryContact(customerId, contact) {
   // re-filed under the buyer/tenant's name and future appointment emails
   // reach it mislabeled. Email-only contacts with a known email are a no-op.
   const emailOnRecord = contact.email && knownEmails.includes(lowerEmail(contact.email));
-  if (!contact.phone && emailOnRecord) return 'skipped_email_on_record';
+  if (!contact.phone && emailOnRecord) {
+    if (await backfillSlotRole()) return 'skipped_email_on_record_role_backfilled';
+    return 'skipped_email_on_record';
+  }
   const slotEmail = emailOnRecord ? null : (contact.email || null);
 
   const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()

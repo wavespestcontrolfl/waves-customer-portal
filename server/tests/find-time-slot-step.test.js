@@ -1,6 +1,12 @@
 // find-time slotStepMinutes: auto-dispatch needs on-the-hour starts (stops are
 // never at 10:15 / 1:30). Default (1) preserves exact earliest-feasible minute.
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  // The stop query selects db.raw(...) coordinate expressions (stamped-address
+  // divergence guard) — mirror knex's raw so building the select can't throw.
+  fn.raw = (sql) => ({ toString: () => sql });
+  return fn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/route-optimizer', () => ({ HQ: { lat: 27.39, lng: -82.39 }, haversine: () => 0.5 }));
 

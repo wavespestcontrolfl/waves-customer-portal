@@ -398,10 +398,18 @@ describe('persistCallSecondaryContact', () => {
   test('a phone already on the record (primary or slot, any format) is a no-op', async () => {
     const writes = makeDb({ customer: { ...bareCustomer, phone: '9542901693' } });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record');
+    // Slot match with an EMPTY role column: identity is a no-op, but the
+    // role the call just identified backfills onto the matched slot (codex
+    // round-8 P2) — otherwise household-role matching can never link this
+    // stored contact's future calls.
     const writes2 = makeDb({ customer: { ...bareCustomer, service_contact2_phone: '(954) 290-1693' } });
+    expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record_role_backfilled');
+    // Slot match with a role already recorded stays a full no-op.
+    const writes3 = makeDb({ customer: { ...bareCustomer, service_contact2_phone: '(954) 290-1693', service_contact2_role: 'tenant' } });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('skipped_phone_on_record');
     expect(writes.updates).toHaveLength(0);
-    expect(writes2.updates).toHaveLength(0);
+    expect(writes2.updates).toEqual([{ service_contact2_role: 'home_buyer' }]);
+    expect(writes3.updates).toHaveLength(0);
   });
 
   test('a service-contact slot email satisfies the appointment email requirement (post-scrub bookability)', () => {
