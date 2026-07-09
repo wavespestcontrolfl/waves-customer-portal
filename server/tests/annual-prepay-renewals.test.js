@@ -1578,3 +1578,73 @@ describe('annual_prepay billing_mode stamp timing', () => {
     );
   });
 });
+
+// billing_mode reset on term void/refund (Codex round-5): the monthly cron
+// now skips 'annual_prepay' outright, so a cancelled/refunded term MUST
+// return the customer to a billable mode at the term choke point —
+// estimate-flow terms to per-visit billing, manual/Customer-360 prepays to
+// legacy monthly (NULL).
+describe('billing_mode reset on term void/refund', () => {
+  const cancelQueues = (term, cancelled, resetQ) => ({
+    annual_prepay_terms: [
+      query({ rows: [term] }), // terms select for the refunded invoice
+      query({ returning: [cancelled] }), // cancel transition update
+      query({ rows: [] }), // decided-covered terms sweep (post-loop)
+    ],
+    scheduled_services: [
+      query({ columnInfo: { scheduled_date: {} } }), // clearPrepaidStamps probe → no-op
+    ],
+    customers: [
+      query({ first: { id: 'customer-1', account_credits: 0 } }), // credit-reversal row lock
+      resetQ, // billing_mode reset
+    ],
+    customer_credit_ledger: [query({ rows: [] })],
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = {
+      hasTable: jest.fn().mockResolvedValue(true),
+      hasColumn: jest.fn().mockResolvedValue(true),
+    };
+    _private.resetCachesForTests();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('an estimate-flow term void resets the customer to per_application', async () => {
+    const TERM = {
+      id: 'term-c', customer_id: 'customer-1', status: 'active',
+      source_estimate_id: 'est-9', prepay_amount: null,
+      term_start: '2026-07-09', term_end: '2027-07-09',
+    };
+    const resetQ = query({});
+    setDbQueues(cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ));
+
+    const results = await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    );
+
+    expect(results[0].status).toBe('cancelled');
+    expect(resetQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: 'per_application' }),
+    );
+  });
+
+  test('a manual/Customer-360 term void resets to NULL (legacy monthly)', async () => {
+    const TERM = {
+      id: 'term-m', customer_id: 'customer-1', status: 'active',
+      source_estimate_id: null, prepay_amount: null,
+      term_start: '2026-07-09', term_end: '2027-07-09',
+    };
+    const resetQ = query({});
+    setDbQueues(cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ));
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    );
+
+    expect(resetQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: null }),
+    );
+  });
+});

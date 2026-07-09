@@ -170,13 +170,18 @@ const BillingCron = {
         // (billing_mode 'per_application' — completion collects the
         // application fee; owner ruling 2026-07-09): charging them here
         // would bill a monthly subscription ON TOP of their per-visit
-        // invoices. Deliberately does NOT skip on 'annual_prepay': the
-        // term guards below (GUARD 4/5) are the coverage-dated source of
-        // truth, and a cancelled/refunded term must return the customer to
-        // normal billing — a mode-only skip would leave them unbilled
-        // forever since term-removal paths don't clear the stamp (Codex
-        // P1). NULL/'monthly_membership' = legacy behavior unchanged.
-        if (customer.billing_mode === 'per_application') {
+        // invoices. 'annual_prepay' is ALSO never this cron's customer
+        // (Codex round-5 P1): with autopay enrolled at signup, a naturally
+        // EXPIRED term would sail past the coverage-dated guards below and
+        // hit chargeMonthly — but the renewal flow is notice + annual
+        // invoice (roll-to-per-app is the follow-up build), never silent
+        // monthly dues. The unbilled-forever risk that once justified
+        // coverage-dating this skip is now closed at the term choke point:
+        // a true void/refund resets billing_mode
+        // (resetBillingModeAfterTermCancel), returning the customer to
+        // per-visit (estimate-flow terms) or legacy monthly (manual
+        // prepays). NULL/'monthly_membership' = legacy behavior unchanged.
+        if (['per_application', 'annual_prepay'].includes(customer.billing_mode)) {
           await logAutopay(customer.id, 'skipped_billing_mode', {
             details: { billing_mode: customer.billing_mode },
           });

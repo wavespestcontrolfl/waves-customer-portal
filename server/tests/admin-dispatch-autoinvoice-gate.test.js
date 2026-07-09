@@ -166,3 +166,37 @@ describe('completionInvoiceAmount', () => {
     expect(completionInvoiceAmount({ ...base, monthlyRate: 49, isCallback: true })).toBe(0);
   });
 });
+
+// Annual-prepay customers are never auto-billed at completion (Codex round-5
+// P1): covered visits settle via prepaid stamps, and an uncovered visit
+// (expired term) belongs to the renewal flow — the tier/monthly_rate branch
+// must not bill monthly dues per visit. Only the explicit scheduler flag
+// outranks.
+describe('shouldAutoInvoiceCompletion — annual-prepay billing', () => {
+  const annualPrepay = {
+    ...base,
+    annualPrepayBilling: true,
+    waveguardTier: 'Gold',
+    invoiceAmount: 55.3,
+  };
+
+  test('annual-prepay visit never auto-invoices, even tiered with a positive amount', () => {
+    expect(shouldAutoInvoiceCompletion(annualPrepay)).toBe(false);
+  });
+
+  test('an uncovered (expired-term) priced visit still does not bill via the priced-visits gate', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, autoInvoicePricedVisits: true, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(false);
+  });
+
+  test('the explicit scheduler flag still outranks (operator intent)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...annualPrepay, createInvoiceOnComplete: true })).toBe(true);
+  });
+
+  test('per-application decision is unaffected when the annual-prepay flag is off', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...base, perApplicationBilling: true, annualPrepayBilling: false, invoiceAmount: 55.3,
+    })).toBe(true);
+  });
+});

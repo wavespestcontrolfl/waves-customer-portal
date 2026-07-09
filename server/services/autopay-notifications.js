@@ -34,14 +34,15 @@ async function sendPreChargeReminders() {
     .where('billing_day', targetDay)
     .whereNull('deleted_at')
     .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until');
-  // Per-application customers keep monthly_rate populated (legacy surfaces)
-  // but the monthly cron skips them (GUARD 3b) — never text a reminder for a
-  // monthly charge that will not run (Codex round-2): their autopay card
-  // collects per completed visit instead. Column-guarded pre-migration.
+  // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
+  // but the monthly cron never charges them (GUARD 3b) — never text a
+  // reminder for a monthly charge that will not run (Codex round-2 + 5):
+  // per_application collects per completed visit, annual_prepay is
+  // term-covered and collects at renewal. Column-guarded pre-migration.
   try {
     if (await db.schema.hasColumn('customers', 'billing_mode')) {
       customersQuery = customersQuery.where(function () {
-        this.whereNull('billing_mode').orWhereNot('billing_mode', 'per_application');
+        this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
       });
     }
   } catch { /* billing_mode column absent — keep legacy selection */ }

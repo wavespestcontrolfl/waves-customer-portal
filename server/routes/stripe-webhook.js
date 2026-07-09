@@ -1161,7 +1161,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const ConsentService = require('../services/payment-method-consents');
       // Check if we already saved this pm (e.g. from a duplicate webhook)
       const existing = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
-      const currentAutopayMethod = await db('payment_methods')
+      let currentAutopayMethod = await db('payment_methods')
         .where({
           customer_id: wavesCustomerId,
           processor: 'stripe',
@@ -1169,7 +1169,21 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           autopay_enabled: true,
         })
         .whereNotNull('stripe_payment_method_id')
-        .first('id');
+        .first('id', 'method_type');
+      // A default ACH method only counts as "in charge" while the customer's
+      // bank state is healthy: customerOnAutopay rejects ach_status
+      // needs_verification/suspended (card-only fallback), so deferring to an
+      // unhealthy ACH default would save the newly consented signup tender as
+      // non-default and point the customer at a method collection refuses —
+      // the visit would never auto-charge (Codex round-5 P1). Same predicate
+      // as customerOnAutopay: a non-empty, non-'active' ach_status blocks
+      // bank methods only.
+      if (currentAutopayMethod?.method_type === 'ach') {
+        const achRow = await db('customers').where({ id: wavesCustomerId }).first('ach_status');
+        if (achRow?.ach_status && achRow.ach_status !== 'active') {
+          currentAutopayMethod = null;
+        }
+      }
       // Estimate-flow signups (billing_mode 'per_application' /
       // 'annual_prepay') enroll in autopay at signup (owner ruling
       // 2026-07-09): the v8 save-card consent the customer just checked

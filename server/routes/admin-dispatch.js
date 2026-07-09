@@ -4275,6 +4275,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // otherwise. The monthly-membership model (autopayCoversVisit suppression
     // + the 8AM cron) never applies to them.
     const perApplicationBilling = svc.cust_billing_mode === 'per_application';
+    // Annual-prepay customers settle covered visits via prepaid stamps; an
+    // UNCOVERED visit (expired term awaiting renewal) is owned by the
+    // renewal flow — never billed here and never suppressed as
+    // membership-dues-covered (Codex round-5 P1).
+    const annualPrepayBilling = svc.cust_billing_mode === 'annual_prepay';
     // Callbacks (re-services) are free by definition for recurring/WaveGuard
     // customers — they must NOT fall back to the customer's monthly_rate, or a
     // no-charge re-service would bill a full month's dues. Honour an explicit
@@ -4328,6 +4333,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // per-visit charge collects, not a reason to skip it.
     const autopayCoversVisit = !visitIsPayerBilled
       && !perApplicationBilling
+      // The 8AM cron never bills annual_prepay (GUARD 3b) — "dues cover the
+      // visit" would be a fiction; real coverage is the prepaid stamps.
+      && !annualPrepayBilling
       && customerAutopayActive
       && !hasVisitPrice
       && !!svc.cust_waveguard_tier
@@ -4430,6 +4438,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
     // where priced, self-pay, non-WaveGuard visits completed uninvoiced.
     // Default OFF = behaviour identical to before.
+    // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
+    // not already paid) means the term expired and renewal hasn't happened —
+    // the gate above deliberately refuses to bill it, so flag it loudly for
+    // the renewal flow / manual invoicing instead of leaking a free visit.
+    if (annualPrepayBilling && !recapReviewOnly && !prepaidCovered && !alreadyPaid
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      logger.warn(`[dispatch] annual-prepay visit ${svc.id} (customer ${svc.customer_id}) completed WITHOUT prepay coverage — term expired/refunded? Renewal or manual invoice needed`);
+    }
     const shouldInvoice = shouldAutoInvoiceCompletion({
       recapReviewOnly,
       alreadyPaid,
@@ -4440,6 +4456,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       perApplicationBilling,
+      annualPrepayBilling,
       hasVisitPrice,
       invoiceAmount,
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
@@ -5638,7 +5655,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // for "no-bill completion", redundant with the !!invoice/suppress checks)
     // would strand that invoice with neither a pay link nor an in-person prompt.
     const invoicePaymentActionRequired = !!invoice
-      && invoice.status !== 'paid'
+      // Collectible statuses only — 'processing' (an in-flight ACH autopay
+      // debit, incl. the per-application completion charge and the orphaned-
+      // charge park) must not reopen the mobile collection sheet for a visit
+      // whose money is already moving (Codex round-5). Also covers
+      // paid/prepaid/void/refunded via the shared helper.
+      && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !prepaidCovered
       && !alreadyPaid
       && !autopayCoversVisit
@@ -7396,6 +7418,7 @@ function shouldAutoInvoiceCompletion({
   createInvoiceOnComplete,
   waveguardTier,
   perApplicationBilling,
+  annualPrepayBilling,
   hasVisitPrice,
   invoiceAmount,
   autoInvoicePricedVisits,
@@ -7409,6 +7432,14 @@ function shouldAutoInvoiceCompletion({
   if (!(Number(invoiceAmount) > 0)) return false;
   // Explicit scheduler flag stays the strongest signal (operator intent).
   if (createInvoiceOnComplete) return true;
+  // Annual-prepay customers are never auto-billed at completion: covered
+  // visits settle through the prepaid stamps / coverage guards above, and
+  // an UNCOVERED visit (naturally expired term awaiting renewal) must not
+  // fall into the tier/monthly_rate branch — the renewal flow (notice +
+  // annual invoice; roll-to-per-app is the follow-up build) owns collection
+  // (Codex round-5 P1). The caller logs uncovered completions for manual
+  // billing so nothing leaks silently.
+  if (annualPrepayBilling) return false;
   // Per-application customers bill every completed APPLICATION — never a
   // callback/re-treat or an always-free type (re-service, follow-up,
   // estimate). Decided BEFORE the WaveGuard-tier shortcut: converted

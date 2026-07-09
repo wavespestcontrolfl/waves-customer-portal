@@ -1166,6 +1166,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // issued — the full-annual refund would otherwise refund those
         // slices twice (once inside the refund, once as kept credit).
         await reversePendingWindowCompletionCredits(updated, conn);
+        // Coverage is gone — return the customer to a billable mode (the
+        // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
+        await resetBillingModeAfterTermCancel(updated, conn);
       }
     }
 
@@ -1381,6 +1384,28 @@ async function stampAnnualPrepayBillingMode(customerId, conn) {
       .update({ billing_mode: 'annual_prepay', updated_at: new Date() });
   } catch (err) {
     logger.warn(`[annual-prepay] billing_mode stamp skipped for customer ${customerId}: ${err.message}`);
+  }
+}
+
+// A true void/refund cancels the prepay coverage — the customer must return
+// to a billable mode, or the monthly cron's 'annual_prepay' skip (GUARD 3b,
+// Codex round-5) leaves them unbilled forever. Estimate-flow terms
+// (source_estimate_id set) return to per-visit billing; Customer 360 /
+// manual prepays (no source estimate — often legacy monthly members who
+// prepaid a year) return to legacy monthly semantics (NULL). Guarded on the
+// current mode so a customer who already switched models isn't clobbered.
+// Best-effort + column-guarded, same contract as the stamp.
+async function resetBillingModeAfterTermCancel(term, conn) {
+  try {
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    await conn('customers')
+      .where({ id: term.customer_id, billing_mode: 'annual_prepay' })
+      .update({
+        billing_mode: term.source_estimate_id ? 'per_application' : null,
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[annual-prepay] billing_mode reset skipped for customer ${term.customer_id}: ${err.message}`);
   }
 }
 

@@ -113,6 +113,12 @@ router.get('/', async (req, res, next) => {
       billingMode = modeRow?.billing_mode || null;
     } catch { /* billing_mode column absent pre-migration */ }
     const perApplicationBilling = billingMode === 'per_application';
+    // Both non-monthly modes must suppress the monthly projection: the
+    // monthly cron never charges per_application, and annual_prepay is
+    // term-covered (renewal collects via its own flow) — projecting
+    // monthly_rate for either advertises a charge that will not run
+    // (Codex round-2 + round-5).
+    const nonMonthlyBilling = perApplicationBilling || billingMode === 'annual_prepay';
     // Per-application collection takes ANY saved tender (owner ruling
     // 2026-07-09): chargeInvoiceWithSavedCard locks the PI to the saved
     // method's family (card settles inline, ACH rides processing→paid), so
@@ -121,7 +127,7 @@ router.get('/', async (req, res, next) => {
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;
-    const nextCharge = customerAutopayEnabled && !perApplicationBilling
+    const nextCharge = customerAutopayEnabled && !nonMonthlyBilling
       ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: autopayFunding })
       : null;
 
@@ -139,7 +145,7 @@ router.get('/', async (req, res, next) => {
       autopay_payment_method_id: hasAutopayMethod ? chargeableAutopayMethod.id : null,
       billing_day: customer.billing_day || 1,
       billing_mode: billingMode,
-      next_charge_date: perApplicationBilling ? null : customer.next_charge_date,
+      next_charge_date: nonMonthlyBilling ? null : customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,
       next_charge_surcharge_amount: nextCharge?.surcharge ?? null,
