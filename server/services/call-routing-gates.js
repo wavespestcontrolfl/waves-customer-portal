@@ -110,9 +110,20 @@ function buildTriageItem({
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     address_recovered: 'address_review',
+    secondary_contact_captured: 'customer_field_conflict',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
+
+  // secondary_contact_captured items are only useful if the row carries the
+  // contact to confirm. Several sites insert this flag (the enforce-mode
+  // deterministic-flags loop first, the processor's payload-rich insert
+  // second) and the open-row unique index makes the FIRST insert win — so
+  // attach the extraction's own secondary_contact here, where every insert
+  // site flows through, instead of relying on the caller to pass it.
+  const flagPayload = (flag === 'secondary_contact_captured' && extraction?.secondary_contact)
+    ? { secondary_contact: extraction.secondary_contact }
+    : {};
 
   return {
     call_log_id: callLogId,
@@ -125,6 +136,7 @@ function buildTriageItem({
       flag,
       confidence: extraction?.confidence?.overall,
       scheduling_status: extraction?.scheduling?.status,
+      ...flagPayload,
       ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
     }),
     created_at: new Date(),

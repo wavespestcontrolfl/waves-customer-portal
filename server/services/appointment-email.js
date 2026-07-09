@@ -104,9 +104,19 @@ async function resolveRecipients(customer) {
       recipients.push({ email: value, name });
     }
   };
-  // The SMS appointment recipients first (service contacts and/or primary, each
-  // with their own email — service email falls back to primary email in here).
-  for (const c of getAppointmentContacts(customer, prefs || {})) add(c.email, c.name);
+  // The SMS appointment recipients first (service contacts and/or primary).
+  // A service contact's email inside getAppointmentContacts falls back to the
+  // PRIMARY email when their slot has none — keep that delivery fallback (the
+  // primary mailbox still gets the notice) but under the PRIMARY's name: a
+  // greeting with the service contact's name on the primary's address
+  // mislabels the email (phone-only buyer/tenant slots made this common).
+  const primary = getPrimaryContact(customer);
+  const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
+  for (const c of getAppointmentContacts(customer, prefs || {})) {
+    const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
+    if (ownEmail) add(ownEmail, c.name);
+    else add(primary.email, primary.name);
+  }
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
@@ -114,7 +124,6 @@ async function resolveRecipients(customer) {
   // Last resort: the primary customer email (e.g. email-only customer with no
   // appointment phone contacts at all).
   if (!recipients.length) {
-    const primary = getPrimaryContact(customer);
     add(primary.email, primary.name);
   }
   return recipients;
@@ -156,11 +165,20 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
  *   { ok: false, blocked: true, reason }           — all recipients suppressed
  *   { ok: false, error }                           — threw
  */
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {} }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  const recipients = await resolveRecipients(customer);
+  let recipients = await resolveRecipients(customer);
+  // Optional allowlist of addresses: the call-booking confirmation fan-out
+  // targets ONLY email-only service-contact slots (a phone-channel customer's
+  // primary must not receive an email their channel choice didn't ask for) —
+  // still resolved through resolveRecipients so names/dedup/suppression
+  // semantics stay identical to a full send.
+  if (Array.isArray(recipientFilter)) {
+    const allow = new Set(recipientFilter.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean));
+    recipients = recipients.filter((r) => allow.has(r.email.toLowerCase()));
+  }
   if (!recipients.length) {
     await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'missing_email', metadata });
     return { ok: false, skipped: true, reason: 'missing_email' };
@@ -247,10 +265,11 @@ function apptStamp(apptTime) {
   return apptTime ? String(apptTime.getTime()) : 'na';
 }
 
-async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey } = {}) {
+async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null } = {}) {
   const apptTime = toDate(appointmentTime);
   return sendTemplate({
     customerId,
+    recipientFilter,
     templateKey: 'appointment.confirmation',
     eventType: 'appointment.confirmation',
     payload: {

@@ -65,6 +65,31 @@ describe('appointment email recipient resolution (fan-out to appointment contact
 
     expect(res.ok).toBe(true);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'primary@example.com' }));
+    // The fallback DELIVERS to the primary address, so it must carry the
+    // PRIMARY's name — greeting the primary mailbox as "Sue" mislabels it
+    // (common once phone-only buyer/tenant slots are auto-written by calls).
+    const fallbackCall = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(fallbackCall.payload.first_name).toBe('Pat');
+  });
+
+  test('recipientFilter restricts the send to the allowlisted addresses only', async () => {
+    mockDb({
+      customer: {
+        id: 'c6', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Joseph Haught', service_contact_phone: null, service_contact_email: 'buyer@example.com',
+      },
+      prefs: { appointment_notify_primary: true },
+    });
+
+    const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c6', scheduledServiceId: 'ss6', appointmentTime: '2026-07-09T16:00:00.000Z', serviceLabel: 'WDO Inspection',
+      recipientFilter: ['buyer@example.com'],
+    });
+
+    expect(res.ok).toBe(true);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'buyer@example.com' }));
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.first_name).toBe('Joseph');
   });
 
   test('email-only customer (no phone contacts) still gets the email at the primary address', async () => {

@@ -7,7 +7,10 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // service_request.quote_requested / quote_promised, triage flags
 // multi_property_call + quote_promised. All optional: 1.0.0 payloads
 // still validate.
-const SCHEMA_VERSION = '1.1.0';
+// 1.2.0: additive — top-level secondary_contact (a second person named as a
+// party to the service: realtor's buyer, landlord's tenant, spouse). Optional
+// and nullable: 1.0.0 / 1.1.0 payloads still validate.
+const SCHEMA_VERSION = '1.2.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

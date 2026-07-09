@@ -28,8 +28,8 @@
           "description": "Foreign key to call_log.id. Server-owned — injected after model response."
         },
         "schema_version": {
-          "enum": ["1.0.0", "1.1.0"],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals) — 1.0.0 payloads remain valid."
+          "enum": ["1.0.0", "1.1.0", "1.2.0"],
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -82,6 +82,33 @@
           "type": ["string", "null"],
           "enum": ["phone", "sms", "email", "unspecified", null]
         }
+      }
+    },
+
+    "secondary_contact": {
+      "type": ["object", "null"],
+      "description": "1.2.0 additive: a SECOND person named as a party to the service. Post-normalization: phone is E.164-or-null, email is valid-or-null (normalize-extraction-v2 nulls anything else), so the strict patterns are safe here.",
+      "additionalProperties": false,
+      "required": ["role", "wants_notifications"],
+      "properties": {
+        "name_full": { "type": ["string", "null"] },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "phone_e164": {
+          "type": ["string", "null"],
+          "pattern": "^\\+[1-9]\\d{1,14}$"
+        },
+        "phone_raw_spoken": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"], "format": "email" },
+        "role": {
+          "type": "string",
+          "enum": [
+            "home_buyer", "home_seller", "tenant", "landlord", "spouse_partner",
+            "family_member", "real_estate_agent", "property_manager", "other", "unknown"
+          ]
+        },
+        "wants_notifications": { "type": "boolean" },
+        "notes": { "type": ["string", "null"] }
       }
     },
 

@@ -80,6 +80,14 @@ MULTIPLE PROPERTIES (service_address vs additional_properties):
 - occupancy: "rental_investment" when the caller says a property is a rental, investment property, tenant-occupied, or short-term rental; "owner_occupied" when they live there; else "unknown".
 - additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home. Set the multi_property_call triage flag whenever additional_properties is non-empty.
 
+SECONDARY CONTACT (a SECOND person who is a party to the service):
+- Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent. Otherwise secondary_contact is null.
+- The CALLER's own identity always stays in the "caller" object. Never duplicate the caller into secondary_contact, and never put the other person's phone/email into the caller's fields.
+- role is this person's relationship to the TRANSACTION: the buyer a realtor is booking for is home_buyer (not real_estate_agent).
+- wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — is false.
+- When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
+- The SPELLED-OUT INPUT, TRANSCRIPT RELIABILITY, and EMAIL rules above apply to this person's fields exactly as they do to the caller's.
+
 SERVICE REQUEST:
 - primary_service_category: Map caller's request to the best enum value.
 - specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Control Service"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.

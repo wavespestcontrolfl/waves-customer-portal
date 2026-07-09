@@ -44,6 +44,7 @@ function flatView(extraction) {
     quote_requested: svc.quote_requested === true,
     quote_promised: svc.quote_promised === true,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
+    secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -80,6 +81,35 @@ function mapAdditionalPropertiesToLegacy(entries) {
       property_type: p.property_type || null,
       notes: p.notes || null,
     }));
+}
+
+// V2 secondary_contact → the legacy flat shape the processor's secondary-
+// contact persistence expects (same keys as the V1 extraction's
+// secondary_contact). An entry with no name, phone, or email is dropped —
+// there is nothing to persist or review without one.
+function mapSecondaryContactToLegacy(contact) {
+  if (!contact || typeof contact !== 'object') return null;
+  // A V2 contact can arrive with only name_full populated ("Joseph Haught"
+  // unsplit) — derive first/last from it so the name survives the flat
+  // mapping instead of producing an unnamed (or dropped) contact.
+  let firstName = contact.first_name || null;
+  let lastName = contact.last_name || null;
+  if (!firstName && !lastName && String(contact.name_full || '').trim()) {
+    const parts = String(contact.name_full).trim().split(/\s+/);
+    firstName = parts[0];
+    lastName = parts.slice(1).join(' ') || null;
+  }
+  const mapped = {
+    first_name: firstName,
+    last_name: lastName,
+    phone: contact.phone_e164 || null,
+    email: contact.email || null,
+    role: contact.role || 'unknown',
+    wants_notifications: contact.wants_notifications === true,
+    notes: contact.notes || null,
+  };
+  if (!mapped.first_name && !mapped.last_name && !mapped.phone && !mapped.email) return null;
+  return mapped;
 }
 
 function mapServiceCategoryToLegacy(category) {
@@ -120,4 +150,5 @@ module.exports = {
   mapServiceCategoryToLegacy,
   mapLeadQualityToLegacy,
   mapAdditionalPropertiesToLegacy,
+  mapSecondaryContactToLegacy,
 };

@@ -100,6 +100,40 @@
       }
     },
 
+    "secondary_contact": {
+      "type": ["object", "null"],
+      "description": "A SECOND person named as a party to the service (a realtor's home buyer, a landlord's tenant, a spouse). null when no such person was named. The caller's own identity always stays in `caller`. 1.2.0 additive — absent in older payloads. phone_e164/email are deliberately unpatterned here: a garbled spoken value must not schema-fail the whole extraction; the server normalizer validates and nulls them.",
+      "additionalProperties": false,
+      "required": ["role", "wants_notifications"],
+      "properties": {
+        "name_full": { "type": ["string", "null"] },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "phone_e164": {
+          "type": ["string", "null"],
+          "description": "Callback number stated for this person, E.164 preferred. Server re-validates."
+        },
+        "phone_raw_spoken": { "type": ["string", "null"] },
+        "email": {
+          "type": ["string", "null"],
+          "description": "Only when clearly said or spelled in full. Server re-validates."
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "home_buyer", "home_seller", "tenant", "landlord", "spouse_partner",
+            "family_member", "real_estate_agent", "property_manager", "other", "unknown"
+          ],
+          "description": "This person's relationship to the transaction — the BUYER a realtor books for is home_buyer, not real_estate_agent."
+        },
+        "wants_notifications": {
+          "type": "boolean",
+          "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to this person. A merely-mentioned or explicitly-excluded person is false."
+        },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+
     "consent": {
       "type": "object",
       "description": "TCPA-relevant consent capture. SMS dispatch MUST check sms_consent_given=true and do_not_contact_request=false before firing.",
