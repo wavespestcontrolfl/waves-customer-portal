@@ -18,7 +18,10 @@ const TEMPLATE = {
   template_key: 'service_complete_annual_prepay',
   name: 'Service Complete + Annual Prepay',
   category: 'service-reports',
-  body: "Hello {first_name}! Your {service_type} service is complete and covered by your annual prepaid plan — nothing due today. Your service report is ready: {portal_url}\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  // Punctuation stays inside GSM-7 (plain hyphen, no em dash / smart quotes):
+  // one non-GSM char would flip the whole message to UCS-2 and double the
+  // segment count (see services/messaging/segment-counter.js).
+  body: "Hello {first_name}! Your {service_type} service is complete and covered by your annual prepaid plan - nothing due today. Your service report is ready: {portal_url}\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
   description: 'Completion text when the visit is covered by an annual prepaid plan — no payment happened today, so it must not thank the customer for one (that copy is service_complete_prepaid, which still covers pay-at-visit / autopay / already-paid invoices). Fallback-protected: if disabled or missing, service_complete_prepaid sends instead.',
   variables: ['first_name', 'service_type', 'portal_url'],
 };

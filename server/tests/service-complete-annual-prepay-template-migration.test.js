@@ -47,6 +47,22 @@ describe('service_complete_annual_prepay template migration', () => {
     expect(row.body).toMatch(/reply stop/i);
   });
 
+  test('seeded body stays in GSM-7 encoding (Codex P2, PR #2537)', async () => {
+    const { detectEncoding } = require('../services/messaging/segment-counter');
+    const { knex, state } = buildKnex();
+
+    await migration.up(knex);
+
+    // One non-GSM character (em dash, smart quote, ...) flips the entire
+    // message to UCS-2 and drops concatenated segments from 153 to 67 chars,
+    // doubling the cost of every annual-prepay completion text.
+    const rendered = state.inserted[0].body
+      .replace('{first_name}', 'Chris')
+      .replace('{service_type}', 'Quarterly Pest Control')
+      .replace('{portal_url}', 'https://portal.wavespestcontrol.com/l/report-435c5');
+    expect(detectEncoding(rendered).encoding).toBe('GSM_7');
+  });
+
   test('is idempotent — skips the insert when the row already exists', async () => {
     const { knex, query } = buildKnex({ existingRow: { id: 'row-1' } });
 
