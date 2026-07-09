@@ -1055,10 +1055,13 @@ router.get('/:token/data', async (req, res, next) => {
     if (service.report_template_version === 'service_report_v1') {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
-      // report (owner ask 2026-07-05; previously SMS-only via /recap/:token).
-      // Live views only: the player streams /reports/:token/recap/video, which
-      // is meaningless in pdf/static renders. Best-effort — never blocks.
-      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly) {
+      // report (owner ask 2026-07-05; the standalone /recap/:token player was
+      // retired 2026-07-09 — the report is now the only surface). Pest reports
+      // only, and only when an approved rendered video actually exists (owner
+      // 2026-07-09). Live views only: the player streams
+      // /reports/:token/recap/video, meaningless in pdf/static renders.
+      // Best-effort — never blocks.
+      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly && v1Data.serviceLine === 'pest') {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');
           const recap = await getRecap(service.scheduled_service_id);

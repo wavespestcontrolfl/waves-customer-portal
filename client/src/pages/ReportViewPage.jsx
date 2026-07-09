@@ -1796,10 +1796,11 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
 }
 
 // "Your Visit, in Motion" — the tech-approved recap clip embedded in the
-// report (owner ask 2026-07-05; previously reachable only from the SMS
-// /recap/:token link). The server only attaches `recap` on live views when an
-// approved clip exists, so this self-gates everywhere else (pdf/static/
-// sms_preview and visits without a recap).
+// report (owner ask 2026-07-05; the standalone /recap/:token player was
+// retired 2026-07-09 — this card is the only surface, and old SMS links
+// redirect here). The server only attaches `recap` on live views of PEST
+// reports when an approved clip exists, so this self-gates everywhere else
+// (pdf/static/sms_preview, non-pest lines, and visits without a recap).
 function RecapVideoCard({ recap, token }) {
   // ready:true only reflects the DB row — the video read can still 404/5xx
   // (pruned clip, S3 error), which used to strand a dead black player. Hide
@@ -4689,7 +4690,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
-  // records no event (mirrors RecapViewPage.share).
+  // records no event.
   const share = async () => {
     try {
       if (navigator.share) {

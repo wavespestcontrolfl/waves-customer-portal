@@ -59,7 +59,10 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   const releaseClaim = () => knex('service_recaps').where({ id: recap.id })
     .update({ send_attempt_at: null, updated_at: knex.fn.now() }).catch(() => {});
 
-  const url = `${publicPortalUrl()}/recap/${token}`;
+  // The standalone /recap player was retired 2026-07-09 — link the service
+  // report, anchored at the embedded RecapVideoCard (#visit-recap). Old
+  // /recap/:token links keep working via a client-side redirect to the same.
+  const url = `${publicPortalUrl()}/report/${token}#visit-recap`;
   const first = String(service.first_name || '').trim().split(/\s+/)[0] || 'there';
   const body = `Hi ${first} — here's a quick 30-second recap of today's visit: ${url}`;
 

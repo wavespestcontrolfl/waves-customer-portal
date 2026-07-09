@@ -104,6 +104,15 @@ function BookEstimateRedirect() {
   return <Navigate to={`/estimate/${estimateToken}`} replace />;
 }
 
+// The standalone recap player was retired 2026-07-09 — the tech-approved
+// "Your Visit, in Motion" clip renders inside the service report itself
+// (RecapVideoCard, pest reports only). Recap SMS links already texted to
+// customers keep working by redirecting to the report, anchored at the clip.
+function RecapLinkRedirect() {
+  const { token } = useParams();
+  return <Navigate to={`/report/${token}#visit-recap`} replace />;
+}
+
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
@@ -123,7 +132,6 @@ import AdminCustomersPage from './pages/admin/CustomersPageV2';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import ProjectReportViewPage from './pages/ProjectReportViewPage';
-import RecapViewPage from './pages/RecapViewPage';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
 
@@ -358,7 +366,7 @@ export default function App() {
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
           <Route path="/report/project/:token" element={<WavesShell><ProjectReportViewPage /></WavesShell>} />
           <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
-          <Route path="/recap/:token" element={<WavesShell><RecapViewPage /></WavesShell>} />
+          <Route path="/recap/:token" element={<RecapLinkRedirect />} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
