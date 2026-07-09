@@ -766,6 +766,9 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
       if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
+      // Kill switch for the post-discount program floor — absent key keeps
+      // the in-code default (enabled).
+      setBoolean(constants.PEST, 'enforceFloorPostDiscount', config.pest_base.enforce_floor_post_discount);
       // Initial Roach Knockdown sliding scale — DB shape mirrors the constants:
       //   { regular: [{sqft, price}, ...], german: [{sqft, price}, ...],
       //     regular_standalone: [{sqft, price}, ...] }

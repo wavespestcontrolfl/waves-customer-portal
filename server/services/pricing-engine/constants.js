@@ -81,6 +81,12 @@ const PEST = {
   // competitor comparison, or historical anchor). v4.3 operator baseline.
   base: r(117),
   floor: r(89),
+  // Post-discount program floor (owner decision 2026-07-09): WaveGuard tier
+  // discounts may not take the collected annual below floor × freqMult ×
+  // visitsPerYear — the list-price floor holds after discounts too, per
+  // cadence. Enforced in discount-engine.applyMarginGuard. DB kill switch:
+  // pest_base row enforce_floor_post_discount=false.
+  enforceFloorPostDiscount: true,
   footprintBrackets: [
     { sqft: 800,  adj: -r(15) },   // Was -r(20). Flattened — old value produced prices below floor.
     { sqft: 1200, adj: -r(10) },   // Was -r(12).
