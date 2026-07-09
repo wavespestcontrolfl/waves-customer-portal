@@ -223,7 +223,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>⛈️ Weather reschedule</div>
+          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Weather reschedule</div>
           <button
             type="button"
             onClick={onClose}
@@ -283,14 +283,14 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     }}
                   >
                     <span>
-                      {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
+                      {opt.display}
                       {opt.kind === 'same_day' && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
                     {opt.rainChance != null && (
                       <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
-                        {opt.rainChance}% 🌧
+                        {opt.rainChance}% rain
                       </span>
                     )}
                   </button>
@@ -310,7 +310,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 }}
               >
-                <span>🕒 Custom time</span>
+                <span>Custom time</span>
                 {customOption && (
                   <span style={{ fontSize: 12, fontWeight: 500, color: '#18181B' }}>
                     {fmtDateLabel(customDate, todayStr)} · {fmtTime(customOption.window.start)}
