@@ -292,3 +292,42 @@ describe('resolveCallBookingPropertyLinkage', () => {
     expect(out.address.line1).toBe('456 Pine Ave');
   });
 });
+
+// ─── Stamped-address divergence rule (codex round-4 P1) ─────────────────────
+describe('stampedAddressDiverges', () => {
+  const { stampedAddressDiverges } = require('../services/stamped-address');
+
+  test('unstamped visit never diverges', () => {
+    expect(stampedAddressDiverges({ customer_address_line1: '123 Main St' })).toBe(false);
+    expect(stampedAddressDiverges({})).toBe(false);
+  });
+
+  test('stamp matching the primary (case/space-insensitive) does not diverge', () => {
+    expect(stampedAddressDiverges({
+      service_address_line1: '123  MAIN st ',
+      customer_address_line1: '123 Main St',
+    })).toBe(false);
+  });
+
+  test('different street line diverges', () => {
+    expect(stampedAddressDiverges({
+      service_address_line1: '456 Rental Ave',
+      customer_address_line1: '123 Main St',
+    })).toBe(true);
+  });
+
+  test('same street line in a different ZIP diverges; missing ZIPs do not', () => {
+    expect(stampedAddressDiverges({
+      service_address_line1: '123 Main St', service_address_zip: '34285',
+      customer_address_line1: '123 Main St', customer_zip: '34202',
+    })).toBe(true);
+    expect(stampedAddressDiverges({
+      service_address_line1: '123 Main St', service_address_zip: '34285',
+      customer_address_line1: '123 Main St', customer_zip: null,
+    })).toBe(false);
+  });
+
+  test('stamped visit for a customer with no primary on file diverges (no valid fallback)', () => {
+    expect(stampedAddressDiverges({ service_address_line1: '456 Rental Ave' })).toBe(true);
+  });
+});

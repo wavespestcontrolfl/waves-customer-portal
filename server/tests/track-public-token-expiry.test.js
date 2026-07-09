@@ -95,13 +95,13 @@ describe('public track token expiry', () => {
     expect(row.longitude).toBeNull();
   });
 
-  test('does not geocode the primary address for address-stamped visits', async () => {
+  test('does not geocode the primary address when the stamped address diverges', async () => {
     // Stamped secondary/rental booking with no property geocode: the tracker
     // must show no pin rather than map/ETA the customer's primary home.
     const row = await trackPublicRouter._test.ensureEnRouteDestinationGeocoded({
       track_state: 'en_route',
       customer_id: 'cust-1',
-      address_stamped: true,
+      stamped_address_diverges: true,
       latitude: null,
       longitude: null,
     });
@@ -109,6 +109,23 @@ describe('public track token expiry', () => {
     expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
     expect(row.latitude).toBeNull();
     expect(row.longitude).toBeNull();
+  });
+
+  test('still geocodes for a stamped booking AT the primary address', async () => {
+    // Every phone booking stamps — a stamp matching the primary must keep
+    // the geocode fallback or ordinary bookings lose their pin/ETA.
+    ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4208, lng: -82.4929 });
+
+    const row = await trackPublicRouter._test.ensureEnRouteDestinationGeocoded({
+      track_state: 'en_route',
+      customer_id: 'cust-1',
+      stamped_address_diverges: false,
+      latitude: null,
+      longitude: null,
+    });
+
+    expect(ensureCustomerGeocoded).toHaveBeenCalledWith('cust-1');
+    expect(row.latitude).toBe(27.4208);
   });
 
   test('hides report token and photos when frozen delivery suppresses customer artifacts', async () => {

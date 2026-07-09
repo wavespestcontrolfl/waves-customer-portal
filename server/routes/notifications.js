@@ -39,23 +39,32 @@ function serviceContactSlotUpdates(contacts = [], before = {}) {
     ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
     ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
   ];
-  const norm = (v) => String(v || '').trim();
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const phoneKey = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  // The editor rewrites slot IDENTITIES without knowing about roles — a
+  // stale role left behind would attach itself to the new person (and the
+  // call pipeline's household-role matching would trust it). But a person
+  // who merely SHIFTED slots (deleting contact 1 compacts 2→1, 3→2) is not
+  // a new identity, and the portal echoes the full list on save — so match
+  // each incoming contact against ALL previous slots (phone, then email,
+  // then exact name) and carry the matched slot's role; only a genuinely
+  // new person gets a cleared role (codex round-3/round-4 P1 class).
+  const prevSlots = slotColumns.map(([nameCol, phoneCol, emailCol, roleCol]) => ({
+    name: before[nameCol], phone: before[phoneCol], email: before[emailCol], role: before[roleCol],
+  }));
+  const matchPrev = (contact) => {
+    if (!contact) return null;
+    return prevSlots.find((s) => phoneKey(contact.phone) && phoneKey(contact.phone) === phoneKey(s.phone))
+      || prevSlots.find((s) => norm(contact.email) && norm(contact.email) === norm(s.email))
+      || prevSlots.find((s) => norm(contact.name) && norm(contact.name) === norm(s.name))
+      || null;
+  };
   slotColumns.forEach(([nameCol, phoneCol, emailCol, roleCol], i) => {
     const contact = contacts[i];
     updates[nameCol] = contact?.name || null;
     updates[phoneCol] = contact?.phone || null;
     updates[emailCol] = contact?.email || null;
-    // The editor rewrites slot IDENTITIES without knowing about roles — a
-    // stale role left behind would attach itself to the new person (and the
-    // call pipeline's household-role matching would trust it). But the role
-    // is only stale when the identity actually CHANGED: the portal echoes
-    // the full list on save, and clearing unconditionally would wipe the
-    // pipeline's role signal on every unrelated save (codex round-3 P1
-    // class). Untouched slots keep their role.
-    const identityChanged = norm(updates[nameCol]) !== norm(before[nameCol])
-      || norm(updates[phoneCol]) !== norm(before[phoneCol])
-      || norm(updates[emailCol]) !== norm(before[emailCol]);
-    if (identityChanged) updates[roleCol] = null;
+    updates[roleCol] = matchPrev(contact)?.role || null;
   });
   return updates;
 }
@@ -589,20 +598,18 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       });
       savedContacts = contacts.map(serviceContactPayload);
     } else if (updates.serviceContact !== undefined) {
-      // Legacy single-contact save: writes slot 1 only.
+      // Legacy single-contact save: writes slot 1 only. Role handling
+      // mirrors the list save: the same person (matched by phone/email/name
+      // against any previous slot) keeps their pipeline-recorded role; a
+      // genuinely new person never inherits the old one.
       const contact = normalizeContactInput(updates.serviceContact);
       const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
-      const norm = (v) => String(v || '').trim();
-      const identityChanged = norm(contact.name) !== norm(beforeRow.service_contact_name)
-        || norm(contact.phone) !== norm(beforeRow.service_contact_phone)
-        || norm(contact.email) !== norm(beforeRow.service_contact_email);
+      const slot1 = serviceContactSlotUpdates([contact], beforeRow);
       await db('customers').where({ id: req.params.customerId }).update({
-        service_contact_name: contact.name || null,
-        service_contact_phone: contact.phone || null,
-        service_contact_email: contact.email || null,
-        // Identity rewritten without a role — never leave the old one behind.
-        // An unchanged identity keeps its role (codex round-3 P1 class).
-        ...(identityChanged ? { service_contact_role: null } : {}),
+        service_contact_name: slot1.service_contact_name,
+        service_contact_phone: slot1.service_contact_phone,
+        service_contact_email: slot1.service_contact_email,
+        service_contact_role: slot1.service_contact_role,
         updated_at: new Date(),
       });
     }

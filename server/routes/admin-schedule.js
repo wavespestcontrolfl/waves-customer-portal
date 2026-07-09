@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
+const { stampedDivergesSql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -5345,12 +5346,15 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        // Primary-home coords are only a valid fallback for UNstamped visits —
-        // a stamped rental booking with no coords must degrade to "no pin"
-        // (optimizer appends coordless stops), never route to the wrong house.
-        db.raw('COALESCE(scheduled_services.lat, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.latitude END) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.longitude END) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -5439,12 +5443,15 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        // Primary-home coords are only a valid fallback for UNstamped visits —
-        // a stamped rental booking with no coords must degrade to "no pin"
-        // (optimizer appends coordless stops), never route to the wrong house.
-        db.raw('COALESCE(scheduled_services.lat, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.latitude END) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.longitude END) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 

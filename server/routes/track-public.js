@@ -42,6 +42,7 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
+const { stampedDivergesSql } = require('../services/stamped-address');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -175,10 +176,12 @@ async function buildVehicle(service) {
 async function ensureEnRouteDestinationGeocoded(service) {
   if (!service || service.track_state !== 'en_route') return service;
   if (finiteNumber(service.latitude) != null && finiteNumber(service.longitude) != null) return service;
-  // ensureCustomerGeocoded resolves the PRIMARY address — for a visit
-  // stamped with its own service address (secondary/rental booking) that
-  // would map/ETA the wrong house. No pin beats a wrong pin.
-  if (service.address_stamped) return service;
+  // ensureCustomerGeocoded resolves the PRIMARY address — when the visit's
+  // stamped service address diverges from the primary (secondary/rental
+  // booking) that would map/ETA the wrong house. No pin beats a wrong pin.
+  // A non-divergent stamp (ordinary primary-address phone booking) keeps
+  // the fallback: the primary IS the destination (codex round-4 P1).
+  if (service.stamped_address_diverges) return service;
   if (!service.customer_id) return service;
 
   try {
@@ -331,12 +334,13 @@ router.get('/:token', async (req, res, next) => {
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
         // Stamped visits carry their own coords (property geocode stamped
-        // at booking) — read them first; the customer's primary coords stay
-        // a fallback for UNstamped visits only (codex round-3 P1: this
-        // select ignored s.lat/s.lng entirely).
-        db.raw('COALESCE(s.lat, CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END) as latitude'),
-        db.raw('COALESCE(s.lng, CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END) as longitude'),
-        db.raw('(s.service_address_line1 IS NOT NULL) as address_stamped'),
+        // at booking) — read them first. The customer's primary coords are
+        // a valid fallback unless the stamp DIVERGES from the primary:
+        // every phone booking stamps, including primary-address bookings,
+        // so "stamped" alone must not blank the pin (codex round-4 P1).
+        db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+        db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+        db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
         't.bouncie_imei as tech_bouncie_imei',
         't.photo_url as tech_photo_url',

@@ -23,6 +23,7 @@ const { getIo } = require('../sockets');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
 const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
 const { ensureCustomerGeocoded } = require('./geocoder');
+const { stampedAddressDiverges } = require('./stamped-address');
 const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
@@ -104,26 +105,48 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 
 // Best-effort ETA for the en-route SMS. Mirrors track-public.js
 // buildVehicle: needs a fresh tech_status GPS ping AND a geocoded
-// customer address. Returns null on any missing-data or upstream
+// destination. Returns null on any missing-data or upstream
 // failure path so the SMS still fires (without the ETA line).
-async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
+// Destination resolution mirrors the public tracker: the visit's own
+// coords win; the customer's primary coords/geocode only stand in when
+// the visit's stamped address doesn't diverge from the primary —
+// otherwise the SMS would quote an ETA to the wrong house while the
+// tracker shows the rental (codex round-4 P1).
+async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId }) {
   if (!technicianId || !customerId) {
     logger.info(`[track-transitions] en-route ETA skipped: missing ids (tech=${!!technicianId} cust=${!!customerId})`);
     return null;
   }
   try {
-    const [ts, customer] = await Promise.all([
+    const [ts, dest] = await Promise.all([
       db('tech_status')
         .where({ tech_id: technicianId })
         .first('lat', 'lng', 'location_updated_at'),
-      db('customers')
-        .where({ id: customerId })
-        .first('latitude', 'longitude'),
+      serviceId
+        ? db('scheduled_services as s')
+          .leftJoin('customers as c', 's.customer_id', 'c.id')
+          .where('s.id', serviceId)
+          .first(
+            's.lat as service_lat',
+            's.lng as service_lng',
+            's.service_address_line1',
+            's.service_address_zip',
+            'c.latitude',
+            'c.longitude',
+            'c.address_line1 as customer_address_line1',
+            'c.zip as customer_zip'
+          )
+        : db('customers')
+          .where({ id: customerId })
+          .first('latitude', 'longitude'),
     ]);
     const techLat = finiteNumber(ts?.lat);
     const techLng = finiteNumber(ts?.lng);
-    let custLat = finiteNumber(customer?.latitude);
-    let custLng = finiteNumber(customer?.longitude);
+    // A divergent stamp makes the primary coords the WRONG destination —
+    // only the visit's own coords count for it.
+    const diverges = stampedAddressDiverges(dest || {});
+    let custLat = finiteNumber(dest?.service_lat) ?? (diverges ? null : finiteNumber(dest?.latitude));
+    let custLng = finiteNumber(dest?.service_lng) ?? (diverges ? null : finiteNumber(dest?.longitude));
     if (techLat == null || techLng == null) {
       logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
       return null;
@@ -133,6 +156,10 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
       return null;
     }
     if (custLat == null || custLng == null) {
+      if (diverges) {
+        logger.info(`[track-transitions] en-route ETA skipped: visit ${serviceId} stamped a non-primary address with no coords`);
+        return null;
+      }
       const geocoded = await withTimeout(
         ensureCustomerGeocoded(customerId),
         EN_ROUTE_GEOCODE_TIMEOUT_MS,
@@ -301,6 +328,7 @@ async function markEnRoute(serviceId, opts = {}) {
       const etaMinutes = await resolveEnRouteEtaMinutes({
         technicianId: svc.technician_id,
         customerId: svc.customer_id,
+        serviceId: svc.id,
       });
 
       const result = await TwilioService.sendTechEnRoute(

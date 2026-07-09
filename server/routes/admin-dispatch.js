@@ -10,6 +10,7 @@ const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, for
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
+const { stampedDivergesSql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
@@ -1328,6 +1329,9 @@ router.get('/:date?', async (req, res, next) => {
         // visits, e.g. a customer's rental) wins over the customer's primary
         // mirror — same output field names, so every consumer keeps working.
         db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // Stamped condo/duplex visits keep THEIR unit line, never the
+        // primary address's (codex round-4 P2).
+        db.raw('CASE WHEN scheduled_services.service_address_line1 IS NOT NULL THEN scheduled_services.service_address_line2 ELSE customers.address_line2 END as address_line2'),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -1406,7 +1410,7 @@ router.get('/:date?', async (req, res, next) => {
         customerName: `${s.first_name} ${s.last_name}`,
         customerId: s.customer_id,
         customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: s.service_type,
         scheduledDate: s.scheduled_date,
@@ -6693,8 +6697,8 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.id,
         s.technician_id,
         s.customer_id,
-        COALESCE(s.lat, CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END)  AS lat,
-        COALESCE(s.lng, CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END) AS lng,
+        COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END)  AS lat,
+        COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng,
         s.status,
         s.service_type,
         s.scheduled_date,
@@ -6840,11 +6844,12 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
-        // A visit stamped with its own address must never fall back to the
-        // customer's PRIMARY geocode — a null pin beats navigating to the
-        // wrong (real) house (codex P1).
-        db.raw('CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END as cust_lat'),
-        db.raw('CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END as cust_lng')
+        // A visit whose stamp DIVERGES from the primary must never fall back
+        // to the customer's PRIMARY geocode — a null pin beats navigating to
+        // the wrong (real) house (codex P1). Non-divergent stamps (ordinary
+        // primary-address phone bookings) keep the fallback (round-4 P1).
+        db.raw(`CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END as cust_lat`),
+        db.raw(`CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END as cust_lng`)
       );
 
     if (!row) return res.status(404).json({ error: 'Job not found' });

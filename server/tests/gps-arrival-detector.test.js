@@ -220,13 +220,14 @@ describe('gps-arrival-detector', () => {
     expect(result.ok).toBe(true);
   });
 
-  test('refuses primary-coord and geocode fallbacks for address-stamped visits', async () => {
+  test('refuses primary-coord and geocode fallbacks when the stamped address diverges', async () => {
     // A stamped secondary/rental booking with no property geocode: the tech
     // idling at the customer's PRIMARY home must not auto-flip this job.
     installServiceLookup(baseService({
       service_lat: null,
       service_lng: null,
       service_address_line1: '456 Rental Ave',
+      customer_address_line1: '123 Primary St',
       customer_latitude: 27.4386,
       customer_longitude: -82.3719,
     }));
@@ -240,6 +241,28 @@ describe('gps-arrival-detector', () => {
     expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
     expect(result).toMatchObject({ ok: false });
+  });
+
+  test('still uses primary coords for a stamped booking AT the primary address', async () => {
+    // Every phone booking stamps — a stamp matching the primary address must
+    // keep arrival detection working for ordinary bookings (codex round-4 P1).
+    installServiceLookup(baseService({
+      service_lat: null,
+      service_lng: null,
+      service_address_line1: '123 Primary St',
+      customer_address_line1: '123 Primary St',
+      customer_latitude: 27.4386,
+      customer_longitude: -82.3719,
+    }));
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint({ speed_mph: 0, ignition: false }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', { actingTechId: 'tech-1' });
+    expect(result.ok).toBe(true);
   });
 
   test('does not scan stale en-route jobs without a current job pointer', async () => {
