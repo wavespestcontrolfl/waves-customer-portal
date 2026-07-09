@@ -170,6 +170,12 @@ export default function MobileAppointmentDetailSheet({
   // single-visit "Prepaid $X via Y" copy below.
   const seriesCtx = service.prepaidSeriesContext || null;
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
+  // Fully prepay-covered visits collect nothing, so the line items and total
+  // read $0.00 — the monthlyRate fallback figure looks like a bill due when
+  // the customer already paid the year up front. Partially prepaid visits
+  // (prepaidAmt < total) keep the real figures and the checkout path.
+  const displayBasePrice = prepaidCovered ? 0 : baseServicePrice;
+  const displayTotal = prepaidCovered ? 0 : total;
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required
@@ -405,7 +411,7 @@ export default function MobileAppointmentDetailSheet({
               </div>
             </div>
             <div className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
-              ${baseServicePrice.toFixed(2)}
+              ${displayBasePrice.toFixed(2)}
             </div>
           </div>
 
@@ -423,7 +429,7 @@ export default function MobileAppointmentDetailSheet({
                 </div>
               </div>
               <div className="u-nums text-zinc-900" style={{ fontSize: 15 }}>
-                ${Number(addon.estimatedPrice || 0).toFixed(2)}
+                ${(prepaidCovered ? 0 : Number(addon.estimatedPrice || 0)).toFixed(2)}
               </div>
             </div>
           ))}
@@ -432,18 +438,27 @@ export default function MobileAppointmentDetailSheet({
             <span className="text-zinc-900" style={{ fontSize: 16 }}>
               Total
             </span>
-            <span className="u-nums text-zinc-900" style={{ fontSize: 16 }}>
-              ${total.toFixed(2)}
+            <span className="text-right">
+              <span className="u-nums text-zinc-900 block" style={{ fontSize: 16 }}>
+                ${displayTotal.toFixed(2)}
+              </span>
+              {prepaidCovered && (
+                <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
+                  Covered by prepay
+                </span>
+              )}
             </span>
           </div>
         </section>
 
         {/* Estimate provenance — quoted vs current, plus the exact payment
-            posture (annual prepay / setup fee / deposit) from the estimate. */}
+            posture (annual prepay / setup fee / deposit) from the estimate.
+            currentPrice null on covered visits: a "$0 vs quoted" delta is
+            noise — the prepay rows below carry the real money facts. */}
         {estimateSource && (
           <EstimateProvenanceCard
             quotedTotal={estimateSource.quotedTotal}
-            currentPrice={price}
+            currentPrice={prepaidCovered ? null : price}
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}
             lines={estimateSource.lines}
