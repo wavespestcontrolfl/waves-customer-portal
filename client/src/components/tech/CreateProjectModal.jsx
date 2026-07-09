@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
@@ -923,14 +924,23 @@ export default function CreateProjectModal({
     }
   }
 
-  return (
+  // Portaled to <body>: rendered inline the overlay is trapped in the page's
+  // stacking context, so the admin header/tab bar (and tech chrome) paint over
+  // it — the dialog's title bar and Save Draft/Cancel row were cut off on
+  // phones. The overlay's own env() padding keeps the card clear of the iOS
+  // status bar and home indicator now that it truly covers the screen. Fonts
+  // are unaffected: the card sets P.bodyFont per theme.
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
       style={{
         position: 'fixed', inset: 0, zIndex: 200, background: isEstimateStyle ? 'rgba(9, 9, 11, 0.42)' : 'rgba(0,0,0,0.6)',
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-        overflowY: 'auto', padding: isEstimateStyle ? '24px 0' : '12px 0',
+        overflowY: 'auto',
+        padding: isEstimateStyle ? '24px 0' : '12px 0',
+        paddingTop: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-top, 0px))`,
+        paddingBottom: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-bottom, 0px))`,
       }}
       onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose?.(); }}
     >
@@ -1424,7 +1434,8 @@ export default function CreateProjectModal({
           >{saving ? 'Saving…' : 'Save Draft'}</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
