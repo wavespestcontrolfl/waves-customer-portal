@@ -5,7 +5,7 @@
 // pages, the Tailwind outline page) without page-local CSS.
 import { useState } from 'react';
 import { Download, Share2, Printer, Lock } from 'lucide-react';
-import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
+import { canSaveNative, canShareNative, isNativeApp, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { COLORS as B } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 
@@ -13,6 +13,9 @@ const FONT_BODY = "'Inter', system-ui, sans-serif";
 
 function buttonStyle() {
   return {
+    // border-box: these render as width-100% grid items — content-box would
+    // add the padding/border on top of the cell width and overflow the row.
+    boxSizing: 'border-box',
     minHeight: 48,
     padding: '0 18px',
     borderRadius: 10,
@@ -60,6 +63,14 @@ export default function DocumentActionBar({
     // pages carry payment_intent_client_secret/redirect_status query params,
     // which must never ride a shared link. Tokens live in the path.
     const url = shareUrl || `${window.location.origin}${window.location.pathname}`;
+    // Capacitor shell first: Web Share / Clipboard are unreliable in the
+    // webview, and on link-only pages (prep, statement, outlines, project
+    // reports) this button is the ONLY share control — it must never
+    // silently no-op where the native Share plugin is available.
+    if (canShareNative()) {
+      await shareUrlNative(url, shareTitle).catch(() => {});
+      return;
+    }
     try {
       if (navigator.share) {
         await navigator.share({ title: shareTitle, url });
