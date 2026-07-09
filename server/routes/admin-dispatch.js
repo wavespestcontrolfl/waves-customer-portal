@@ -4801,10 +4801,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (chargeErr) {
-        logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
+        if (chargeErr.code === 'STRIPE_CHARGED_DB_FAILED') {
+          // Stripe COLLECTED the money but the DB write failed — already
+          // recorded in stripe_orphan_charges for manual reconciliation.
+          // The invoice still reads open locally, so the normal fallback
+          // (pay-link SMS) would invite the customer to pay the SAME visit
+          // again. Mirror the card-hold convention: suppress the pay link /
+          // charge actions and leave the reconciliation to the orphan
+          // ledger — never re-collectible from this completion (Codex P1).
+          invoiceCreated = false;
+          payUrl = null;
+          logger.error(`[dispatch] per-application autopay charge ORPHANED for invoice ${invoice?.id} (PI ${chargeErr.stripePaymentIntentId || 'unknown'}) — pay link suppressed, see stripe_orphan_charges`);
+        } else {
+          logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
+        }
         try {
           await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
-            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, error: String(chargeErr.message || '').slice(0, 300) },
+            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
       }
@@ -7325,14 +7338,17 @@ function shouldAutoInvoiceCompletion({
     return false;
   }
   if (!(Number(invoiceAmount) > 0)) return false;
-  // Explicit scheduler flag / WaveGuard tier are the existing, unchanged
-  // paths. perApplicationBilling (billing_mode 'per_application') bills every
-  // completed application by definition — including tier-less/commercial rows
-  // the waveguardTier branch would miss — but never a callback/re-treat or an
-  // always-free type (re-service, follow-up, estimate): those are free for
-  // recurring customers regardless of billing mode.
-  if (createInvoiceOnComplete || waveguardTier) return true;
-  if (perApplicationBilling && !isCallback && !isAlwaysFreeServiceType(serviceType)) return true;
+  // Explicit scheduler flag stays the strongest signal (operator intent).
+  if (createInvoiceOnComplete) return true;
+  // Per-application customers bill every completed APPLICATION — never a
+  // callback/re-treat or an always-free type (re-service, follow-up,
+  // estimate). Decided BEFORE the WaveGuard-tier shortcut: converted
+  // per-application customers carry a tier, and letting the tier branch
+  // answer first would bill their free visit types the moment a fee/rate
+  // gives them a positive invoiceAmount (Codex P1). Tier-less/commercial
+  // per-application rows are covered here too.
+  if (perApplicationBilling) return !isCallback && !isAlwaysFreeServiceType(serviceType);
+  if (waveguardTier) return true;
   // GATED new path: a priced visit qualifies — but NEVER an always-free type
   // (appointment / estimate / re-service / follow-up) or a callback/re-treat,
   // even if a stale or inherited price is present. Keeps this gate in lockstep

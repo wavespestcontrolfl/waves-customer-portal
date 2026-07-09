@@ -79,16 +79,26 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     expect(result.skipped).toBe(1);
   });
 
-  test('annual_prepay billing_mode is skipped even with no term row (belt-and-suspenders)', async () => {
+  test("annual_prepay mode alone does NOT skip — a cancelled/refunded term must return the customer to normal billing (term guards, not the stamp, are the coverage truth)", async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-AP', billing_mode: 'annual_prepay' }];
-    mockTermRows = []; // no active term — the mode alone must protect
+    mockTermRows = []; // no live term (e.g. cancelled/refunded) — must fall through to charging
+    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_ap', amount: 55.3 }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+
+    await BillingCron.processMonthlyBilling();
+
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-AP', 'skipped_billing_mode', expect.anything());
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-AP');
+  });
+
+  test('annual_prepay mode WITH a live covering term is still skipped by the term guard', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-AP2', billing_mode: 'annual_prepay' }];
+    mockTermRows = [{ customer_id: 'cust-AP2' }]; // live coverage
 
     const result = await BillingCron.processMonthlyBilling();
 
     expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
-    expect(logAutopay).toHaveBeenCalledWith('cust-AP', 'skipped_billing_mode', {
-      details: { billing_mode: 'annual_prepay' },
-    });
+    expect(logAutopay).toHaveBeenCalledWith('cust-AP2', 'skipped_annual_prepay');
     expect(result.skipped).toBe(1);
   });
 

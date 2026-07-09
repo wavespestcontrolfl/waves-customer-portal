@@ -1354,10 +1354,13 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
 }
 
 // Owner ruling 2026-07-09: annual-prepay customers carry billing_mode
-// 'annual_prepay' so the monthly billing cron's mode guard skips them
-// (belt-and-suspenders on the existing term-based guards) and the completion
-// path knows they are NOT per-application customers. The estimate converter
-// stamps every recurring accept 'per_application'; the term choke point here
+// 'annual_prepay' as their classification — it drives autopay enrollment at
+// signup (stripe-webhook save-card mirror) and marks them NOT
+// per-application for completion billing. Deliberately NOT a billing
+// suppressor: the monthly cron keeps trusting its coverage-dated term
+// guards, so a later term cancel/refund returns the customer to normal
+// billing without this stamp needing cleanup. The estimate converter stamps
+// every recurring accept 'per_application'; the term choke point here
 // (portal accept, prepay-on-book, Customer 360 record-prepay all run through
 // it) re-stamps the prepay ones. Best-effort + column-guarded: term creation
 // must never fail on this stamp.

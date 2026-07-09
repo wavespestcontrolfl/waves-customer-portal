@@ -1210,12 +1210,18 @@ const EstimateConverter = {
           billing_mode: 'per_application',
           // Exact per-visit charge at the accepted billing cadence (quarterly
           // derives from the exact annual: $98.00, not 3 x rounded-monthly
-          // $98.01 — resolveBillingCadence). Monthly-rate fallback only when
-          // no cadence resolved; NULL = no fee on file (completion keeps its
-          // existing rate precedence).
-          per_application_fee: (billingCadence && Number(billingCadence.amount) > 0)
+          // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
+          // only — the same gate the scheduled-row estimated_price writer
+          // uses: a multi-service plan creates one row per service, and a
+          // customer-level whole-plan fee would bill the full package on
+          // EVERY row's completion (Codex P1). Multi-service plans leave the
+          // fee NULL so completion keeps its existing per-row precedence.
+          per_application_fee: (recurringServicesForConversion.length === 1
+            && billingCadence && Number(billingCadence.amount) > 0)
             ? Number(billingCadence.amount)
-            : (Number(monthlyRate) > 0 ? Number(monthlyRate) : null),
+            : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+              ? Number(monthlyRate)
+              : null),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former

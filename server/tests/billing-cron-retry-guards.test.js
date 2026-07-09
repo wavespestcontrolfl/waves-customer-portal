@@ -279,3 +279,44 @@ describe('processPaymentRetries — suppression guards', () => {
     );
   });
 });
+
+// billing_mode resolution guard (owner ruling 2026-07-09): a monthly
+// obligation mis-created for a per-application customer (the pre-
+// classification failed-charge cohort) resolves non-collectible — but ONLY
+// for 'per_application', and never for a customer who has actually paid a
+// monthly charge before (a real ex-member's pre-conversion debt stays
+// collectible). 'annual_prepay' old debt is governed exclusively by the
+// coverage-DATED absorb, not by current mode.
+describe('processPaymentRetries — billing_mode resolution guard', () => {
+  test('per_application customer (never paid monthly): monthly row resolved non-collectible', async () => {
+    mockCustomer.billing_mode = 'per_application';
+    mockFailedPayments = [monthlyFailedPayment()];
+    mockCollectedRow = null; // no paid monthly row exists, ever
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(1);
+    const resolved = mockPaymentUpdates[0];
+    expect(resolved.next_retry_at).toBeNull();
+    expect(resolved.superseded_by_payment_id).toBe('pay-failed-1'); // self-supersede convention
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_billing_mode',
+      expect.objectContaining({
+        paymentId: 'pay-failed-1',
+        details: expect.objectContaining({ billing_mode: 'per_application', ladder_stopped: true }),
+      }));
+  });
+
+  test('annual_prepay mode does NOT mode-resolve old monthly debt — coverage-dated guards own it', async () => {
+    mockCustomer.billing_mode = 'annual_prepay';
+    mockFailedPayments = [monthlyFailedPayment()];
+    // no coverage on the obligation date, no pending term → nothing suppresses
+    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+
+    await BillingCron.processPaymentRetries();
+
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'skipped_billing_mode', expect.anything());
+    expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-1');
+  });
+});

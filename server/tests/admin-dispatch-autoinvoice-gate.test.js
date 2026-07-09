@@ -103,6 +103,18 @@ describe('shouldAutoInvoiceCompletion — per-application billing', () => {
       });
   });
 
+  test("per-application decides BEFORE the WaveGuard-tier shortcut — a tiered per-app customer's free visit types stay free (Codex P1)", () => {
+    const tiered = { ...perApp, waveguardTier: 'Bronze' };
+    expect(shouldAutoInvoiceCompletion({ ...tiered, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...tiered, isCallback: true })).toBe(false);
+    // ...while their normal application still bills.
+    expect(shouldAutoInvoiceCompletion(tiered)).toBe(true);
+  });
+
+  test('the explicit scheduler flag still outranks per-application (operator intent)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, serviceType: 'Pest Control Re-Service', createInvoiceOnComplete: true })).toBe(true);
+  });
+
   test('coverage guards still block a per-application bill (first visit paid at acceptance)', () => {
     expect(shouldAutoInvoiceCompletion({ ...perApp, alreadyPaid: true })).toBe(false);
     expect(shouldAutoInvoiceCompletion({ ...perApp, existingCompletionInvoice: { id: 'inv' } })).toBe(false);

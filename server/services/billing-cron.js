@@ -168,12 +168,15 @@ const BillingCron = {
         // GUARD 3b: billing mode — this cron is the MONTHLY MEMBERSHIP
         // subscription biller only. Estimate-flow customers bill per visit
         // (billing_mode 'per_application' — completion collects the
-        // application fee; owner ruling 2026-07-09) and annual-prepay
-        // customers paid up front ('annual_prepay'; also caught by the
-        // term guards below). NULL/'monthly_membership' = legacy behavior
-        // unchanged. Charging a per-application customer here would bill a
-        // monthly subscription ON TOP of their per-visit invoices.
-        if (customer.billing_mode && customer.billing_mode !== 'monthly_membership') {
+        // application fee; owner ruling 2026-07-09): charging them here
+        // would bill a monthly subscription ON TOP of their per-visit
+        // invoices. Deliberately does NOT skip on 'annual_prepay': the
+        // term guards below (GUARD 4/5) are the coverage-dated source of
+        // truth, and a cancelled/refunded term must return the customer to
+        // normal billing — a mode-only skip would leave them unbilled
+        // forever since term-removal paths don't clear the stamp (Codex
+        // P1). NULL/'monthly_membership' = legacy behavior unchanged.
+        if (customer.billing_mode === 'per_application') {
           await logAutopay(customer.id, 'skipped_billing_mode', {
             details: { billing_mode: customer.billing_mode },
           });
@@ -630,17 +633,23 @@ const BillingCron = {
         continue;
       }
 
-      // RESOLUTION GUARD (mirrors monthly GUARD 3b): the customer is not a
-      // monthly-membership subscriber (billing_mode 'per_application' bills
-      // per completed visit; 'annual_prepay' paid up front), so a MONTHLY
-      // obligation row was mis-created for them — most commonly a failed
-      // charge from before the customer was classified. Nothing is owed on
-      // a monthly basis: resolve the row non-collectible (disarm + the same
-      // self-superseding convention as the parked states) instead of burning
-      // retry rungs / decline SMS on a debt that does not exist. Per-visit
-      // money is collected by completion billing; prepay by the term.
-      if (isMonthlyObligation && customer.billing_mode
-        && customer.billing_mode !== 'monthly_membership') {
+      // RESOLUTION GUARD (mirrors monthly GUARD 3b): a MONTHLY obligation
+      // row exists for a per-application customer — mis-created before the
+      // customer was classified (the July failed-charge cohort). Nothing is
+      // owed on a monthly basis for them, so resolve the row non-collectible
+      // (disarm + the same self-superseding convention as the parked states)
+      // instead of burning retry rungs / decline SMS on a debt that does not
+      // exist. Two deliberate limits (Codex P1/P2): only 'per_application'
+      // — an 'annual_prepay' customer's old monthly debt is governed by the
+      // coverage-DATED absorb above, never by current mode — and only when
+      // the customer has NEVER successfully paid a monthly charge: a real
+      // ex-monthly-member's pre-conversion debt stays collectible.
+      if (isMonthlyObligation && customer.billing_mode === 'per_application'
+        && !(await db('payments')
+          .where({ customer_id: payment.customer_id, status: 'paid' })
+          .where('description', 'like', '%WaveGuard Monthly%')
+          .whereNot({ id: payment.id })
+          .first())) {
         await db('payments')
           .where({ id: payment.id })
           .update({
