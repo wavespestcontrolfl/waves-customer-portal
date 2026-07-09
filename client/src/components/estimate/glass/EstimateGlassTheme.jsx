@@ -24,7 +24,7 @@
  * observers, listeners. Stray data attributes are inert without the html
  * attribute, so they are left in place rather than walked again.
  */
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 import {
   applyGlassScene,
   attachGlassPointerFx,
@@ -227,7 +227,10 @@ function classify(revealIO, statIO, pro) {
  * mounting the component in every branch.
  */
 export function useGlassTheme(active, variant = 'full') {
-  useEffect(() => {
+  // Layout effect, not effect: the scene attribute + first classify() must
+  // land before the browser paints, or the page flashes its untagged legacy
+  // inline styles for a frame (owner saw the old theme pop on draft previews).
+  useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const { orbs, cleanup: sceneCleanup } = applyGlassScene(variant);
@@ -270,8 +273,26 @@ export function useGlassTheme(active, variant = 'full') {
     // attributeFilter ['style'] covers in-place selection changes (Codex rd2).
     // classify() itself writes styles/attributes, so after each run the
     // records it produced are flushed with takeRecords() to avoid a loop.
+    // Timing split (owner saw the legacy styles pop before glass on draft
+    // previews): MutationObserver callbacks are microtasks that fire BEFORE
+    // the browser paints, so any batch that ADDS nodes (skeleton → loaded
+    // estimate, new sections) is classified synchronously — new DOM never
+    // paints untagged. Style-only batches recolor elements that are already
+    // tagged (slider/slot selection flips), so they keep the trailing 150ms
+    // coalesce that stops classify()'s full getComputedStyle walk from
+    // running per-frame during drags.
     let retagTimer = 0;
-    const mo = new MutationObserver(() => {
+    const mo = new MutationObserver((records) => {
+      const addedNodes = records.some((r) => r.type === 'childList' && r.addedNodes.length);
+      if (addedNodes) {
+        if (retagTimer) {
+          clearTimeout(retagTimer);
+          retagTimer = 0;
+        }
+        run();
+        mo.takeRecords();
+        return;
+      }
       if (retagTimer) return;
       retagTimer = window.setTimeout(() => {
         retagTimer = 0;
