@@ -1200,6 +1200,17 @@ function SharePostButton({ url, title }) {
   );
 }
 
+// Feed dates arrive in mixed shapes (ISO from Facebook, RFC-822 from the
+// RSS/newsletter feeds) — parseDate/fmtDate only handle YYYY-MM-DD, so this
+// mirrors the Learn tab's ContentCard: plain Date parse, month + day, no
+// year, and nothing rendered when the feed omits or mangles the date.
+function formatPostDate(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  if (isNaN(dt)) return null;
+  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 // Home-page content row (owner 2026-07-09): one glass section per source —
 // Facebook, the Waves blog, and the newsletter — each a swipeable card rail
 // mirroring the wavespestcontrol.com Social Hub cards (View Post + Share,
@@ -1268,6 +1279,11 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
               )}
             </a>
             <div style={{ padding: compact ? '8px 10px 10px' : '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6, flex: 1 }}>
+              {formatPostDate(post.date) && (
+                <div style={{ fontSize: 12, color: PORTAL_SHELL.muted }}>
+                  {formatPostDate(post.date)}
+                </div>
+              )}
               {post.title && (
                 <div style={{
                   fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
@@ -1921,7 +1937,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           </span>
         )}
         posts={facebookPosts.map((p) => ({
-          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', external: true,
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', date: p.postedAt, external: true,
         }))}
       />
       <HomeContentRow
@@ -1932,7 +1948,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         ctaLabel="Read Post"
         iconTile={<ShellIconTile icon="bulb" size={compact ? 30 : 38} />}
         posts={blogPosts.map((p) => ({
-          url: p.link, image: p.image, title: p.title, text: p.description, external: true,
+          url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate, external: true,
         }))}
       />
       <HomeContentRow
@@ -1943,7 +1959,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         ctaLabel="Read Issue"
         iconTile={<ShellIconTile icon="newspaper" size={compact ? 30 : 38} />}
         posts={newsletterPosts.map((p) => ({
-          url: p.link, image: p.image, title: p.title, text: p.description,
+          url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate,
           external: !String(p.link || '').startsWith('/'),
         }))}
       />
