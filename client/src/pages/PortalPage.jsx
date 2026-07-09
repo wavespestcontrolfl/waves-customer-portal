@@ -3345,7 +3345,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // removed from this customer-facing list. The underlying
                 // notification_prefs columns stay honored server-side —
                 // existing opt-outs keep working, and the irrigation weekly
-                // email still has its own email unsubscribe.
+                // email footer offers the reply-to opt-out (migration
+                // 20260709000030).
               ];
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
