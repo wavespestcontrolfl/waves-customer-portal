@@ -110,7 +110,13 @@ async function gatherEmailDomainEvidence(candidates, deps = {}) {
       } catch (err) {
         mxError = err.code || err.message;
       }
-      if (!mxRecords && !nullMx) {
+      // Implicit-MX fallback applies only when the MX answer was
+      // AUTHORITATIVE no-records. After a transient MX failure the domain's
+      // mail setup is simply unknown — an A/AAAA hit must not upgrade it to
+      // deliverable:true, or an adopt could bypass the unknown cap on the
+      // strength of a web server record.
+      const mxTransient = !!mxError && !AUTHORITATIVE_NEGATIVE_CODES.has(mxError);
+      if (!mxRecords && !nullMx && !mxTransient) {
         // Mail can still deliver to an apex address record (implicit MX) —
         // A or AAAA (an IPv6-only apex is still deliverable). Only a domain
         // with none of them is deliverability-dead, and only when BOTH
@@ -179,7 +185,7 @@ ${transcripts.contactPass}
 ` : ''}
 HOW TO DECIDE — evidence hierarchy, strongest first:
 1. HARD EXTERNAL FACTS beat everything. A candidate email domain with no DNS records (deliverable: false) cannot receive mail — eliminate it. deliverable: null means DNS could not be checked (transient resolver error) — treat it as UNKNOWN, never as a negative.
-2. COHERENCE with the call. If the caller said they run "Gulf Coast Shutter Co", then gulfcoastshutterco.com is corroborated. A one-letter variant that also resolves is NOT automatically right — note when it plausibly belongs to an unrelated entity.
+2. COHERENCE with the call. If the caller names their business or organization and a candidate's domain plainly matches that name, the candidate is corroborated. A near-miss variant that also resolves is NOT automatically right — note when it plausibly belongs to an unrelated entity.
 3. THE CALLER'S OWN SPELLING beats agent read-backs and call summaries. A read-back is one more chance to mishear; trust it only when the caller explicitly confirmed it.
 4. PHONETIC PLAUSIBILITY last. Use "which mishear is more likely" only when facts and coherence do not separate the candidates.
 

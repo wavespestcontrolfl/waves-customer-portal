@@ -240,6 +240,17 @@ describe('gatherEmailDomainEvidence', () => {
     expect(out[0].deliverable).toBeNull();
   });
 
+  test('transient MX failure stays unknown even when A/AAAA resolve (implicit MX needs authoritative no-MX)', async () => {
+    const servfail = () => { const e = new Error('queryMx ESERVFAIL'); e.code = 'ESERVFAIL'; return Promise.reject(e); };
+    const out = await gatherEmailDomainEvidence(['a@mx-flaky.example'], {
+      resolveMx: servfail,
+      resolve4: () => Promise.resolve(['1.2.3.4']),
+      resolve6: nxdomain,
+    });
+    expect(out[0].deliverable).toBeNull();
+    expect(out[0].dns_error).toBe('ESERVFAIL');
+  });
+
   test('transient IPv6 failure alone keeps the domain unknown', async () => {
     const timeout = () => Promise.reject(new Error('timeout'));
     const out = await gatherEmailDomainEvidence(['a@v6-flaky.example'], { resolveMx: nxdomain, resolve4: nxdomain, resolve6: timeout });
