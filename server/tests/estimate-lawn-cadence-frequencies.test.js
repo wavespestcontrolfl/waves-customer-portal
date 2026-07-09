@@ -211,6 +211,33 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequencyKey: 'quarterly' },
     ))).toBe(true);
+    // Every alias the CONVERTER's explicitServiceCadence reads must flag —
+    // the backstop mirrors the exact reader scheduling uses.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, appsPerYear: 4 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, apps: 4 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, recurringPattern: 'quarterly' },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency_key: 'quarterly' },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, treatmentsPerYear: 6 },
+    ))).toBe(false);
+    // Converter precedence: a cadence FIELD beats a visit count (that is the
+    // order explicitServiceCadence resolves — and therefore how the program
+    // would actually schedule), unlike quarterly LABEL text which visits win.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: 'quarterly', visitsPerYear: 6 },
+    ))).toBe(true);
+    // Bare `v` tier-row shorthand still flags (converter-skipped alias).
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, v: 4 },
+    ))).toBe(true);
   });
 
   test('quote gate: an explicitly-quarterly lawn row with NO lawn tier rows is quote-required UP FRONT', () => {
@@ -232,15 +259,52 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     const quoteState = resolveEstimateQuoteRequirement(null, quarterlyRowNoLadder);
     expect(quoteState.quoteRequired).toBe(true);
     expect(quoteState.reason).toBe('retired_lawn_cadence_requote');
-    // A lawn row with NO cadence data and no ladder stays self-serve here —
-    // never inferred as quarterly by default.
+    // A lawn row with NO provable cadence and no ladder is UNINSPECTABLE —
+    // the v1/no-engine bundle paths fall back to a generic quarterly-keyed
+    // frequency, so it must requote too (accept could otherwise schedule
+    // the retired 4-visit program with only its price clamped).
     expect(resolveEstimateQuoteRequirement(null, {
       result: {
         recurring: {
           services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55 }],
         },
       },
+    }).quoteRequired).toBe(true);
+    // A row with an explicit SOLD cadence keeps self-serve — the converter
+    // schedules lawn from the row itself, never the accepted selection.
+    expect(resolveEstimateQuoteRequirement(null, {
+      result: {
+        recurring: {
+          services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55, visitsPerYear: 6 }],
+        },
+      },
     }).quoteRequired).toBe(false);
+    // Engine-invocation estimates rebuild the live 6/9/12 ladder, so a sold
+    // restamp is available — no requote even for a sparse row.
+    expect(resolveEstimateQuoteRequirement(null, {
+      engineInputs: { services: { lawn: { grassType: 'A' } } },
+      result: {
+        recurring: {
+          services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55 }],
+        },
+      },
+    }).quoteRequired).toBe(false);
+  });
+
+  test('annual-only lawn tier rows clamped by the floor derive a monthly too', () => {
+    // Accept reads selectedFrequency.monthly first and falls back to the
+    // stored (pre-floor) monthly_total — a clamped annual-only row must not
+    // leave monthly null and lock the old monthly charge.
+    const freqs = lawnFrequenciesFromResultStats({
+      results: {
+        lawn: [
+          { name: 'Standard', v: 6, ann: 408, recommended: true },
+        ],
+      },
+    });
+    const std = freqs.find((f) => f.key === 'standard');
+    expect(std.annual).toBe(600);
+    expect(std.monthly).toBe(50);
   });
 
   test('a manual discount fully blocked by the floor is SUPPRESSED, not just dropped', () => {

@@ -9434,14 +9434,28 @@ function retiredLawnRequoteNeeded(estData = null) {
   const tierKeys = rows
     .map((row) => lawnTierKey(row))
     .filter((key) => ['basic', 'standard', 'enhanced', 'premium'].includes(key));
-  // No lawn tier rows to inspect (legacy/mixed shape): if the stored
-  // recurring lawn row is EXPLICITLY at a retired cadence, the accept-time
-  // backstop would 409 it — but only AFTER /data and /deposit-intent had
-  // already let the customer pay the deposit. Surface quote-required up
-  // front so those stale links never collect money for an acceptance that
-  // must fail. Rows with no explicit cadence stay self-serve (the check
-  // never infers quarterly by default).
-  if (!tierKeys.length) return recurringLawnRowAtRetiredCadence(estData);
+  // No lawn tier rows to inspect (legacy/mixed shape):
+  //  1. A stored lawn row EXPLICITLY at a retired cadence requotes up front
+  //     — the accept-time backstop alone would 409 only AFTER /data and
+  //     /deposit-intent had let the customer pay the deposit.
+  //  2. Engine-invocation estimates rebuild the live 6/9/12 ladder
+  //     (lawnFrequenciesFromEngineResult), so a sold restamp is available —
+  //     keep self-serve.
+  //  3. Otherwise the v1/no-engine bundle paths fall back to a generic
+  //     'quarterly'-keyed frequency, and a lawn row with NO provable cadence
+  //     (converter reads the ROW, never the accepted selection, for lawn)
+  //     could schedule the retired 4-visit program with only its price
+  //     clamped — uninspectable, so requote. Rows with an explicit SOLD
+  //     cadence keep self-serve: the converter schedules them correctly.
+  if (!tierKeys.length) {
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    const lawnRows = (recurringSvcList || []).filter((svc) => recurringServiceKey(svc) === 'lawn_care');
+    if (!lawnRows.length) return false;
+    if (recurringLawnRowAtRetiredCadence(estData)) return true;
+    if (extractEngineInputs(estData)) return false;
+    const converter = require('../services/estimate-converter');
+    return lawnRows.some((svc) => !converter.explicitServiceCadence(svc));
+  }
   if (!tierKeys.every((key) => isRetiredLawnTierKey(key))) return false;
   const { recurringSvcList } = acceptanceServiceLists(estData);
   const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
@@ -9464,28 +9478,28 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
     .filter((n) => Number.isFinite(n) && n > 0));
   if (!retiredFreqs.size) return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
+  const converter = require('../services/estimate-converter');
   return (recurringSvcList || []).some((svc) => {
     if (recurringServiceKey(svc) !== 'lawn_care') return false;
-    const explicitVisits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.v);
-    if (Number.isFinite(explicitVisits) && explicitVisits > 0) return retiredFreqs.has(explicitVisits);
-    // Legacy quote-wizard rows store the cadence as a NUMBER (frequency: 4,
-    // sometimes as the string '4'). The seeder parses numeric cadence values
-    // as visits/yr (normalizeRecurringPattern → patternFromVisitsPerYear), so
-    // treat them exactly like an explicit visit count.
-    const cadenceCandidates = [svc?.frequency, svc?.frequencyKey, svc?.cadence]
-      .filter((value) => value !== undefined && value !== null && String(value).trim() !== '');
-    const numericCadence = cadenceCandidates.map(Number).find((n) => Number.isFinite(n) && n > 0);
-    if (numericCadence) return retiredFreqs.has(Math.round(numericCadence));
-    const cadence = String(cadenceCandidates[0] || '').toLowerCase().replace(/[-_\s]/g, '');
-    if (cadence) return cadence === 'quarterly' && retiredFreqs.has(4);
-    // No cadence field at all: the recurring appointment seeder infers the
-    // cadence from the row's label/service key, so an explicit quarterly
-    // LABEL ('Quarterly Lawn Care Service' / 'lawn_care_quarterly') is just
-    // as schedulable as a cadence field — flag it too. Unlabeled rows stay
-    // unflagged (never inferred as quarterly by default).
-    const labelText = [svc?.service, svc?.serviceKey, svc?.service_key, svc?.name, svc?.label, svc?.displayName]
+    // Resolve the cadence with the CONVERTER'S OWN reader
+    // (explicitServiceCadence: frequency/frequencyKey/frequency_key/
+    // recurringPattern/recurring_pattern → visit-count aliases
+    // visitsPerYear/appsPerYear/visits/apps/treatmentsPerYear → label/name
+    // text, all via the seeder's normalizeRecurringPattern) so this backstop
+    // can never drift from what scheduling actually does — including the
+    // same precedence (an explicit sold cadence field beats stale quarterly
+    // text, exactly as the converter would schedule it).
+    const pattern = converter.explicitServiceCadence(svc);
+    if (pattern) return pattern === 'quarterly' && retiredFreqs.has(4);
+    // Aliases the converter's reader skips but older rows still carry: bare
+    // `v` visit counts (tier-row shorthand) and cadence tokens inside
+    // service keys ('lawn_care_quarterly'). Rows with none of it stay
+    // unflagged — never inferred as quarterly by default.
+    const vAlias = Number(svc?.v);
+    if (Number.isFinite(vAlias) && vAlias > 0) return retiredFreqs.has(vAlias);
+    const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
       .filter(Boolean).join(' ').toLowerCase();
-    return /\bquarterly\b|_quarterly\b/.test(labelText) && retiredFreqs.has(4);
+    return /\bquarterly\b|_quarterly\b/.test(keyText) && retiredFreqs.has(4);
   });
 }
 
@@ -9565,18 +9579,30 @@ function annualPrepayEligibleForEstimateData(estData) {
 // don't offer it in EITHER flow. With no stored annual to price against,
 // eligibility stays with the service-mix rule (fail open — the shared
 // converter calc still bills the correct floor-clamped total either way).
-function annualPrepayHasSellableIncentive(estimate = {}, estData = null) {
+function annualPrepayHasSellableIncentive(estimate = {}, estData = null, payload = {}) {
   const converter = require('../services/estimate-converter');
   const { recurringSvcList } = acceptanceServiceLists(estData || {});
   if (converter.hasWaveGuardSetupService(recurringSvcList || [])) return true;
-  const baseAnnual = Number(estimate.annual_total ?? estimate.annualTotal) || 0;
-  if (!(baseAnnual > 0)) return true;
-  const resolved = converter.resolveAnnualPrepayInvoiceTotal({
-    baseAnnual,
-    recurringServices: recurringSvcList || [],
-    estimateData: estData || {},
+  // Accept invoices from the SELECTED frequency's annual, so the incentive
+  // exists if ANY offered cadence clears it — a lawn-only quote whose
+  // default sits at the floor still earns a real discount on the
+  // Premium/monthly cadence, and hiding prepay for the whole payload would
+  // deny it. (The stored annual_total is the default-cadence candidate.)
+  const candidateAnnuals = [
+    Number(estimate.annual_total ?? estimate.annualTotal) || 0,
+    ...(Array.isArray(payload.frequencies)
+      ? payload.frequencies.map((f) => Number(f?.annual) || 0)
+      : []),
+  ].filter((n) => n > 0);
+  if (!candidateAnnuals.length) return true;
+  return candidateAnnuals.some((baseAnnual) => {
+    const resolved = converter.resolveAnnualPrepayInvoiceTotal({
+      baseAnnual,
+      recurringServices: recurringSvcList || [],
+      estimateData: estData || {},
+    });
+    return resolved.discount > 0 && resolved.rate >= 0.001;
   });
-  return resolved.discount > 0 && resolved.rate >= 0.001;
 }
 
 function attachQuoteRequirement(payload, estData = null) {
@@ -10878,7 +10904,7 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   const minMonthly = lawnProgramMinimumMonthly();
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
   const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
-  const clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
+  let clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
   const monthlyWasClamped = monthly != null && clampedMonthly !== monthly;
   // Only re-derive annual/per-app when the floor actually moved a number —
   // untouched rows keep their stored annual (it is the billing source of
@@ -10887,6 +10913,13 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
     ? roundMonthly(clampedMonthly * 12)
     : (annual != null && monthly == null ? Math.max(annual, roundMonthly(minMonthly * 12)) : annual);
   const annualWasClamped = clampedAnnual != null && annual != null && clampedAnnual !== annual;
+  // An annual-only row the floor moved must ALSO carry a derived monthly:
+  // accept reads selectedFrequency.monthly first and otherwise falls back to
+  // the estimate's stored (pre-floor) monthly_total — without this, the row
+  // could show a floored annual while still locking the old monthly charge.
+  if (monthly == null && annualWasClamped) {
+    clampedMonthly = roundMonthly(clampedAnnual / 12);
+  }
   const clampedPerTreatment = (monthlyWasClamped || annualWasClamped) && clampedAnnual != null && visits
     ? roundMonthly(clampedAnnual / visits)
     : perTreatment;
@@ -12581,7 +12614,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   // showAnnualPrepayOption gate here so the React /data flow hides the
   // annual-prepay option too (it renders off annualPrepayEligible alone).
   if (withQuoteState.annualPrepayEligible === true
-    && !annualPrepayHasSellableIncentive(estimate, estData)) {
+    && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
   }
   const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);

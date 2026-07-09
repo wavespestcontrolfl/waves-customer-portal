@@ -630,7 +630,10 @@ describe('public estimate one-time breakdown', () => {
             annualAfterDiscount: 1200,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 50 },
+              // The stored lawn row carries its SOLD cadence (matching the
+              // snapshot's 6-visit treatment row) — a cadence-less lawn row
+              // with no tier ladder would be uninspectable and requote.
+              { name: 'Lawn Care', mo: 50, visitsPerYear: 6 },
             ],
           },
           oneTime: {
@@ -1207,6 +1210,45 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(payload.annualPrepayEligible).toBe(false);
+  });
+
+  test('annual prepay stays offered when a selectable higher cadence clears the floor', async () => {
+    // Default (recommended Standard) sits AT the floor, but the Premium
+    // cadence has real headroom — accept invoices from the SELECTED
+    // frequency, so the payload-level flag must not hide prepay for the
+    // whole estimate.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-selectable-prepay-gate-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true },
+              { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89 },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [{
+              service: 'lawn_care',
+              name: 'Lawn Care',
+              mo: 50,
+              ann: 600,
+              perTreatment: 100,
+              visitsPerYear: 6,
+            }],
+          },
+          oneTime: { total: 0, items: [] },
+        },
+      },
+    });
+
+    expect(payload.annualPrepayEligible).toBe(true);
   });
 
   test('no-engine fallback: a below-floor recurring-lawn estimate is quote-required, not rendered verbatim', async () => {
