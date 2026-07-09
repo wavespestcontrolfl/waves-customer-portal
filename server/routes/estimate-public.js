@@ -12504,6 +12504,17 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const pestOnly = options.pestOnly === true && !!pestTier;
   const pestMoBefore = pestTier ? Number(pestTier.mo || 0) : 0;
   const pestAnnBefore = pestTier ? Number(pestTier.ann || 0) : 0;
+  // Pest post-discount program floor: tier rows generated with enforcement on
+  // carry floorMo/floorPa (v1-legacy-mapper). The WaveGuard tier percent may
+  // not take pest's collected price below the floor for its cadence, so the
+  // discounted figures clamp back up — never above the pre-discount price,
+  // mirroring discount-engine.applyMarginGuard. Older stored estimates have
+  // no floor metadata and reprice exactly as before.
+  const pestFloorMoRaw = pestTier ? Number(pestTier.floorMo) : NaN;
+  const pestFloorMo = Number.isFinite(pestFloorMoRaw) && pestFloorMoRaw > 0
+    ? Math.min(pestFloorMoRaw, pestMoBefore)
+    : null;
+  const pestFloorPaRaw = pestTier ? Number(pestTier.floorPa) : NaN;
   const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
   const pestRecurring = pestTier
     ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
@@ -12514,7 +12525,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     const discount = recurringServiceReceivesTierDiscount(svc) ? v1.discount : 0;
     return n * (1 - discount);
   };
-  const pestMoAfter = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
+  const pestMoDiscounted = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
+  const pestMoAfter = pestFloorMo !== null ? Math.max(pestMoDiscounted, pestFloorMo) : pestMoDiscounted;
   const nonPestMoAfter = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
     return sum + discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
   }, 0);
@@ -12562,11 +12574,19 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const perServiceTreatments = [];
   if (pestTier) {
     const pestPa = Number(pestTier.pa);
+    // Same program-floor clamp as the monthly figure, on the per-visit basis:
+    // the displayed discounted per-treatment price never dips below floorPa.
+    const pestDisplayRaw = treatmentDisplayPrice(pestPa, { service: 'pest_control' });
+    const pestFloorPa = Number.isFinite(pestFloorPaRaw) && pestFloorPaRaw > 0 && Number.isFinite(pestPa)
+      ? Math.min(pestFloorPaRaw, pestPa)
+      : null;
     perServiceTreatments.push({
       service: 'pest_control',
       label: `Pest Control (${pestTier.label || 'Quarterly'})`,
       perTreatment: Number.isFinite(pestPa) && pestPa > 0 ? pestPa : null,
-      displayPrice: treatmentDisplayPrice(pestPa, { service: 'pest_control' }),
+      displayPrice: pestDisplayRaw !== null && pestFloorPa !== null
+        ? Math.max(pestDisplayRaw, pestFloorPa)
+        : pestDisplayRaw,
       visitsPerYear: Number(pestTier.apps || pestTier.v) || null,
       waveGuardDiscountEligible: true,
     });

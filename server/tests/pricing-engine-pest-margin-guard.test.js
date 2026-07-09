@@ -9,9 +9,11 @@ const {
 // knobs to force below-floor scenarios, so we snapshot and restore them
 // around every test.
 const ORIGINAL_PEST_BASE = constants.PEST.base;
+const ORIGINAL_PEST_FLOOR = constants.PEST.floor;
 const ORIGINAL_ENFORCE_FLOOR = constants.PEST.enforceFloorPostDiscount;
 afterEach(() => {
   constants.PEST.base = ORIGINAL_PEST_BASE;
+  constants.PEST.floor = ORIGINAL_PEST_FLOOR;
   constants.PEST.enforceFloorPostDiscount = ORIGINAL_ENFORCE_FLOOR;
 });
 
@@ -105,6 +107,23 @@ describe('pest post-discount program floor (owner decision 2026-07-09)', () => {
     expect(pest.annualBeforeDiscount).toBeCloseTo(453.90, 2);
     expect(pest.programFloorApplied).toBe(true);
     expect(pest.annualAfterDiscount).toBeCloseTo(453.90, 2);
+  });
+
+  test('cents-tuned DB floor: floor annual uses the rounded per-visit basis', () => {
+    // pricePestControl rounds the per-app amount BEFORE annualizing, so the
+    // floor must too: round(89.99 × 0.85) = 76.49 → $458.94/yr, exactly the
+    // list annual. A single end-rounding (89.99 × 0.85 × 6 → $458.95) would
+    // sit a cent ABOVE list, defeat the never-above-list cap, and mark the
+    // floor applied at a collected price below it (codex P3).
+    constants.PEST.base = 89.99;
+    constants.PEST.floor = 89.99;
+    const est = generateEstimate(bundleWithPestFrequency('bimonthly'));
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    expect(pest.annualBeforeDiscount).toBeCloseTo(458.94, 2);
+    expect(pest.programFloorAnnual).toBeCloseTo(458.94, 2);
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBeCloseTo(458.94, 2);
+    expect(pest.annualAfterDiscount).toBeGreaterThanOrEqual(pest.programFloorAnnual);
   });
 
   test('discounts above the floor are untouched — modal-priced quarterly keeps full Platinum 20%', () => {

@@ -399,10 +399,21 @@ function mapV1ToLegacyShape(v1Result) {
 
   // Pest → R.pest, R.pestTiers
   if (pestLI) {
+    // floorPa/floorAnn/floorMo: post-discount program floor for the row's
+    // cadence (present only on estimates generated with enforcement on).
+    // estimate-public shapeFromV1 reads these to hold the WaveGuard-discounted
+    // pest price at the floor when it reprices the stored payload — without
+    // them the public link re-applies the full tier percent below the floor.
+    const floorFields = (t) => (Number.isFinite(Number(t?.programFloorAnnual)) ? {
+      floorPa: t.programFloorPerVisit,
+      floorAnn: t.programFloorAnnual,
+      floorMo: t.programFloorMonthly,
+    } : {});
     R.pestTiers = (pestLI.tiers || []).map(t => ({
       pa: t.perApp, apps: t.freq, ann: t.annual, mo: t.monthly,
       init: pestLI.initialFee || 0, rOG: pestLI.roachAddOn || 0,
       label: t.label, recommended: !!t.recommended, dimmed: !t.recommended,
+      ...floorFields(t),
     }));
     const sel = (pestLI.tiers || []).find(t => t.recommended) || (pestLI.tiers || [])[0] || {};
     R.pest = {
@@ -413,6 +424,7 @@ function mapV1ToLegacyShape(v1Result) {
       init: pestLI.initialFee || 0,
       rOG: pestLI.roachAddOn || 0,
       label: sel.label || 'Quarterly',
+      ...floorFields(sel),
     };
     // Session 11a Step 2b-3: uppercase to match v2-legacy-mapper output.
     // pestLI.roachType is lowercase (german/regular/none) per service-pricing.

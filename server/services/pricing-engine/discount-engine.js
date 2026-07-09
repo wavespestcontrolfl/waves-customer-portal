@@ -193,6 +193,26 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
 // cell (owner decision 2026-07-09). Kill switch: pest_base row
 // enforce_floor_post_discount=false (DB, no deploy).
 // Manual owner discounts are NOT capped here — they warn-only (see estimate-engine).
+
+// Program-floor amounts for a pest cadence. The per-visit basis is rounded
+// FIRST — matching pricePestControl's perApp = round(basePrice × freqMult)
+// before annualizing — so a cents-tuned DB floor can never produce a floor
+// annual a cent above the actual list price for a quote sitting exactly at
+// the floor (which would silently defeat the Math.min(lifted, originalAnnual)
+// cap and report the floor as applied at a price below it).
+function pestProgramFloorPerVisit(freqMult) {
+  const fm = Number(freqMult);
+  if (!Number.isFinite(fm) || fm <= 0) return null;
+  return roundMoney(Number(PEST.floor) * fm);
+}
+
+function pestProgramFloorAnnual(freqMult, visitsPerYear) {
+  const perVisit = pestProgramFloorPerVisit(freqMult);
+  const visits = Number(visitsPerYear);
+  if (perVisit === null || !Number.isFinite(visits) || visits <= 0) return null;
+  return roundMoney(perVisit * visits);
+}
+
 function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   const service = serviceQuote?.service;
   let annualCostAllIn = null;
@@ -212,11 +232,7 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
     // floor value and the kill switch (enforce_floor_post_discount: false)
     // are DB-tunable on the pricing_config pest_base row.
     if (PEST.enforceFloorPostDiscount) {
-      const freqMult = Number(serviceQuote.freqMult);
-      const visits = Number(serviceQuote.visitsPerYear);
-      if (Number.isFinite(freqMult) && freqMult > 0 && Number.isFinite(visits) && visits > 0) {
-        programFloorAnnual = roundMoney(Number(PEST.floor) * freqMult * visits);
-      }
+      programFloorAnnual = pestProgramFloorAnnual(serviceQuote.freqMult, serviceQuote.visitsPerYear);
     }
   } else {
     return {
@@ -300,5 +316,7 @@ module.exports = {
   getEffectiveDiscount,
   applyDiscount,
   applyMarginGuard,
+  pestProgramFloorPerVisit,
+  pestProgramFloorAnnual,
   validateEstimateDiscounts,
 };

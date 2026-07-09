@@ -43,7 +43,8 @@ const {
   normalizeRoachType,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard,
+  pestProgramFloorAnnual, validateEstimateDiscounts,
 } = require('./discount-engine');
 const {
   isCommercialProperty,
@@ -1634,21 +1635,17 @@ function generateEstimate(input) {
       // warning when the pest share of the pool cuts below the post-discount
       // program floor that caps automatic WaveGuard discounts.
       if (item.service === 'pest_control' && PEST.enforceFloorPostDiscount) {
-        const freqMult = Number(item.freqMult);
-        const visits = Number(item.visitsPerYear);
-        if (Number.isFinite(freqMult) && freqMult > 0 && Number.isFinite(visits) && visits > 0) {
-          const floorAnnual = Math.round(Number(PEST.floor) * freqMult * visits * 100) / 100;
-          if (lineFinalAnnual < floorAnnual) {
-            item.manualPestFloorWarning = true;
-            manualMarginWarnings.push({
-              service: item.service,
-              type: 'manual_discount_below_pest_program_floor',
-              programFloorAnnual: floorAnnual,
-              finalAnnual: lineFinalAnnual,
-              manualDiscountShare: Math.round(lineManualCut * 100) / 100,
-              message: `pest_control manual discount drops annual to $${lineFinalAnnual.toFixed(2)} (below the $${floorAnnual.toFixed(2)} program floor)`,
-            });
-          }
+        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear);
+        if (floorAnnual !== null && lineFinalAnnual < floorAnnual) {
+          item.manualPestFloorWarning = true;
+          manualMarginWarnings.push({
+            service: item.service,
+            type: 'manual_discount_below_pest_program_floor',
+            programFloorAnnual: floorAnnual,
+            finalAnnual: lineFinalAnnual,
+            manualDiscountShare: Math.round(lineManualCut * 100) / 100,
+            message: `pest_control manual discount drops annual to $${lineFinalAnnual.toFixed(2)} (below the $${floorAnnual.toFixed(2)} program floor)`,
+          });
         }
       }
     }
