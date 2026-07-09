@@ -1511,36 +1511,12 @@ function DashboardTab({ customer, onSwitchTab }) {
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
   const referralReward = Number(referralStats?.rewardPerReferral) || 25;
-  // Server-authoritative earned dollars — not an estimate off referrals *sent*.
-  const referralCredits = Math.round(Number(referralStats?.totalEarned || 0));
-  const referralTotal = referralCredits;
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: `$${referralReward} credit`, action: () => onSwitchTab?.('refer') },
   ];
-  const rewardCards = [
-    {
-      icon: 'coins',
-      label: 'WaveGuard Rewards',
-      // Server-backed dollars only — the old card summed in a client-invented,
-      // tenure-prorated "renewal credit" no system ever grants.
-      value: `$${referralCredits}`,
-      sub: `$${referralCredits} referral credits earned`,
-      actionLabel: null,
-    },
-    {
-      icon: 'gift',
-      label: referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : `Give $${referralReward}, get $${referralReward}`,
-      value: referralStats?.totalReferrals ? `$${referralTotal}` : `$${referralReward}`,
-      sub: referralStats?.totalReferrals
-        ? 'earned so far'
-        : 'Share Waves with a neighbor and you both get credit.',
-      actionLabel: 'Open referrals',
-    },
-  ];
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
@@ -1904,7 +1880,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog, and
           the newsletter — Social Hub-style cards in glass, each with View
-          Post + Share (no quote CTA), above the rewards cards. */}
+          Post + Share (no quote CTA). */}
       <HomeContentRow
         compact={compact}
         title="Latest from Facebook"
@@ -1947,26 +1923,6 @@ function DashboardTab({ customer, onSwitchTab }) {
           external: !String(p.link || '').startsWith('/'),
         }))}
       />
-
-      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
-        {rewardCards.map(item => (
-          <section key={item.label} data-glass="card" style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-              <ShellIconTile icon={item.icon} size={38} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{item.label}</div>
-                <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>{item.sub}</div>
-              </div>
-              <div style={{ fontSize: 22, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap' }}>{item.value}</div>
-            </div>
-            {item.actionLabel && (
-              <button type="button" onClick={() => onSwitchTab?.('refer')} data-glass-accent="" style={{ ...dashboardSecondaryButton, position: 'relative' }}>
-                {item.actionLabel}
-              </button>
-            )}
-          </section>
-        ))}
-      </div>
 
       {/* Store badges for web-portal regulars — hidden inside the native
           apps (isNativeApp), where advertising an install is noise. */}
