@@ -168,13 +168,15 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
 
-  test('a row that flipped terminal mid-flight survives intact (conditional update misses)', async () => {
+  test('a row that flipped terminal mid-flight aborts the settle (transaction rolls back)', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'refunded', refund_amount: '110.11' };
     paymentsUpdateResult = []; // whereNotIn filtered the terminal row out
     const StripeService = require('../services/stripe');
-    const record = await StripeService.confirmInvoicePayment('inv_123', PI_ID);
 
-    expect(record).toEqual(existingPaymentRow);
+    // The throw rolls back the trx — the invoice update above it never
+    // commits, so /confirm cannot settle the invoice beside a terminal row.
+    await expect(StripeService.confirmInvoicePayment('inv_123', PI_ID))
+      .rejects.toThrow(/could not process your payment/i);
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
 });

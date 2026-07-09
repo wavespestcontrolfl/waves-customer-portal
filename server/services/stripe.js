@@ -3331,16 +3331,21 @@ const StripeService = {
           .first();
         if (existingPayment) {
           // Never clobber a terminal money row (webhook parity): paid/refunded/
-          // disputed rows are settled history — a conditional update means a row
-          // that flipped terminal between the read above and this write survives
-          // intact, and the pre-write dispute guard keeps this path from ever
-          // reaching a disputed row in the first place.
+          // disputed rows are settled history. A miss here means the row flipped
+          // terminal between the dispute pre-check above and this write (a
+          // dispute/refund webhook landing mid-flight) — THROW so the whole
+          // transaction rolls back, including the invoice update above;
+          // returning would let /confirm settle the invoice as paid beside a
+          // row recording that the money just left.
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['paid', 'refunded', 'disputed'])
             .update(paymentPayload)
             .returning('*');
-          return record || existingPayment;
+          if (!record) {
+            throw new Error('Payment record changed while confirming — refresh the invoice and try again');
+          }
+          return record;
         }
 
         const [record] = await trx('payments').insert(paymentPayload).returning('*');
