@@ -255,4 +255,16 @@ describe('estimate_followup_cadence_templates migration', () => {
       expect([...new Set(placeholders)].sort()).toEqual([...t.variables].sort());
     }
   });
+
+  test('every body is a fixed point of the 20260706000010 copy normalization', () => {
+    // That cleanup already ran on prod, so rows seeded here are never
+    // normalized there — the invariants (trailing opt-out notice, "Hello"
+    // greeting, no phone numbers) must hold in the source or prod and fresh
+    // DBs drift apart.
+    for (const t of templateMigration.NEW_TEMPLATES) {
+      expect(t.body).toMatch(/\n\nReply STOP to opt out\.$/);
+      expect(t.body).not.toMatch(/^Hi \{first_name\}/);
+      expect(t.body).not.toMatch(/941\) 297-5749|\{call_number\}/);
+    }
+  });
 });
