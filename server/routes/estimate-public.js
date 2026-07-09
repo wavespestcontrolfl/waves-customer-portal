@@ -546,13 +546,11 @@ const BRAND = {
 
 const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
 
-// App-store links — the iOS app is live, so the Apple badge links to the
-// listing by default (env var still overrides). Android isn't published yet,
-// so the Google Play badge is hidden entirely until WAVES_ANDROID_APP_URL is
-// set (no dead/non-clickable badge once one store is live). Only when BOTH are
-// empty does the card fall back to the "coming soon" preview with both badges.
+// App-store links — both stores are live (Play went live 2026-07-09, owner
+// confirmed), so both badges link to their listings by default; the env vars
+// still override.
 const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
-const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || '';
+const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
 // Self-contained inline-SVG store badges (no hosted assets / no broken images).
 function appStoreBadgeSvg() {
