@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import api from '../utils/api';
@@ -1167,36 +1168,144 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   );
 }
 
-// Share action on the home-page content cards (owner 2026-07-09): native
-// share sheet where available, clipboard fallback with a "Copied!" flash.
-// A canceled share sheet is not an error and does nothing.
+// Share action on the home-page content cards (owner 2026-07-09): explicit
+// channel menu — Facebook, Twitter, Instagram, email, text message.
+// Instagram has no web share intent, so that option copies the link and
+// opens Instagram with a "Link copied!" flash on the button. The menu is
+// position:fixed because the cards clip overflow and live inside a
+// horizontal scroll rail; any scroll closes it so it can't drift.
+const SHARE_BRAND_ICONS = {
+  facebook: (
+    <svg viewBox="0 0 24 24" width={15} height={15} fill="#1877F2" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+  ),
+  twitter: (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.451-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z" /></svg>
+  ),
+  instagram: (
+    <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="#E1306C" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="5" /><circle cx="12" cy="12" r="4.2" /><circle cx="17.4" cy="6.6" r="0.6" fill="#E1306C" stroke="none" /></svg>
+  ),
+};
+
 function SharePostButton({ url, title }) {
-  const [copied, setCopied] = useState(false);
-  const share = async (e) => {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState(null);
+  const [flash, setFlash] = useState('');
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    // Capture-phase so the card rail's own horizontal scroll closes it too.
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open]);
+
+  const toggle = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const absolute = new URL(url, window.location.origin).toString();
-    if (navigator.share) {
-      try { await navigator.share({ title: title || 'Waves Pest Control', url: absolute }); } catch { /* canceled */ }
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(absolute);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch { /* clipboard unavailable */ }
+    if (open) { setOpen(false); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    // Anchor above the button, right-aligned to it — the footer sits at the
+    // card bottom, so upward never collides with the viewport edge.
+    setMenuPos({
+      right: Math.max(8, window.innerWidth - rect.right),
+      bottom: window.innerHeight - rect.top + 8,
+    });
+    setOpen(true);
   };
+
+  const shareTo = (channel) => {
+    const absolute = new URL(url, window.location.origin).toString();
+    const text = title || 'Waves Pest Control';
+    setOpen(false);
+    if (channel === 'facebook') {
+      window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(absolute)}`, '_blank', 'noopener,noreferrer');
+    } else if (channel === 'twitter') {
+      window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(absolute)}&text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+    } else if (channel === 'instagram') {
+      // No web share intent exists for Instagram: copy the link, open the
+      // app/site, and tell the customer the link is ready to paste.
+      navigator.clipboard?.writeText(absolute).catch(() => {});
+      window.open('https://www.instagram.com/', '_blank', 'noopener,noreferrer');
+      setFlash('Link copied!');
+      setTimeout(() => setFlash(''), 2000);
+    } else if (channel === 'email') {
+      window.location.href = `mailto:?subject=${encodeURIComponent(text)}&body=${encodeURIComponent(absolute)}`;
+    } else if (channel === 'sms') {
+      window.location.href = `sms:?body=${encodeURIComponent(`${text} ${absolute}`)}`;
+    }
+  };
+
+  const options = [
+    { key: 'facebook', label: 'Facebook', icon: SHARE_BRAND_ICONS.facebook },
+    { key: 'twitter', label: 'Twitter', icon: SHARE_BRAND_ICONS.twitter },
+    { key: 'instagram', label: 'Instagram', icon: SHARE_BRAND_ICONS.instagram },
+    { key: 'email', label: 'Email', icon: <Icon name="mail" size={15} strokeWidth={2} /> },
+    { key: 'sms', label: 'Text message', icon: <Icon name="message" size={15} strokeWidth={2} /> },
+  ];
+
   return (
-    <button
-      type="button"
-      onClick={share}
-      style={{
-        border: 'none', background: 'none', padding: 0, cursor: 'pointer',
-        fontSize: 12, fontWeight: 800, color: PORTAL_SHELL.muted, fontFamily: FONTS.heading,
-      }}
-    >
-      {copied ? 'Copied!' : 'Share'}
-    </button>
+    <span ref={rootRef} style={{ marginLeft: 'auto', display: 'inline-flex' }}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        style={{
+          border: 'none', background: 'none', padding: 0, cursor: 'pointer',
+          fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading,
+          color: open ? B.wavesBlue : PORTAL_SHELL.muted, whiteSpace: 'nowrap',
+        }}
+      >
+        {flash || 'Share'}
+      </button>
+      {open && menuPos && createPortal(
+        // Portaled to <body>: the glass cards carry transform/backdrop-filter,
+        // which would otherwise make the card (clipped, horizontally
+        // scrolling) the containing block for this fixed-position menu.
+        <div
+          ref={menuRef}
+          role="menu"
+          style={{
+            position: 'fixed', right: menuPos.right, bottom: menuPos.bottom, zIndex: 1200,
+            background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+            boxShadow: '0 8px 24px rgba(15,23,42,0.14)', padding: 6, minWidth: 172,
+          }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              role="menuitem"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); shareTo(opt.key); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left',
+                padding: '10px 12px', minHeight: 42, borderRadius: 8,
+                fontSize: 14, fontWeight: 800, color: B.blueDeeper, fontFamily: FONTS.heading,
+              }}
+            >
+              <span style={{ display: 'inline-flex', width: 18, justifyContent: 'center', flexShrink: 0 }}>{opt.icon}</span>
+              {opt.label}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </span>
   );
 }
 
