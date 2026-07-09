@@ -271,3 +271,53 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
     expect(() => normalizeClientPestFloorMetadata(null)).not.toThrow();
   });
 });
+
+describe('recurringServiceFirstVisitPrice — legacy first-application preview holds the floor', () => {
+  const { recurringServiceFirstVisitPrice } = require('../routes/estimate-public');
+
+  const estData = {
+    result: {
+      results: {
+        pestTiers: [
+          { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly', floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+        ],
+        pest: { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly', floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+      },
+    },
+  };
+  const pestSvc = { name: 'Pest Control', service: 'pest_control', mo: 29.67, perTreatment: 89, visitsPerYear: 4 };
+
+  test('floor-priced Platinum pest first application quotes the floor, not the raw 20% off', () => {
+    const { price, basePrice } = recurringServiceFirstVisitPrice(pestSvc, {
+      estData,
+      tierDiscount: 0.20,
+      pestRecurring: { monthlyBase: 29.67, visitsPerYear: 4 },
+    });
+    expect(basePrice).toBe(89); // not 71.20
+    expect(price).toBe(89);
+  });
+
+  test('legacy payloads without floorPa keep the discounted price', () => {
+    const legacy = JSON.parse(JSON.stringify(estData));
+    for (const row of [...legacy.result.results.pestTiers, legacy.result.results.pest]) {
+      delete row.floorPa; delete row.floorAnn; delete row.floorMo;
+    }
+    const { price } = recurringServiceFirstVisitPrice(pestSvc, {
+      estData: legacy,
+      tierDiscount: 0.20,
+      pestRecurring: { monthlyBase: 29.67, visitsPerYear: 4 },
+    });
+    expect(price).toBe(Math.round(89 * 0.8 * 100) / 100);
+  });
+
+  test('oversized floor metadata never lifts above the pre-discount per-visit price', () => {
+    const corrupt = JSON.parse(JSON.stringify(estData));
+    corrupt.result.results.pestTiers[0].floorPa = 999;
+    const { price } = recurringServiceFirstVisitPrice(pestSvc, {
+      estData: corrupt,
+      tierDiscount: 0.20,
+      pestRecurring: { monthlyBase: 29.67, visitsPerYear: 4 },
+    });
+    expect(price).toBe(89);
+  });
+});

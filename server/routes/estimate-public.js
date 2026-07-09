@@ -707,7 +707,17 @@ function recurringServiceFirstVisitPrice(svc = {}, {
     return base == null ? null : Math.round(base * 100) / 100;
   })();
   const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? Number(tierDiscount || 0) : 0;
-  const basePrice = anchorPrice == null ? null : Math.round(anchorPrice * (1 - serviceDiscount) * 100) / 100;
+  let basePrice = anchorPrice == null ? null : Math.round(anchorPrice * (1 - serviceDiscount) * 100) / 100;
+  // Pest program floor: the WaveGuard-discounted first-application price may
+  // not dip below the tier row's per-visit floor (floorPa, stamped at
+  // generation; absent on legacy payloads) — never above the pre-discount
+  // price. Keeps the pay-at-visit copy consistent with the clamped bundle.
+  if (basePrice != null && n.includes('pest')) {
+    const floorPa = Number(pestTier?.floorPa);
+    if (Number.isFinite(floorPa) && floorPa > 0) {
+      basePrice = Math.max(basePrice, Math.round(Math.min(floorPa, anchorPrice) * 100) / 100);
+    }
+  }
   const prefPerTreatmentOff = n.includes('pest') && visits > 0
     ? (Number(prefMonthlyOff || 0) * 12) / visits
     : 0;
@@ -13472,6 +13482,7 @@ module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
 module.exports.pestFloorMonthlyLift = pestFloorMonthlyLift;
+module.exports.recurringServiceFirstVisitPrice = recurringServiceFirstVisitPrice;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
