@@ -673,7 +673,7 @@ const btnBase = {
   padding: "0 18px",
   borderRadius: 12,
   border: "none",
-  fontWeight: 700,
+  fontWeight: 500,
   fontSize: 13,
   cursor: "pointer",
   transition: "all 0.2s",
@@ -4731,7 +4731,7 @@ const CP_EYEBROW = {
   display: "block",
   fontFamily: CP_FONT,
   fontSize: 11,
-  fontWeight: 600,
+  fontWeight: 500,
   color: CP_M.ink4,
   textTransform: "uppercase",
   letterSpacing: "0.3px",
@@ -4956,13 +4956,13 @@ function TypedFindingsSection({
   const scoreLabels = schema.activity?.techScoreLabels || {};
   const fieldLabelStyle = {
     fontSize: 14,
-    fontWeight: 600,
+    fontWeight: 500,
     color: textColor,
     marginBottom: 6,
   };
   const sectionHeaderStyle = {
     fontSize: 12,
-    fontWeight: 700,
+    fontWeight: 500,
     letterSpacing: "0.06em",
     textTransform: "uppercase",
     color: mutedColor,
@@ -5029,7 +5029,7 @@ function TypedFindingsSection({
                     color: selected ? accentFg : textColor,
                     border: `1px solid ${selected ? accent : hairline}`,
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -5137,7 +5137,7 @@ function TypedFindingsSection({
               color: accent,
               border: `1px solid ${accent}`,
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: aiDrafting ? "wait" : "pointer",
               opacity: aiDrafting ? 0.5 : 1,
             }}
@@ -5531,7 +5531,7 @@ function LawnAssessmentCompletionBlock({
                 background: D.white,
                 color: D.heading,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
                 opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
               }}
@@ -5563,7 +5563,7 @@ function LawnAssessmentCompletionBlock({
                     background: D.white,
                     color: D.heading,
                     fontSize: 13,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     cursor: disabled || analyzing ? "not-allowed" : "pointer",
                     opacity: disabled || analyzing ? 0.55 : 1,
                   }}
@@ -5572,7 +5572,7 @@ function LawnAssessmentCompletionBlock({
                 </button>
                 <span style={{ fontSize: 12, color: D.muted }}>{gaugePhoto ? 1 : 0}/1</span>
                 {/* Gauge reading (height of cut) — sits with the lawn-length photo it documents. */}
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Gauge reading</span>
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Gauge reading</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -5650,7 +5650,7 @@ function LawnAssessmentCompletionBlock({
               background: D.green,
               color: "#fff",
               fontSize: 13,
-              fontWeight: 800,
+              fontWeight: 500,
               cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
               opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
             }}
@@ -5676,7 +5676,7 @@ function LawnAssessmentCompletionBlock({
                     minWidth: 0,
                   }}
                 >
-                  <div style={{ fontSize: 15, fontWeight: 800, color: lawnScoreColor(value), lineHeight: 1.1 }}>
+                  <div style={{ fontSize: 15, fontWeight: 500, color: lawnScoreColor(value), lineHeight: 1.1 }}>
                     {value}%
                   </div>
                   <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>{metric.label}</div>
@@ -5696,7 +5696,7 @@ function LawnAssessmentCompletionBlock({
           </div>
           {!confirmed && (
             <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
                 Stress flags
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -5714,7 +5714,7 @@ function LawnAssessmentCompletionBlock({
                         background: selected ? `${D.amber}18` : D.white,
                         color: selected ? D.amber : D.text,
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                     >
@@ -5728,7 +5728,7 @@ function LawnAssessmentCompletionBlock({
           )}
           {!confirmed && (
             <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
                 Protocol field checks
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
@@ -5799,7 +5799,7 @@ function LawnAssessmentCompletionBlock({
                         background: selected ? `${D.green}14` : D.white,
                         color: selected ? D.green : D.text,
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                     >
@@ -5833,7 +5833,7 @@ function LawnAssessmentCompletionBlock({
                   background: `${D.green}14`,
                   color: D.green,
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   textAlign: "center",
                 }}
               >
@@ -5852,7 +5852,7 @@ function LawnAssessmentCompletionBlock({
                   background: D.green,
                   color: "#fff",
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   cursor: disabled || confirming ? "not-allowed" : "pointer",
                   opacity: disabled || confirming ? 0.55 : 1,
                 }}
@@ -5880,7 +5880,7 @@ function LawnAssessmentCompletionBlock({
                 background: D.white,
                 color: D.text,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
                 opacity: disabled || analyzing || confirming ? 0.55 : 1,
               }}
@@ -5903,7 +5903,7 @@ const scoreButtonStyle = {
   background: D.white,
   color: D.heading,
   fontSize: 14,
-  fontWeight: 800,
+  fontWeight: 500,
   lineHeight: 1,
   cursor: "pointer",
 };
@@ -6371,7 +6371,7 @@ function TreeShrubCloseoutBlock({
           ))}
         </select>
       </div>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 500 }}>
         <input
           type="checkbox"
           checked={!!value.iracFracLogged}
@@ -6401,7 +6401,7 @@ function TreeShrubCloseoutBlock({
         placeholder="Customer note"
         style={textarea}
       />
-      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 500 }}>
         <input
           type="checkbox"
           checked={!!value.injectionPerformed || productFlags.hasInjectionProduct}
@@ -6683,8 +6683,8 @@ export function ZoneMarkingStep({
   return (
     <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: ink }}>Mark treated areas on the map</div>
-        <div style={{ fontSize: 11, color: markedCount === areas.length ? "#10b981" : mutedInk, fontWeight: 600 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>Mark treated areas on the map</div>
+        <div style={{ fontSize: 11, color: markedCount === areas.length ? "#10b981" : mutedInk, fontWeight: 500 }}>
           {markedCount} of {areas.length} marked
         </div>
       </div>
@@ -6693,7 +6693,7 @@ export function ZoneMarkingStep({
         Mark every area to unlock the satellite map on the customer report.
       </div>
       {markedCount > 0 && markedCount < areas.length ? (
-        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 600, margin: "0 0 8px" }}>
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 500, margin: "0 0 8px" }}>
           Marks only save when every area is marked — finish the remaining {areas.length - markedCount} or they will be discarded.
         </div>
       ) : null}
@@ -6710,7 +6710,7 @@ export function ZoneMarkingStep({
                 padding: "5px 12px",
                 borderRadius: 999,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 background: isActive ? accent : "transparent",
                 color: isActive ? "#fff" : ink,
@@ -6758,8 +6758,8 @@ export function ZoneMarkingStep({
         ) : null}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
-        <button type="button" onClick={() => setTool("circle")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "circle" ? accent : "transparent", color: tool === "circle" ? "#fff" : ink, border: `1px solid ${tool === "circle" ? accent : hairline}` }}>Circle</button>
-        <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
+        <button type="button" onClick={() => setTool("circle")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", background: tool === "circle" ? accent : "transparent", color: tool === "circle" ? "#fff" : ink, border: `1px solid ${tool === "circle" ? accent : hairline}` }}>Circle</button>
+        <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
         {activeMark && activeMark.type === "circle" ? (
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <button type="button" disabled={disabled} onClick={() => resizeActiveCircle(-0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1 }}>-</button>
@@ -6768,7 +6768,7 @@ export function ZoneMarkingStep({
           </span>
         ) : null}
         {activeMark ? (
-          <button type="button" disabled={disabled} onClick={() => { if (!disabled) onClearMark(activeLabel); }} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}>Remove mark</button>
+          <button type="button" disabled={disabled} onClick={() => { if (!disabled) onClearMark(activeLabel); }} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}>Remove mark</button>
         ) : null}
       </div>
     </div>
@@ -6824,11 +6824,11 @@ function RecapCapture({ serviceId }) {
   };
 
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
-  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 700, cursor: "pointer", textAlign: "left" };
+  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 500, cursor: "pointer", textAlign: "left" };
 
   return (
     <div style={wrap}>
-      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Recap clips</span>
         <span style={{ fontSize: 12, color: D.muted }}>{items.length ? `${items.length} captured` : "optional"}</span>
       </div>
@@ -6842,10 +6842,10 @@ function RecapCapture({ serviceId }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
               <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
                 <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
-              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
+              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 500 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
               <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: D.muted, fontSize: 18, cursor: "pointer" }}>×</button>
             </div>
           ))}
@@ -6853,7 +6853,7 @@ function RecapCapture({ serviceId }) {
       )}
 
       {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
-      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 500, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
         {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
       </button>
 
@@ -6861,7 +6861,7 @@ function RecapCapture({ serviceId }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
             <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 800, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
+            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
@@ -6932,8 +6932,8 @@ function PestRecapCard({ serviceId }) {
 
   const s = state.status;
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
-  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
-  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 700, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
+  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
+  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 500, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
 
   return (
     <div style={wrap}>
@@ -6960,12 +6960,12 @@ function PestRecapCard({ serviceId }) {
           {s === "approved" ? (
             state.sent ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 700 }}>Approved &amp; sent to the customer</span>
+                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 500 }}>Approved &amp; sent to the customer</span>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 700, minWidth: 130 }}>Approved — the text didn’t send</span>
+                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 500, minWidth: 130 }}>Approved — the text didn’t send</span>
                 <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
@@ -9583,7 +9583,7 @@ export function CompletionPanel({
       display: "block",
       fontFamily: font,
       fontSize: 11,
-      fontWeight: 600,
+      fontWeight: 500,
       color: M.ink4,
       textTransform: "uppercase",
       letterSpacing: "0.3px",
@@ -9626,7 +9626,7 @@ export function CompletionPanel({
       color: M.actionFg,
       fontFamily: font,
       fontSize: 14,
-      fontWeight: 600,
+      fontWeight: 500,
       textTransform: "uppercase",
       letterSpacing: "0.3px",
       cursor: "pointer",
@@ -9743,7 +9743,7 @@ export function CompletionPanel({
                 style={{
                   fontFamily: font,
                   fontSize: 20,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: M.ink,
                 }}
               >
@@ -9903,7 +9903,7 @@ export function CompletionPanel({
                 style={{
                   fontFamily: font,
                   fontSize: 17,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: M.ink,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
@@ -9926,7 +9926,7 @@ export function CompletionPanel({
                   color: M.ink,
                   fontFamily: font,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                 }}
               >
@@ -9962,7 +9962,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                   }}
                 >
@@ -10002,7 +10002,7 @@ export function CompletionPanel({
                     display: "block",
                     fontFamily: font,
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                     marginBottom: 4,
                     textDecoration: "underline",
@@ -10016,7 +10016,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                     marginBottom: 4,
                   }}
@@ -10068,7 +10068,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: mono,
                     fontSize: 28,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: M.ink,
                     fontVariantNumeric: "tabular-nums",
                     lineHeight: 1.15,
@@ -10739,7 +10739,7 @@ export function CompletionPanel({
                     )}
                     {typedPhotoSummary !== "" && (
                       <div style={{ marginTop: 10 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: M.ink, marginBottom: 4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500, color: M.ink, marginBottom: 4 }}>
                           Photo summary (appears on the customer report)
                         </div>
                         <textarea
@@ -10913,7 +10913,7 @@ export function CompletionPanel({
                         style={{
                           fontFamily: font,
                           fontSize: 15,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: M.ink,
                           flex: 1,
                           minWidth: 120,
@@ -11247,7 +11247,7 @@ export function CompletionPanel({
                           }`,
                           fontFamily: font,
                           fontSize: 16,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           cursor: "pointer",
                         }}
                         aria-pressed={selected}
@@ -11450,7 +11450,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 15,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                   }}
                 >
@@ -11602,7 +11602,7 @@ export function CompletionPanel({
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>
               &#10003;
             </div>{" "}
-            <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>
+            <div style={{ fontSize: 20, fontWeight: 500, color: D.green }}>
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
@@ -11732,7 +11732,7 @@ export function CompletionPanel({
             }}
           >
             {" "}
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+            <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
               Complete Service
             </div>{" "}
             <button
@@ -11752,12 +11752,12 @@ export function CompletionPanel({
           {(service.customerId || service.customer_id) ? (
             <a
               href={`/admin/customers?customerId=${encodeURIComponent(service.customerId || service.customer_id)}`}
-              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 500, textDecoration: "underline", cursor: "pointer" }}
             >
               {service.customerName}
             </a>
           ) : (
-            <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>
+            <div style={{ fontSize: 14, color: D.text, fontWeight: 500 }}>
               {service.customerName}
             </div>
           )}{" "}
@@ -11788,7 +11788,7 @@ export function CompletionPanel({
                 <div
                   style={{
                     fontSize: 10,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.teal,
                     textTransform: "uppercase",
                     letterSpacing: 0.5,
@@ -11800,7 +11800,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: "'JetBrains Mono', monospace",
                     fontSize: 22,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     color: D.teal,
                     letterSpacing: 1,
                   }}
@@ -11820,7 +11820,7 @@ export function CompletionPanel({
               borderBottom: `1px solid ${D.green}44`,
               fontSize: 13,
               color: D.green,
-              fontWeight: 600,
+              fontWeight: 500,
               lineHeight: 1.5,
             }}
           >
@@ -11841,7 +11841,7 @@ export function CompletionPanel({
               }}
             >
               {" "}
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 Restore saved draft?
               </div>{" "}
               <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>
@@ -11963,7 +11963,7 @@ export function CompletionPanel({
                           lineHeight: 1.4,
                         }}
                       >
-                        <div style={{ fontWeight: 800, color: D.heading }}>
+                        <div style={{ fontWeight: 500, color: D.heading }}>
                           Approved substitute: {sub.substituteProductName}
                         </div>
                         <div style={{ color: D.muted, marginTop: 2 }}>
@@ -11984,7 +11984,7 @@ export function CompletionPanel({
                             background: selected ? D.green + "18" : D.card,
                             color: selected ? D.green : D.text,
                             fontSize: 12,
-                            fontWeight: 800,
+                            fontWeight: 500,
                             cursor: selected ? "default" : "pointer",
                             opacity: isIncompleteVisit || submitting ? 0.6 : 1,
                           }}
@@ -12495,7 +12495,7 @@ export function CompletionPanel({
                   : "linear-gradient(135deg, #8b5cf6, #6366f1)",
                 color: D.heading,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: generating ? "wait" : "pointer",
                 marginTop: 8,
                 marginBottom: 20,
@@ -12585,7 +12585,7 @@ export function CompletionPanel({
                           alignItems: "center",
                           justifyContent: "center",
                           lineHeight: 1,
-                          fontWeight: 700,
+                          fontWeight: 500,
                         }}
                       >
                         &times;
@@ -12638,7 +12638,7 @@ export function CompletionPanel({
                   )}
                   {typedPhotoSummary !== "" && (
                     <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: D.text, marginBottom: 4 }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: D.text, marginBottom: 4 }}>
                         Photo summary (appears on the customer report)
                       </div>
                       <textarea
@@ -12741,7 +12741,7 @@ export function CompletionPanel({
                       padding: "6px 12px",
                       borderRadius: 8,
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       cursor: "pointer",
                       background: isSelected ? D.teal + "22" : D.card,
                       color: isSelected ? D.teal : D.text,
@@ -12823,7 +12823,7 @@ export function CompletionPanel({
                   <span
                     style={{
                       fontSize: 13,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.text,
                       flex: 1,
                       minWidth: 120,
@@ -13009,7 +13009,7 @@ export function CompletionPanel({
                         padding: "6px 14px",
                         borderRadius: 20,
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                         background: selected ? D.teal + "22" : D.card,
                         color: selected ? D.teal : D.muted,
@@ -13111,7 +13111,7 @@ export function CompletionPanel({
                         color: selected ? D.teal : D.text,
                         border: `1px solid ${selected ? D.teal : D.border}`,
                         fontSize: 14,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                         transition: "all 0.15s",
                       }}
@@ -13245,7 +13245,7 @@ export function CompletionPanel({
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 700,
+                  fontWeight: 500,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
@@ -13254,7 +13254,7 @@ export function CompletionPanel({
               >
                 Next Scheduled Visit
               </div>{" "}
-              <div style={{ fontSize: 14, color: D.heading, fontWeight: 600 }}>
+              <div style={{ fontSize: 14, color: D.heading, fontWeight: 500 }}>
                 {nextVisit.date
                   ? new Date(nextVisit.date + "T00:00:00").toLocaleDateString(
                       "en-US",
@@ -13350,7 +13350,7 @@ export function CompletionPanel({
             ) : (
               <>
                 {" "}
-                <span style={{ fontSize: 15, fontWeight: 700 }}>
+                <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
                 <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
@@ -13373,7 +13373,7 @@ export function CompletionPanel({
 const labelStyle = {
   display: "block",
   fontSize: 12,
-  fontWeight: 700,
+  fontWeight: 500,
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 0.8,
@@ -13514,7 +13514,7 @@ function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, invent
   const rows = planRows.length ? planRows : staticRows;
   return (
     <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 12 }}>
-      <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 700, color: t.ink }}>
+      <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 500, color: t.ink }}>
         {protocol.window.title}
       </div>
       {protocol.window.goal ? (
@@ -13524,7 +13524,7 @@ function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, invent
       ) : null}
       {rows.length ? (
         <div style={{ marginTop: 10 }}>
-          <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 700, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
+          <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 500, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
             Mix for a {PROTOCOL_TANK_GAL}-gal tank
           </div>
           <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 5 }}>
@@ -13600,7 +13600,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions 
         minWidth: 0,
       }}
     >
-      <span style={{ fontSize: 12, fontWeight: 600, color: theme.labelColor }}>
+      <span style={{ fontSize: 12, fontWeight: 500, color: theme.labelColor }}>
         Targets
       </span>
       {list.map((t) => (
