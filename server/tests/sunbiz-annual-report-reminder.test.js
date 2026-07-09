@@ -1,0 +1,83 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'notif-1' }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...args) => mockNotifyAdmin(...args),
+}));
+
+const db = require('../models/db');
+const { runSunbizAnnualReportReminder } = require('../services/sunbiz-annual-report-reminder');
+
+function chain({ first } = {}) {
+  const q = {};
+  q.where = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
+  q.first = jest.fn(async () => first);
+  q.insert = jest.fn(async () => undefined);
+  return q;
+}
+
+// Noon UTC on Jan 1 = 7am ET Jan 1 — squarely inside the filing window.
+const JAN_1 = new Date('2027-01-01T12:00:00Z');
+
+describe('runSunbizAnnualReportReminder', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('january: creates the filing-calendar row and rings the admin bell with dedupe metadata', async () => {
+    const filingQ = chain({ first: undefined }); // no row for the year yet
+    const insertQ = chain();
+    const dedupeQ = chain({ first: undefined }); // not yet notified
+    db.mockReturnValueOnce(filingQ).mockReturnValueOnce(insertQ).mockReturnValueOnce(dedupeQ);
+
+    const result = await runSunbizAnnualReportReminder(JAN_1);
+
+    expect(result).toEqual({ fired: true, filingRowCreated: true });
+    expect(insertQ.insert).toHaveBeenCalledWith(expect.objectContaining({
+      filing_type: 'sunbiz_annual_report',
+      period_label: '2027',
+      due_date: '2027-05-01',
+      status: 'upcoming',
+      amount_due: 138.75,
+    }));
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(category).toBe('tax');
+    expect(title).toContain('2027 Florida LLC annual report');
+    expect(opts.link).toBe('/admin/tax');
+    expect(opts.metadata).toEqual({ reminder: 'sunbiz_annual_report', year: '2027' });
+  });
+
+  test('january, already notified this year: keeps the filing row but does not ring twice', async () => {
+    const filingQ = chain({ first: { id: 'row-1' } }); // year row exists
+    const dedupeQ = chain({ first: { id: 'notif-existing' } });
+    db.mockReturnValueOnce(filingQ).mockReturnValueOnce(dedupeQ);
+
+    const result = await runSunbizAnnualReportReminder(JAN_1);
+
+    expect(result).toEqual({ fired: false, filingRowCreated: false, reason: 'already_notified' });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('outside january: no-op even if invoked manually', async () => {
+    const result = await runSunbizAnnualReportReminder(new Date('2027-07-09T12:00:00Z'));
+
+    expect(result).toEqual({ fired: false, reason: 'not_january' });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('notification insert failure leaves the dedupe unset so the next tick retries', async () => {
+    mockNotifyAdmin.mockResolvedValueOnce(null); // notifyAdmin swallows insert errors → null
+    const filingQ = chain({ first: { id: 'row-1' } });
+    const dedupeQ = chain({ first: undefined });
+    db.mockReturnValueOnce(filingQ).mockReturnValueOnce(dedupeQ);
+
+    const result = await runSunbizAnnualReportReminder(JAN_1);
+
+    expect(result).toEqual({ fired: false, filingRowCreated: false });
+  });
+});
