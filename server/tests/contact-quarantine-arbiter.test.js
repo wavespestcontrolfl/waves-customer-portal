@@ -11,6 +11,7 @@ const {
   buildArbiterPrompt,
   parseArbiterResponse,
   ADOPT_CONFIDENCE_FLOOR,
+  STORE_CONFIDENCE_FLOOR,
 } = require('../services/contact-quarantine-arbiter');
 
 const nxdomain = () => { const e = new Error('queryMx ENOTFOUND'); e.code = 'ENOTFOUND'; return Promise.reject(e); };
@@ -153,6 +154,23 @@ describe('arbitrateQuarantinedEmail', () => {
     expect(out.chosenValue).toBe('marty@gulfcoastshutterco.com');
   });
 
+  test('adopt_with_confirmation below the storing floor is downgraded to review', async () => {
+    const out = await arbitrateQuarantinedEmail({
+      entry: ENTRY,
+      deps: deps({
+        createMessage: modelSaying({
+          verdict: 'adopt_with_confirmation',
+          chosen_value: 'marty@gulfcoastshutterco.com',
+          confidence: STORE_CONFIDENCE_FLOOR - 0.2,
+          reasoning: 'weak guess',
+        }),
+      }),
+    });
+    expect(out.verdict).toBe('review');
+    expect(out.chosenValue).toBeNull();
+    expect(out.reasoning).toContain('below storing floor');
+  });
+
   test('review verdict carries the decoder confirmation question as fallback', async () => {
     const out = await arbitrateQuarantinedEmail({
       entry: ENTRY,
@@ -208,6 +226,24 @@ describe('gatherEmailDomainEvidence', () => {
     const timeout = () => Promise.reject(new Error('timeout'));
     const out = await gatherEmailDomainEvidence(['a@half-checked.example'], { resolveMx: timeout, resolve4: nxdomain });
     expect(out[0].deliverable).toBeNull();
+  });
+
+  test('Null MX (RFC 7505) is authoritatively undeliverable, even with A records', async () => {
+    const out = await gatherEmailDomainEvidence(['a@no-mail.example'], {
+      resolveMx: () => Promise.resolve([{ exchange: '', priority: 0 }]),
+      resolve4: () => Promise.resolve(['1.2.3.4']),
+    });
+    expect(out[0].deliverable).toBe(false);
+    expect(out[0].dns_error).toBe('NULL_MX');
+  });
+
+  test('a real MX alongside a null entry still counts as deliverable', async () => {
+    const out = await gatherEmailDomainEvidence(['a@mixed.example'], {
+      resolveMx: () => Promise.resolve([{ exchange: '.', priority: 0 }, { exchange: 'mx1.mixed.example', priority: 10 }]),
+      resolve4: nxdomain,
+    });
+    expect(out[0].deliverable).toBe(true);
+    expect(out[0].mx_records).toBe(1);
   });
 
   test('deduplicates DNS lookups per domain', async () => {

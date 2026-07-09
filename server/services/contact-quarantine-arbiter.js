@@ -52,9 +52,13 @@ const ENABLED = () => process.env.CONTACT_QUARANTINE_ARBITER_ENABLED === 'true';
 // customer/lead writes behind it.
 const DNS_TIMEOUT_MS = 4000;
 const MODEL_TIMEOUT_MS = 60000;
-// Deterministic floor UNDER the model's self-reported confidence: a decisive
-// "adopt" below it degrades to adopt_with_confirmation (card stays open).
+// Deterministic floors UNDER the model's self-reported confidence: a decisive
+// "adopt" below ADOPT_CONFIDENCE_FLOOR degrades to adopt_with_confirmation
+// (card stays open); ANY storing verdict below STORE_CONFIDENCE_FLOOR
+// degrades to review — a low-confidence guess is exactly what quarantine
+// exists to keep out of send paths, whatever label the model puts on it.
 const ADOPT_CONFIDENCE_FLOOR = 0.9;
+const STORE_CONFIDENCE_FLOOR = 0.6;
 
 // ── Evidence gathering (deterministic, no model) ─────────────────────────────
 
@@ -93,12 +97,19 @@ async function gatherEmailDomainEvidence(candidates, deps = {}) {
       let aRecords = 0;
       let mxError = null;
       let aError = null;
+      let nullMx = false;
       try {
-        mxRecords = (await withTimeout(resolveMx(domain), DNS_TIMEOUT_MS)).length;
+        const mx = await withTimeout(resolveMx(domain), DNS_TIMEOUT_MS);
+        // RFC 7505 Null MX ("MX 0 .") is the domain explicitly declaring it
+        // accepts NO mail — the opposite of deliverable, and it overrides the
+        // implicit-MX A-record fallback too.
+        const usable = mx.filter((r) => r?.exchange && r.exchange !== '.');
+        mxRecords = usable.length;
+        nullMx = mx.length > 0 && usable.length === 0;
       } catch (err) {
         mxError = err.code || err.message;
       }
-      if (!mxRecords) {
+      if (!mxRecords && !nullMx) {
         // Mail can still deliver to an A record (implicit MX). Only a domain
         // with neither is deliverability-dead.
         try {
@@ -109,14 +120,14 @@ async function gatherEmailDomainEvidence(candidates, deps = {}) {
       }
       const hasRecords = mxRecords > 0 || aRecords > 0;
       const authoritativeNegative = !hasRecords
-        && AUTHORITATIVE_NEGATIVE_CODES.has(mxError)
-        && AUTHORITATIVE_NEGATIVE_CODES.has(aError);
+        && (nullMx
+          || (AUTHORITATIVE_NEGATIVE_CODES.has(mxError) && AUTHORITATIVE_NEGATIVE_CODES.has(aError)));
       byDomain.set(domain, {
         domain,
         mx_records: mxRecords,
         a_records: aRecords,
         deliverable: hasRecords ? true : (authoritativeNegative ? false : null),
-        dns_error: hasRecords ? null : (mxError || aError),
+        dns_error: hasRecords ? null : (nullMx ? 'NULL_MX' : (mxError || aError)),
       });
     }
     evidence.push({ value, ...byDomain.get(domain) });
@@ -278,6 +289,8 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
         downgrade = 'chosen domain has no MX/A records (authoritative)';
       } else if (match.owned_by_other_customer) {
         downgrade = 'chosen address is on file for another customer';
+      } else if (ruling.confidence < STORE_CONFIDENCE_FLOOR) {
+        downgrade = `confidence ${ruling.confidence} below storing floor`;
       }
       if (downgrade) {
         logger.warn(`[quarantine-arbiter] Downgraded ${verdict} to review: ${downgrade}`);
@@ -317,4 +330,5 @@ module.exports = {
   buildArbiterPrompt,
   parseArbiterResponse,
   ADOPT_CONFIDENCE_FLOOR,
+  STORE_CONFIDENCE_FLOOR,
 };

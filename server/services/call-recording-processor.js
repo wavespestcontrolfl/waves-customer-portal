@@ -3489,10 +3489,17 @@ const CallRecordingProcessor = {
         // floor — exactly the malformed dictation this pass quarantines.
         // Force a read-back reason so the triage item (with payload) exists.
         // A decisive arbiter adopt resolved the dictation — the read-back
-        // card would only re-ask a settled question. adopt_with_confirmation
-        // and review verdicts still get the flag (card stays open).
-        if (dictationEmailPayload
-            && dictationEmailPayload.arbiter?.verdict !== 'adopt'
+        // card would only re-ask a settled question. The bridge's
+        // deriveEmailReview gives EVERY call-captured email a read-back
+        // reason unconditionally, so the settled reasons must be REMOVED,
+        // not just not-re-added. adopt_with_confirmation and review verdicts
+        // keep the flag (card stays open).
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt') {
+          for (const settled of ['email_unverified', 'email_invalid']) {
+            const at = needsConfirmation.indexOf(settled);
+            if (at !== -1) needsConfirmation.splice(at, 1);
+          }
+        } else if (dictationEmailPayload
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
@@ -3590,9 +3597,15 @@ const CallRecordingProcessor = {
         // Same decoder-only fallback as the shadow branch: dictation evidence
         // with no extracted email must still open a read-back triage item.
         // Same arbiter release as the shadow branch: a decisive adopt closed
-        // the question; anything less keeps the read-back card.
-        if (dictationEmailPayload
-            && dictationEmailPayload.arbiter?.verdict !== 'adopt'
+        // the question, and deriveEmailReview adds a read-back reason for
+        // every call-captured email unconditionally — remove the settled
+        // ones. Anything less than a decisive adopt keeps the card.
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt') {
+          for (const settled of ['email_unverified', 'email_invalid']) {
+            const at = emailReasons.indexOf(settled);
+            if (at !== -1) emailReasons.splice(at, 1);
+          }
+        } else if (dictationEmailPayload
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
