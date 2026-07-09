@@ -45,6 +45,13 @@ function serviceContactSlotUpdates(contacts = []) {
     updates[phoneCol] = contact?.phone || null;
     updates[emailCol] = contact?.email || null;
   });
+  // The editor rewrites slot IDENTITIES without knowing about roles — a
+  // stale role left behind would attach itself to the new person (and the
+  // call pipeline's household-role matching would trust it). Clear all
+  // three; the pipeline re-records roles on its own writes.
+  updates.service_contact_role = null;
+  updates.service_contact2_role = null;
+  updates.service_contact3_role = null;
   return updates;
 }
 
@@ -582,6 +589,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         service_contact_name: contact.name || null,
         service_contact_phone: contact.phone || null,
         service_contact_email: contact.email || null,
+        // Identity rewritten without a role — never leave the old one behind.
+        service_contact_role: null,
         updated_at: new Date(),
       });
     }

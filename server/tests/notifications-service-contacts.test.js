@@ -46,13 +46,25 @@ describe('on-location contact slot helpers', () => {
       service_contact3_name: null,
       service_contact3_phone: null,
       service_contact3_email: null,
+      service_contact_role: null,
+      service_contact2_role: null,
+      service_contact3_role: null,
     });
   });
 
   test('serviceContactSlotUpdates clears every slot for an empty list', () => {
     const updates = serviceContactSlotUpdates([]);
     expect(Object.values(updates).every((v) => v === null)).toBe(true);
-    expect(Object.keys(updates)).toHaveLength(9);
+    expect(Object.keys(updates)).toHaveLength(12);
+  });
+
+  test('serviceContactSlotUpdates always clears the role columns — a replaced slot must not hand its old role to the new person', () => {
+    const updates = serviceContactSlotUpdates([
+      { name: 'New Realtor', phone: '+15556660000', email: '' },
+    ]);
+    expect(updates.service_contact_role).toBeNull();
+    expect(updates.service_contact2_role).toBeNull();
+    expect(updates.service_contact3_role).toBeNull();
   });
 
   test('normalizeContactInput joins and trims the name parts', () => {

@@ -6703,7 +6703,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         c.first_name,
         c.last_name,
         COALESCE(s.service_address_line1, c.address_line1) AS address_line1,
-        COALESCE(s.service_address_line2, c.address_line2) AS address_line2,
+        CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END AS address_line2,
         COALESCE(s.service_address_city, c.city) AS city,
         COALESCE(s.service_address_state, c.state) AS state,
         COALESCE(s.service_address_zip, c.zip) AS zip
@@ -6836,7 +6836,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         'c.phone as cust_phone',
         'c.email as cust_email',
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-        db.raw('COALESCE(s.service_address_line2, c.address_line2) as address_line2'),
+        db.raw('CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END as address_line2'),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
@@ -6937,7 +6937,7 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-        db.raw('COALESCE(s.service_address_line2, c.address_line2) as address_line2'),
+        db.raw('CASE WHEN s.service_address_line1 IS NOT NULL THEN s.service_address_line2 ELSE c.address_line2 END as address_line2'),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip')

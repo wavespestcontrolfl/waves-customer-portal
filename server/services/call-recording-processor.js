@@ -841,6 +841,22 @@ const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_con
 // accounts and must never auto-link on a slot-phone hit alone.
 const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
 const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager']);
+// Slot-only match gating: the number belongs to a person STORED ON this
+// account (tenant/spouse/buyer/agent). Household-type roles identify the
+// account; agent-type people (realtor, property manager) serve MANY accounts
+// — a realtor's next call is usually about a DIFFERENT buyer, so an
+// unconditional link would book the new visit on the old customer. Household
+// role or a first-name agreement with the slot's OWN name links.
+function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
+  const slotEntry = matchedSlotEntry(customer, phone);
+  const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
+  if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return false;
+  if (HOUSEHOLD_SLOT_ROLES.has(slotRole)) return true;
+  const extractedFirst = normalizeNamePart(extracted.first_name);
+  const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
+  return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
+}
+
 function matchedSlotEntry(customer, phone) {
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   for (const slot of SERVICE_CONTACT_SLOTS) {
@@ -896,7 +912,15 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     }
 
     const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
-    if (named && extractedNameMatchesCustomer(extracted, named)) return named;
+    // The name fast path is only safe when the number is the customer's OWN
+    // phone. A slot-phone hit (base() searches those too) whose account
+    // first name happens to match the caller must still pass the slot-role
+    // gating below — a realtor stored on a same-named customer would
+    // otherwise link and book on the old account (codex round-2 P1).
+    if (named && extractedNameMatchesCustomer(extracted, named)) {
+      if (matchedViaPrimary(named)) return named;
+      if (slotOnlyLinkAllowed(named, phone, extracted)) return named;
+    }
     // No name match — but the AI-extracted name is frequently wrong (it can pick
     // up the technician's name from the call audio, e.g. "Adam"). Returning null
     // here makes the caller spawn a NEW customer even when the phone already maps
@@ -910,21 +934,9 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   if (matches.length === 1) {
     const only = matches[0];
     if (matchedViaPrimary(only)) return only;
-    // Slot-only match: the number belongs to a person STORED ON this account
-    // (tenant/spouse/buyer/agent). Household-type roles identify the account;
-    // agent-type people (realtor, property manager) serve MANY accounts — a
-    // realtor's next call is usually about a DIFFERENT buyer, so an
-    // unconditional link would book the new visit on the old customer
-    // (codex P1). Household role or a first-name agreement with the slot's
-    // own name links; anything weaker falls through to the legacy
-    // create/lead path exactly as before slot matching existed.
-    const slotEntry = matchedSlotEntry(only, phone);
-    const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
-    if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return null;
-    const extractedFirst = normalizeNamePart(extracted.first_name);
-    const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
-    const nameAgrees = !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
-    if (HOUSEHOLD_SLOT_ROLES.has(slotRole) || nameAgrees) return only;
+    if (slotOnlyLinkAllowed(only, phone, extracted)) return only;
+    // Anything weaker falls through to the legacy create/lead path exactly
+    // as before slot matching existed.
     return null;
   }
   if (matches.length > 1) {
@@ -4847,8 +4859,12 @@ const CallRecordingProcessor = {
                         .insert({
                           customer_id: customerId,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
-                          // Visit 2 treats the same property as visit 1.
+                          // Visit 2 treats the same property as visit 1 —
+                          // coordinates included, or the stamped child would
+                          // render the right address with no map pin.
                           property_id: primaryRow.property_id || null,
+                          lat: primaryRow.lat ?? null,
+                          lng: primaryRow.lng ?? null,
                           service_address_line1: primaryRow.service_address_line1 || null,
                           service_address_line2: primaryRow.service_address_line2 || null,
                           service_address_city: primaryRow.service_address_city || null,

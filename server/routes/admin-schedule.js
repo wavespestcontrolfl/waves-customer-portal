@@ -1206,7 +1206,13 @@ router.get('/', async (req, res, next) => {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific stamped address (call bookings for a secondary/
+        // rental property) wins over the customer's primary mirror — same
+        // field names, so the schedule/tech-home consumers keep working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
         'customers.service_preferences',
@@ -2719,7 +2725,12 @@ router.get('/list', async (req, res, next) => {
         // blank payerId/poNumber and silently clears an existing per-job payer/PO
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
-        'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
+        'customers.first_name', 'customers.last_name',
+        // Stamped visit-specific address wins over the primary mirror here
+        // too — this list is a display surface for the booked property.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address'),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
       )
       .orderBy('scheduled_services.scheduled_date')
@@ -5331,8 +5342,11 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+        // Primary-home coords are only a valid fallback for UNstamped visits —
+        // a stamped rental booking with no coords must degrade to "no pin"
+        // (optimizer appends coordless stops), never route to the wrong house.
+        db.raw('COALESCE(scheduled_services.lat, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.latitude END) as lat'),
+        db.raw('COALESCE(scheduled_services.lng, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.longitude END) as lng'),
         'customers.city', 'customers.zip',
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
@@ -5422,8 +5436,11 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
+        // Primary-home coords are only a valid fallback for UNstamped visits —
+        // a stamped rental booking with no coords must degrade to "no pin"
+        // (optimizer appends coordless stops), never route to the wrong house.
+        db.raw('COALESCE(scheduled_services.lat, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.latitude END) as lat'),
+        db.raw('COALESCE(scheduled_services.lng, CASE WHEN scheduled_services.service_address_line1 IS NULL THEN customers.longitude END) as lng'),
         'customers.city', 'customers.zip',
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );

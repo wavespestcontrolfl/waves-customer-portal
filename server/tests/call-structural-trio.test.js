@@ -165,6 +165,34 @@ describe('findCustomerForCallContact cascade', () => {
     expect(await findCustomerForCallContact(PHONE, {})).toBeNull();
   });
 
+  test('name fast path: slot-phone hit still passes role gating (round-2 P1)', async () => {
+    // A realtor's phone stored in a slot on a customer who happens to share
+    // the caller's first name: the named query returns that customer, but
+    // the fast path must NOT link — agent-type slots never auto-link.
+    const sameNamedCustomer = {
+      id: 'prev-buyer', first_name: 'Karen', last_name: null, phone: '+19415559999',
+      service_contact_phone: PHONE, service_contact_name: 'Karen Realtor',
+      service_contact_role: 'real_estate_agent',
+    };
+    mockDbQueue({ customers: [[sameNamedCustomer]] });
+    expect(await findCustomerForCallContact(PHONE, { first_name: 'Karen' })).toBeNull();
+  });
+
+  test('name fast path: primary-phone owner and household slot still link', async () => {
+    // Positive controls — the gating must not break the legitimate paths.
+    const owner = { id: 'own', first_name: 'Karen', phone: PHONE };
+    mockDbQueue({ customers: [[owner]] });
+    expect((await findCustomerForCallContact(PHONE, { first_name: 'Karen' }))?.id).toBe('own');
+
+    const householdSlot = {
+      id: 'landlord', first_name: 'Karen', phone: '+19415559999',
+      service_contact_phone: PHONE, service_contact_name: 'Terry Tenant',
+      service_contact_role: 'tenant',
+    };
+    mockDbQueue({ customers: [[householdSlot]] });
+    expect((await findCustomerForCallContact(PHONE, { first_name: 'Karen' }))?.id).toBe('landlord');
+  });
+
   test('conflicting V2 mirror contact is dropped from the plural list', () => {
     const v1Matt = { first_name: 'Matt', last_name: null, phone: '+19415551111', email: null, role: 'real_estate_agent', wants_notifications: false, notes: null };
     const v2Sarah = { name_full: 'Sarah Miller', first_name: 'Sarah', last_name: 'Miller', phone_e164: '+19415550101', phone_raw_spoken: null, email: null, role: 'home_buyer', wants_notifications: true, notes: null };
