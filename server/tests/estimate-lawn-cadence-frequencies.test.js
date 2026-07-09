@@ -152,6 +152,26 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(premium.monthly).toBe(79); // 89 − 120/12
     expect(premium.manualDiscount.capReason).not.toBe('lawn_program_minimum');
   });
+
+  test('a manual discount fully blocked by the floor is SUPPRESSED, not just dropped', () => {
+    // $45/mo standard is exactly at the floor — a $10/mo manual discount has
+    // zero room. The row must carry manualDiscountSuppressed so the
+    // buildPricingBundle wrapper never back-fills the raw estimate discount
+    // (which would display savings the price doesn't reflect).
+    const freqs = lawnFrequenciesFromResultStats({
+      manualDiscount: { type: 'FIXED', value: 120, amount: 120, scope: 'recurring_annual_after_waveguard' },
+      results: {
+        lawn: [
+          { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90, recommended: true },
+        ],
+      },
+    });
+    const std = freqs.find((f) => f.key === 'standard');
+    expect(std.monthly).toBe(45);
+    expect(std.annual).toBe(540);
+    expect(std.manualDiscount).toBeNull();
+    expect(std.manualDiscountSuppressed).toBe(true);
+  });
 });
 
 describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder', () => {
@@ -254,6 +274,27 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     );
     expect(freqs.find((f) => f.selected)).toMatchObject({ key: 'standard' });
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(false);
+  });
+
+  test('a floor-capped selected tier keeps the requested WaveGuard discount on above-floor tiers', () => {
+    // Standard (540 gross) is at the floor: Silver 10% caps back to 540, so
+    // annualAfter/annualBefore reads 1 and would strip the discount from the
+    // other tiers. The ladder must use the engine's requested rate instead —
+    // Enhanced/Premium keep their 10% off; Standard re-clamps at the floor.
+    const line = lawnLineItem();
+    line.tier = 'standard';
+    line.annualBeforeDiscount = 540;
+    line.annualAfterDiscount = 540; // program minimum capped the Silver 10%
+    line.programMinimumGuardApplied = true;
+    line.requestedDiscountPct = 0.10;
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [line] });
+    const std = freqs.find((f) => f.key === 'standard');
+    expect(std.monthly).toBe(45); // floor holds
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.annual).toBe(672.3); // 747 * 0.9 — discount preserved
+    expect(enhanced.monthly).toBe(56.03);
+    const premium = freqs.find((f) => f.key === 'premium');
+    expect(premium.annual).toBe(907.2); // 1008 * 0.9
   });
 
   test('a legacy accepted Basic selection no longer resolves to a selectable cadence', () => {

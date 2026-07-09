@@ -606,13 +606,14 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $135/app × 4 ÷ 12 = $45/mo — at the lawn program
-                    // minimum, so this snapshot keeps the fast path.
+                    // $90/app × 6 ÷ 12 = $45/mo — a SOLD cadence at the lawn
+                    // program minimum, so this snapshot keeps the fast path
+                    // (4-visit lawn rows are retired regardless of price).
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 135,
-                    perTreatment: 135,
-                    visitsPerYear: 4,
+                    displayPrice: 90,
+                    perTreatment: 90,
+                    visitsPerYear: 6,
                   },
                 ],
                 included: [
@@ -677,7 +678,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'recurring',
       monthly: 45,
-      perTreatment: 135,
+      perTreatment: 90,
       perVisit: null,
       addOns: [],
     }));
@@ -715,12 +716,12 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $135/app × 4 ÷ 12 = $45/mo — at the program minimum.
+                    // $90/app × 6 ÷ 12 = $45/mo — a sold cadence at the floor.
                     service: 'lawn_care',
-                    label: 'Lawn Care (Quarterly)',
-                    displayPrice: 135,
-                    perTreatment: 135,
-                    visitsPerYear: 4,
+                    label: 'Lawn Care (Bi-monthly)',
+                    displayPrice: 90,
+                    perTreatment: 90,
+                    visitsPerYear: 6,
                   },
                 ],
               },
@@ -780,7 +781,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
       monthly: 45,
-      perTreatment: 135,
+      perTreatment: 90,
       perVisit: null,
     }));
     expect(payload.services[1].frequencies[1]).toEqual(expect.objectContaining({
@@ -812,12 +813,12 @@ describe('public estimate one-time breakdown', () => {
                 annual: 780,
                 perServiceTreatments: [
                   {
-                    // $135/app × 4 ÷ 12 = $45/mo — at the program minimum.
+                    // $90/app × 6 ÷ 12 = $45/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 135,
-                    perTreatment: 135,
-                    visitsPerYear: 4,
+                    displayPrice: 90,
+                    perTreatment: 90,
+                    visitsPerYear: 6,
                   },
                   {
                     service: 'mosquito',
@@ -875,7 +876,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
       monthly: 45,
-      perTreatment: 135,
+      perTreatment: 90,
       perVisit: null,
     }));
     expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
@@ -966,12 +967,12 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $135/app × 4 ÷ 12 = $45/mo — at the program minimum.
+                    // $90/app × 6 ÷ 12 = $45/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 135,
-                    perTreatment: 135,
-                    visitsPerYear: 4,
+                    displayPrice: 90,
+                    perTreatment: 90,
+                    visitsPerYear: 6,
                   },
                 ],
               },
@@ -1052,6 +1053,83 @@ describe('public estimate one-time breakdown', () => {
         expect(frequency.monthly).toBeGreaterThanOrEqual(45);
       }
     }
+  });
+
+  test('snapshots with an AT-FLOOR 4-visit lawn row are still recomputed (retired cadence, any price)', async () => {
+    // $135/app × 4 ÷ 12 = $45/mo passes the price check, but 4 visits/yr IS
+    // the retired Quarterly plan — the snapshot must not short-circuit.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-at-floor-retired-lawn-snapshot-test',
+      monthly_total: 95,
+      annual_total: 1140,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'at_floor_retired_lawn_snapshot',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 95,
+                annual: 1140,
+                perServiceTreatments: [
+                  { service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 150, perTreatment: 150, visitsPerYear: 4 },
+                  { service: 'lawn_care', label: 'Lawn Care', displayPrice: 135, perTreatment: 135, visitsPerYear: 4 },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            monthlyTotal: 95,
+            annualAfterDiscount: 1140,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 45 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+  });
+
+  test('a lawn-only estimate whose stored rows are ALL retired is quote-required (no self-serve accept)', async () => {
+    // Legacy quote that stored only the Basic/4-app row: the ladder filters
+    // it, and the generic fallback must NOT offer a silently-billable
+    // quarterly row — the estimate flips to quote-required so accept 409s
+    // and the view shows the call-to-confirm state.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-retired-lawn-only-requote-test',
+      monthly_total: 30,
+      annual_total: 360,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 30,
+            annualAfterDiscount: 360,
+            services: [
+              { name: 'Lawn Care', service: 'lawn_care', mo: 30 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('retired_lawn_cadence_requote');
+    expect(payload.frequencies.map((f) => f.key)).not.toContain('basic');
   });
 
   test('phase 0 no-engine recurring fallback keeps stored frequency pricing in services', async () => {

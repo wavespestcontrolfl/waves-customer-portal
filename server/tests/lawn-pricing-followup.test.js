@@ -876,9 +876,33 @@ describe('lawn pricing production follow-up', () => {
     // base is pest 421.20 + lawn 540 = 961.20 (was 939.60 pre-floor).
     expect(lawn.annualAfterDiscount).toBe(540);
     expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(961.2, 2);
+    // 10% (96.12) fits inside the non-lawn headroom (961.20 − 540 protected
+    // = 421.20), so the manual discount applies in full, uncapped.
     expect(estimate.summary.manualDiscount.amount).toBe(96.12);
+    expect(estimate.summary.manualDiscount.capReason).not.toBe('lawn_program_minimum');
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
+  });
+
+  test('a manual discount on a lawn-only estimate is capped at the program minimum (recurring slice)', () => {
+    // Lawn-only, standard/6x at 4,500 sqft: the $38/mo bracket cell floors to
+    // $45/mo ($540/yr). The whole recurring base is floor-protected, so a 10%
+    // manual discount has zero recurring room — the recurring slice caps to 0
+    // and the plan bills the floor.
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: {
+        lawn: { track: 'st_augustine', lawnFreq: 6 },
+      },
+      manualDiscount: { type: 'PERCENT', value: 10 },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+    expect(lawn.annual).toBe(540);
+    expect(lawn.programMinimumApplied).toBe(true);
+    expect(estimate.summary.manualDiscount.recurringAmount).toBe(0);
+    expect(estimate.summary.manualDiscount.capped).toBe(true);
+    expect(estimate.summary.manualDiscount.capReason).toBe('lawn_program_minimum');
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThanOrEqual(540);
   });
 
   test('requesting the retired 4-application tier falls back to enhanced (quarterly retired 2026-07-09)', () => {

@@ -132,6 +132,22 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     // pest 60*0.9 = 54 ; lawn 89*0.9 = 80.1 → 134.1
     expect(entry.monthly).toBe(134.1);
   });
+
+  test('a bundle manual discount cannot spend the lawn floor (capped to non-lawn + above-floor headroom)', () => {
+    // No WaveGuard %; lawn Standard prices at $45.50/mo. A $65/mo manual
+    // discount may spend pest ($60) plus lawn's above-floor headroom
+    // ($0.50), never the floor itself → capped to $60.50/mo and the bundle
+    // total lands exactly on pest 0 + lawn 45.
+    const manualV1 = { ...pestLawnV1(), discount: 0, manualDiscount: { type: 'FIXED', value: 780 } };
+    const entry = comboPricingEntry(manualV1, QUARTERLY, manualV1.pestTiers[0], {}, tierBaseMap, {
+      pest_control: 'quarterly',
+      lawn_care: 'standard',
+    });
+    // pest 60 + lawn 45.5 = 105.5 gross; headroom = 105.5 − 45 = 60.5
+    expect(entry.monthly).toBe(45);
+    expect(entry.manualDiscount).toMatchObject({ capped: true, capReason: 'lawn_program_minimum' });
+    expect(entry.manualDiscount.monthlyAmount).toBe(60.5);
+  });
 });
 
 describe('serviceCadenceComboKey — stable composite key', () => {

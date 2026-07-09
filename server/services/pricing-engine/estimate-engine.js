@@ -1538,6 +1538,7 @@ function generateEstimate(input) {
   let manualDiscountAmount = 0;          // recurring slice (margin logic + recurringAnnualAfter use this)
   let manualDiscountOneTimeAmount = 0;   // one-time slice
   let manualDiscountSpecialtyAmount = 0; // specialty slice
+  let manualDiscountLawnFloorCapped = false; // recurring slice capped at the lawn program minimum
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
@@ -1575,6 +1576,24 @@ function generateEstimate(input) {
         manualDiscountSpecialtyAmount = roundMoney(applied - manualDiscountAmount - manualDiscountOneTimeAmount);
       }
     }
+    // Lawn program minimum (owner directive 2026-07-09): unlike the warn-only
+    // margin stance below, the lawn floor is a HARD post-discount minimum —
+    // the recurring slice may spend all non-lawn room plus lawn's above-floor
+    // headroom, but never the floor itself. min(line, floor) protects legacy
+    // below-floor lines in full (they cannot be manually discounted lower)
+    // without ever raising them.
+    const lawnProgramMinimumMonthlyValue = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    if (Number.isFinite(lawnProgramMinimumMonthlyValue) && lawnProgramMinimumMonthlyValue > 0) {
+      const lawnFloorAnnual = roundMoney(lawnProgramMinimumMonthlyValue * 12);
+      const lawnFloorProtectedAnnual = roundMoney(manualEligibleItems
+        .filter((i) => i.service === 'lawn_care')
+        .reduce((sum, i) => sum + Math.min(i.annualAfterDiscount || i.annual || 0, lawnFloorAnnual), 0));
+      const recurringManualHeadroom = Math.max(0, roundMoney(manualDiscountableRecurringAnnual - lawnFloorProtectedAnnual));
+      if (manualDiscountAmount > recurringManualHeadroom) {
+        manualDiscountAmount = recurringManualHeadroom;
+        manualDiscountLawnFloorCapped = true;
+      }
+    }
     const appliedTotal = roundMoney(
       manualDiscountAmount + manualDiscountOneTimeAmount + manualDiscountSpecialtyAmount,
     );
@@ -1600,8 +1619,10 @@ function generateEstimate(input) {
       discountableBase: manualDiscountableTotal,
       recurringDiscountableBase: manualDiscountableRecurringAnnual,
       oneTimeDiscountableBase: roundMoney(manualDiscountableOneTime + manualDiscountableSpecialty),
-      capped: requestedAmount > appliedTotal,
-      capReason: requestedAmount > appliedTotal ? 'discountable_base' : null,
+      capped: requestedAmount > appliedTotal || manualDiscountLawnFloorCapped,
+      capReason: manualDiscountLawnFloorCapped
+        ? 'lawn_program_minimum'
+        : (requestedAmount > appliedTotal ? 'discountable_base' : null),
       scope: nonRecurringAmount > 0 ? 'recurring_and_one_time_after_waveguard' : 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
       eligibleServices: [
