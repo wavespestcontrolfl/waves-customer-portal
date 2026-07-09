@@ -521,6 +521,22 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(gh._calls.putFile).toHaveLength(1); // the commit DID land on the branch
     expect(gh._calls.comments).toHaveLength(0); // but Codex re-review was not requested
   });
+
+  test('sync-failure park stamps the NEW head so our own push cannot re-arm it', async () => {
+    const db = makeDb();
+    const gh = makeGh();
+    await runRemediationForPr(
+      { ...CTX, onRemediated: async () => { throw new Error('db down'); } },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    // The park verdict applies to the commit we just pushed, not the pre-push head.
+    expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
+    // Next tick, the PR head IS that pushed commit — the park must hold.
+    const gh2 = makeGh({ gh: { getPr: async () => ({ state: 'open', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } }) } });
+    const r2 = await runRemediationForPr(CTX, { db, gh: gh2, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r2.skipped).toBe(true);
+    expect(r2.reason).toBe('parked');
+  });
 });
 
 describe('round-10 hardening (Codex findings on 82ec5608)', () => {

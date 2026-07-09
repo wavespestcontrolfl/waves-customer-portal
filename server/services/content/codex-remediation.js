@@ -805,7 +805,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       const body = String((fm.parse(fixed) || {}).content || '').trim();
       await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped });
     } catch (e) {
-      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, headSha);
+      // Stamp the park with newHead, NOT the pre-push headSha: the fix commit
+      // is already on the branch, so a headSha stamp would make the re-arm
+      // logic read our own push as "head advanced" next tick and un-park the
+      // exact divergence this park exists to hold for a human.
+      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha);
     }
   }
 
