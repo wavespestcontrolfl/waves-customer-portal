@@ -506,6 +506,10 @@ describe('lawn pricing production follow-up', () => {
 
     expect(profile.imperviousSurfacePercent).toBeUndefined();
     expect(profile.imperviosSurfacePercent).toBeUndefined();
+    // The county turf prior does NOT fire here — this record has no parsed
+    // extra-features roll (imperviousKnown=false), and the prior requires
+    // county-COMPLETE facts. Pricing keeps the legacy fallback path.
+    expect(profile.countyTurfPriorSf).toBeNull();
     expect(property.turfBasis).toBe('legacyHardscapeEstimate');
   });
 

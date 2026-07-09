@@ -279,6 +279,22 @@ describe('estimate show your work — gate on', () => {
     expect(JSON.stringify(work)).not.toContain('cadastral');
   });
 
+  test('county-prior turf is attributed to county records, not satellite imagery (codex P3)', async () => {
+    const work = await buildShowYourWork(estimateRow(), {
+      enriched: enrichedFixture({
+        estimatedTurfSf: 2721,
+        turfSource: 'county_prior',
+        turfCappedToParcel: false,
+      }),
+    });
+    const turfFact = work.facts.find((f) => f.label === 'Treatable turf');
+    expect(turfFact).toEqual({
+      label: 'Treatable turf',
+      value: '2,721 sq ft',
+      source: 'County records (estimated)',
+    });
+  });
+
   test('renderPage extends the Waves AI card with the facts block', async () => {
     const showYourWork = await buildShowYourWork(estimateRow(), { enriched: enrichedFixture() });
     const html = renderPage('syw-token', renderEstimate(), renderEstimateData({ enriched: enrichedFixture() }), null, { showYourWork });

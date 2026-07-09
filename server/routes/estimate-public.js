@@ -3064,7 +3064,12 @@ async function buildShowYourWork(estimate = {}, estData = {}) {
     turfSqFt ? {
       label: 'Treatable turf',
       value: `${Math.round(turfSqFt).toLocaleString()} sq ft${enriched.turfCappedToParcel === true ? ' (bounded by your county parcel area)' : ''}`,
-      source: sourceFor('estimatedTurfSf'),
+      // A county-prior seed (vision-missing lookup) has no fieldEvidence
+      // entry, and the satellite fallback label would misattribute it —
+      // the number came from county lot/building facts, not imagery.
+      source: enriched.turfSource === 'county_prior'
+        ? 'County records (estimated)'
+        : sourceFor('estimatedTurfSf'),
     } : null,
   ].filter(Boolean);
 
