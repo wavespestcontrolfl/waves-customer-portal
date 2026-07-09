@@ -171,17 +171,22 @@ function toDispatchJob(row, index = 0) {
 }
 
 async function canonicalJobs({ date, techId, status } = {}) {
-  const query = getDb()('scheduled_services')
+  const dbConn = getDb();
+  const query = dbConn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
     .select(
       'scheduled_services.*',
       'customers.first_name',
       'customers.last_name',
-      'customers.address_line1',
-      'customers.city',
-      'customers.state',
-      'customers.zip',
+      // Visit-specific stamped address wins over the customer's primary
+      // mirror — same field names, so toDispatchJob and every consumer of
+      // /api/dispatch/jobs keep working (codex P1: this legacy reader was
+      // missed by the admin-dispatch updates).
+      dbConn.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+      dbConn.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+      dbConn.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+      dbConn.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
       'customers.waveguard_tier',
       'customers.monthly_rate',
       'technicians.name as tech_name'

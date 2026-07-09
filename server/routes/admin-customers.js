@@ -564,11 +564,18 @@ function compactServiceContactSlots(updates, before = {}) {
   };
 
   const compacted = SERVICE_CONTACT_SLOT_FIELDS
-    .map((fields) => fields.map((field) => (
-      Object.prototype.hasOwnProperty.call(updates, field)
-        ? normalizedValue(updates[field])
-        : normalizedValue(before[field])
-    )))
+    .map((fields) => {
+      // The admin PUT / prefs editors submit only name/phone/email — when a
+      // slot's IDENTITY changes without an explicit role, the old role must
+      // not attach itself to the new person (codex P2).
+      const identityChanged = fields.slice(0, 3)
+        .some((field) => Object.prototype.hasOwnProperty.call(updates, field));
+      return fields.map((field, fieldIndex) => {
+        if (Object.prototype.hasOwnProperty.call(updates, field)) return normalizedValue(updates[field]);
+        if (fieldIndex === 3 && identityChanged) return null;
+        return normalizedValue(before[field]);
+      });
+    })
     // Survival is judged on name/phone/email only — a role with no person
     // attached must not keep a ghost slot alive.
     .filter((slot) => slot.slice(0, 3).some((value) => value !== null));

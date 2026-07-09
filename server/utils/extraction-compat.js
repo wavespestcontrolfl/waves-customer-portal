@@ -33,6 +33,7 @@ function flatView(extraction) {
     phone: caller.phone_e164 || null,
 
     address_line1: addr.street_line_1 || null,
+    address_line2: addr.street_line_2 || null,
     city: addr.city || null,
     state: addr.state || null,
     zip: addr.postal_code || null,

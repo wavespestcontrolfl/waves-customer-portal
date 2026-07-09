@@ -144,6 +144,40 @@ describe('findCustomerForCallContact cascade', () => {
     });
   }
 
+  test('slot-only single match: household role links; agent role never links; no signal falls through', async () => {
+    const base = {
+      id: 'landlord', first_name: 'Pat', phone: '+19415559999',
+      service_contact_phone: PHONE, service_contact_name: 'Maria Lopez',
+    };
+    // (When a first_name is extracted, the named query consumes one queued
+    // result before the phone-only fetch — feed it an empty miss.)
+    // Household role → linked.
+    mockDbQueue({ customers: [[{ ...base, service_contact_role: 'tenant' }]] });
+    expect((await findCustomerForCallContact(PHONE, {}))?.id).toBe('landlord');
+    // Agent-type role → never auto-links, even with a name match.
+    mockDbQueue({ customers: [[], [{ ...base, service_contact_role: 'real_estate_agent' }]] });
+    expect(await findCustomerForCallContact(PHONE, { first_name: 'Maria' })).toBeNull();
+    // No role, name agrees with the SLOT's own name → linked.
+    mockDbQueue({ customers: [[], [{ ...base, service_contact_role: null }]] });
+    expect((await findCustomerForCallContact(PHONE, { first_name: 'Maria' }))?.id).toBe('landlord');
+    // No role, no name signal → falls through (legacy create/lead path).
+    mockDbQueue({ customers: [[{ ...base, service_contact_role: null }]] });
+    expect(await findCustomerForCallContact(PHONE, {})).toBeNull();
+  });
+
+  test('conflicting V2 mirror contact is dropped from the plural list', () => {
+    const v1Matt = { first_name: 'Matt', last_name: null, phone: '+19415551111', email: null, role: 'real_estate_agent', wants_notifications: false, notes: null };
+    const v2Sarah = { name_full: 'Sarah Miller', first_name: 'Sarah', last_name: 'Miller', phone_e164: '+19415550101', phone_raw_spoken: null, email: null, role: 'home_buyer', wants_notifications: true, notes: null };
+    const v2Rita = { name_full: 'Rita Doyle', first_name: 'Rita', last_name: 'Doyle', phone_e164: '+19415550303', phone_raw_spoken: null, email: null, role: 'home_seller', wants_notifications: false, notes: null };
+    const out = resolveCallSecondaryContacts(
+      { secondary_contact: v1Matt },
+      { secondary_contact: v2Sarah, secondary_contacts: [v2Sarah, v2Rita] },
+    );
+    // V1 Matt won the identity conflict; V2's rejected Sarah must NOT come
+    // back as an "additional" contact — only the genuinely-different Rita.
+    expect(out.map((c) => c.first_name)).toEqual(['Matt', 'Rita']);
+  });
+
   test('leg (a): exactly one candidate OWNS the number as primary → linked', async () => {
     const owner = { id: 'own', first_name: 'Jordan', phone: PHONE };
     const slotHolder = { id: 'slot', first_name: 'Realtor', phone: '+19415559999' };
@@ -215,7 +249,7 @@ describe('resolveCallBookingPropertyLinkage', () => {
 
   test('no call address → nulls (readers fall back to the customer mirror)', async () => {
     const out = await resolveCallBookingPropertyLinkage('cust-1', {}, mockProps([]));
-    expect(out).toEqual({ propertyId: null, address: null });
+    expect(out).toEqual({ propertyId: null, address: null, lat: null, lng: null });
   });
 
   test('ambiguous (two properties share the key) → address stamped, property unlinked', async () => {

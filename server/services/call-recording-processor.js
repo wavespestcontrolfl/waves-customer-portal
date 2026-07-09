@@ -623,10 +623,36 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
 // budget). Entry 1 = the single-contact V1/V2 resolution above (identity-
 // conflict rule intact); entries 2+ = the V2 array's additional people (V1
 // only ever emits one). Dedupe key: phone last-10, else email, else full name.
+function identityConflicts(a, b) {
+  if (!a || !b) return false;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  return (a.phone && b.phone && last10(a.phone) !== last10(b.phone))
+    || (a.email && b.email && norm(a.email) !== norm(b.email))
+    || (a.first_name && b.first_name && norm(a.first_name) !== norm(b.first_name))
+    || (a.last_name && b.last_name && norm(a.last_name) !== norm(b.last_name));
+}
+
 function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+  const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
   const primary = resolveCallSecondaryContact(extracted, v2Extraction);
-  const v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
+  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
+  // When the single-contact resolver rejected V2's person on an identity
+  // conflict (V1 wins unmerged), that same person is REQUIRED to lead the V2
+  // array as the mirror entry — appending it here would resurrect the
+  // rejected identity as an "additional" contact and fan notifications out
+  // to it (codex P1). Drop the conflicting mirror; genuinely-different
+  // extra parties (entries 2+) stay.
+  const v2Single = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  if (primary && v2Single && identityConflicts(primary, v2Single)) {
+    const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    v2List = v2List.filter((c) => !(
+      (c.phone && v2Single.phone && last10(c.phone) === last10(v2Single.phone))
+      || (c.email && v2Single.email && norm(c.email) === norm(v2Single.email))
+      || (!c.phone && !c.email && norm(c.first_name) === norm(v2Single.first_name) && norm(c.last_name || '') === norm(v2Single.last_name || ''))
+    ));
+  }
   const keyOf = (c) => {
     const digits = String(c.phone || '').replace(/\D/g, '').slice(-10);
     if (digits) return `p:${digits}`;
@@ -811,6 +837,19 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
 // spouses/tenants into those slots, and matching that ignored them forked a
 // duplicate customer the next time that person called (audit #7/F1).
 const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+// Slot roles that identify the HOUSEHOLD/account vs people who serve many
+// accounts and must never auto-link on a slot-phone hit alone.
+const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
+const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager']);
+function matchedSlotEntry(customer, phone) {
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  for (const slot of SERVICE_CONTACT_SLOTS) {
+    if (samePhone(phone, customer[slot.phone])) {
+      return { name: customer[slot.name] || null, contactRole: customer[slot.roleCol] || null };
+    }
+  }
+  return null;
+}
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
@@ -867,11 +906,39 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     // active customer") and keeps the genuine shared-phone case (2+ matches) safe.
   }
 
-  const matches = await base().orderBy('updated_at', 'desc').limit(6);
-  if (matches.length === 1) return matches[0];
+  const matches = await base().orderBy('updated_at', 'desc').limit(25);
+  if (matches.length === 1) {
+    const only = matches[0];
+    if (matchedViaPrimary(only)) return only;
+    // Slot-only match: the number belongs to a person STORED ON this account
+    // (tenant/spouse/buyer/agent). Household-type roles identify the account;
+    // agent-type people (realtor, property manager) serve MANY accounts — a
+    // realtor's next call is usually about a DIFFERENT buyer, so an
+    // unconditional link would book the new visit on the old customer
+    // (codex P1). Household role or a first-name agreement with the slot's
+    // own name links; anything weaker falls through to the legacy
+    // create/lead path exactly as before slot matching existed.
+    const slotEntry = matchedSlotEntry(only, phone);
+    const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
+    if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return null;
+    const extractedFirst = normalizeNamePart(extracted.first_name);
+    const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
+    const nameAgrees = !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
+    if (HOUSEHOLD_SLOT_ROLES.has(slotRole) || nameAgrees) return only;
+    return null;
+  }
   if (matches.length > 1) {
+    // Exact population first: uniqueness decisions on a CAPPED sample would
+    // auto-link when the tie-breaking row sits beyond the cap (codex P2).
+    const shareCount = await Promise.resolve()
+      .then(() => base().count('* as n').first())
+      .then((r) => parseInt(r?.n || 0, 10) || matches.length)
+      .catch(() => matches.length);
+    const cascadeSound = shareCount === matches.length;
     // ── Multi-match disambiguation cascade (audit #7) — each leg is a
-    // deterministic second signal; anything weaker stays ambiguous. ──
+    // deterministic second signal; anything weaker stays ambiguous. Legs run
+    // only when the fetched set IS the full population. ──
+    if (cascadeSound) {
     // (a) The number is exactly ONE candidate's own primary phone (the others
     //     merely hold it in a service-contact slot): the primary owns it.
     const primaryOwners = matches.filter(matchedViaPrimary);
@@ -920,13 +987,8 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
         return matches[0];
       }
     } catch { /* fall through to ambiguous */ }
+    }
 
-    // Exact count, not the limit-capped fetch — a number forked five ways
-    // used to log as "2", hiding the badly-shared phones from ops review.
-    const shareCount = await Promise.resolve()
-      .then(() => base().count('* as n').first())
-      .then((r) => parseInt(r?.n || 0, 10) || matches.length)
-      .catch(() => matches.length);
     logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without a second deterministic signal`);
     // Surface the ambiguity to callers that can act on it (Step 3 suppresses
     // the new-customer create and opens a review card) without changing the
@@ -1215,8 +1277,10 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     state: clean(extracted.state, 2),
     zip: clean(extracted.zip, 10),
   };
-  if (!address.line1) return { propertyId: null, address: null };
+  if (!address.line1) return { propertyId: null, address: null, lat: null, lng: null };
   let propertyId = null;
+  let lat = null;
+  let lng = null;
   try {
     const { addressKey } = require('./customer-properties');
     const callKey = addressKey({
@@ -1225,14 +1289,23 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     if (callKey) {
       const props = await trx('customer_properties')
         .where({ customer_id: customerId, active: true })
-        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude');
       const matches = props.filter((p) => addressKey(p) === callKey);
-      if (matches.length === 1) propertyId = matches[0].id;
+      if (matches.length === 1) {
+        propertyId = matches[0].id;
+        // The property's own geocode rides along — without it the visit's
+        // map pin would fall back to the customer's PRIMARY coordinates
+        // while the text shows the rental (codex P1).
+        if (matches[0].latitude != null && matches[0].longitude != null) {
+          lat = matches[0].latitude;
+          lng = matches[0].longitude;
+        }
+      }
     }
   } catch (e) {
     logger.warn(`[call-proc] property-linkage resolution failed (booking proceeds unlinked): ${e.code || e.message}`);
   }
-  return { propertyId, address };
+  return { propertyId, address, lat, lng };
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -4911,11 +4984,22 @@ const CallRecordingProcessor = {
                 // and the tech portal render the booked property, not the
                 // customer's primary mirror (a rental booking used to
                 // dispatch to the customer's home).
-                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, extracted, trx);
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {
+                  ...extracted,
+                  // flatView historically dropped street_line_2; a condo unit
+                  // must survive into the stamp/key (codex P2).
+                  address_line2: extracted.address_line2
+                    || v2ApprovedExtraction?.property?.service_address?.street_line_2
+                    || v2CanonicalExtraction?.property?.service_address?.street_line_2
+                    || null,
+                }, trx);
                 const insertData = {
                   customer_id: customerId,
                   technician_id: defaultTechnicianId,
                   property_id: propertyLinkage.propertyId,
+                  ...(propertyLinkage.lat != null && propertyLinkage.lng != null
+                    ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
+                    : {}),
                   service_address_line1: propertyLinkage.address?.line1 || null,
                   service_address_line2: propertyLinkage.address?.line2 || null,
                   service_address_city: propertyLinkage.address?.city || null,

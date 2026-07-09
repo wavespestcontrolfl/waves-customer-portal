@@ -85,17 +85,23 @@ export function ConfirmEvidence({ payload }) {
   // from the deterministic-flags insert or the flat shape (phone) from the
   // processor's payload-rich insert — render either.
   const sc = p.secondary_contact && typeof p.secondary_contact === "object" ? p.secondary_contact : null;
-  const scValue = sc
-    ? [
-        sc.name_full || [sc.first_name, sc.last_name].filter(Boolean).join(" ") || null,
-        sc.role && sc.role !== "unknown" ? `(${sc.role.replace(/_/g, " ")})` : null,
-        sc.phone || sc.phone_e164 || null,
-        sc.email || null,
-      ].filter(Boolean).join(" · ")
-      + (sc.wants_notifications === true ? " — caller asked they get notifications" : "")
-    : "";
+  const fmtContact = (c) =>
+    [
+      c.name_full || [c.first_name, c.last_name].filter(Boolean).join(" ") || null,
+      c.role && c.role !== "unknown" ? `(${c.role.replace(/_/g, " ")})` : null,
+      c.phone || c.phone_e164 || null,
+      c.email || null,
+    ].filter(Boolean).join(" · ")
+      + (c.wants_notifications === true ? " — caller asked they get notifications" : "");
+  const scValue = sc ? fmtContact(sc) : "";
+  // 1.4.0 multi-party calls: every ADDITIONAL named party after the first —
+  // without these rows the office could only see them in raw JSON.
+  const extraContacts = Array.isArray(p.secondary_contacts)
+    ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
+    : [];
   const rows = [
     scValue && { label: "Second contact", value: scValue },
+    ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

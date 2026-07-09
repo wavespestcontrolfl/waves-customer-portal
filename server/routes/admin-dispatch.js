@@ -6693,8 +6693,8 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.id,
         s.technician_id,
         s.customer_id,
-        COALESCE(s.lat, c.latitude)  AS lat,
-        COALESCE(s.lng, c.longitude) AS lng,
+        COALESCE(s.lat, CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END)  AS lat,
+        COALESCE(s.lng, CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END) AS lng,
         s.status,
         s.service_type,
         s.scheduled_date,
@@ -6840,8 +6840,11 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
-        'c.latitude as cust_lat',
-        'c.longitude as cust_lng'
+        // A visit stamped with its own address must never fall back to the
+        // customer's PRIMARY geocode — a null pin beats navigating to the
+        // wrong (real) house (codex P1).
+        db.raw('CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END as cust_lat'),
+        db.raw('CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END as cust_lng')
       );
 
     if (!row) return res.status(404).json({ error: 'Job not found' });
