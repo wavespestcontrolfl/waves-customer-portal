@@ -1,8 +1,8 @@
 // Lawn Report V2 — customer-facing visual insight layer.
 //
-// Presentational components ONLY: every component is driven by props so they can
-// render from the eventual `/api/reports/:token/data` payload (and from mock data
-// in the dev preview at /report-v2-preview). Lightweight inline SVG/CSS — no
+// Presentational components ONLY: every component is driven by props and renders
+// from the live `/api/reports/:token/data` payload's `reportV2` key (the dev
+// preview page was removed once V2 went live). Lightweight inline SVG/CSS — no
 // charting dependency. Customer-surface warm tokens (NOT the admin monochrome).
 //
 // Honest-copy rules baked in here are presentation-side guards only — the real
@@ -12,6 +12,7 @@
 
 import { useRef, useState, useEffect, createContext, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
+import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -19,15 +20,16 @@ export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (mirror LawnReportViewPage / public estimate surface) ──────
-const TEXT = '#1B2C5B';
-const BODY = '#3F4A65';
-const MUTED = '#6B7280';
-const BORDER = '#E7E2D7';
+const TEXT = CUSTOMER_SURFACE.text;
+const BODY = CUSTOMER_SURFACE.body;
+// muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
+const MUTED = CUSTOMER_SURFACE.muted;
+const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
 // ── Status system ─────────────────────────────────────────────────────────────
-// One vocabulary shared by the overall score, the 5 diagnosis cards, water, and
+// One vocabulary shared by the overall score, the diagnosis cards, water, and
 // mowing. Customer-safe words only — never "diseased", "infestation", etc.
 export const STATUS = {
   strong: { label: 'Strong', color: COLORS.green },
@@ -138,8 +140,10 @@ export function StatusPill({ status, small = false }) {
 }
 
 function Card({ children, style }) {
+  // data-glass is inert without html[data-glass-theme] (set unconditionally on
+  // the live report view) — glass-theme.css supplies all material.
   return (
-    <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -164,7 +168,8 @@ function inchLabel(v) {
 export function LawnSnapshotHero({ snapshot = {} }) {
   const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
   const status = snapshot.status || scoreStatus(overallScore);
-  const nextVisitText = nextVisit
+  const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
+  const nextVisitText = hasNextVisit
     ? (nextVisit.source === 'estimated'
       ? `Expected around ${nextVisit.label}${nextVisit.cadenceWeeks ? ` (about every ${nextVisit.cadenceWeeks} weeks)` : ''}`
       : nextVisit.label)
@@ -176,7 +181,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
         <div style={{ flex: 1, minWidth: 220 }}>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
+          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Lawn Status
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
@@ -196,7 +201,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       {/* Root cause — the connected "what's driving it" read. */}
       {rootCause ? (
         <div style={{ marginTop: 14, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
-          <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What’s driving it</div>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What’s driving it</div>
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{rootCause}</div>
         </div>
       ) : null}
@@ -204,7 +209,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       {/* The "story": what we're watching, what Waves does next, what (if anything) you do. */}
       {watching.length ? (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>Main things we’re watching</div>
+          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>Main things we’re watching</div>
           <ol style={{ margin: 0, padding: '0 0 0 20px', display: 'grid', gap: 5 }}>
             {watching.map((w, i) => (
               <li key={i} style={{ fontSize: 14.5, color: BODY, lineHeight: 1.45 }}>{w}</li>
@@ -253,20 +258,21 @@ function KeyLine({ label, value, dot }) {
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
-        <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
+        <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
         <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
   );
 }
 
-// ── 2. Five-category photo diagnosis ────────────────────────────────────────────
+// ── 2. Photo diagnosis cards ────────────────────────────────────────────────────
 // Field photos as a horizontal strip + ONE consolidated analysis across all photos
 // (never the per-photo vision blurbs). Renders above the Photo Diagnosis scores.
 function SliderArrow({ dir, onClick, disabled }) {
   return (
     <button
       type="button" aria-label={dir === 'prev' ? 'Previous photo' : 'Next photo'} onClick={onClick} disabled={disabled}
+      className="lawn-photo-arrow"
       style={{
         position: 'absolute', top: '42%', [dir === 'prev' ? 'left' : 'right']: 8, transform: 'translateY(-50%)',
         width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(27,44,91,0.82)', color: '#fff',
@@ -528,26 +534,31 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
-        <div style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
       {/* Watering after today, from the product label (or a safe default). */}
       {aftercare && aftercare.watering ? (
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
           {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 12.5, color: MUTED }}>{aftercare.reentry}</div> : null}
         </div>
       ) : null}
-      {/* No irrigation schedule on file → a real CTA (not a text link) explaining the
-          payoff (a precise reading) and deep-linking to the portal to add it. */}
-      {(status === 'unknown' || !Number.isFinite(irrigation)) && irrigationHref ? (
-        <div style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
+      {/* No usable irrigation schedule on file → a real CTA (not a text link)
+          explaining the payoff (a precise reading) and deep-linking to the portal to
+          add it. Keyed off water.scheduleOnFile alone (the server treats a
+          0/absent/disabled schedule as "not on file"), so a finite-zero irrigation
+          with a known rain status still shows the CTA; once a real schedule is
+          added, scheduleOnFile flips true and this hides. */}
+      {!water.scheduleOnFile && irrigationHref ? (
+        <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
           <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
             We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.
           </div>
           <a
+            data-glass-accent=""
             href={irrigationHref}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 7,
@@ -578,7 +589,7 @@ function ConfidenceTag({ confidence }) {
 }
 
 // ── 4. Rain in your area — last 7 days ───────────────────────────────────────────
-export function RainLast7DaysChart({ days = [] }) {
+export function RainLast7DaysChart({ days = [], confidence = null }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const data = (days || []).filter((d) => d && Number.isFinite(Number(d.in)));
@@ -609,6 +620,11 @@ export function RainLast7DaysChart({ days = [] }) {
           );
         })}
       </div>
+      {/* City-collective fallback week (a single-cell model spike was smoothed out) →
+          be honest that this is an area estimate, not a precise per-address reading. */}
+      {confidence === 'low' ? (
+        <div style={{ marginTop: 10 }}><ConfidenceTag confidence="low" /></div>
+      ) : null}
     </Card>
   );
 }
@@ -723,6 +739,10 @@ const TIMELINE_ICON = {
 export function LawnVisitTimeline({ timeline = {} }) {
   const mounted = useMounted();
   const events = timeline && Array.isArray(timeline.events) ? timeline.events.filter(Boolean) : [];
+  // Honor the admin timeline config like the standard layout's
+  // ServiceTimelineSection does — the server still ships populated events[]
+  // when the config disables the timeline; `enabled` carries the gate.
+  if (timeline?.enabled === false) return null;
   if (!events.length) return null;
   return (
     <Card>
@@ -766,7 +786,7 @@ export function LawnVisitTimeline({ timeline = {} }) {
 function ScoreBadge({ score, side }) {
   if (!Number.isFinite(toScore(score))) return null;
   return (
-    <div style={{
+    <div className="lawn-photo-score" style={{
       position: 'absolute', bottom: 10, [side]: 10, zIndex: 3,
       background: 'rgba(27,44,91,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
       fontFamily: FONTS.heading, fontWeight: 800, fontSize: 13, lineHeight: 1,

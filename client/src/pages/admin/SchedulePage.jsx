@@ -113,23 +113,16 @@ const CHIP_OBSERVATIONS_PEST = [
   "Customer concern discussed",
 ];
 const CHIP_OBSERVATIONS_LAWN = [
-  "Pest activity noted",
+  "Lawn stress/dry patches",
   "Standing water found",
   "Irrigation issue",
-  "Rodent signs",
-  "Lawn stress/dry patches",
-  "Fungus visible",
+  "Fungus/disease visible",
   "Weeds spreading",
+  "Lawn pest activity (chinch/armyworm/grubs)",
+  "Thinning/bare areas",
+  "Scalping/mowing damage",
   "Property access issue",
   "Customer concern discussed",
-  "Debris in gutters",
-  "Ant trails observed",
-  "Roach activity (live/dead)",
-  "Spider webs/egg sacs",
-  "Wasp/bee nests found",
-  "Moisture/conducive conditions",
-  "Entry points identified",
-  "Conducive vegetation against structure",
 ];
 const CHIP_OBSERVATIONS_TREE_SHRUB = [
   "Scale insects present",
@@ -155,9 +148,8 @@ const CHIP_RECOMMENDATIONS_PEST = [
 const CHIP_RECOMMENDATIONS_LAWN = [
   "Callback recommended",
   "Irrigation adjustment needed",
+  "Raise mowing height",
   "Follow-up in 2 weeks",
-  "Schedule interior next visit",
-  "Bait station replacement",
   "Customer wants estimate",
 ];
 const CHIP_RECOMMENDATIONS_TREE_SHRUB = [
@@ -383,7 +375,7 @@ const AREAS_BY_SERVICE = {
   lawn: [
     "Front yard",
     "Back yard",
-    "Side yard",
+    "Side yards",
   ],
   universal: [
     "No issues found",
@@ -681,7 +673,7 @@ const btnBase = {
   padding: "0 18px",
   borderRadius: 12,
   border: "none",
-  fontWeight: 700,
+  fontWeight: 500,
   fontSize: 13,
   cursor: "pointer",
   transition: "all 0.2s",
@@ -1403,7 +1395,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     color: "#374151",
     marginBottom: 6,
     display: "block",
-    fontWeight: 700,
+    fontWeight: 500,
   };
   const inputStyle = {
     width: "100%",
@@ -1412,7 +1404,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     background: D.input,
     color: "#111827",
     border: `1px solid ${D.inputBorder}`,
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
     boxSizing: "border-box",
   };
@@ -1425,7 +1417,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
   const sectionTitleStyle = {
     fontSize: 18,
-    fontWeight: 700,
+    fontWeight: 500,
     color: "#111827",
     margin: "0 0 14px",
   };
@@ -1474,14 +1466,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               borderBottom: `1px solid ${D.border}`,
             }}
           >
-            <span style={{ fontSize: 12, fontWeight: 800, color: D.muted }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
               {label || "Additional service"}
             </span>
             {onRemove && (
               <button
                 type="button"
                 onClick={onRemove}
-                className="font-bold"
+                className="font-medium"
                 style={{
                   padding: "4px 10px",
                   borderRadius: 4,
@@ -1522,7 +1514,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     setPickerKey(pickerId);
                     setExpandedCategory(null);
                   }}
-                  className="font-bold"
+                  className="font-medium"
                   style={{
                     padding: "8px 10px",
                     borderRadius: 4,
@@ -1556,7 +1548,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         onClick={() =>
                           setExpandedCategory(isOpen ? null : group.category)
                         }
-                        className="font-bold"
+                        className="font-medium"
                         style={{
                           width: "100%",
                           textAlign: "left",
@@ -1610,7 +1602,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
-                              className="font-bold"
+                              className="font-medium"
                               style={{
                                 padding: "8px 10px",
                                 background: "#fff",
@@ -1639,7 +1631,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <select
                 value={technicianId}
                 onChange={(e) => onField("technicianId", e.target.value)}
-                className="font-bold"
+                className="font-medium"
                 style={inputStyle}
               >
                 <option value="">Unassigned</option>
@@ -1656,7 +1648,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <select
                       value={assignmentScope}
                       onChange={(e) => setAssignmentScope(e.target.value)}
-                      className="font-bold"
+                      className="font-medium"
                       style={inputStyle}
                     >
                       <option value="this_only">This appointment only</option>
@@ -1675,7 +1667,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               type="number"
               value={estimatedDuration}
               onChange={(e) => onField("estimatedDuration", e.target.value)}
-              className="font-bold"
+              className="font-medium"
               style={inputStyle}
             />
           </div>
@@ -1688,7 +1680,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               value={price}
               onChange={(e) => onField("price", e.target.value)}
               placeholder="0.00"
-              className="font-bold"
+              className="font-medium"
               style={inputStyle}
             />
           </div>
@@ -1713,7 +1705,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="font-bold"
         style={{
           height: "100%",
           overflow: "auto",
@@ -1729,12 +1720,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             background: "#fff",
             borderBottom: `1px solid ${D.border}`,
             padding: "14px 20px",
+            // Standalone/home-screen mode: keep the title/buttons below the
+            // iOS status bar (viewport-fit=cover lets content run under it).
+            paddingTop: "calc(14px + env(safe-area-inset-top, 0px))",
           }}
         >
           {" "}
           <div className="min-w-0 flex-1">
             {" "}
-            <div style={{ fontSize: 22, fontWeight: 800, color: "#111827" }}>
+            <div style={{ fontSize: 22, fontWeight: 500, color: "#111827" }}>
               Edit appointment
             </div>{" "}
             <div
@@ -1757,7 +1751,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#ECFDF3",
                   color: "#027A48",
                   fontSize: 12,
-                  fontWeight: 800,
+                  fontWeight: 500,
                 }}
               >
                 {service.status || "Accepted"}
@@ -1790,7 +1784,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={() => handleSave({ takePayment: true })}
               disabled={saving}
-              className="font-bold flex-1 md:flex-initial"
+              className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
                 borderRadius: 4,
@@ -1808,7 +1802,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={() => handleSave()}
               disabled={saving}
-              className="font-bold flex-1 md:flex-initial"
+              className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
                 borderRadius: 4,
@@ -1826,7 +1820,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={onClose}
               disabled={saving}
-              className="font-bold"
+              className="font-medium"
               style={{
                 width: 38,
                 height: 38,
@@ -1866,7 +1860,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
                 color: D.muted,
                 marginBottom: 12,
               }}
@@ -1876,7 +1870,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <div
               style={{
                 fontSize: 22,
-                fontWeight: 800,
+                fontWeight: 500,
                 color: "#111827",
                 marginBottom: 10,
               }}
@@ -1926,7 +1920,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 background: "#fff",
                 color: "#111827",
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
                 cursor: "pointer",
                 marginBottom: 18,
               }}
@@ -1950,7 +1944,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 15, fontWeight: 800 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>
                   Customer notes
                 </div>{" "}
                 <button
@@ -1960,7 +1954,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     background: "transparent",
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -1990,7 +1984,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 15, fontWeight: 800 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>
                   Cards on file
                 </div>{" "}
                 <button
@@ -2000,7 +1994,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     background: "transparent",
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -2024,7 +2018,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </div>{" "}
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>
+              <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 10 }}>
                 Appointment history
               </div>
               {customerLoading && (
@@ -2050,7 +2044,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <div
                       style={{
                         fontSize: 13,
-                        fontWeight: 800,
+                        fontWeight: 500,
                         color: "#111827",
                       }}
                     >
@@ -2091,7 +2085,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#EEF6FF",
                   color: D.teal,
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   marginBottom: 14,
                 }}
               >
@@ -2105,7 +2099,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <input
                     value={service.address || customer.address?.line1 || ""}
                     readOnly
-                    className="font-bold"
+                    className="font-medium"
                     style={{ ...inputStyle, background: "#F9FAFB" }}
                   />{" "}
                 </div>{" "}
@@ -2123,7 +2117,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input
                       value={service.city || customer.address?.city || ""}
                       readOnly
-                      className="font-bold"
+                      className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
                     />{" "}
                   </div>{" "}
@@ -2133,7 +2127,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input
                       value={customer.address?.state || "Florida"}
                       readOnly
-                      className="font-bold"
+                      className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
                     />{" "}
                   </div>{" "}
@@ -2169,7 +2163,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <button
                 type="button"
                 onClick={addServiceLine}
-                className="font-bold"
+                className="font-medium"
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -2180,7 +2174,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#fff",
                   color: "#111827",
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   cursor: "pointer",
                   marginBottom: 12,
                 }}
@@ -2193,6 +2187,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   currentPrice={appointmentTotal}
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
+                  lines={estimateSource.lines}
                   style={{ marginBottom: 14 }}
                 />
               )}
@@ -2211,7 +2206,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   }}
                 >
                   <div>
-                    <div style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: "#166534" }}>
                       Prepaid ${Number(service.prepaidAmount).toFixed(2)}
                       {service.prepaidMethod ? ` · ${String(service.prepaidMethod).replace(/_/g, " ")}` : ""}
                     </div>
@@ -2227,7 +2222,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <button
                     type="button"
                     onClick={() => onMarkPrepaid?.(service)}
-                    className="font-bold"
+                    className="font-medium"
                     style={{
                       padding: "8px 12px",
                       borderRadius: 4,
@@ -2256,14 +2251,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <button
                     type="button"
                     onClick={() => onMarkPrepaid(service)}
-                    className="font-bold"
+                    className="font-medium"
                     style={{
                       padding: "9px 12px",
                       borderRadius: 4,
                       border: `1px solid ${D.inputBorder}`,
                       background: "#fff",
                       fontSize: 13,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       cursor: "pointer",
                     }}
                   >
@@ -2275,14 +2270,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
-                  className="font-bold"
+                  className="font-medium"
                   style={{
                     padding: "9px 12px",
                     borderRadius: 4,
                     border: `1px solid ${D.inputBorder}`,
                     background: "#fff",
                     fontSize: 13,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -2304,7 +2299,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <select
                     value={discountPresetId}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   >
                     {" "}
@@ -2329,7 +2324,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={discountType}
                         onChange={(e) => setDiscountType(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         {" "}
@@ -2352,7 +2347,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           step={discountType === "percentage" ? 1 : 0.01}
                           value={discountAmount}
                           onChange={(e) => setDiscountAmount(e.target.value)}
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2435,7 +2430,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="date"
                     value={form.scheduledDate}
                     onChange={(e) => update("scheduledDate", e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2446,7 +2441,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="time"
                     value={form.windowStart}
                     onChange={(e) => updateWindowStart(e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2457,7 +2452,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="time"
                     value={form.windowEnd}
                     onChange={(e) => update("windowEnd", e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2480,7 +2475,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 />{" "}
                 <div>
                   {" "}
-                  <div style={{ fontSize: 14, fontWeight: 800 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>
                     Repeat
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
@@ -2514,7 +2509,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={recurringFreq}
                         onChange={(e) => setRecurringFreq(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         {EDIT_FREQUENCIES.map((f) => (
@@ -2533,7 +2528,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringOngoing(e.target.value === "never")
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {" "}
@@ -2554,7 +2549,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringCount(parseInt(e.target.value) || 4)
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2579,7 +2574,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringNth(parseInt(e.target.value))
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {EDIT_NTH_OPTIONS.map((o) => (
@@ -2597,7 +2592,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringWeekday(parseInt(e.target.value))
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {EDIT_WEEKDAY_OPTIONS.map((o) => (
@@ -2632,7 +2627,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                               parseInt(e.target.value) || 30,
                             )
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2641,7 +2636,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         <select
                           value={weekendRuleValue}
                           onChange={(e) => updateWeekendRule(e.target.value)}
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           <option value="allow">Allow weekends</option>
@@ -2659,7 +2654,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={weekendRuleValue}
                         onChange={(e) => updateWeekendRule(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         <option value="allow">Allow weekends</option>
@@ -2686,7 +2681,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                             background: "#EEF6FF",
                             borderRadius: 999,
                             color: D.teal,
-                            fontWeight: 800,
+                            fontWeight: 500,
                           }}
                         >
                           {d}
@@ -2716,7 +2711,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 value={form.notes}
                 onChange={(e) => update("notes", e.target.value)}
                 rows={5}
-                className="font-bold"
+                className="font-medium"
                 style={{ ...inputStyle, resize: "vertical" }}
               />{" "}
               <label
@@ -2740,7 +2735,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   style={{ width: 16, height: 16, accentColor: D.green }}
                 />{" "}
                 <span
-                  style={{ fontSize: 13, color: "#111827", fontWeight: 800 }}
+                  style={{ fontSize: 13, color: "#111827", fontWeight: 500 }}
                 >
                   Create invoice on completion
                 </span>{" "}
@@ -2750,7 +2745,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <select
                   value={form.payerId}
                   onChange={(e) => update("payerId", e.target.value)}
-                  className="font-bold"
+                  className="font-medium"
                   style={inputStyle}
                 >
                   <option value="">
@@ -2799,7 +2794,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         value={form.poNumber}
                         onChange={(e) => update("poNumber", e.target.value)}
                         placeholder="Purchase order #"
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       />
                       {needsPo && (
@@ -3028,6 +3023,9 @@ export function ProtocolPanel({ service, onClose }) {
       <div
         style={{
           padding: "16px 20px",
+          // Full-height drawer runs under the iOS status bar in standalone
+          // mode — pad the header below it.
+          paddingTop: "calc(16px + env(safe-area-inset-top, 0px))",
           borderBottom: `1px solid ${D.border}`,
           display: "flex",
           justifyContent: "space-between",
@@ -3037,7 +3035,7 @@ export function ProtocolPanel({ service, onClose }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Service Protocol
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
@@ -3113,7 +3111,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -3163,7 +3161,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           color: D.heading,
                           marginBottom: 6,
                         }}
@@ -3228,7 +3226,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 12,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.teal,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
@@ -3309,7 +3307,7 @@ export function ProtocolPanel({ service, onClose }) {
                                 <div
                                   style={{
                                     fontSize: 12,
-                                    fontWeight: 700,
+                                    fontWeight: 500,
                                     color: D.heading,
                                   }}
                                 >
@@ -3358,7 +3356,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
@@ -3396,7 +3394,7 @@ export function ProtocolPanel({ service, onClose }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 800,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 8,
                       }}
@@ -3427,7 +3425,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 12,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.heading,
                             }}
                           >
@@ -3490,7 +3488,7 @@ export function ProtocolPanel({ service, onClose }) {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 4,
                     }}
@@ -3545,7 +3543,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 10,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.teal,
                               textTransform: "uppercase",
                               letterSpacing: 0.6,
@@ -3557,7 +3555,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 12,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.heading,
                             }}
                           >
@@ -3598,7 +3596,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 11,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           color: D.teal,
                           textTransform: "uppercase",
                           letterSpacing: 0.5,
@@ -3623,7 +3621,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 11,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.muted,
                               textTransform: "uppercase",
                               letterSpacing: 0.5,
@@ -3650,7 +3648,7 @@ export function ProtocolPanel({ service, onClose }) {
                   <div
                     style={{
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 0.6,
@@ -3690,7 +3688,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 12,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.heading,
                               }}
                             >
@@ -3724,7 +3722,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <div
                           style={{
                             fontSize: 11,
-                            fontWeight: 800,
+                            fontWeight: 500,
                             color: D.teal,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
@@ -3749,7 +3747,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.5,
@@ -3783,7 +3781,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 12,
                   }}
@@ -3801,7 +3799,7 @@ export function ProtocolPanel({ service, onClose }) {
                 >
                   {" "}
                   <div
-                    style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}
+                    style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}
                   >
                     {service.serviceType}
                   </div>{" "}
@@ -3833,7 +3831,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {seasonal.length}
                     </div>{" "}
@@ -3860,7 +3858,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {photos.length}
                     </div>{" "}
@@ -3887,7 +3885,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {scripts.length}
                     </div>{" "}
@@ -3910,7 +3908,7 @@ export function ProtocolPanel({ service, onClose }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 6,
                       }}
@@ -3948,7 +3946,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 11,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.muted,
                           textTransform: "uppercase",
                           letterSpacing: 0.5,
@@ -3974,7 +3972,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4021,7 +4019,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <span
                           style={{
                             fontSize: 13,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                           }}
                         >
@@ -4030,7 +4028,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <span
                           style={{
                             fontSize: 10,
-                            fontWeight: 700,
+                            fontWeight: 500,
                             textTransform: "uppercase",
                             padding: "2px 8px",
                             borderRadius: 8,
@@ -4078,7 +4076,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4115,7 +4113,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.teal,
                           marginBottom: 6,
                         }}
@@ -4156,7 +4154,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4193,7 +4191,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.heading,
                           marginBottom: 6,
                         }}
@@ -4235,7 +4233,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4263,7 +4261,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 12,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.teal,
                           marginBottom: 8,
                         }}
@@ -4280,7 +4278,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 11,
-                              fontWeight: 700,
+                              fontWeight: 500,
                               color: D.amber,
                               textTransform: "uppercase",
                               letterSpacing: 0.8,
@@ -4449,7 +4447,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     border: `1px solid ${D.border}`,
     background: D.input,
     color: D.heading,
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
     boxSizing: "border-box",
   };
@@ -4486,7 +4484,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -4501,7 +4499,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               marginBottom: 6,
             }}
@@ -4525,7 +4523,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               marginBottom: 6,
             }}
@@ -4542,7 +4540,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         <div
           style={{
             fontSize: 13,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.teal,
             marginBottom: 10,
           }}
@@ -4587,7 +4585,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {opt.displayDate}
                   </div>{" "}
@@ -4607,7 +4605,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     background: D.teal,
                     color: "#fff",
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     opacity: sending ? 0.6 : 1,
                   }}
                 >
@@ -4633,7 +4631,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
               border: "none",
               color: D.teal,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               padding: 0,
               display: "flex",
@@ -4683,7 +4681,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     background: manualDate ? D.teal : D.border,
                     color: D.heading,
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     opacity: sending ? 0.6 : 1,
                     whiteSpace: "nowrap",
                   }}
@@ -4733,7 +4731,7 @@ const CP_EYEBROW = {
   display: "block",
   fontFamily: CP_FONT,
   fontSize: 11,
-  fontWeight: 600,
+  fontWeight: 500,
   color: CP_M.ink4,
   textTransform: "uppercase",
   letterSpacing: "0.3px",
@@ -4958,13 +4956,13 @@ function TypedFindingsSection({
   const scoreLabels = schema.activity?.techScoreLabels || {};
   const fieldLabelStyle = {
     fontSize: 14,
-    fontWeight: 600,
+    fontWeight: 500,
     color: textColor,
     marginBottom: 6,
   };
   const sectionHeaderStyle = {
     fontSize: 12,
-    fontWeight: 700,
+    fontWeight: 500,
     letterSpacing: "0.06em",
     textTransform: "uppercase",
     color: mutedColor,
@@ -5031,7 +5029,7 @@ function TypedFindingsSection({
                     color: selected ? accentFg : textColor,
                     border: `1px solid ${selected ? accent : hairline}`,
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -5139,7 +5137,7 @@ function TypedFindingsSection({
               color: accent,
               border: `1px solid ${accent}`,
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: aiDrafting ? "wait" : "pointer",
               opacity: aiDrafting ? 0.5 : 1,
             }}
@@ -5176,12 +5174,16 @@ function TypedFindingsSection({
   );
 }
 
+// The four scores the tech reviews/adjusts, matching the customer report's
+// consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
+// assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
+// stay on the assessment row for analytics + folding into stress_damage — but the
+// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weeds" },
   { key: "color_health", label: "Color" },
-  { key: "fungus_control", label: "Fungus" },
-  { key: "thatch_level", label: "Thatch" },
+  { key: "stress_damage", label: "Stress" },
 ];
 
 const LAWN_STRESS_FLAGS = [
@@ -5249,13 +5251,24 @@ function readLawnAssessmentPhoto(file) {
 }
 
 function parseAssessmentScores(row = {}) {
-  return {
-    turf_density: row.turf_density ?? row.turfDensity ?? 0,
-    weed_suppression: row.weed_suppression ?? row.weedSuppression ?? 0,
-    color_health: row.color_health ?? row.colorHealth ?? 0,
-    fungus_control: row.fungus_control ?? row.fungusControl ?? 0,
-    thatch_level: row.thatch_level ?? row.thatchLevel ?? 0,
-  };
+  const turf_density = row.turf_density ?? row.turfDensity ?? 0;
+  const weed_suppression = row.weed_suppression ?? row.weedSuppression ?? 0;
+  const color_health = row.color_health ?? row.colorHealth ?? 0;
+  // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
+  // now corrects stress_damage directly instead of these two.
+  const fungus_control = row.fungus_control ?? row.fungusControl ?? 0;
+  const thatch_level = row.thatch_level ?? row.thatchLevel ?? 0;
+  // Legacy assessments (created before the stress_damage column) have a null
+  // stress_damage. Coercing that to 0 would make a plain re-confirm POST
+  // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
+  // override and persists an artificially low score. Instead derive it exactly the
+  // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
+  // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
+  const rawStress = row.stress_damage ?? row.stressDamage;
+  const stress_damage = rawStress != null
+    ? rawStress
+    : Math.min(Number(fungus_control) || 0, Number(thatch_level) || 0, 95);
+  return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
 function parseStressFlags(value) {
@@ -5312,6 +5325,9 @@ function LawnAssessmentCompletionBlock({
   // documents. Stored on the same shared turf-height state.
   gaugeHeightIn = null,
   onGaugeHeight,
+  // The tech's free-text visit notes (owned by CompletionPanel) — passed through
+  // so the AI photo analysis can factor them in alongside the images.
+  technicianNotes = "",
 }) {
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
@@ -5321,8 +5337,6 @@ function LawnAssessmentCompletionBlock({
     EMPTY_PROTOCOL_FIELD_CHECKS,
   );
   const [confirmedId, setConfirmedId] = useState(null);
-  const [snapshotReview, setSnapshotReview] = useState(null);
-  const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -5348,7 +5362,6 @@ function LawnAssessmentCompletionBlock({
     setStressFlags(EMPTY_LAWN_STRESS_FLAGS);
     setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
     setConfirmedId(null);
-    setSnapshotReview(null);
     setError("");
     onConfirmed?.(null);
     if (!service?.id) return () => { cancelled = true; };
@@ -5374,7 +5387,6 @@ function LawnAssessmentCompletionBlock({
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
           onConfirmed?.(assessment.id);
-          loadSnapshotReview(assessment.id);
         }
       })
       .catch(() => {})
@@ -5386,49 +5398,6 @@ function LawnAssessmentCompletionBlock({
       cancelled = true;
     };
   }, [service?.id]);
-
-  async function loadSnapshotReview(assessmentId) {
-    if (!assessmentId) return;
-    setSnapshotLoading(true);
-    try {
-      const data = await adminFetch(`/admin/lawn-assessment/${assessmentId}/snapshot`);
-      setSnapshotReview(data);
-    } catch {
-      setSnapshotReview(null);
-    } finally {
-      setSnapshotLoading(false);
-    }
-  }
-
-  async function patchSnapshot(snapshotId, body) {
-    if (!snapshotId || !confirmedId) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/snapshots/${snapshotId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(confirmedId);
-    } catch (err) {
-      setError(err.message || "Snapshot update failed");
-      setSnapshotLoading(false);
-    }
-  }
-
-  async function patchRecommendation(recommendationId, body) {
-    if (!recommendationId || !confirmedId) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/recommendations/${recommendationId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(confirmedId);
-    } catch (err) {
-      setError(err.message || "Recommendation update failed");
-      setSnapshotLoading(false);
-    }
-  }
 
   async function addPhotos(event) {
     const files = Array.from(event.target.files || []);
@@ -5473,6 +5442,9 @@ function LawnAssessmentCompletionBlock({
             data: photo.data.split(",")[1],
             mimeType: photo.mimeType || "image/jpeg",
           })),
+          // Extra context for the vision model (see buildVisionPrompt server-side).
+          turfHeightIn: gaugeHeightIn,
+          technicianNotes,
         }),
       });
       if (response.success === false) {
@@ -5517,7 +5489,6 @@ function LawnAssessmentCompletionBlock({
       const assessmentId = response?.assessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
-      await loadSnapshotReview(assessmentId);
     } catch (err) {
       setError(err.message || "Confirm failed");
     } finally {
@@ -5560,7 +5531,7 @@ function LawnAssessmentCompletionBlock({
                 background: D.white,
                 color: D.heading,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
                 opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
               }}
@@ -5592,7 +5563,7 @@ function LawnAssessmentCompletionBlock({
                     background: D.white,
                     color: D.heading,
                     fontSize: 13,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     cursor: disabled || analyzing ? "not-allowed" : "pointer",
                     opacity: disabled || analyzing ? 0.55 : 1,
                   }}
@@ -5601,7 +5572,7 @@ function LawnAssessmentCompletionBlock({
                 </button>
                 <span style={{ fontSize: 12, color: D.muted }}>{gaugePhoto ? 1 : 0}/1</span>
                 {/* Gauge reading (height of cut) — sits with the lawn-length photo it documents. */}
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Gauge reading</span>
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Gauge reading</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -5679,7 +5650,7 @@ function LawnAssessmentCompletionBlock({
               background: D.green,
               color: "#fff",
               fontSize: 13,
-              fontWeight: 800,
+              fontWeight: 500,
               cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
               opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
             }}
@@ -5690,7 +5661,7 @@ function LawnAssessmentCompletionBlock({
       )}
       {hasResult && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = Number(scoreSource?.[metric.key] || 0);
               return (
@@ -5705,7 +5676,7 @@ function LawnAssessmentCompletionBlock({
                     minWidth: 0,
                   }}
                 >
-                  <div style={{ fontSize: 15, fontWeight: 800, color: lawnScoreColor(value), lineHeight: 1.1 }}>
+                  <div style={{ fontSize: 15, fontWeight: 500, color: lawnScoreColor(value), lineHeight: 1.1 }}>
                     {value}%
                   </div>
                   <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>{metric.label}</div>
@@ -5725,7 +5696,7 @@ function LawnAssessmentCompletionBlock({
           </div>
           {!confirmed && (
             <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
                 Stress flags
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -5743,7 +5714,7 @@ function LawnAssessmentCompletionBlock({
                         background: selected ? `${D.amber}18` : D.white,
                         color: selected ? D.amber : D.text,
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                     >
@@ -5757,7 +5728,7 @@ function LawnAssessmentCompletionBlock({
           )}
           {!confirmed && (
             <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
                 Protocol field checks
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
@@ -5828,7 +5799,7 @@ function LawnAssessmentCompletionBlock({
                         background: selected ? `${D.green}14` : D.white,
                         color: selected ? D.green : D.text,
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                     >
@@ -5862,7 +5833,7 @@ function LawnAssessmentCompletionBlock({
                   background: `${D.green}14`,
                   color: D.green,
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   textAlign: "center",
                 }}
               >
@@ -5881,7 +5852,7 @@ function LawnAssessmentCompletionBlock({
                   background: D.green,
                   color: "#fff",
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   cursor: disabled || confirming ? "not-allowed" : "pointer",
                   opacity: disabled || confirming ? 0.55 : 1,
                 }}
@@ -5897,7 +5868,6 @@ function LawnAssessmentCompletionBlock({
                 setTechScores(null);
                 setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
                 setConfirmedId(null);
-                setSnapshotReview(null);
                 setError("");
                 onConfirmed?.(null);
               }}
@@ -5910,7 +5880,7 @@ function LawnAssessmentCompletionBlock({
                 background: D.white,
                 color: D.text,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
                 opacity: disabled || analyzing || confirming ? 0.55 : 1,
               }}
@@ -5920,96 +5890,10 @@ function LawnAssessmentCompletionBlock({
           </div>
         </>
       )}
-      {(snapshotLoading || snapshotReview?.snapshot) && (
-        <ScheduleLawnSnapshotReview
-          review={snapshotReview}
-          loading={snapshotLoading}
-          onSnapshotAction={patchSnapshot}
-          onRecommendationAction={patchRecommendation}
-        />
-      )}
       {error && <div style={{ fontSize: 12, color: D.red, lineHeight: 1.45 }}>{error}</div>}
     </div>
   );
 }
-
-function ScheduleLawnSnapshotReview({ review, loading, onSnapshotAction, onRecommendationAction }) {
-  const snapshot = review?.snapshot;
-  const cards = review?.recommendationCards || [];
-  if (loading && !snapshot) {
-    return <div style={{ fontSize: 12, color: D.muted }}>Loading snapshot review...</div>;
-  }
-  if (!snapshot) return null;
-
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: D.white }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>Customer snapshot</div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-            {snapshot.status} · {snapshot.customer_visible ? "Customer visible" : "Internal only"}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { approve: true })} style={miniOutlineButton}>
-            Approve
-          </button>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { customer_visible: true })} style={miniOutlineButton}>
-            Show
-          </button>
-          <button type="button" onClick={() => onSnapshotAction(snapshot.id, { hide: true })} style={{ ...miniOutlineButton, color: D.red }}>
-            Hide
-          </button>
-        </div>
-      </div>
-      <div style={{ fontSize: 12, color: D.text, lineHeight: 1.45, marginTop: 8 }}>
-        {snapshot.summary_customer}
-      </div>
-      {cards.length > 0 && (
-        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-          {cards.map((card) => (
-            <div key={card.id} style={{ borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>{card.title}</div>
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                {card.status} · {card.customer_visible ? "Customer visible" : "Internal only"}
-              </div>
-              {card.performance && (
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-                  Shown {card.performance.counts?.recommendation_shown || card.performance.counts?.shown || 0}
-                  {" · "}Clicked {card.performance.counts?.recommendation_clicked || card.performance.counts?.clicked || 0}
-                  {" · "}CTR {Number.isFinite(Number(card.performance.clickThroughRate)) ? `${Math.round(Number(card.performance.clickThroughRate) * 100)}%` : "—"}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { approve: true })} style={miniOutlineButton}>
-                  Approve
-                </button>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { customer_visible: true })} style={miniOutlineButton}>
-                  Show
-                </button>
-                <button type="button" onClick={() => onRecommendationAction(card.id, { dismiss: true })} style={{ ...miniOutlineButton, color: D.red }}>
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const miniOutlineButton = {
-  height: 28,
-  padding: "0 8px",
-  borderRadius: 6,
-  border: `1px solid ${D.border}`,
-  background: D.white,
-  color: D.text,
-  fontSize: 11,
-  fontWeight: 800,
-  cursor: "pointer",
-};
 
 const scoreButtonStyle = {
   width: 24,
@@ -6019,7 +5903,7 @@ const scoreButtonStyle = {
   background: D.white,
   color: D.heading,
   fontSize: 14,
-  fontWeight: 800,
+  fontWeight: 500,
   lineHeight: 1,
   cursor: "pointer",
 };
@@ -6487,7 +6371,7 @@ function TreeShrubCloseoutBlock({
           ))}
         </select>
       </div>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 500 }}>
         <input
           type="checkbox"
           checked={!!value.iracFracLogged}
@@ -6517,7 +6401,7 @@ function TreeShrubCloseoutBlock({
         placeholder="Customer note"
         style={textarea}
       />
-      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 500 }}>
         <input
           type="checkbox"
           checked={!!value.injectionPerformed || productFlags.hasInjectionProduct}
@@ -6659,6 +6543,238 @@ function readVideoDurationMs(file) {
 
 // Tech capture — record a clip (native camera) → tag the action → upload direct to
 // S3 (presigned PUT) → it lands in the recap. All optional; flag-gated, pest only.
+
+// ── Zone marking (satellite coverage PR 2, flag: zone-marking-v1) ────────────
+// The tech marks WHERE each chipped area actually is on the property's
+// satellite image. Shapes post as completion `zoneShapes` and persist into
+// property_zones.geometry_image (the PR 1 write path), which lights up the
+// satellite coverage map on the customer report. Coordinates are normalized
+// 0-1 against the 640x340 image; circle radius normalizes against the SHORT
+// side (r = px/340) to match the server contract. Existing marks preload for
+// confirm/adjust, but only TOUCHED labels resubmit — resubmitting an
+// untouched mark would restamp its drift `ref` with today's image params
+// even though the shape was drawn against older imagery.
+const ZONE_MARK_DEFAULT_R = 0.07;
+const ZONE_MARK_MIN_RECT = 0.02;
+
+function normalizeZoneMarkLabel(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+export function ZoneMarkingStep({
+  map,
+  areas,
+  marks,
+  onSetMark,
+  onClearMark,
+  dark = false,
+  disabled = false,
+}) {
+  const [activeLabel, setActiveLabel] = useState(null);
+  const [tool, setTool] = useState("circle");
+  const [rectDraft, setRectDraft] = useState(null);
+  const svgRef = useRef(null);
+
+  // keep the active row valid as chips toggle
+  useEffect(() => {
+    if (!areas.length) { setActiveLabel(null); return; }
+    if (!activeLabel || !areas.includes(activeLabel)) setActiveLabel(areas[0]);
+  }, [areas, activeLabel]);
+
+  if (!map?.available || !map.image?.url || !areas.length) return null;
+
+  const ink = dark ? "#e2e8f0" : "#1a1a1a";
+  const mutedInk = dark ? "#94a3b8" : "#6b6b6b";
+  const cardBg = dark ? "#1e293b" : "#ffffff";
+  const hairline = dark ? "#334155" : "#e4e4e4";
+  const accent = "#0ea5e9";
+
+  const svgPointFromEvent = (evt) => {
+    const el = svgRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const commitCircle = (pt) => {
+    onSetMark(activeLabel, { type: "circle", cx: pt.x, cy: pt.y, r: ZONE_MARK_DEFAULT_R });
+  };
+
+  const handlePointerDown = (evt) => {
+    if (disabled || !activeLabel) return;
+    const pt = svgPointFromEvent(evt);
+    if (!pt) return;
+    if (tool === "rect") {
+      evt.currentTarget.setPointerCapture?.(evt.pointerId);
+      setRectDraft({ x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y });
+    }
+  };
+  const handlePointerMove = (evt) => {
+    if (!rectDraft) return;
+    const pt = svgPointFromEvent(evt);
+    if (!pt) return;
+    setRectDraft((prev) => (prev ? { ...prev, x1: pt.x, y1: pt.y } : prev));
+  };
+  const handlePointerUp = (evt) => {
+    if (disabled || !activeLabel) { setRectDraft(null); return; }
+    if (tool === "rect" && rectDraft) {
+      // Close the box at the RELEASE point, not the last pointermove — a fast
+      // drag can release with zero/stale move events, and committing the
+      // draft alone would shrink the box to the down point and drop the mark.
+      const end = svgPointFromEvent(evt) || { x: rectDraft.x1, y: rectDraft.y1 };
+      const x = Math.min(rectDraft.x0, end.x);
+      const y = Math.min(rectDraft.y0, end.y);
+      const w = Math.abs(end.x - rectDraft.x0);
+      const h = Math.abs(end.y - rectDraft.y0);
+      setRectDraft(null);
+      if (w >= ZONE_MARK_MIN_RECT && h >= ZONE_MARK_MIN_RECT) {
+        onSetMark(activeLabel, { type: "rect", x, y, w, h });
+      }
+      return;
+    }
+    const pt = svgPointFromEvent(evt);
+    if (pt) commitCircle(pt);
+  };
+
+  const resizeActiveCircle = (delta) => {
+    // disabled must freeze EVERY mutating control, not just the pointer
+    // handlers — an edit landing mid-submit is not in the payload already
+    // sent, so it would silently vanish behind a successful save
+    if (disabled) return;
+    const mark = marks[activeLabel];
+    if (!mark || mark.type !== "circle") return;
+    const r = Math.min(0.4, Math.max(0.02, Number(mark.r) + delta));
+    onSetMark(activeLabel, { ...mark, r });
+  };
+
+  const markedCount = areas.filter((a) => marks[a]).length;
+  const activeMark = activeLabel ? marks[activeLabel] : null;
+
+  const renderMark = (label, mark, isActive) => {
+    const stroke = isActive ? accent : "rgba(255,255,255,0.9)";
+    const fill = isActive ? "rgba(14,165,233,0.25)" : "rgba(255,255,255,0.16)";
+    const letter = String(areas.indexOf(label) + 1);
+    if (mark.type === "rect") {
+      const cx = (mark.x + mark.w / 2) * 640;
+      const cy = (mark.y + mark.h / 2) * 340;
+      return (
+        <g key={label}>
+          <rect x={mark.x * 640} y={mark.y * 340} width={mark.w * 640} height={mark.h * 340} rx={8} fill={fill} stroke={stroke} strokeWidth={2.5} />
+          <circle cx={cx} cy={cy} r={11} fill="rgba(2,20,35,0.75)" />
+          <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">{letter}</text>
+        </g>
+      );
+    }
+    const cx = mark.cx * 640;
+    const cy = mark.cy * 340;
+    return (
+      <g key={label}>
+        <circle cx={cx} cy={cy} r={mark.r * 340} fill={fill} stroke={stroke} strokeWidth={2.5} />
+        <circle cx={cx} cy={cy} r={11} fill="rgba(2,20,35,0.75)" />
+        <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">{letter}</text>
+      </g>
+    );
+  };
+
+  return (
+    <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>Mark treated areas on the map</div>
+        <div style={{ fontSize: 11, color: markedCount === areas.length ? "#10b981" : mutedInk, fontWeight: 500 }}>
+          {markedCount} of {areas.length} marked
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: mutedInk, margin: "2px 0 8px" }}>
+        Pick an area, then tap the photo to drop a circle (or switch to box and drag).
+        Mark every area to unlock the satellite map on the customer report.
+      </div>
+      {markedCount > 0 && markedCount < areas.length ? (
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 500, margin: "0 0 8px" }}>
+          Marks only save when every area is marked — finish the remaining {areas.length - markedCount} or they will be discarded.
+        </div>
+      ) : null}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+        {areas.map((label) => {
+          const isActive = label === activeLabel;
+          const isMarked = Boolean(marks[label]);
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={() => setActiveLabel(label)}
+              style={{
+                padding: "5px 12px",
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: "pointer",
+                background: isActive ? accent : "transparent",
+                color: isActive ? "#fff" : ink,
+                border: `1px solid ${isActive ? accent : hairline}`,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: isMarked ? "#10b981" : (isActive ? "rgba(255,255,255,0.6)" : hairline) }} />
+              {areas.indexOf(label) + 1}. {label}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${hairline}` }}>
+        <svg
+          ref={svgRef}
+          viewBox="0 0 640 340"
+          style={{ display: "block", width: "100%", touchAction: "none", cursor: disabled ? "default" : "crosshair" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+        >
+          <image href={map.image.url} x="0" y="0" width="640" height="340" preserveAspectRatio="xMidYMid slice" />
+          {areas.filter((label) => marks[label] && label !== activeLabel).map((label) => renderMark(label, marks[label], false))}
+          {activeMark ? renderMark(activeLabel, activeMark, true) : null}
+          {rectDraft ? (
+            <rect
+              x={Math.min(rectDraft.x0, rectDraft.x1) * 640}
+              y={Math.min(rectDraft.y0, rectDraft.y1) * 340}
+              width={Math.abs(rectDraft.x1 - rectDraft.x0) * 640}
+              height={Math.abs(rectDraft.y1 - rectDraft.y0) * 340}
+              fill="rgba(14,165,233,0.2)"
+              stroke="#38bdf8"
+              strokeWidth={2}
+              strokeDasharray="6 4"
+            />
+          ) : null}
+        </svg>
+        {map.image.attributionText ? (
+          <div style={{ position: "absolute", right: 6, bottom: 4, fontSize: 10, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.9)", pointerEvents: "none" }}>
+            {map.image.attributionText}
+          </div>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => setTool("circle")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", background: tool === "circle" ? accent : "transparent", color: tool === "circle" ? "#fff" : ink, border: `1px solid ${tool === "circle" ? accent : hairline}` }}>Circle</button>
+        <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
+        {activeMark && activeMark.type === "circle" ? (
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <button type="button" disabled={disabled} onClick={() => resizeActiveCircle(-0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1 }}>-</button>
+            <button type="button" disabled={disabled} onClick={() => resizeActiveCircle(0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1 }}>+</button>
+            <span style={{ fontSize: 11, color: mutedInk }}>size</span>
+          </span>
+        ) : null}
+        {activeMark ? (
+          <button type="button" disabled={disabled} onClick={() => { if (!disabled) onClearMark(activeLabel); }} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}>Remove mark</button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function RecapCapture({ serviceId }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
@@ -6708,11 +6824,11 @@ function RecapCapture({ serviceId }) {
   };
 
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
-  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 700, cursor: "pointer", textAlign: "left" };
+  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 500, cursor: "pointer", textAlign: "left" };
 
   return (
     <div style={wrap}>
-      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Recap clips</span>
         <span style={{ fontSize: 12, color: D.muted }}>{items.length ? `${items.length} captured` : "optional"}</span>
       </div>
@@ -6726,10 +6842,10 @@ function RecapCapture({ serviceId }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
               <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
                 <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
-              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
+              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 500 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
               <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: D.muted, fontSize: 18, cursor: "pointer" }}>×</button>
             </div>
           ))}
@@ -6737,7 +6853,7 @@ function RecapCapture({ serviceId }) {
       )}
 
       {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
-      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 500, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
         {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
       </button>
 
@@ -6745,7 +6861,7 @@ function RecapCapture({ serviceId }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
             <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 800, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
+            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
@@ -6816,8 +6932,8 @@ function PestRecapCard({ serviceId }) {
 
   const s = state.status;
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
-  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
-  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 700, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
+  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
+  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 500, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
 
   return (
     <div style={wrap}>
@@ -6844,12 +6960,12 @@ function PestRecapCard({ serviceId }) {
           {s === "approved" ? (
             state.sent ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 700 }}>Approved &amp; sent to the customer</span>
+                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 500 }}>Approved &amp; sent to the customer</span>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 700, minWidth: 130 }}>Approved — the text didn’t send</span>
+                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 500, minWidth: 130 }}>Approved — the text didn’t send</span>
                 <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
@@ -6960,8 +7076,84 @@ export function CompletionPanel({
     defaultTreeShrubCloseout(service),
   );
   const [areasServiced, setAreasServiced] = useState([]);
+  // Zone marking (satellite coverage, flag zone-marking-v1). zoneMarks keys
+  // by chip label and holds THIS session's edits (null = tech cleared it);
+  // zonePreloads keys by normalized label and holds the property's existing
+  // geometry_image shapes for confirm/adjust. Only labels in zoneDirtyRef
+  // resubmit — resubmitting an untouched preload would restamp its drift
+  // `ref` with today's image params.
+  const { enabled: zoneMarkingFlag } = useFeatureFlagReady("zone-marking-v1");
+  const [zoneMarks, setZoneMarks] = useState({});
+  const [zonePreloads, setZonePreloads] = useState({});
+  const [propertyMap, setPropertyMap] = useState(null);
+  // Image params restored from a saved draft (checkout detour) — lets submit
+  // stamp the drift ref for marks drawn pre-detour even if the live
+  // /property-map refetch hasn't resolved yet.
+  const [zoneMapImageFallback, setZoneMapImageFallback] = useState(null);
+  const zoneDirtyRef = useRef(new Set());
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
+
+  // Satellite basemap + the property's existing zone marks. Preloads land in
+  // zonePreloads (normalized-label keyed) so visit N+1 is confirm/adjust,
+  // never a redraw — and never dirty unless the tech actually touches one.
+  useEffect(() => {
+    if (!zoneMarkingFlag || !service?.id) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/dispatch/${service.id}/property-map`)
+      .then((res) => {
+        if (cancelled) return;
+        setPropertyMap(res || null);
+        if (!res?.available) return;
+        const preload = {};
+        const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
+        (res.zones || []).forEach((zone) => {
+          const shape = zone.geometryImage;
+          if (!shape || typeof shape !== "object") return;
+          if (shape.type === "rect" || shape.type === "circle") {
+            preload[normalizeZoneMarkLabel(zone.label)] = shape;
+          } else if (shape.type == null && [shape.x, shape.y, shape.w, shape.h].every(norm01)) {
+            // The report renderer treats a typeless {x,y,w,h} as a rect
+            // (satellite-treatment-map normalizeRectGeometry) — preload those
+            // legacy marks too, or the step would show them as unmarked and
+            // invite an accidental overwrite. Normalized coords only; the
+            // renderer's pixel-space branch has no meaning on this 0-1 canvas.
+            preload[normalizeZoneMarkLabel(zone.label)] = { ...shape, type: "rect" };
+          }
+        });
+        setZonePreloads(preload);
+      })
+      .catch(() => { if (!cancelled) setPropertyMap(null); });
+    return () => { cancelled = true; };
+  }, [zoneMarkingFlag, service?.id]);
+
+  // What the marking step renders: this session's edit if present (null =
+  // cleared), else the property's preloaded shape.
+  const zoneSpatialAreas = zoneMarkingFlag
+    ? areasServiced.filter((a) => !AREAS_BY_SERVICE.universal.includes(a))
+    : [];
+  const zoneMarksForDisplay = {};
+  zoneSpatialAreas.forEach((label) => {
+    const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
+    const mark = local !== undefined ? local : zonePreloads[normalizeZoneMarkLabel(label)];
+    if (mark) zoneMarksForDisplay[label] = mark;
+  });
+  const setZoneMark = (label, shape) => {
+    zoneDirtyRef.current.add(label);
+    setZoneMarks((prev) => ({ ...prev, [label]: shape }));
+  };
+  const clearZoneMark = (label) => {
+    // Removing a mark drawn THIS session is local-only. Removing a PRELOADED
+    // mark must stay dirty so submit sends a clear tombstone — otherwise the
+    // step shows the area unmarked while property_zones.geometry_image keeps
+    // the stale shape and the report goes on painting it.
+    if (zonePreloads[normalizeZoneMarkLabel(label)]) {
+      zoneDirtyRef.current.add(label);
+    } else {
+      zoneDirtyRef.current.delete(label);
+    }
+    setZoneMarks((prev) => ({ ...prev, [label]: null }));
+  };
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -7097,11 +7289,9 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
-  const [protocolTaskStatus, setProtocolTaskStatus] = useState({});
-  const [protocolTreatedSqft, setProtocolTreatedSqft] = useState("");
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
-  const [skippedProtocolProducts, setSkippedProtocolProducts] = useState({});
+  const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
   const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
   const [officeApprovalNote, setOfficeApprovalNote] = useState("");
   const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
@@ -7383,41 +7573,24 @@ export function CompletionPanel({
       .filter((sub) => sub.originalProductId)
       .map((sub) => [String(sub.originalProductId), sub]),
   );
-  const requiredProtocolTasks =
-    treatmentPlanStructuredProtocol?.window?.requiredTasks || [];
-  const missingProtocolTasks = requiredProtocolTasks.filter(
-    (task) => !protocolTaskStatus[task],
-  );
-  const protocolProductKey = (product) =>
-    product?.id || product?.productId || product?.productName;
-  const defaultProtocolProducts =
-    treatmentPlanStructuredProtocol?.products?.filter(
-      (product) => product.defaultInPlan,
-    ) || [];
-  const undispositionedDefaultProtocolProducts = defaultProtocolProducts.filter(
-    (product) => {
-      const key = protocolProductKey(product);
-      const substitution = product.productId
-        ? substitutionByOriginalProductId.get(String(product.productId))
-        : null;
-      const selected = product.productId
-        ? selectedProductIds.has(String(product.productId))
-          || (substitution?.substituteProductId && selectedProductIds.has(String(substitution.substituteProductId)))
-        : false;
-      return !selected && !skippedProtocolProducts[key];
-    },
-  );
+  // Protocol checklist / default-product disposition were removed with the
+  // read-only protocol redesign — they no longer gate completion.
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit,
   );
+  // The protocol is now a read-only reference (mixing ratios), so the checklist
+  // and default-product-disposition no longer gate completion. Real safeguards
+  // stay: a WaveGuard lawn completion must record at least one applied product
+  // (an empty list would write a protocol completion with no actuals or
+  // inventory deductions), every applied product needs actual amounts, and
+  // inventory blocks still hold.
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
-    (missingProtocolTasks.length > 0 ||
-      undispositionedDefaultProtocolProducts.length > 0 ||
+    (selectedProducts.length === 0 ||
       selectedProductsMissingActualAmount.length > 0 ||
       treatmentPlanInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
@@ -7516,13 +7689,11 @@ export function CompletionPanel({
     : tankCleanoutCompletionBlocked
       ? "Tank Cleanout Required"
       : protocolActualsCompletionBlocked
-        ? missingProtocolTasks.length
-          ? "Protocol Checklist Required"
+        ? !selectedProducts.length
+          ? "Products Applied Required"
           : selectedProductsMissingActualAmount.length
             ? "Product Actuals Required"
-            : treatmentPlanInventoryBlocks.length
-              ? "Inventory Blocked"
-              : "Product Disposition Required"
+            : "Inventory Blocked"
         : blackoutCompletionBlocked
           ? canApproveOfficeExceptions
             ? "Office Approval Required"
@@ -7724,26 +7895,20 @@ export function CompletionPanel({
           setEquipmentSystemId(selectedCalibration.equipment_system_id);
           setCalibrationId(selectedCalibration.id || "");
         }
-        const requiredTasks =
-          data?.plan?.closeout?.requiredProtocolTasks ||
-          data?.plan?.protocol?.structured?.window?.requiredTasks ||
-          [];
-        setProtocolTaskStatus((prev) => {
-          const next = { ...prev };
-          requiredTasks.forEach((task) => {
-            if (!(task in next)) next[task] = false;
-          });
-          return next;
-        });
-        if (!protocolTreatedSqft && data?.plan?.mixCalculator?.lawnSqft) {
-          setProtocolTreatedSqft(String(data.plan.mixCalculator.lawnSqft));
-        }
-        if (!protocolCarrierGalPer1000 && data?.plan?.mixCalculator?.carrierGalPer1000) {
-          setProtocolCarrierGalPer1000(String(data.plan.mixCalculator.carrierGalPer1000));
-        }
+        // The carrier feeds the read-only mix box, so it must track every plan
+        // fetch — equipment/calibration changes refetch with a new carrier. The
+        // old set-once-when-empty latch predates removing the carrier input;
+        // with no input left to preserve, latching would show mix amounts for
+        // the previous equipment after a calibration switch.
+        setProtocolCarrierGalPer1000(
+          data?.plan?.mixCalculator?.carrierGalPer1000
+            ? String(data.plan.mixCalculator.carrierGalPer1000)
+            : "",
+        );
         const baseItems = data?.plan?.protocol?.base || [];
         const conditionalItems = data?.plan?.protocol?.conditional || [];
         const mixItems = data?.plan?.mixCalculator?.items || [];
+        setTreatmentPlanMixItems(mixItems);
         setTreatmentPlanSubstitutions(
           mixItems.map((item) => item?.substitution).filter(Boolean),
         );
@@ -7849,6 +8014,22 @@ export function CompletionPanel({
         customerRecap,
         recapSource,
         areasServiced,
+        // Zone marks survive the billing-409 checkout detour like everything
+        // else; the dirty list rides along so restore keeps resubmit intent.
+        // The image params the marks were drawn against ride too (center/zoom
+        // /size only — never the live-display-only image URL), so a restored
+        // draft can submit with the CORRECT drift ref even before the
+        // /property-map refetch resolves.
+        zoneMarks,
+        zoneDirty: [...zoneDirtyRef.current],
+        zoneMapImage: propertyMap?.available && propertyMap.image
+          ? {
+            center: propertyMap.image.center || null,
+            zoom: propertyMap.image.zoom,
+            width: propertyMap.image.width || 640,
+            height: propertyMap.image.height || 340,
+          }
+          : null,
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
@@ -7909,6 +8090,7 @@ export function CompletionPanel({
     customerRecap,
     recapSource,
     areasServiced,
+    zoneMarks,
     customerInteraction,
     customerConcern,
     selectedProtocolActionLabels,
@@ -7967,7 +8149,25 @@ export function CompletionPanel({
     );
     setRecapStaleAfterEdit(false);
     setAreasServiced(
-      Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : [],
+      // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
+      // saved before the rename restores as the currently-rendered option (and
+      // dedupe, so re-selecting can't submit both strings). Other values pass through.
+      Array.isArray(savedDraft.areasServiced)
+        ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
+        : [],
+    );
+    setZoneMarks(
+      savedDraft.zoneMarks && typeof savedDraft.zoneMarks === "object"
+        ? savedDraft.zoneMarks
+        : {},
+    );
+    zoneDirtyRef.current = new Set(
+      Array.isArray(savedDraft.zoneDirty) ? savedDraft.zoneDirty : [],
+    );
+    setZoneMapImageFallback(
+      savedDraft.zoneMapImage && typeof savedDraft.zoneMapImage === "object"
+        ? savedDraft.zoneMapImage
+        : null,
     );
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -8430,7 +8630,16 @@ export function CompletionPanel({
         applicationArea: "",
         areaValue: "",
         areaUnit: areaRequirement?.unit || "",
-        targets: [],
+        // Prefill the targets from the manufacturer label (products_catalog
+        // target_pests) so the tech starts from what the product is labeled to
+        // control and trims rather than typing from scratch. Editable as before.
+        // Protocol-added products (addProduct(action.product)) are serialized
+        // without target_pests, so fall back to the loaded catalog row by id.
+        targets: normalizeLabelTargets(
+          product.target_pests
+            ?? product.targetPests
+            ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
+        ),
       },
     ]);
     setProductSearch("");
@@ -8486,28 +8695,6 @@ export function CompletionPanel({
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
-  }
-  function toggleProtocolTask(task) {
-    setProtocolTaskStatus((prev) => ({ ...prev, [task]: !prev[task] }));
-  }
-  function updateSkippedProtocolProduct(product, skipped, reason = "") {
-    const key = product.id || product.productId || product.productName;
-    if (!key) return;
-    setSkippedProtocolProducts((prev) => {
-      const next = { ...prev };
-      if (!skipped) {
-        delete next[key];
-        return next;
-      }
-      next[key] = {
-        protocolProductId: product.id || null,
-        productId: product.productId || null,
-        productName: product.productName || product.protocolProductName || "Protocol product",
-        role: product.role || null,
-        reason: reason || next[key]?.reason || "Not applied",
-      };
-      return next;
-    });
   }
   function handleEquipmentSelect(value) {
     setEquipmentSystemId(value);
@@ -8731,28 +8918,9 @@ export function CompletionPanel({
         }
       }
     }
-    if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
-      missingProtocolTasks.length
-    ) {
+    if (calibrationRequired && !isIncompleteVisit && !selectedProducts.length) {
       alert(
-        `Complete the required protocol checklist before closeout: ${missingProtocolTasks
-          .map((task) => task.replace(/_/g, " "))
-          .join(", ")}.`,
-      );
-      return;
-    }
-    if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
-      undispositionedDefaultProtocolProducts.length
-    ) {
-      alert(
-        `Mark each default protocol product as applied or skipped before closeout: ${undispositionedDefaultProtocolProducts
-          .map((product) => product.productName)
-          .filter(Boolean)
-          .join(", ")}.`,
+        "Add the products applied on this visit before closeout — a WaveGuard lawn completion records product actuals.",
       );
       return;
     }
@@ -8896,23 +9064,12 @@ export function CompletionPanel({
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
-        lawnProtocolCompletion:
-          calibrationRequired && treatmentPlanStructuredProtocol
-            ? {
-                checklist: requiredProtocolTasks.map((task) => ({
-                  key: task,
-                  label: task.replace(/_/g, " "),
-                  completed: !!protocolTaskStatus[task],
-                })),
-                treatedSqft: protocolTreatedSqft
-                  ? Number(protocolTreatedSqft)
-                  : null,
-                carrierGalPer1000: protocolCarrierGalPer1000
-                  ? Number(protocolCarrierGalPer1000)
-                  : null,
-                skippedProducts: Object.values(skippedProtocolProducts),
-              }
-            : null,
+        // The protocol block is now read-only (mixing-ratio reference), so the tech
+        // no longer submits a checklist / treated-sqft / disposition. The server
+        // still records a protocol completion for WaveGuard lawn visits, deriving
+        // treated area + carrier from the plan; what was actually applied comes
+        // through the products list.
+        lawnProtocolCompletion: null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,
@@ -8934,9 +9091,54 @@ export function CompletionPanel({
         reviewScheduledFor: oneTimeRecapOnly
           ? null
           : selectedReviewScheduledFor,
-        areasTreated: areasServiced,
         timeOnSite: elapsed,
+        // Single source of truth for the treated areas. The server reads
+        // areasServiced (falling back to a legacy areasTreated only if present),
+        // so we no longer post the same list under both keys.
         areasServiced,
+        // Satellite zone marks: only labels the tech TOUCHED this session,
+        // stamped with the image params they were drawn against (drift ref).
+        // Shape WRITES post only when EVERY selected spatial area is marked —
+        // the report switches to satellite mode the moment any zone carries
+        // geometry_image and drops schematic-only zones, so a partial post
+        // would publish a coverage map missing treated areas. CLEARS (tech
+        // removed a preloaded mark) always post: suppressing one would keep
+        // painting a mark the tech just said is wrong. Image params fall back
+        // to the draft-saved copy so a restore after the checkout detour can
+        // submit before the /property-map refetch resolves.
+        ...(zoneMarkingFlag
+          ? (() => {
+            const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
+            if (!image) return {};
+            const ref = {
+              lat: image.center?.lat,
+              lng: image.center?.lng,
+              zoom: image.zoom,
+              width: image.width || 640,
+              height: image.height || 340,
+              capturedAt: new Date().toISOString(),
+            };
+            const effectiveMark = (label) => {
+              const local = Object.prototype.hasOwnProperty.call(zoneMarks, label) ? zoneMarks[label] : undefined;
+              return local !== undefined ? local : (zonePreloads[normalizeZoneMarkLabel(label)] || null);
+            };
+            const allMarked = zoneSpatialAreas.length > 0
+              && zoneSpatialAreas.every((label) => effectiveMark(label));
+            const dirty = [...zoneDirtyRef.current].filter((label) => areasServiced.includes(label));
+            const writes = allMarked
+              ? dirty
+                .filter((label) => zoneMarks[label])
+                .map((label) => ({ areaLabel: label, shape: { ...zoneMarks[label], ref } }))
+              : [];
+            const clears = dirty
+              .filter((label) => Object.prototype.hasOwnProperty.call(zoneMarks, label)
+                && zoneMarks[label] == null
+                && zonePreloads[normalizeZoneMarkLabel(label)])
+              .map((label) => ({ areaLabel: label, clear: true }));
+            const shapes = [...writes, ...clears];
+            return shapes.length ? { zoneShapes: shapes } : {};
+          })()
+          : {}),
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
@@ -9381,7 +9583,7 @@ export function CompletionPanel({
       display: "block",
       fontFamily: font,
       fontSize: 11,
-      fontWeight: 600,
+      fontWeight: 500,
       color: M.ink4,
       textTransform: "uppercase",
       letterSpacing: "0.3px",
@@ -9424,7 +9626,7 @@ export function CompletionPanel({
       color: M.actionFg,
       fontFamily: font,
       fontSize: 14,
-      fontWeight: 600,
+      fontWeight: 500,
       textTransform: "uppercase",
       letterSpacing: "0.3px",
       cursor: "pointer",
@@ -9541,7 +9743,7 @@ export function CompletionPanel({
                 style={{
                   fontFamily: font,
                   fontSize: 20,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: M.ink,
                 }}
               >
@@ -9701,7 +9903,7 @@ export function CompletionPanel({
                 style={{
                   fontFamily: font,
                   fontSize: 17,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: M.ink,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
@@ -9724,7 +9926,7 @@ export function CompletionPanel({
                   color: M.ink,
                   fontFamily: font,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                 }}
               >
@@ -9760,7 +9962,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                   }}
                 >
@@ -9800,7 +10002,7 @@ export function CompletionPanel({
                     display: "block",
                     fontFamily: font,
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                     marginBottom: 4,
                     textDecoration: "underline",
@@ -9814,7 +10016,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                     marginBottom: 4,
                   }}
@@ -9866,7 +10068,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: mono,
                     fontSize: 28,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: M.ink,
                     fontVariantNumeric: "tabular-nums",
                     lineHeight: 1.15,
@@ -9925,6 +10127,7 @@ export function CompletionPanel({
                   onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
                   gaugeHeightIn={turfHeight.heightIn}
                   onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
+                  technicianNotes={notes}
                 />
               </Field>
             )}
@@ -9954,189 +10157,24 @@ export function CompletionPanel({
             )}
             {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
-                <div
-                  style={{
-                    background: M.card,
-                    border: `0.5px solid ${M.hairline}`,
-                    borderRadius: 12,
-                    padding: 12,
-                    marginBottom: 10,
+                <ProtocolMixSummary
+                  protocol={treatmentPlanStructuredProtocol}
+                  mixItems={treatmentPlanMixItems}
+                  carrierGalPer1000={
+                    protocolCarrierGalPer1000 ||
+                    treatmentPlanStructuredProtocol.window.defaultCarrierGalPer1000
+                  }
+                  inventoryBlocks={treatmentPlanInventoryBlocks}
+                  theme={{
+                    card: M.card,
+                    border: M.hairline,
+                    ink: M.ink,
+                    muted: M.ink3,
+                    err: M.err,
+                    errBg: M.err + "10",
+                    font,
                   }}
-                >
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: M.ink,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {treatmentPlanStructuredProtocol.window.title}
-                  </div>
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 12,
-                      color: M.ink3,
-                      lineHeight: 1.35,
-                    }}
-                  >
-                    {treatmentPlanStructuredProtocol.window.goal}
-                  </div>
-                  <div
-                    style={{
-                      marginTop: 10,
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr",
-                      gap: 8,
-                      fontFamily: font,
-                      fontSize: 11,
-                      color: M.ink3,
-                    }}
-                  >
-                    <div>
-                      <strong style={{ color: M.ink }}>Assignment:</strong>{" "}
-                      {treatmentPlanAppointmentAssignment?.assignedAt
-                        ? "linked"
-                        : "current window"}
-                    </div>
-                    <div>
-                      <strong style={{ color: M.ink }}>Inventory:</strong>{" "}
-                      {treatmentPlanInventoryBlocks.length
-                        ? `${treatmentPlanInventoryBlocks.length} block`
-                        : treatmentPlanInventoryWarnings.length
-                          ? `${treatmentPlanInventoryWarnings.length} warning`
-                          : "clear"}
-                    </div>
-                  </div>
-                </div>
-                {treatmentPlanInventoryBlocks.length > 0 && (
-                  <div
-                    style={{
-                      background: M.err + "10",
-                      border: `1px solid ${M.err}`,
-                      borderRadius: 10,
-                      color: M.err,
-                      fontFamily: font,
-                      fontSize: 12,
-                      lineHeight: 1.35,
-                      padding: 10,
-                      marginBottom: 10,
-                    }}
-                  >
-                    {treatmentPlanInventoryBlocks
-                      .map((block) => block.message)
-                      .filter(Boolean)
-                      .join(" ")}
-                  </div>
-                )}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                  <input
-                    type="number"
-                    value={protocolTreatedSqft}
-                    onChange={(e) => setProtocolTreatedSqft(e.target.value)}
-                    placeholder="Treated sq ft"
-                    style={mInput}
-                  />
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={protocolCarrierGalPer1000}
-                    onChange={(e) => setProtocolCarrierGalPer1000(e.target.value)}
-                    placeholder="Carrier gal/1K"
-                    style={mInput}
-                  />
-                </div>
-                {(treatmentPlanStructuredProtocol.window.requiredTasks || []).length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
-                    {treatmentPlanStructuredProtocol.window.requiredTasks.map((task) => {
-                      const checked = !!protocolTaskStatus[task];
-                      return (
-                        <button
-                          key={task}
-                          type="button"
-                          onClick={() => toggleProtocolTask(task)}
-                          disabled={isIncompleteVisit || submitting}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 10,
-                            fontSize: 13,
-                            fontWeight: 600,
-                            textAlign: "left",
-                            cursor: "pointer",
-                            background: checked ? M.success + "18" : M.card,
-                            color: checked ? M.success : M.ink,
-                            border: `1px solid ${checked ? M.success : M.hairline}`,
-                          }}
-                        >
-                          {checked ? "\u2713 " : ""}
-                          {task.replace(/_/g, " ")}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                {(treatmentPlanStructuredProtocol.products || []).length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <div style={{ ...subLabelStyle, marginBottom: 2 }}>
-                      Default product disposition
-                    </div>
-                    {undispositionedDefaultProtocolProducts.length > 0 && (
-                      <div style={{ fontFamily: font, fontSize: 12, color: M.err, lineHeight: 1.35 }}>
-                        Mark default products as applied through the product list or skipped below before closeout.
-                      </div>
-                    )}
-                    {treatmentPlanStructuredProtocol.products
-                      .filter((product) => product.defaultInPlan)
-                      .slice(0, 6)
-                      .map((product) => {
-                        const key = product.id || product.productId || product.productName;
-                        const skipped = !!skippedProtocolProducts[key];
-                        const substitution = product.productId
-                          ? substitutionByOriginalProductId.get(String(product.productId))
-                          : null;
-                        return (
-                          <div
-                            key={key}
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "auto 1fr",
-                              gap: 8,
-                              alignItems: "center",
-                            }}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => updateSkippedProtocolProduct(product, !skipped)}
-                              style={{
-                                height: 34,
-                                padding: "0 10px",
-                                borderRadius: 8,
-                                border: `1px solid ${skipped ? M.err : M.hairline}`,
-                                background: skipped ? M.err + "12" : M.card,
-                                color: skipped ? M.err : M.ink3,
-                                fontSize: 12,
-                                fontWeight: 700,
-                                cursor: "pointer",
-                              }}
-                            >
-                              {skipped ? "Skipped" : "Applied"}
-                            </button>
-                            <input
-                              value={skippedProtocolProducts[key]?.reason || ""}
-                              onChange={(e) => updateSkippedProtocolProduct(product, true, e.target.value)}
-                              placeholder={substitution
-                                ? `${product.productName} replaced by ${substitution.substituteProductName}`
-                                : `${product.productName} skip reason`}
-                              disabled={!skipped}
-                              style={{ ...mInput, marginBottom: 0, opacity: skipped ? 1 : 0.55 }}
-                            />
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
+                />
               </Field>
             )}
             {calibrationRequired && (
@@ -10701,7 +10739,7 @@ export function CompletionPanel({
                     )}
                     {typedPhotoSummary !== "" && (
                       <div style={{ marginTop: 10 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: M.ink, marginBottom: 4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500, color: M.ink, marginBottom: 4 }}>
                           Photo summary (appears on the customer report)
                         </div>
                         <textarea
@@ -10875,7 +10913,7 @@ export function CompletionPanel({
                         style={{
                           fontFamily: font,
                           fontSize: 15,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: M.ink,
                           flex: 1,
                           minWidth: 120,
@@ -11071,6 +11109,8 @@ export function CompletionPanel({
                       <ProductTargetsPicker
                         idSuffix={sp.productId}
                         targets={sp.targets}
+                        suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                        noun={isLawn ? "" : "pest"}
                         onChange={(next) =>
                           updateProduct(sp.productId, "targets", next)
                         }
@@ -11112,6 +11152,14 @@ export function CompletionPanel({
                     );
                   })}
                 </div>{" "}
+                <ZoneMarkingStep
+                  map={propertyMap}
+                  areas={zoneSpatialAreas}
+                  marks={zoneMarksForDisplay}
+                  onSetMark={setZoneMark}
+                  onClearMark={clearZoneMark}
+                  disabled={generating || success}
+                />
               </Field>
             )}
             {/* The customer-facing report summary is now auto-generated from the
@@ -11199,7 +11247,7 @@ export function CompletionPanel({
                           }`,
                           fontFamily: font,
                           fontSize: 16,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           cursor: "pointer",
                         }}
                         aria-pressed={selected}
@@ -11402,7 +11450,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 15,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                   }}
                 >
@@ -11554,7 +11602,7 @@ export function CompletionPanel({
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>
               &#10003;
             </div>{" "}
-            <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>
+            <div style={{ fontSize: 20, fontWeight: 500, color: D.green }}>
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
@@ -11684,7 +11732,7 @@ export function CompletionPanel({
             }}
           >
             {" "}
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+            <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
               Complete Service
             </div>{" "}
             <button
@@ -11704,12 +11752,12 @@ export function CompletionPanel({
           {(service.customerId || service.customer_id) ? (
             <a
               href={`/admin/customers?customerId=${encodeURIComponent(service.customerId || service.customer_id)}`}
-              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 500, textDecoration: "underline", cursor: "pointer" }}
             >
               {service.customerName}
             </a>
           ) : (
-            <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>
+            <div style={{ fontSize: 14, color: D.text, fontWeight: 500 }}>
               {service.customerName}
             </div>
           )}{" "}
@@ -11740,7 +11788,7 @@ export function CompletionPanel({
                 <div
                   style={{
                     fontSize: 10,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.teal,
                     textTransform: "uppercase",
                     letterSpacing: 0.5,
@@ -11752,7 +11800,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: "'JetBrains Mono', monospace",
                     fontSize: 22,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     color: D.teal,
                     letterSpacing: 1,
                   }}
@@ -11772,7 +11820,7 @@ export function CompletionPanel({
               borderBottom: `1px solid ${D.green}44`,
               fontSize: 13,
               color: D.green,
-              fontWeight: 600,
+              fontWeight: 500,
               lineHeight: 1.5,
             }}
           >
@@ -11793,7 +11841,7 @@ export function CompletionPanel({
               }}
             >
               {" "}
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 Restore saved draft?
               </div>{" "}
               <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>
@@ -11847,6 +11895,7 @@ export function CompletionPanel({
                 onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
                 gaugeHeightIn={turfHeight.heightIn}
                 onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
+                technicianNotes={notes}
               />
             </div>
           )}
@@ -11877,42 +11926,26 @@ export function CompletionPanel({
           )}
           {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>WaveGuard Execution Checklist</label>
-              <div
-                style={{
-                  background: D.input,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                  padding: 14,
-                  marginBottom: 10,
-                }}
-              >
-                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>
-                  {treatmentPlanStructuredProtocol.window.title}
-                </div>
-                <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginTop: 4 }}>
-                  {treatmentPlanStructuredProtocol.window.goal}
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10, fontSize: 12, color: D.muted }}>
-                  <div>
-                    <strong style={{ color: D.text }}>Assignment:</strong>{" "}
-                    {treatmentPlanAppointmentAssignment?.assignedAt ? "linked" : "current window"}
-                  </div>
-                  <div>
-                    <strong style={{ color: D.text }}>Inventory:</strong>{" "}
-                    {treatmentPlanInventoryBlocks.length
-                      ? `${treatmentPlanInventoryBlocks.length} block`
-                      : treatmentPlanInventoryWarnings.length
-                        ? `${treatmentPlanInventoryWarnings.length} warning`
-                        : "clear"}
-                  </div>
-                </div>
+              <label style={labelStyle}>Lawn Care Protocol</label>
+              <div style={{ marginBottom: 10 }}>
+                <ProtocolMixSummary
+                  protocol={treatmentPlanStructuredProtocol}
+                  mixItems={treatmentPlanMixItems}
+                  carrierGalPer1000={
+                    protocolCarrierGalPer1000 ||
+                    treatmentPlanStructuredProtocol.window.defaultCarrierGalPer1000
+                  }
+                  inventoryBlocks={treatmentPlanInventoryBlocks}
+                  theme={{
+                    card: D.input,
+                    border: D.border,
+                    ink: D.heading,
+                    muted: D.muted,
+                    err: D.red,
+                    errBg: D.red + "12",
+                  }}
+                />
               </div>
-              {treatmentPlanInventoryBlocks.length > 0 && (
-                <div style={{ background: D.red + "12", border: `1px solid ${D.red}`, borderRadius: 10, padding: 10, color: D.red, fontSize: 12, lineHeight: 1.4, marginBottom: 10 }}>
-                  {treatmentPlanInventoryBlocks.map((block) => block.message).filter(Boolean).join(" ")}
-                </div>
-              )}
               {treatmentPlanSubstitutions.length > 0 && (
                 <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
                   {treatmentPlanSubstitutions.map((sub) => {
@@ -11930,7 +11963,7 @@ export function CompletionPanel({
                           lineHeight: 1.4,
                         }}
                       >
-                        <div style={{ fontWeight: 800, color: D.heading }}>
+                        <div style={{ fontWeight: 500, color: D.heading }}>
                           Approved substitute: {sub.substituteProductName}
                         </div>
                         <div style={{ color: D.muted, marginTop: 2 }}>
@@ -11951,97 +11984,13 @@ export function CompletionPanel({
                             background: selected ? D.green + "18" : D.card,
                             color: selected ? D.green : D.text,
                             fontSize: 12,
-                            fontWeight: 800,
+                            fontWeight: 500,
                             cursor: selected ? "default" : "pointer",
                             opacity: isIncompleteVisit || submitting ? 0.6 : 1,
                           }}
                         >
                           {selected ? "Added to products" : "Add substitute to products"}
                         </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                <input
-                  type="number"
-                  value={protocolTreatedSqft}
-                  onChange={(e) => setProtocolTreatedSqft(e.target.value)}
-                  placeholder="Treated sq ft"
-                  style={inputStyle}
-                />
-                <input
-                  type="number"
-                  step="0.1"
-                  value={protocolCarrierGalPer1000}
-                  onChange={(e) => setProtocolCarrierGalPer1000(e.target.value)}
-                  placeholder="Carrier gal/1K"
-                  style={inputStyle}
-                />
-              </div>
-              {requiredProtocolTasks.length > 0 && (
-                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                  {requiredProtocolTasks.map((task) => {
-                    const checked = !!protocolTaskStatus[task];
-                    return (
-                      <button
-                        key={task}
-                        type="button"
-                        onClick={() => toggleProtocolTask(task)}
-                        disabled={isIncompleteVisit || submitting}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 8,
-                          fontSize: 13,
-                          fontWeight: 700,
-                          textAlign: "left",
-                          cursor: "pointer",
-                          background: checked ? D.green + "18" : D.input,
-                          color: checked ? D.green : D.text,
-                          border: `1px solid ${checked ? D.green : D.border}`,
-                        }}
-                      >
-                        {checked ? "\u2713 " : ""}
-                        {task.replace(/_/g, " ")}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {defaultProtocolProducts.length > 0 && (
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, color: undispositionedDefaultProtocolProducts.length ? D.red : D.muted, lineHeight: 1.4 }}>
-                    Mark each default protocol product as applied in product actuals or skipped below.
-                  </div>
-                  {defaultProtocolProducts.slice(0, 6).map((product) => {
-                    const key = protocolProductKey(product);
-                    const skipped = !!skippedProtocolProducts[key];
-                    return (
-                      <div key={key} style={{ display: "grid", gridTemplateColumns: "96px 1fr", gap: 8, alignItems: "center" }}>
-                        <button
-                          type="button"
-                          onClick={() => updateSkippedProtocolProduct(product, !skipped)}
-                          style={{
-                            height: 36,
-                            borderRadius: 8,
-                            border: `1px solid ${skipped ? D.red : D.border}`,
-                            background: skipped ? D.red + "12" : D.input,
-                            color: skipped ? D.red : D.text,
-                            fontSize: 12,
-                            fontWeight: 800,
-                            cursor: "pointer",
-                          }}
-                        >
-                          {skipped ? "Skipped" : "Applied"}
-                        </button>
-                        <input
-                          value={skippedProtocolProducts[key]?.reason || ""}
-                          onChange={(e) => updateSkippedProtocolProduct(product, true, e.target.value)}
-                          placeholder={`${product.productName} skip reason`}
-                          disabled={!skipped}
-                          style={{ ...inputStyle, margin: 0, opacity: skipped ? 1 : 0.55 }}
-                        />
                       </div>
                     );
                   })}
@@ -12546,7 +12495,7 @@ export function CompletionPanel({
                   : "linear-gradient(135deg, #8b5cf6, #6366f1)",
                 color: D.heading,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: generating ? "wait" : "pointer",
                 marginTop: 8,
                 marginBottom: 20,
@@ -12636,7 +12585,7 @@ export function CompletionPanel({
                           alignItems: "center",
                           justifyContent: "center",
                           lineHeight: 1,
-                          fontWeight: 700,
+                          fontWeight: 500,
                         }}
                       >
                         &times;
@@ -12689,7 +12638,7 @@ export function CompletionPanel({
                   )}
                   {typedPhotoSummary !== "" && (
                     <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: D.text, marginBottom: 4 }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: D.text, marginBottom: 4 }}>
                         Photo summary (appears on the customer report)
                       </div>
                       <textarea
@@ -12792,7 +12741,7 @@ export function CompletionPanel({
                       padding: "6px 12px",
                       borderRadius: 8,
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       cursor: "pointer",
                       background: isSelected ? D.teal + "22" : D.card,
                       color: isSelected ? D.teal : D.text,
@@ -12874,7 +12823,7 @@ export function CompletionPanel({
                   <span
                     style={{
                       fontSize: 13,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.text,
                       flex: 1,
                       minWidth: 120,
@@ -13023,6 +12972,8 @@ export function CompletionPanel({
                   <ProductTargetsPicker
                     idSuffix={sp.productId}
                     targets={sp.targets}
+                    suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                    noun={isLawn ? "" : "pest"}
                     onChange={(next) =>
                       updateProduct(sp.productId, "targets", next)
                     }
@@ -13058,7 +13009,7 @@ export function CompletionPanel({
                         padding: "6px 14px",
                         borderRadius: 20,
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                         background: selected ? D.teal + "22" : D.card,
                         color: selected ? D.teal : D.muted,
@@ -13071,7 +13022,16 @@ export function CompletionPanel({
                     </button>
                   );
                 })}
-              </div>{" "}
+              </div>
+              <ZoneMarkingStep
+                map={propertyMap}
+                areas={zoneSpatialAreas}
+                marks={zoneMarksForDisplay}
+                onSetMark={setZoneMark}
+                onClearMark={clearZoneMark}
+                dark
+                disabled={generating || success}
+              />
             </div>
           )}
           {/* Customer recap + SMS preview removed (desktop) — the report summary is
@@ -13151,7 +13111,7 @@ export function CompletionPanel({
                         color: selected ? D.teal : D.text,
                         border: `1px solid ${selected ? D.teal : D.border}`,
                         fontSize: 14,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                         transition: "all 0.15s",
                       }}
@@ -13285,7 +13245,7 @@ export function CompletionPanel({
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 700,
+                  fontWeight: 500,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
@@ -13294,7 +13254,7 @@ export function CompletionPanel({
               >
                 Next Scheduled Visit
               </div>{" "}
-              <div style={{ fontSize: 14, color: D.heading, fontWeight: 600 }}>
+              <div style={{ fontSize: 14, color: D.heading, fontWeight: 500 }}>
                 {nextVisit.date
                   ? new Date(nextVisit.date + "T00:00:00").toLocaleDateString(
                       "en-US",
@@ -13390,7 +13350,7 @@ export function CompletionPanel({
             ) : (
               <>
                 {" "}
-                <span style={{ fontSize: 15, fontWeight: 700 }}>
+                <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
                 <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
@@ -13413,7 +13373,7 @@ export function CompletionPanel({
 const labelStyle = {
   display: "block",
   fontSize: 12,
-  fontWeight: 700,
+  fontWeight: 500,
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 0.8,
@@ -13444,6 +13404,17 @@ const checkboxRow = {
 // Quick-pick suggestions for the per-product pest-target picker. The field is
 // free-text (string[]), so this list is convenience only — techs can type any
 // target. Common SWFL household/lawn pests.
+// Normalize a products_catalog.target_pests value (JSONB array, or a stringified
+// one) into a clean string[] for prefilling a product's Targets from its label.
+function normalizeLabelTargets(value) {
+  let v = value;
+  if (typeof v === "string") {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (!Array.isArray(v)) return [];
+  return v.map((t) => String(t).trim()).filter(Boolean);
+}
+
 const PEST_TARGET_SUGGESTIONS = [
   "Ghost ants",
   "Big-headed ants",
@@ -13470,13 +13441,133 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// Per-product pest-target multiselect: free-text chips with datalist
-// suggestions. Stored on the selected product as `targets` (string[]); the
-// completion route persists it to service_products.targets. Optional.
-function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
+// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
+// what a lawn tech actually enters as a product's target, not structural pests.
+const LAWN_TARGET_SUGGESTIONS = [
+  "Broadleaf weeds",
+  "Crabgrass",
+  "Nutsedge / sedge",
+  "Dollarweed",
+  "Doveweed",
+  "Chamberbitter",
+  "Spurge",
+  "Clover",
+  "Goosegrass",
+  "Torpedograss",
+  "Chinch bugs",
+  "Armyworms",
+  "Sod webworms",
+  "Grubs",
+  "Mole crickets",
+  "Fire ants",
+  "Nematodes",
+  "Brown patch / large patch",
+  "Dollar spot",
+  "Gray leaf spot",
+  "Take-all root rot",
+];
+
+// The standard field rig. The protocol mix amounts are shown for this tank so
+// the tech reads the ratios off one number they recognize.
+const PROTOCOL_TANK_GAL = 110;
+
+function formatMixAmount(n) {
+  if (!Number.isFinite(n)) return null;
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+// Read-only Lawn Care Protocol reference: the protocol window (title + goal) and,
+// for each product in the generated plan, how much to put in a 110-gallon tank
+// (ratePer1000 × tank-coverage). Rows come from plan.mixCalculator.items — the
+// per-visit mix, which carries engine-derived nutrition rates, selected
+// conditionals, and approved substitutes that the static protocol definitions
+// don't. No inputs, no checklist — the tech reads it and records what they
+// actually applied through the Products Applied list. Inventory blocks (a real
+// stock safeguard) still surface here.
+function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, inventoryBlocks = [], theme }) {
+  if (!protocol?.window) return null;
+  const t = theme || {};
+  const carrier = Number(carrierGalPer1000);
+  const hasCarrier = Number.isFinite(carrier) && carrier > 0;
+  const planRows = (mixItems || [])
+    .filter((item) => item?.product)
+    .map((item) => ({
+      key: item.product.id || item.product.name,
+      name: item.product.name,
+      // Null when the engine couldn't derive a rate — rendered as "—", never 0.
+      ratePer1000: Number(item.mix?.ratePer1000) || null,
+      rateUnit: item.mix?.rateUnit || null,
+    }));
+  // Fallback while the plan hasn't loaded (or matched no catalog products):
+  // static protocol rows, defaults preferred, excluding rows without a usable
+  // stored rate — a null rate must not read as a concrete 0.
+  const allProducts = protocol.products || [];
+  const planned = allProducts.filter((p) => p.defaultInPlan);
+  const staticRows = (planned.length ? planned : allProducts)
+    .filter((p) => Number(p.ratePer1000) > 0)
+    .map((p) => ({
+      key: p.id || p.productId || p.productName,
+      name: p.productName,
+      ratePer1000: Number(p.ratePer1000),
+      rateUnit: p.rateUnit || null,
+    }));
+  const rows = planRows.length ? planRows : staticRows;
+  return (
+    <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 12 }}>
+      <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 500, color: t.ink }}>
+        {protocol.window.title}
+      </div>
+      {protocol.window.goal ? (
+        <div style={{ fontFamily: t.font, fontSize: 12, color: t.muted, lineHeight: 1.35, marginTop: 4 }}>
+          {protocol.window.goal}
+        </div>
+      ) : null}
+      {rows.length ? (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 500, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Mix for a {PROTOCOL_TANK_GAL}-gal tank
+          </div>
+          <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 5 }}>
+            {rows.map((row, i) => {
+              const amt =
+                hasCarrier && row.ratePer1000 > 0
+                  ? row.ratePer1000 * (PROTOCOL_TANK_GAL / carrier)
+                  : null;
+              return (
+                <div key={row.key || i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: t.font, fontSize: 13, color: t.ink }}>
+                  <span>{row.name}</span>
+                  <strong style={{ whiteSpace: "nowrap" }}>
+                    {amt != null ? `${formatMixAmount(amt)} ${row.rateUnit || "oz"}` : "—"}
+                  </strong>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 6, fontFamily: t.font, fontSize: 11, color: t.muted }}>
+            {hasCarrier
+              ? `Based on ${carrier} gal/1K carrier — reference only, nothing to fill in.`
+              : "Carrier rate unavailable — see the treatment plan for amounts."}
+          </div>
+        </div>
+      ) : null}
+      {inventoryBlocks.length ? (
+        <div style={{ marginTop: 10, background: t.errBg, border: `1px solid ${t.err}`, borderRadius: 10, color: t.err, fontFamily: t.font, fontSize: 12, lineHeight: 1.35, padding: 10 }}>
+          {inventoryBlocks.map((b) => b.message).filter(Boolean).join(" ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Per-product target multiselect: free-text chips with datalist suggestions.
+// Stored on the selected product as `targets` (string[]); the completion route
+// persists it to service_products.targets. Optional. `suggestions`/`noun` are
+// service-line aware — pest services get pests, lawn services get weeds/turf
+// pests/diseases — so the label and datalist match what's actually being treated.
+function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions = PEST_TARGET_SUGGESTIONS, noun = "pest" }) {
   const [draft, setDraft] = useState("");
   const list = Array.isArray(targets) ? targets : [];
-  const datalistId = `pest-targets-${idSuffix}`;
+  const datalistId = `targets-${idSuffix}`;
   function commit(raw) {
     const cleaned = String(raw || "")
       .split(",")
@@ -13509,7 +13600,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         minWidth: 0,
       }}
     >
-      <span style={{ fontSize: 12, fontWeight: 600, color: theme.labelColor }}>
+      <span style={{ fontSize: 12, fontWeight: 500, color: theme.labelColor }}>
         Targets
       </span>
       {list.map((t) => (
@@ -13550,7 +13641,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         type="text"
         list={datalistId}
         value={draft}
-        placeholder={list.length ? "Add target…" : "Add pest target…"}
+        placeholder={list.length || !noun ? "Add target…" : `Add ${noun} target…`}
         onChange={(e) => {
           const value = e.target.value;
           if (value.includes(",")) {
@@ -13560,7 +13651,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
           // Auto-commit when the value exactly matches a suggestion (datalist
           // pick), so selecting works without relying on Enter/blur on mobile.
           if (
-            PEST_TARGET_SUGGESTIONS.some(
+            suggestions.some(
               (s) => s.toLowerCase() === value.trim().toLowerCase(),
             )
           ) {
@@ -13581,7 +13672,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
         style={{ ...theme.inputStyle, flex: "1 1 140px", minWidth: 120 }}
       />
       <datalist id={datalistId}>
-        {PEST_TARGET_SUGGESTIONS.map((p) => (
+        {suggestions.map((p) => (
           <option key={p} value={p} />
         ))}
       </datalist>

@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { WAVES_LOCATIONS, resolveLocation } = require('../config/locations');
+const { WAVES_LOCATIONS, CITY_TO_LOCATION, resolveLocation } = require('../config/locations');
 const SocialMediaService = require('./social-media');
 const {
   SOCIAL_FLAGS,
@@ -8,6 +8,7 @@ const {
   normalizeUrl,
 } = require('./social-media');
 const SocialCardRenderer = require('./social-card-renderer');
+const CreativeEngine = require('./social-creative-engine');
 const { runExclusive } = require('../utils/cron-lock');
 const { etParts } = require('../utils/datetime-et');
 
@@ -484,6 +485,69 @@ function locationForCity(city) {
   };
 }
 
+// ── City grounding ──────────────────────────────────────────────────────────
+// Campaign copy targets ONE city, but the fact sources (blog posts matched by
+// an OR topic search, review text, service descriptions) can carry a different
+// city's name — live example 07-03: a Venice-targeted Facebook post opened
+// "around Venice" then said "Your Sarasota lawn" because a Sarasota blog post
+// won the content search. Facts naming a different service-area city are
+// dropped, and an AI draft naming one falls back to the (city-clean) template.
+// The comparison is strict per city name, not per office: "around Venice …
+// your Punta Gorda lawn" reads just as wrong to the reader even though both
+// route to the Venice office.
+// "palmetto bugs" / "saw palmetto" / "laurel oaks" are Florida vernacular, not
+// the cities Palmetto / Laurel — scrub them before scanning.
+const KNOWN_CITY_NAMES = Object.keys(CITY_TO_LOCATION);
+// Longest name first, and each match is consumed from the haystack, so nested
+// names can't double-read: "Bradenton Beach homeowners" is one mention of
+// bradenton beach, NOT also a (foreign) mention of bradenton.
+const KNOWN_CITIES_BY_LENGTH = [...KNOWN_CITY_NAMES].sort((a, b) => b.length - a.length);
+const CITY_FALSE_POSITIVES = /\b(?:saw\s+palmetto|palmetto\s+bugs?|laurel\s+oaks?)\b/gi;
+
+// A city shows up in prose ("Sarasota") or in the hashtag forms the Instagram
+// prompt itself suggests ("#sarasotafl", "#lakewoodranch") — scan all of them.
+function cityForms(name) {
+  const compact = name.replace(/ /g, '');
+  return Array.from(new Set([name, compact, `${compact}fl`]));
+}
+
+function citiesMentioned(text) {
+  let haystack = ` ${String(text || '').toLowerCase().replace(CITY_FALSE_POSITIVES, ' ').replace(/[^a-z]+/g, ' ').trim()} `;
+  const found = [];
+  for (const name of KNOWN_CITIES_BY_LENGTH) {
+    let hit = false;
+    for (const form of cityForms(name)) {
+      const needle = ` ${form} `;
+      if (haystack.includes(needle)) {
+        hit = true;
+        haystack = haystack.split(needle).join('  ');
+      }
+    }
+    if (hit) found.push(name);
+  }
+  return found;
+}
+
+function mentionsOtherCity(text, targetCity) {
+  const target = String(targetCity || '').toLowerCase().trim();
+  return citiesMentioned(text).some((name) => name !== target);
+}
+
+// Blog rows about a different city are excluded up front: content[0] feeds a
+// draft fact AND suggestedLink, so a cross-city row means wrong-city copy plus
+// a wrong-city link. A row is cross-city when its city tag names a different
+// known city, OR — for untagged/region-tagged rows ("SWFL") — when its
+// title/meta/keyword/slug text names one; the fact scrub alone can't fix
+// suggestedLink, which reads the row, not the fact.
+function contentRowMatchesCity(row, targetCity) {
+  const target = String(targetCity || '').toLowerCase().trim();
+  if (!target) return true;
+  const rowCity = String(row?.city || '').toLowerCase().trim();
+  if (rowCity && rowCity !== target && KNOWN_CITY_NAMES.includes(rowCity)) return false;
+  const rowText = [row?.title, row?.meta_description, row?.keyword, row?.slug].filter(Boolean).join(' ');
+  return !mentionsOtherCity(rowText, target);
+}
+
 async function getCampaignContext({ topic, city, service }) {
   const location = locationForCity(city);
   const context = {
@@ -544,6 +608,7 @@ async function getCampaignContext({ topic, city, service }) {
         return intentKeywords.some((kw) => text.includes(kw));
       };
       context.content = rows
+        .filter((row) => contentRowMatchesCity(row, location.city))
         .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
         .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index))
         .map((entry) => entry.row)
@@ -675,7 +740,7 @@ async function renderReviewGraphicImageUrl(candidate, platform) {
   );
 }
 
-function previewWithVisual(preview, { imageUrl, variant, templateKey }) {
+function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, variants, videoUrl }) {
   if (!imageUrl) return preview;
   return {
     ...preview,
@@ -683,8 +748,111 @@ function previewWithVisual(preview, { imageUrl, variant, templateKey }) {
       imageUrl,
       variant,
       templateKey: templateKey || (variant === 'review' ? 'waves_clean_square' : 'waves_campaign_square'),
+      // Creative-engine metadata: which scene concept made this image (feeds the
+      // no-repeat rotation) and, on draft runs, the alternate variants the admin
+      // can pick from in the approval queue. videoUrl records an approved Reel
+      // (the primary imageUrl stays a still for thumbnails/GBP).
+      ...(creative ? { creative } : {}),
+      ...(Array.isArray(variants) && variants.length ? { variants } : {}),
+      ...(videoUrl ? { videoUrl } : {}),
     },
   };
+}
+
+// Concept keys of recently PUBLISHED/chosen creative visuals — the engine skips
+// these so back-to-back posts don't reuse a scene. Only the chosen concept
+// counts (not every draft variant): the banks are ~5 deep per service, and
+// excluding whole draft batches would exhaust a bank in two days and disable
+// exclusion entirely (pickConcepts ignores an exhausted exclusion list).
+async function recentCreativeConceptKeys(limit = 6) {
+  if (!(await hasTable('social_content_studio_runs'))) return [];
+  try {
+    const rows = await db('social_content_studio_runs')
+      .where({ run_type: 'autonomous' })
+      .orderBy('started_at', 'desc')
+      .limit(Math.max(1, Math.min(30, Number(limit) || 6)))
+      .select('preview');
+    const keys = [];
+    for (const row of rows) {
+      const conceptKey = toJson(row.preview, {})?.visual?.creative?.conceptKey;
+      if (conceptKey) keys.push(conceptKey);
+    }
+    return Array.from(new Set(keys));
+  } catch {
+    return [];
+  }
+}
+
+// AI-scene photo card variants for an autonomous run (creative engine). Returns
+// [] when the engine is disabled or every variant fails, so callers keep the
+// legacy SVG-card path as the fallback. Draft runs get the multi-variant batch
+// for the approval queue; publish runs render exactly one.
+// A Veo clip only ever publishes to Facebook/Instagram — publishToAll routes
+// video to Meta while GBP keeps the still — so don't spend on a clip unless a
+// REQUESTED channel can actually take it. E.g. SOCIAL_AUTONOMOUS_CHANNELS=gbp,
+// or FB/IG disabled/missing credentials, would otherwise buy a clip that can
+// never publish and put a misleading video option in the approval queue.
+// Mirrors publishToAll's fbReady/igReady env checks.
+function hasVideoCapableChannel(channels) {
+  const list = Array.isArray(channels) ? channels : [];
+  // Mirror publishToAll's readiness SPLIT exactly: its fbReady is CREDENTIALS-
+  // only (page token + page id — IG Graph publishing rides those even with
+  // Facebook posting off), while the SOCIAL_FACEBOOK_ENABLED / _INSTAGRAM_
+  // flags each gate only their own platform entry. So an IG-only config with
+  // Facebook disabled still earns a video, and one missing the page id doesn't.
+  const pageCreds = !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.FACEBOOK_PAGE_ID;
+  const fbReady = SOCIAL_FLAGS.facebookEnabled && pageCreds;
+  const igReady = SOCIAL_FLAGS.instagramEnabled && pageCreds && !!process.env.INSTAGRAM_ACCOUNT_ID;
+  return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
+}
+
+async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, effectiveMode, now }) {
+  if (!CreativeEngine.CREATIVE_FLAGS.enabled) return [];
+  try {
+    const cardInput = isReviewRun
+      ? buildReviewCardInput(plan.reviewGraphic)
+      : buildCampaignCardInput(plan, preview);
+    const excludeConcepts = await recentCreativeConceptKeys();
+    const variants = await CreativeEngine.generateVariants({
+      cardInput,
+      topic: plan.topic,
+      service: plan.service,
+      city: plan.city,
+      variant: isReviewRun ? 'review' : 'campaign',
+      count: effectiveMode === 'draft' ? CreativeEngine.CREATIVE_FLAGS.variantCount : 1,
+      excludeConcepts,
+      wantGbp: wantsGbp,
+      now,
+    });
+
+    // Veo Reel option — DRAFT campaign runs only (approval required for video:
+    // real cost per clip and the most public artifact the brand ships), on
+    // every Nth ET day, and only when at least one image variant succeeded (a
+    // video-only queue entry would leave GBP with no media and the runs list
+    // with no thumbnail). Appended LAST so variants[0] — the run's primary
+    // visual — stays a still.
+    if (
+      variants.length
+      && !isReviewRun
+      && effectiveMode === 'draft'
+      && CreativeEngine.VIDEO_FLAGS.enabled
+      && CreativeEngine.isVideoDay(now)
+      && hasVideoCapableChannel(plan.channels)
+    ) {
+      const video = await CreativeEngine.generateVideoVariant({
+        topic: plan.topic,
+        service: plan.service,
+        city: plan.city,
+        excludeConcepts: [...excludeConcepts, ...variants.map((v) => v.conceptKey).filter(Boolean)],
+        now,
+      });
+      if (video) variants.push(video);
+    }
+
+    return variants;
+  } catch {
+    return [];
+  }
 }
 
 function selectAutonomousCampaign(now = new Date()) {
@@ -839,11 +1007,16 @@ function relevantServices(context = {}, input = {}) {
 }
 
 function sourceFacts(context, input = {}) {
+  const targetCity = context?.location?.city || input.city;
   const serviceFact = firstSentence(relevantServices(context, input)[0]?.description);
   const contentFact = firstSentence(context.content[0]?.meta_description || context.content[0]?.title);
   const pestPressureFact = firstSentence(context.pestPressure?.explanation);
   const reviewFact = firstSentence(context.reviews[0]?.review_text, 160);
-  return [serviceFact, contentFact, pestPressureFact, reviewFact].filter(Boolean);
+  return [serviceFact, contentFact, pestPressureFact, reviewFact]
+    .filter(Boolean)
+    // Review text and brand-wide sources can name any city regardless of the
+    // row-level filters — drop cross-city facts rather than publish them.
+    .filter((fact) => !mentionsOtherCity(fact, targetCity));
 }
 
 function buildCampaignDrafts(input, context) {
@@ -916,12 +1089,16 @@ function buildSourcePanel(context, input = {}) {
 // from, as a short bullet list the model may use (and must not exceed/invent
 // beyond). Keeps the AI captions factual and local.
 function campaignFactPack(context, input) {
+  const targetCity = context?.location?.city || input?.city;
   const lines = [];
   const svc = relevantServices(context, input)[0];
   if (svc?.description) lines.push(svc.description);
   for (const f of (sourceFacts(context, input) || [])) lines.push(f);
   if (context?.pestPressure?.explanation) lines.push(context.pestPressure.explanation);
   return Array.from(new Set(lines.map((l) => cleanText(l, 400)).filter(Boolean)))
+    // sourceFacts is already scrubbed; this catches the two lines pushed
+    // directly (full service description, pest-pressure explanation).
+    .filter((l) => !mentionsOtherCity(l, targetCity))
     .slice(0, 6)
     .map((l) => `- ${l}`)
     .join('\n');
@@ -948,7 +1125,12 @@ async function buildCampaignDraftsAI(input, context) {
       channels,
     });
     const out = { ...template };
-    for (const ch of channels) if (ai && ai[ch]) out[ch] = ai[ch];
+    const targetCity = context?.location?.city || input.city;
+    // Belt and suspenders: even with a city-scrubbed fact pack the model can
+    // still name a stray city. A cross-city draft falls back to the
+    // (city-clean) template for that channel instead of publishing mixed-city
+    // copy — the 07-03 live failure this grounding exists to prevent.
+    for (const ch of channels) if (ai && ai[ch] && !mentionsOtherCity(ai[ch], targetCity)) out[ch] = ai[ch];
     return out;
   } catch {
     return template;
@@ -988,10 +1170,15 @@ async function saveCampaignDraft(input) {
   const imageUrl = httpUrlOrNull(input.imageUrl)
     || httpUrlOrNull(preview.visual?.imageUrl)
     || await renderCampaignImageUrl(input, preview);
+  // Preserve an existing visual's identity (photo-card runs pass a preview that
+  // already carries variant/templateKey/creative/variants for the approval
+  // queue) — only default the legacy campaign card when nothing is set.
   const finalPreview = previewWithVisual(preview, {
     imageUrl,
-    variant: 'campaign',
-    templateKey: 'waves_campaign_square',
+    variant: preview.visual?.variant || 'campaign',
+    templateKey: preview.visual?.templateKey || 'waves_campaign_square',
+    creative: preview.visual?.creative,
+    variants: preview.visual?.variants,
   });
   const title = cleanText(input.title || `${preview.inputs.city}: ${preview.inputs.topic}`, 180);
   const [post] = await db('social_media_posts')
@@ -1214,7 +1401,27 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     const wantsGbp = Array.isArray(plan.channels) && plan.channels.includes('gbp');
     const isReviewRun = !!plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics');
 
-    if (isReviewRun) {
+    // Creative engine first (AI photo scene + deterministic brand overlay,
+    // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
+    // provider outage, upload failure — falls through to the legacy SVG brand
+    // card below, so the engine can only ever upgrade a post, never block one.
+    const creativeVariants = await creativeVariantsForRun(plan, preview, {
+      isReviewRun, wantsGbp, effectiveMode, now: startedAt,
+    });
+    if (creativeVariants.length) {
+      imageUrl = creativeVariants[0].imageUrl;
+      gbpImageUrl = creativeVariants[0].gbpImageUrl || null;
+      finalPreview = previewWithVisual(preview, {
+        imageUrl,
+        variant: isReviewRun ? 'review' : 'campaign',
+        templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
+        creative: {
+          conceptKey: creativeVariants[0].conceptKey,
+          sceneModel: creativeVariants[0].sceneModel,
+        },
+        variants: creativeVariants,
+      });
+    } else if (isReviewRun) {
       // Render the review card for preview/publish, but do NOT persist or approve
       // the graphic yet. listReviewGraphicCandidates() excludes any review
       // already joined to review_graphics, so creating the row here would consume
@@ -1288,7 +1495,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       await createReviewGraphic({
         googleReviewId: plan.reviewGraphic.googleReviewId,
         privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
-        templateKey: 'waves_clean_square',
+        // Follow the visual that actually published (photo card vs SVG card).
+        templateKey: finalPreview.visual?.templateKey || 'waves_clean_square',
         channels: plan.channels,
         status: 'approved',
         imageUrl,
@@ -1324,6 +1532,314 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
 
 function cityFromLocationId(locationId) {
   return WAVES_LOCATIONS.find((loc) => loc.id === locationId)?.name || 'SWFL';
+}
+
+// ── Approval queue (draft_created runs) ─────────────────────────────────────
+// A draft autonomous run holds everything needed to publish (channel drafts,
+// suggested link, rendered visual + creative-engine variants) in its preview.
+// Approve publishes the stored content with the admin's chosen variant and
+// folds the outcome into the SAME run + draft post row; reject retires both.
+
+// Resolve the publishable variant list for a run preview. Creative-engine runs
+// carry preview.visual.variants; legacy single-card drafts collapse to a
+// one-entry list so the same approve path serves both.
+function runVariants(preview = {}) {
+  const visual = preview.visual || {};
+  if (Array.isArray(visual.variants) && visual.variants.length) return visual.variants;
+  if (visual.imageUrl) {
+    return [{
+      imageUrl: visual.imageUrl,
+      gbpImageUrl: null,
+      conceptKey: visual.creative?.conceptKey || null,
+      sceneModel: visual.creative?.sceneModel || null,
+    }];
+  }
+  return [];
+}
+
+// Pure: merge a prior approval attempt's platform successes with the current
+// attempt and decide whether the approval is COMPLETE. Rules:
+// - success: any platform success across attempts (the post-level rule).
+// - videoPosted: a video approval needs at least one reel/video success.
+// - videoBlocked: a video approval stays incomplete while any REQUESTED Meta
+//   channel has been attempted and failed without ever succeeding — so a
+//   half-posted FB+IG pair keeps the run retryable for the missing platform.
+//   A SKIP (platform not configured/enabled) doesn't block: it can never
+//   succeed, and the capability gate means a video variant only exists when
+//   at least one Meta channel was publish-ready.
+// Exported for tests.
+function assessApprovalPublish({ isVideoVariant, channels, priorPlatforms, current } = {}) {
+  const priorSuccesses = (Array.isArray(priorPlatforms) ? priorPlatforms : []).filter((p) => p?.success);
+  const platforms = [...priorSuccesses, ...((current && current.platforms) || [])];
+  const success = platforms.some((p) => p?.success);
+  const videoPosted = !isVideoVariant
+    || platforms.some((p) => p?.success && (p.mediaType === 'reel' || p.mediaType === 'video'));
+  const metaChannels = (channels || []).filter((c) => c === 'facebook' || c === 'instagram');
+  // A requested Meta channel must be RESOLVED before a video approval can
+  // finalize: a success (now or prior), or a channel-level skip in the current
+  // attempt (unconfigured/disabled — can never succeed). A channel with no
+  // entry at all stays blocking: prior failures are not carried into the merge,
+  // so a retry that comes back with only a GLOBAL skip (automation disabled/
+  // paused → one {platform:'all', skipped} row) must not let the prior
+  // success finalize a run whose other Meta channel never got the video.
+  const videoBlocked = !!isVideoVariant && metaChannels.some((channel) => {
+    const entries = platforms.filter((p) => p?.platform === channel);
+    if (entries.some((p) => p?.success)) return false;
+    if (entries.length && entries.every((p) => p?.skipped)) return false; // channel-level skip
+    return true; // failed, dry-run, or unresolved (global skip / never attempted)
+  });
+  return {
+    success,
+    videoPosted,
+    videoBlocked,
+    complete: success && videoPosted && !videoBlocked,
+    mergedPublishResult: { ...(current || {}), success, platforms },
+  };
+}
+
+async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
+  if (!(await hasTable('social_content_studio_runs'))) {
+    return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
+  }
+  // Per-run advisory lock: a double-clicked Approve (or two admin tabs) must
+  // not publish twice. Non-blocking — the loser gets a 409, not a queue.
+  const result = await runExclusive(`social_autonomous_approve_${runId}`, async () => {
+    // .catch(null): a malformed :id (not a UUID) is a 404, not a 500.
+    const run = await db('social_content_studio_runs')
+      .where({ id: runId, run_type: 'autonomous' })
+      .first()
+      .catch(() => null);
+    if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
+    if (run.status !== 'draft_created') {
+      return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be approved` };
+    }
+
+    const preview = toJson(run.preview, {});
+    const input = toJson(run.input, {});
+    const variants = runVariants(preview);
+    const priorRecordFull = toJson(run.publish_result, {});
+    const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)
+      && priorRecordFull.platforms.some((p) => p?.success);
+    let idx = Number(variantIndex ?? 0);
+    // Once any platform has actually posted, the creative is LOCKED to the
+    // variant that posted it: a retry (page refresh → variantIndex defaults to
+    // 0) must finish the same publish, not post a DIFFERENT still/video to the
+    // remaining channels while earlier channels carry the original.
+    const lockedIdx = priorHasSuccess ? Number(priorRecordFull?.approval?.variantIndex) : NaN;
+    if (Number.isInteger(lockedIdx) && lockedIdx >= 0 && lockedIdx < variants.length) {
+      idx = lockedIdx;
+    }
+    if (!Number.isInteger(idx) || idx < 0 || idx >= variants.length) {
+      return { ok: false, status: 400, error: variants.length ? `variantIndex must be 0..${variants.length - 1}` : 'run has no publishable image' };
+    }
+    const chosen = variants[idx];
+    const isVideoVariant = chosen?.type === 'video';
+    // Variants were persisted server-side at run time, but re-validate to http(s)
+    // anyway — preview JSON is also reachable through admin save endpoints.
+    const chosenVideoUrl = isVideoVariant ? httpUrlOrNull(chosen?.videoUrl) : null;
+    if (isVideoVariant && !chosenVideoUrl) {
+      return { ok: false, status: 400, error: 'selected variant has no hosted video' };
+    }
+    // The still that rides along with the publish: for an image approval it's
+    // the chosen variant; for a video approval it's the run's first image
+    // variant (GBP has no video ingestion, and the post row keeps an image
+    // thumbnail). A video approval with no image variant just posts GBP
+    // text-only — its CTA button still carries the link.
+    const imageVariant = isVideoVariant
+      ? variants.find((v) => v?.type !== 'video' && v?.imageUrl)
+      : chosen;
+    const chosenImageUrl = httpUrlOrNull(imageVariant?.imageUrl);
+    if (!isVideoVariant && !chosenImageUrl) {
+      return { ok: false, status: 400, error: 'selected variant has no hosted image' };
+    }
+
+    const channels = normalizeChannels(
+      toJson(run.channels, null) ?? input.channels ?? preview.inputs?.channels
+    );
+    if (!channels.length) return { ok: false, status: 400, error: 'run has no publishable channels' };
+
+    const city = run.city || preview.inputs?.city || input.city;
+    const gbpLocationId = preview.inputs?.locationId || locationForCity(city).id;
+
+    // Retry of a partially-published approval: channels that already posted in
+    // a PRIOR attempt (recorded on the run's publish_result) are skipped this
+    // time — a video failure after a GBP success retries WITHOUT double-posting
+    // GBP, and a half-posted FB+IG pair retries only the missing platform. GBP
+    // posts per-location but is treated as one channel: any location success
+    // skips it (re-posting the succeeded locations would duplicate).
+    const priorPlatforms = Array.isArray(priorRecordFull?.platforms) ? priorRecordFull.platforms : [];
+    const alreadyPosted = new Set(priorPlatforms.filter((p) => p?.success).map((p) => p?.platform));
+    const remainingChannels = channels.filter((channel) => !alreadyPosted.has(channel));
+
+    // Nothing left to attempt → assess purely from the record (defensive; a
+    // fully-posted run normally finalizes on the attempt that completed it).
+    const publishResult = remainingChannels.length
+      ? await SocialMediaService.publishToAll({
+        title: run.topic || preview.inputs?.topic || 'Waves update',
+        description: run.service || preview.inputs?.service || '',
+        link: preview.suggestedLink,
+        guid: `${AUTONOMOUS_SOURCE}_approved_${run.id}`,
+        source: AUTONOMOUS_SOURCE,
+        customContent: preview.drafts,
+        channels: remainingChannels,
+        imageUrl: chosenImageUrl,
+        gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl),
+        videoUrl: chosenVideoUrl,
+        noAiImage: true, // stored visual only — never a fresh literal AI image
+        gbpLocationIds: [gbpLocationId],
+        postId: run.social_media_post_id || null,
+      })
+      : { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' };
+
+    // A VIDEO approval only finalizes when the video itself posted AND no
+    // requested Meta channel is left attempted-but-failed (see
+    // assessApprovalPublish) — a GBP-only success can't consume the draft, and
+    // an FB-posted/IG-failed split stays retryable for Instagram alone.
+    const assessment = assessApprovalPublish({
+      isVideoVariant,
+      channels,
+      priorPlatforms,
+      current: publishResult,
+    });
+    // Stamp the approval's variant identity onto the stored record — the lock
+    // above reads it so retries can't switch creative mid-publish.
+    assessment.mergedPublishResult.approval = {
+      variantIndex: idx,
+      type: isVideoVariant ? 'video' : 'image',
+      conceptKey: chosen.conceptKey || null,
+    };
+    const published = assessment.complete && !SOCIAL_FLAGS.dryRun;
+
+    // publishToAll's postId update wrote only THIS attempt's results to the
+    // post-history row; overwrite with the merged cross-attempt record so
+    // admin history and the per-platform failure alerting keep the earlier
+    // successes (e.g. attempt-1 Facebook video + retry Instagram Reel).
+    if (run.social_media_post_id && remainingChannels.length && priorPlatforms.length) {
+      const mergedContent = {};
+      for (const p of assessment.mergedPublishResult.platforms) {
+        if (p?.content) mergedContent[p.location ? `${p.platform}_${p.location}` : p.platform] = p.content;
+      }
+      await db('social_media_posts')
+        .where({ id: run.social_media_post_id })
+        .update({
+          platforms_posted: JSON.stringify(assessment.mergedPublishResult.platforms),
+          // publishToAll derived the row status from THIS attempt alone, so a
+          // no-success retry (IG failed/skipped while attempt-1's FB video is
+          // already live) just flipped a live post to 'failed'. Re-derive from
+          // the merged record: any cross-attempt success = 'published' — the
+          // same any-success rule publishToAll itself applies. (published_at
+          // was already stamped by the attempt that first succeeded.)
+          ...(assessment.mergedPublishResult.success ? { status: 'published' } : {}),
+          ...(Object.keys(mergedContent).length ? { published_content: JSON.stringify(mergedContent) } : {}),
+        })
+        .catch(() => null);
+    }
+
+    // Consume the review from the candidate queue only after a REAL publish —
+    // same invariants as the autonomous publish path (never on dry-run/failure,
+    // never without a hosted image).
+    if (published && input.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
+      await createReviewGraphic({
+        googleReviewId: input.reviewGraphic.googleReviewId,
+        privacyMode: input.reviewGraphic.privacyMode || 'first_name_city',
+        templateKey: preview.visual?.templateKey || 'waves_clean_square',
+        channels,
+        status: 'approved',
+        imageUrl: chosenImageUrl,
+      }).catch(() => null);
+    }
+
+    // Promote the chosen variant to the run's primary visual so the audit list
+    // shows what actually published. A failed/dry-run attempt keeps the run in
+    // draft_created (still approvable once the blocker clears) but records the
+    // attempt for the audit trail. For a video approval the primary imageUrl
+    // stays the still (thumbnails/GBP) and videoUrl records the published Reel.
+    const approvedPreview = previewWithVisual(preview, {
+      imageUrl: chosenImageUrl || preview.visual?.imageUrl,
+      variant: preview.visual?.variant || 'campaign',
+      templateKey: preview.visual?.templateKey,
+      creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
+      variants,
+      // Only stamp the Reel onto the run's visual when it actually shipped —
+      // the audit row renders visual.videoUrl as "the published Reel".
+      videoUrl: published ? chosenVideoUrl : null,
+    });
+    const updated = await updateAutonomousRun(run.id, {
+      status: published ? 'published' : 'draft_created',
+      preview: approvedPreview,
+      // The MERGED record (prior successes + this attempt) — the next retry's
+      // channel narrowing and the audit trail both read from it.
+      publishResult: assessment.mergedPublishResult,
+      socialMediaPostId: run.social_media_post_id,
+      skipReason: published ? null
+        : SOCIAL_FLAGS.dryRun ? 'approve ran in dry-run mode — not published'
+        : assessment.success && !assessment.complete
+          ? 'approve publish incomplete: the video has not posted on every requested Meta channel — a retry publishes only the missing channels'
+          : 'approve publish failed: all platforms skipped or failed',
+    });
+
+    return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult: assessment.mergedPublishResult, run: updated };
+  });
+
+  if (result?.skipped) {
+    return { ok: false, status: 409, error: 'an approval for this run is already in progress' };
+  }
+  return result;
+}
+
+async function rejectAutonomousRun(runId, { reason } = {}) {
+  if (!(await hasTable('social_content_studio_runs'))) {
+    return { ok: false, status: 503, error: 'social_content_studio_runs table is unavailable' };
+  }
+  // SAME per-run lock as approve: a reject racing an in-flight approve would
+  // otherwise read stale draft_created and mark the run rejected while the
+  // approve is mid-publish on Meta/GBP — the finishing approve then flips the
+  // "rejected" run to published and a draft the admin rejected is live anyway.
+  // Serializing on the shared lock means the reject either runs first (and the
+  // approve 409s on the status guard) or arrives during a publish and 409s here.
+  const result = await runExclusive(`social_autonomous_approve_${runId}`, async () => {
+    const run = await db('social_content_studio_runs')
+      .where({ id: runId, run_type: 'autonomous' })
+      .first()
+      .catch(() => null); // malformed :id → 404, not a 500
+    if (!run) return { ok: false, status: 404, error: 'autonomous run not found' };
+    if (run.status !== 'draft_created') {
+      return { ok: false, status: 409, error: `run is '${run.status}' — only draft_created runs can be rejected` };
+    }
+    // A partially-published approval (some platform already posted, e.g. GBP
+    // went out before the video failed) can NOT be rejected — marking it
+    // rejected would hide LIVE external posts behind a rejected draft. The
+    // path forward is retrying the approval (which narrows to the missing
+    // channels) or removing the live posts manually first.
+    const priorPlatforms = toJson(run.publish_result, {})?.platforms;
+    const postedPlatforms = (Array.isArray(priorPlatforms) ? priorPlatforms : [])
+      .filter((p) => p?.success)
+      .map((p) => (p.location ? `${p.platform}/${p.location}` : p.platform));
+    if (postedPlatforms.length) {
+      return {
+        ok: false,
+        status: 409,
+        error: `this run has already posted to ${Array.from(new Set(postedPlatforms)).join(', ')} — it cannot be rejected; retry the approval to finish publishing, or remove the live posts manually first`,
+      };
+    }
+    const note = cleanText(reason, 300);
+    const updated = await updateAutonomousRun(run.id, {
+      status: 'rejected',
+      skipReason: note ? `rejected by admin: ${note}` : 'rejected by admin',
+      socialMediaPostId: run.social_media_post_id,
+    });
+    if (run.social_media_post_id) {
+      await db('social_media_posts')
+        .where({ id: run.social_media_post_id })
+        .update({ status: 'rejected' })
+        .catch(() => null);
+    }
+    return { ok: true, run: updated };
+  });
+  if (result?.skipped) {
+    return { ok: false, status: 409, error: 'an approval for this run is in progress — retry once it finishes' };
+  }
+  return result;
 }
 
 function initials(name) {
@@ -1590,6 +2106,8 @@ module.exports = {
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,
   SEASONAL_AUTONOMOUS_TOPICS,
+  approveAutonomousRun,
+  assessApprovalPublish,
   autonomousStatus,
   buildCampaignCardInput,
   buildCampaignDrafts,
@@ -1604,11 +2122,15 @@ module.exports = {
   httpUrlOrNull,
   normalizeChannels,
   getCampaignContext,
+  mentionsOtherCity,
+  contentRowMatchesCity,
   listCompetitorSwipeFile,
   listAutonomousRuns,
   listReviewGraphicCandidates,
   previewCampaign,
   privacyDisplayName,
+  recentCreativeConceptKeys,
+  rejectAutonomousRun,
   reviewExcerpt,
   serviceIntentKeywords,
   runAutonomous,

@@ -196,6 +196,11 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
     expect(byKey.basic.monthly).toBe(31.5); // 35 * 0.9
     expect(byKey.standard.monthly).toBe(40.95); // 45.5 * 0.9
     expect(byKey.premium.monthly).toBe(80.1); // 89 * 0.9
+    // monthlyBase stays the PRE-discount monthly — the client derives the
+    // struck-through anchor and the "You save … with WaveGuard" line from
+    // the monthlyBase-vs-monthly gap on non-pest rows (no perVisit anchor).
+    expect(byKey.basic.monthlyBase).toBe(35);
+    expect(byKey.premium.monthlyBase).toBe(89);
     // Manual discount is applied once at the bundle total, never per-section.
     for (const e of ladder) expect(e.manualDiscount).toBeNull();
   });

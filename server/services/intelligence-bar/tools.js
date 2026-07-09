@@ -28,6 +28,18 @@ const {
 const TOOLS = [
   // ── READ TOOLS ──────────────────────────────────────────────
   {
+    name: 'search_field_intelligence',
+    description: `Search the trusted agronomic knowledge brain — the AI-maintained field-outcome wiki plus the curated knowledge base — and return matching pages with summaries, confidence, data-point counts and any OPEN contradictions. Unreviewed (red-tier) wiki pages are excluded automatically. Synthesize an answer from the returned material and cite the source slugs; mention confidence levels and surface any open contradictions explicitly.
+Use for: "what do we know about large patch on zoysia", "how has K-Flow performed", "field results for Talstar P", "what works for chinch bugs in peak season".`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Topic, product, condition, or grass track to look up' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'query_customers',
     description: `Search/filter the customer database. Returns matching customers with key fields.
 Use for: finding customers by attribute, missing data, filtering by city/tier/stage/tags/service type.
@@ -294,6 +306,7 @@ time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
 async function executeTool(toolName, input) {
   try {
     switch (toolName) {
+      case 'search_field_intelligence': return await searchFieldIntelligence(input);
       case 'query_customers': return await queryCustomers(input);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
@@ -984,9 +997,20 @@ async function updateCustomer(customerId, updates) {
     .some((f) => clean[f] !== undefined);
   try {
     await db.transaction(async (trx) => {
+      // Row lock serializes overlapping address edits (see the Customers
+      // route): before/merged are re-derived from the locked row so a losing
+      // concurrent editor still matches the snapshots the winner moved.
+      const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+      const lockedMerged = { ...lockedBefore, ...clean };
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
-        await require('../customer-properties').syncPrimaryAddress(merged, trx);
+        await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
+        // Open leads/estimates snapshot the address at creation and never
+        // re-read customers.* — sync the copies that still match the old
+        // address (matching rules in the fan-out service header). Presence-
+        // triggered like the mirror above, so resubmitting the same address
+        // also self-heals copies left stale by a pre-fix edit.
+        await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
       }
     });
   } catch (e) {
@@ -1048,16 +1072,66 @@ async function bulkUpdateCustomers(customerIds, updates) {
         `CASE WHEN pipeline_stage IN ('active_customer','won','at_risk','churned','dormant') THEN COALESCE(member_since, ?) ELSE ? END`,
         [etDateString(), etDateString()]) }
     : {};
-  const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
   // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
   const logUpdates = updates.notes !== undefined ? { ...updates, notes: '[redacted]' } : updates;
-  logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
+
+  const addressSubmitted = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+    .some((f) => clean[f] !== undefined);
+  if (!addressSubmitted) {
+    const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+    logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
+    return {
+      success: true,
+      updated_count: count,
+      fields_updated: Object.keys(updates),
+    };
+  }
+
+  // A bulk ADDRESS edit takes a per-row path so every row gets the same
+  // consistency treatment as a single edit (see updateCustomer): primary
+  // customer_properties mirror + lead/estimate snapshot fan-out ATOMICALLY,
+  // then coords cleared + re-geocoded. The old single-statement path skipped
+  // all of that, leaving property dedup keys, map pins, and snapshot copies
+  // pointing at the old address.
+  let count = 0;
+  const errors = [];
+  for (const customerId of customerIds) {
+    const before = await db('customers').where('id', customerId).first();
+    if (!before) {
+      errors.push({ customer_id: customerId, error: 'Customer not found' });
+      continue;
+    }
+    const merged = { ...before, ...clean };
+    try {
+      await db.transaction(async (trx) => {
+        // Same row-lock serialization as the single-edit path.
+        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+        const lockedMerged = { ...lockedBefore, ...clean };
+        await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
+        await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
+        await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+      });
+    } catch (e) {
+      if (e && e.code === '23505') {
+        errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
+        continue;
+      }
+      throw e;
+    }
+    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+    void require('../geocoder').ensureCustomerGeocoded(customerId)
+      .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+      .catch(() => {});
+    count += 1;
+  }
+  logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
 
   return {
     success: true,
     updated_count: count,
     fields_updated: Object.keys(updates),
+    ...(errors.length ? { errors } : {}),
   };
 }
 
@@ -1247,5 +1321,83 @@ async function draftSms(input) {
   };
 }
 
+
+// ── search_field_intelligence ───────────────────────────────────
+// Read-only. Trusted tiers only (review_status auto/approved) — the
+// exception-based review gate decides what agents may read.
+async function searchFieldIntelligence(input) {
+  const query = String(input?.query || '').trim();
+  if (!query) return { error: 'query is required' };
+
+  const KnowledgeBridge = require('../knowledge-bridge');
+  const { claudeopedia, wiki, bridged } = await KnowledgeBridge.unifiedSearch(query, { limit: 6, trustedOnly: true });
+
+  // Attach summaries/snippets — unifiedSearch returns metadata only.
+  let wikiRows = wiki || [];
+  try {
+    const ids = wikiRows.map((w) => w.id).filter(Boolean);
+    if (ids.length) {
+      const summaries = await db('knowledge_entries').whereIn('id', ids).select('id', 'summary');
+      const byId = Object.fromEntries(summaries.map((r) => [r.id, r.summary]));
+      wikiRows = wikiRows.map((w) => ({ ...w, summary: byId[w.id] || null }));
+    }
+  } catch { /* summaries optional */ }
+
+  let kbRows = claudeopedia || [];
+  try {
+    const kbIds = kbRows.map((k) => k.id).filter(Boolean);
+    if (kbIds.length) {
+      const contents = await db('knowledge_base').whereIn('id', kbIds).select('id', 'content', 'wiki_entry_id');
+      const byId = Object.fromEntries(contents.map((r) => [r.id, r]));
+      kbRows = kbRows.map((k) => ({
+        ...k,
+        snippet: (byId[k.id]?.content || '').substring(0, 500) || null,
+        wiki_entry_id: byId[k.id]?.wiki_entry_id ?? null,
+      }));
+    }
+  } catch { /* snippets optional */ }
+
+  // Open contradictions against EVERY returned hit — wiki pages, KB rows
+  // (contradictions also link by kb_entry_id), and the wiki pages that KB
+  // hits mirror/link. A KB-only hit must still carry its warning.
+  let openContradictions = [];
+  try {
+    const wikiIds = new Set(wikiRows.map((w) => w.id).filter(Boolean));
+    for (const k of kbRows) if (k.wiki_entry_id) wikiIds.add(k.wiki_entry_id);
+    const kbIds = kbRows.map((k) => k.id).filter(Boolean);
+    if (wikiIds.size || kbIds.length) {
+      openContradictions = await db('knowledge_contradictions')
+        .where(function () {
+          if (wikiIds.size) this.orWhereIn('wiki_entry_id', [...wikiIds]);
+          if (kbIds.length) this.orWhereIn('kb_entry_id', kbIds);
+        })
+        .whereNotIn('status', ['resolved', 'dismissed'])
+        .select('contradiction_type', 'description', 'severity', 'status');
+    }
+  } catch { /* table may not exist */ }
+
+  return {
+    query,
+    fieldIntelligence: wikiRows.map((w) => ({
+      slug: w.slug,
+      title: w.title,
+      category: w.category,
+      confidence: w.confidence,
+      dataPoints: w.data_point_count,
+      tier: w.review_tier,
+      summary: w.summary,
+    })),
+    knowledgeBase: kbRows.map((k) => ({
+      slug: k.slug,
+      title: k.title,
+      category: k.category,
+      confidence: k.confidence,
+      snippet: k.snippet,
+    })),
+    bridgedPairs: (bridged || []).length,
+    openContradictions,
+    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge. Cite slugs, state confidence, and surface open contradictions.',
+  };
+}
 
 module.exports = { TOOLS, executeTool };

@@ -33,6 +33,10 @@ function assessmentAnalytics() {
   return require('./assessment-analytics');
 }
 
+function agronomicWiki() {
+  return require('./agronomic-wiki');
+}
+
 // ══════════════════════════════════════════════════════════════
 // 1. FAWN WEATHER CONTEXT
 // ══════════════════════════════════════════════════════════════
@@ -299,14 +303,30 @@ If no contradictions, return: { "contradictions": [] }`
               .where({ kb_entry_id: kb.id, wiki_entry_id: wiki.id, contradiction_type: c.type, resolved: false })
               .first();
             if (!existing) {
-              await db('knowledge_contradictions').insert({
+              const [inserted] = await db('knowledge_contradictions').insert({
                 kb_entry_id: kb.id,
                 wiki_entry_id: wiki.id,
                 kb_claim: (c.kb_claim || '').substring(0, 500),
                 wiki_evidence: (c.wiki_evidence || '').substring(0, 500),
                 contradiction_type: c.type || 'efficacy',
                 severity: c.severity || 'moderate',
-              });
+              }).returning('id');
+              const insertedId = inserted?.id ?? inserted;
+              // Trusted reads gate on the page's cached review_status — flip
+              // the page and its KB mirror now, not at the next regeneration.
+              // Passing the just-inserted id keeps the gate closed even if
+              // the recompute's own contradiction lookup transiently fails.
+              try {
+                await agronomicWiki().recomputeEntryReviewGate(wiki.id, {
+                  assumeOpenIds: [insertedId],
+                });
+              } catch (gateErr) {
+                // Roll the insert back: the existing-row dedupe would
+                // otherwise skip this contradiction on every later run,
+                // leaving the page trusted with no retry path.
+                try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                throw gateErr;
+              }
               stats.found++;
             }
           }
@@ -361,7 +381,74 @@ If no contradictions, return: { "contradictions": [] }`
     return context;
   },
 
-  // ── 7. Assessment notification ──────────────────────────────
+  // ── 7. Assessment score parts (shared) ──────────────────────
+  // Overall score + delta vs the previous confirmed assessment + customer tip.
+  // Shared by the completion-time report SMS (score folded into the single
+  // service-report text) and the legacy standalone notification below.
+  async computeAssessmentScoreParts(assessment) {
+    if (!assessment) return null;
+    const scoreOf = (a) => a.overall_score || Math.round(
+      (a.turf_density + a.weed_suppression + a.fungus_control +
+        (a.color_health || 0) + (a.thatch_level || 0)) / 5
+    );
+    const overall = scoreOf(assessment);
+
+    // Get previous assessment for delta
+    const previous = await db('lawn_assessments')
+      .where({ customer_id: assessment.customer_id, confirmed_by_tech: true })
+      .where('service_date', '<', assessment.service_date)
+      .orderBy('service_date', 'desc')
+      .first();
+    const delta = previous ? overall - scoreOf(previous) : null;
+
+    // Parse recommendations for customer tip
+    let tip = '';
+    try {
+      const recs = typeof assessment.recommendations === 'string'
+        ? JSON.parse(assessment.recommendations) : assessment.recommendations;
+      tip = recs?.customerTip ? String(recs.customerTip).trim() : '';
+    } catch {}
+
+    const deltaStr = delta != null && delta !== 0
+      ? `, ${delta > 0 ? 'up' : 'down'} ${Math.abs(delta)} from last visit` : '';
+    return { overall, delta, deltaStr, tip };
+  },
+
+  // Score lines folded into the completion service-report SMS so the
+  // customer's lawn health score rides in the SAME text as the report link,
+  // instead of a separate "lawn health report ready" message at confirm time.
+  // Returns { scoreLine, tipLine } (tipLine may be '') or null when there's no
+  // confirmed assessment/score. Split so the caller can drop the (longer) tip
+  // to stay within its SMS segment budget. Never throws.
+  // Note: recommendations.customerTip is generated asynchronously after
+  // /confirm, so tipLine can legitimately be '' when a completion races ahead
+  // of that generation — the full recommendations still live in the linked
+  // report, so an occasional missing inline tip degrades gracefully.
+  async buildCompletionScoreBlock(assessmentId) {
+    try {
+      if (!assessmentId) return null;
+      const assessment = await db('lawn_assessments')
+        .where({ id: assessmentId, confirmed_by_tech: true })
+        .first();
+      if (!assessment) return null;
+      const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
+      if (!parts || !Number.isFinite(parts.overall)) return null;
+      return {
+        scoreLine: `You scored ${parts.overall}/100${parts.deltaStr}.`,
+        tipLine: parts.tip ? `Tip: ${parts.tip}` : '',
+      };
+    } catch (err) {
+      logger.error(`[lawn-intel] buildCompletionScoreBlock failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  // ── 7b. Assessment notification (legacy standalone) ─────────
+  // SUPERSEDED: the lawn health score is now folded into the single
+  // completion service-report SMS (see admin-dispatch completion +
+  // buildCompletionScoreBlock) so customers get one report text, not two.
+  // Retained for manual re-send / backfill; no longer invoked from the
+  // confirm pipeline.
   async sendAssessmentNotification(assessmentId) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
@@ -370,32 +457,11 @@ If no contradictions, return: { "contradictions": [] }`
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
       if (!customer) return null;
 
-      // Build notification message
-      const overall = assessment.overall_score || Math.round(
-        (assessment.turf_density + assessment.weed_suppression + assessment.fungus_control +
-          (assessment.color_health || 0) + (assessment.thatch_level || 0)) / 5
-      );
+      const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
+      const overall = parts?.overall ?? 0;
+      const deltaStr = parts?.deltaStr || '';
+      const tip = parts?.tip ? `\nTip: ${parts.tip}` : '';
 
-      // Get previous assessment for delta
-      const previous = await db('lawn_assessments')
-        .where({ customer_id: customer.id, confirmed_by_tech: true })
-        .where('service_date', '<', assessment.service_date)
-        .orderBy('service_date', 'desc')
-        .first();
-
-      const delta = previous ? overall - (previous.overall_score || Math.round(
-        (previous.turf_density + previous.weed_suppression + previous.fungus_control +
-          (previous.color_health || 0) + (previous.thatch_level || 0)) / 5
-      )) : null;
-
-      // Parse recommendations for customer tip
-      let tip = '';
-      try {
-        const recs = typeof assessment.recommendations === 'string' ? JSON.parse(assessment.recommendations) : assessment.recommendations;
-        tip = recs?.customerTip ? `\nTip: ${recs.customerTip}` : '';
-      } catch {}
-
-      const deltaStr = delta != null && delta !== 0 ? `, ${delta > 0 ? 'up' : 'down'} ${Math.abs(delta)} from last visit` : '';
       const smsMessage = await renderRequiredSmsTemplate('lawn_health_report_ready', {
         first_name: customer.first_name || 'there',
         overall_score: String(overall),
@@ -415,10 +481,18 @@ If no contradictions, return: { "contradictions": [] }`
         emailBody: smsMessage,
       });
 
-      await db('lawn_assessments').where({ id: assessmentId }).update({
-        notification_sent: true,
-        notification_sent_at: new Date(),
-      });
+      // Stamp only when a channel actually delivered — an unconditional
+      // stamp recorded "notified" even when the dispatcher sent nothing
+      // (email-preferring customers, blocked SMS), permanently hiding the
+      // miss because the notification_sent guard above never retries.
+      if (result?.sent) {
+        await db('lawn_assessments').where({ id: assessmentId }).update({
+          notification_sent: true,
+          notification_sent_at: new Date(),
+        });
+      } else {
+        logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); left unstamped for re-send`);
+      }
 
       return result;
     } catch (err) {
@@ -551,7 +625,11 @@ If no contradictions, return: { "contradictions": [] }`
       const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment || !assessment.technician_id) return null;
 
-      const fields = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level'];
+      // stress_damage is the consolidated score the tech actually corrects on the
+      // completion screen now (fungus/thatch are AI-only and unchanged), so it must
+      // be part of the calibration delta/bias — otherwise a real Stress correction
+      // reads as zero delta.
+      const fields = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
       const deltas = [];
       const row = { assessment_id: assessmentId, technician_id: assessment.technician_id };
 

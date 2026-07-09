@@ -36,7 +36,7 @@ export default function SerifHeading({
       {...rest}
       style={{
         fontFamily: "'Inter', system-ui, sans-serif",
-        fontWeight: 650,
+        fontWeight: 600,
         fontSize: size || 'var(--h1-serif)',
         letterSpacing: 0,
         lineHeight: 1.1,

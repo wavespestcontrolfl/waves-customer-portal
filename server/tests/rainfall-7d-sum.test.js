@@ -96,4 +96,30 @@ describe('fetchServiceWeekWeather — dailyRain mirrors rainInches (no partial c
     expect(res.rainInches).toBeNull();
     expect(res.dailyRain).toBeNull();
   });
+
+  test('a SHORT et0 array (full precip window) → et0Inches null, rain still computed', async () => {
+    // Open-Meteo can return a full precipitation_sum but a truncated et0 series.
+    // sumPrecipInches only rejects gaps, not a short array, so et0 must be length-guarded
+    // against the window or it would understate ET₀ and drag the water target down.
+    const serviceDate = '2026-05-12';
+    const window = rainWindowEndingOn(serviceDate, 7);
+    const days = [];
+    let d = new Date(`${window.start}T00:00:00Z`);
+    const end = new Date(`${window.end}T00:00:00Z`);
+    while (d <= end) { days.push(d.toISOString().slice(0, 10)); d = new Date(d.getTime() + 86400000); }
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        daily: {
+          time: days,
+          precipitation_sum: days.map(() => 0.1), // full, valid → rain trusted
+          et0_fao_evapotranspiration: [0.2, 0.2, 0.2], // SHORT: 3 of 7 → et0 must NOT be trusted
+        },
+        daily_units: { et0_fao_evapotranspiration: 'inch' },
+      }),
+    });
+    const res = await fetchServiceWeekWeather({ latitude: 27.33, longitude: -82.55, serviceDate });
+    expect(res.rainInches).toBe(0.7);
+    expect(res.et0Inches).toBeNull();
+  });
 });

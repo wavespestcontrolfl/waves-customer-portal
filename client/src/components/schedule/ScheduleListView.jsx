@@ -63,6 +63,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   const [bulkDate, setBulkDate] = useState('');
   const [bulkPrepaidAmount, setBulkPrepaidAmount] = useState('');
   const [bulkPrepaidMethod, setBulkPrepaidMethod] = useState('cash');
+  // Business-initiated bulk cancels can waive the one-time card-hold
+  // late-cancel fee. Default OFF: unchecked keeps today's behavior (an
+  // in-window cancel of a held-card visit charges the disclosed fee).
+  const [bulkWaiveCardHoldFee, setBulkWaiveCardHoldFee] = useState(false);
 
   const fetchList = useCallback(async () => {
     setLoading(true);
@@ -119,6 +123,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     else setSelected(new Set(sorted.map(s => s.id)));
   };
 
+  // A checked waive must never outlive the selection it was decided for:
+  // Clear, deselecting the last row, and Apply all empty the selection and
+  // drop the flag here (Apply also resets it explicitly on success).
+  useEffect(() => {
+    if (selected.size === 0) setBulkWaiveCardHoldFee(false);
+  }, [selected]);
+
   const executeBulkAction = async () => {
     if (!bulkAction || selected.size === 0) return;
     setBulkBusy(true);
@@ -126,6 +137,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       let payload = {};
       if (bulkAction === 'reassign') payload = { technicianId: bulkTechId || null };
       else if (bulkAction === 'reschedule') payload = { scheduledDate: bulkDate };
+      else if (bulkAction === 'cancel') payload = { waiveCardHoldFee: bulkWaiveCardHoldFee };
       else if (bulkAction === 'mark_prepaid') payload = { totalAmount: Number(bulkPrepaidAmount), method: bulkPrepaidMethod };
 
       await adminFetch('/admin/schedule/bulk-action', {
@@ -134,6 +146,9 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       });
       setSelected(new Set());
       setBulkAction('');
+      // One decision per bulk cancel: never let a checked waive leak into
+      // the next batch and silently forfeit disclosed fees.
+      setBulkWaiveCardHoldFee(false);
       fetchList();
       onRefresh?.();
     } catch (e) {
@@ -210,7 +225,8 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
         <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white rounded-sm text-12">
           <span className="u-nums font-medium">{selected.size} selected</span>
           <span className="text-zinc-500">·</span>
-          <select value={bulkAction} onChange={e => setBulkAction(e.target.value)}
+          <select value={bulkAction}
+            onChange={e => { setBulkAction(e.target.value); setBulkWaiveCardHoldFee(false); }}
             className="text-12 px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600">
             <option value="">Choose action…</option>
             <option value="reassign">Reassign tech</option>
@@ -229,6 +245,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
             <input type="date" value={bulkDate} onChange={e => setBulkDate(e.target.value)}
               className="text-12 u-nums px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600" />
           )}
+          {bulkAction === 'cancel' && (
+            <label className="flex items-center gap-1.5 text-12 text-zinc-300 select-none cursor-pointer">
+              <input
+                type="checkbox"
+                checked={bulkWaiveCardHoldFee}
+                onChange={e => setBulkWaiveCardHoldFee(e.target.checked)}
+                className="accent-white"
+              />
+              Waive card-hold late-cancel fees (Waves-initiated)
+            </label>
+          )}
           {bulkAction === 'mark_prepaid' && (
             <>
               <input type="number" value={bulkPrepaidAmount} onChange={e => setBulkPrepaidAmount(e.target.value)}
@@ -244,12 +271,15 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
             </>
           )}
           {bulkAction && (
+            // variant=secondary, not primary + white overrides: cn() is plain
+            // clsx, so the old bg-white/text-zinc-900 overrides lost the
+            // stylesheet-order conflict and rendered Apply black-on-black.
             <Button
               size="sm"
-              variant="primary"
+              variant="secondary"
               onClick={executeBulkAction}
               disabled={bulkBusy || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
-              className="bg-white text-zinc-900 hover:bg-zinc-100 rounded-sm"
+              className="rounded-sm"
             >
               {bulkBusy ? 'Applying…' : 'Apply'}
             </Button>

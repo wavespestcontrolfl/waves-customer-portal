@@ -8,8 +8,9 @@
 
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const analytics = require('../services/assessment-analytics');
+const { recomputeEntryReviewGate } = require('../services/agronomic-wiki');
 const db = require('../models/db');
 
 router.use(adminAuthenticate);
@@ -196,11 +197,19 @@ router.get('/contradictions', async (req, res, next) => {
 router.post('/contradictions/detect', async (req, res, next) => {
   try {
     const result = await analytics.detectContradictions();
+    // A run that died mid-scan (including a failed page re-gate after a
+    // contradiction insert) is not a success — surface it.
+    if (result.error) return res.status(500).json({ success: false, ...result });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
 });
 
-router.patch('/contradictions/:id', async (req, res, next) => {
+// requireAdmin: resolving/dismissing a contradiction is a REVIEW action —
+// since the recompute below, it can un-gate a wiki page and its KB mirror
+// back to agent-visible, so it needs the same role bar as the requireAdmin
+// review endpoints in admin-wiki (adminAuthenticate alone accepts any
+// active technician token).
+router.patch('/contradictions/:id', requireAdmin, async (req, res, next) => {
   try {
     const { status, resolution_notes } = req.body;
     const update = { status, updated_at: new Date() };
@@ -213,6 +222,12 @@ router.patch('/contradictions/:id', async (req, res, next) => {
       .where({ id: req.params.id })
       .update(update)
       .returning('*');
+    // Any status change can open or clear a page's gating exception —
+    // resolving the last open contradiction must un-gate the linked wiki
+    // page (and its KB mirror) now, not at some future regeneration.
+    if (updated?.wiki_entry_id) {
+      await recomputeEntryReviewGate(updated.wiki_entry_id);
+    }
     res.json({ success: true, contradiction: updated });
   } catch (err) { next(err); }
 });

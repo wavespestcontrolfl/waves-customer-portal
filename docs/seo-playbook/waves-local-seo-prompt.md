@@ -1,6 +1,6 @@
 # Waves — Local SEO Page Audit Prompt
 
-You have already loaded `waves-seo-operator-prompt.md`. That gave you the business context, service map, brand voice, and tool inventory. This file tells you how to run a **single-page local SEO audit** and what the deliverable must look like.
+You have already loaded `.claude/skills/waves-content/SKILL.md` (content/SEO rules, prohibitions, hub-and-spoke boundaries, E-E-A-T facts) and have the repo `CLAUDE.md` for business context (offices, services, spoke fleet). This file tells you how to run a **single-page local SEO audit** and what the deliverable must look like. For brand voice, positioning, and conversion-writing context, load `.claude/skills/waves-content/EXAMPLES.md` (the salvaged, de-staled replacement for the retired operator prompt).
 
 ## Inputs
 

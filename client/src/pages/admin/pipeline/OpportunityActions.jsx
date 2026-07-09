@@ -107,6 +107,12 @@ function actionConfig(kind, opportunity) {
 }
 
 function primaryAction(opportunity) {
+  // An expired estimate's only working action is Extend — the send and
+  // follow-up paths both refuse expired rows — so it wins the primary slot
+  // whatever the stage (a swept expired scheduled-send derives as draft).
+  if (opportunity.estimateId && opportunity.nextAction === "extend_estimate") {
+    return { label: "Extend Expiration", kind: "extend_estimate" };
+  }
   switch (opportunity.stage) {
     case PIPELINE_STAGES.NEW_LEAD:
       return { label: "Contact", kind: "navigate", to: communicationUrl(opportunity) };
@@ -147,7 +153,12 @@ function menuActions(opportunity) {
     if (opportunity.stage === PIPELINE_STAGES.ESTIMATE_DRAFT) {
       actions.push({ label: "Edit Estimate", kind: "navigate", to: "/admin/estimates?tab=estimates" });
     }
-    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {
+    if (
+      [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)
+      // Expired rows can't follow up (server refuses) — Extend Expiration is
+      // already in this menu and is the primary action for them.
+      && opportunity.nextAction !== "extend_estimate"
+    ) {
       actions.push({ label: "Follow Up", kind: "follow_up" });
     }
     if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {
@@ -155,7 +166,12 @@ function menuActions(opportunity) {
       actions.push({ label: "Mark Annual Prepay", kind: "mark_annual_prepay" });
       actions.push({ label: "Mark Declined", kind: "decline_estimate" });
     }
-    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.LOST].includes(opportunity.stage)) {
+    if (
+      [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.LOST].includes(opportunity.stage)
+      // Expired rows offer Extend whatever the stage (a swept expired
+      // scheduled-send derives as draft-stage).
+      || opportunity.nextAction === "extend_estimate"
+    ) {
       actions.push({ label: "Extend Expiration", kind: "extend_estimate" });
     }
   }

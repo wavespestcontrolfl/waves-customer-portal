@@ -62,7 +62,7 @@ export default function MobileCheckTenderSheet({
       {/* Header */}
       <div
         className="flex items-center px-3 border-b border-hairline border-zinc-200"
-        style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"
@@ -104,7 +104,7 @@ export default function MobileCheckTenderSheet({
             marginTop: 0,
             padding: '18px 24px',
             fontSize: 18,
-            fontWeight: 600,
+            fontWeight: 500,
             background: '#111111',
             color: '#FFFFFF',
             border: 'none',

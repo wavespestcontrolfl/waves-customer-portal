@@ -52,7 +52,9 @@ function fullName(customer = {}) {
 function propertyLabel(customer = {}) {
   const label = clean(customer.profile_label);
   if (label) return label;
-  const address = [customer.address_line1, customer.city].filter(Boolean).join(', ');
+  // Full address incl. state + zip (owner call 07-06).
+  const cityStateZip = [customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const address = [customer.address_line1, cityStateZip].filter(Boolean).join(', ');
   return address || 'Service property';
 }
 
@@ -102,9 +104,19 @@ async function resolveRecipients(customer) {
       recipients.push({ email: value, name });
     }
   };
-  // The SMS appointment recipients first (service contacts and/or primary, each
-  // with their own email — service email falls back to primary email in here).
-  for (const c of getAppointmentContacts(customer, prefs || {})) add(c.email, c.name);
+  // The SMS appointment recipients first (service contacts and/or primary).
+  // A service contact's email inside getAppointmentContacts falls back to the
+  // PRIMARY email when their slot has none — keep that delivery fallback (the
+  // primary mailbox still gets the notice) but under the PRIMARY's name: a
+  // greeting with the service contact's name on the primary's address
+  // mislabels the email (phone-only buyer/tenant slots made this common).
+  const primary = getPrimaryContact(customer);
+  const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
+  for (const c of getAppointmentContacts(customer, prefs || {})) {
+    const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
+    if (ownEmail) add(ownEmail, c.name);
+    else add(primary.email, primary.name);
+  }
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
@@ -112,7 +124,6 @@ async function resolveRecipients(customer) {
   // Last resort: the primary customer email (e.g. email-only customer with no
   // appointment phone contacts at all).
   if (!recipients.length) {
-    const primary = getPrimaryContact(customer);
     add(primary.email, primary.name);
   }
   return recipients;
@@ -154,11 +165,20 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
  *   { ok: false, blocked: true, reason }           — all recipients suppressed
  *   { ok: false, error }                           — threw
  */
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {} }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  const recipients = await resolveRecipients(customer);
+  let recipients = await resolveRecipients(customer);
+  // Optional allowlist of addresses: the call-booking confirmation fan-out
+  // targets ONLY email-only service-contact slots (a phone-channel customer's
+  // primary must not receive an email their channel choice didn't ask for) —
+  // still resolved through resolveRecipients so names/dedup/suppression
+  // semantics stay identical to a full send.
+  if (Array.isArray(recipientFilter)) {
+    const allow = new Set(recipientFilter.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean));
+    recipients = recipients.filter((r) => allow.has(r.email.toLowerCase()));
+  }
   if (!recipients.length) {
     await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'missing_email', metadata });
     return { ok: false, skipped: true, reason: 'missing_email' };
@@ -245,10 +265,11 @@ function apptStamp(apptTime) {
   return apptTime ? String(apptTime.getTime()) : 'na';
 }
 
-async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, idempotencyKey } = {}) {
+async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null } = {}) {
   const apptTime = toDate(appointmentTime);
   return sendTemplate({
     customerId,
+    recipientFilter,
     templateKey: 'appointment.confirmation',
     eventType: 'appointment.confirmation',
     payload: {
@@ -256,6 +277,9 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      // Empty string hides the template's "Reschedule appointment" CTA block
+      // (renderBlocks skips a cta with no href) — never a broken button.
+      reschedule_url: clean(rescheduleUrl),
     },
     idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}:${apptStamp(apptTime)}`,
     categories: ['appointment_confirmation'],
@@ -264,21 +288,55 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
   });
 }
 
+// Assigned tech's first name for the reminder details card — self-contained
+// lookup so callers don't need to thread it; '' (suppressed row) when the
+// visit is unassigned or the lookup fails.
+async function technicianFirstName(scheduledServiceId) {
+  if (!scheduledServiceId) return '';
+  try {
+    const row = await db('scheduled_services')
+      .where({ 'scheduled_services.id': scheduledServiceId })
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .first('technicians.name as tech_name');
+    return firstToken(row?.tech_name);
+  } catch {
+    return '';
+  }
+}
+
 // kind: '72h' | '24h'
-async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, idempotencyKey } = {}) {
+async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
+  const techName = await technicianFirstName(scheduledServiceId);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
+  // Empty reschedule_url hides the template's "Reschedule appointment" CTA
+  // block (renderBlocks skips a cta with no href) — never a broken button.
   const payload = is72
     ? {
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      technician_name: techName,
+      reschedule_url: clean(rescheduleUrl),
     }
     : {
       service_type: clean(serviceLabel) || 'service',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
+      // The details card lists Date above Scheduled start (owner call
+      // 2026-07-06 — if we show the start time, show the date too).
+      appointment_date: apptTime ? formatETDate(apptTime) : '',
+      // Composed clause for the 24h opening sentence (migration
+      // 20260705010020): "…scheduled for tomorrow{{appointment_when}}."
+      // Composed HERE so fallback sends with no reconstructable
+      // appointment time degrade to the clean "…tomorrow." sentence
+      // instead of stranding empty per-field variables in prose.
+      appointment_when: apptTime
+        ? `, ${formatETDay(apptTime)}, ${formatETDate(apptTime)}, starting at ${formatETTime(apptTime)}`
+        : '',
+      technician_name: techName,
+      reschedule_url: clean(rescheduleUrl),
     };
   return sendTemplate({
     customerId,
@@ -310,9 +368,72 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
   });
 }
 
+// Email twin of the tech_arrived SMS — sent when the customer's Tech Arrived
+// delivery channel is email/both (template seeded by 20260707000050).
+async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, idempotencyKey } = {}) {
+  return sendTemplate({
+    customerId,
+    templateKey: 'appointment.tech_arrived',
+    eventType: 'appointment.tech_arrived',
+    payload: {
+      tech_name: clean(techName) || 'Your technician',
+    },
+    idempotencyKey: idempotencyKey || `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+    categories: ['appointment_tech_arrived'],
+    triggerEventId: `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+    metadata: { scheduled_service_id: scheduledServiceId || null },
+  });
+}
+
+/**
+ * Missed-visit (no-show) email — the email twin of the appointment_no_show
+ * SMS, fired from AppointmentReminders.handleNoShow. missedWhen arrives
+ * pre-composed by the caller (same-day "today" vs "on Tuesday, July 8" for
+ * back-dated marks — the SMS path already computes it). The charge line is
+ * composed HERE from the fee outcome the dispatch route passes through, so
+ * the email never claims "no charge" to a customer whose card hold was
+ * charged the no-show fee.
+ */
+async function sendAppointmentNoShowEmail({
+  customerId,
+  scheduledServiceId,
+  serviceLabel,
+  missedWhen,
+  noShowReason,
+  feeOutcome,
+  idempotencyKey,
+} = {}) {
+  // 'review' = the charge attempt hit an ambiguous Stripe error and was
+  // parked for reconciliation — the fee may still have been accepted, so
+  // neither "was charged" nor "no charge" is safe to claim.
+  const chargeLine = feeOutcome === 'charged'
+    ? 'Per your booking terms, the missed-visit fee was charged to your card on file — it will show on your emailed receipt.'
+    : feeOutcome === 'review'
+      ? 'If a missed-visit fee applies under your booking terms, it will appear on an emailed receipt.'
+      : 'There’s no charge for the attempted visit.';
+  return sendTemplate({
+    customerId,
+    templateKey: 'appointment.no_show',
+    eventType: 'appointment.no_show',
+    payload: {
+      service_type: clean(serviceLabel) || 'service',
+      missed_when: clean(missedWhen) || 'recently',
+      no_show_reason: clean(noShowReason),
+      charge_line: chargeLine,
+      rebook_url: portalTabUrl('visits'),
+    },
+    idempotencyKey: idempotencyKey || `appointment.no_show:${scheduledServiceId || customerId}`,
+    categories: ['appointment_no_show'],
+    triggerEventId: `appointment.no_show:${scheduledServiceId || customerId}`,
+    metadata: { scheduled_service_id: scheduledServiceId || null },
+  });
+}
+
 module.exports = {
   sendAppointmentConfirmationEmail,
   sendAppointmentReminderEmail,
+  sendAppointmentNoShowEmail,
   sendTechEnRouteEmail,
+  sendTechArrivedEmail,
   _private: { sendTemplate, loadCustomer, resolveRecipients, isEmailLike, propertyLabel },
 };

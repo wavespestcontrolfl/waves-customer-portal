@@ -850,6 +850,31 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         : null;
     } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
 
+    // Estimate-deposit money — deposits live in their own ledger
+    // (estimate_deposits), never as payments/invoices rows, so none of the
+    // AR/billing queries above can see them. onHand = received rows' unapplied
+    // remainder (amount − credited − refunded, the pendingDepositCredit
+    // formula); collectedPeriod = gross deposit money that arrived in the
+    // window (received_at is only stamped on real Stripe success, so a bare
+    // window filter excludes pending/failed rows). null (not zeros) on a read
+    // failure so the tile can show unavailable rather than a real-looking $0.
+    let deposits = null;
+    try {
+      const [ledger] = await db('estimate_deposits').select(
+        db.raw("COALESCE(SUM(GREATEST(amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0), 0)) FILTER (WHERE status = 'received'), 0) as on_hand"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count"),
+      );
+      const [window] = await db('estimate_deposits')
+        .modify((qb) => applyETTimestampWindow(qb, 'received_at', start, todayStr))
+        .select(db.raw('COALESCE(SUM(amount), 0) as collected'), db.raw('COUNT(*) as n'));
+      deposits = {
+        onHand: parseFloat(ledger.on_hand),
+        onHandCount: parseInt(ledger.on_hand_count, 10),
+        collectedPeriod: parseFloat(window.collected),
+        collectedPeriodCount: parseInt(window.n, 10),
+      };
+    } catch (err) { logger.error(`[admin-dashboard] deposit kpis failed: ${err.message}`); }
+
     return {
       period: range ? 'custom' : period,
       periodLabel: range ? `Since ${start}` : periodLabel(period),
@@ -895,6 +920,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         customerBase,
       },
       retention: { pct: retentionPct, lost },
+      deposits,
       momentum,
       leaderboard,
     };
@@ -952,6 +978,175 @@ router.get('/mrr-trend', dashboardCache, async (req, res, next) => {
     const result = await executeDashboardTool('get_mrr_trend', { months }).catch(ibError('get_mrr_trend'));
     if (result?.error) return res.status(500).json({ error: result.error });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/mrr-bridge?months=6
+// Net-MRR bridge: each month's movement decomposed into new / reactivated /
+// expansion / contraction / churned by diffing consecutive
+// customer_mrr_snapshots months; pre-snapshot months degrade (never hide) to a
+// customers-table approximation. See services/mrr-bridge.js.
+router.get('/mrr-bridge', dashboardCache, async (req, res, next) => {
+  try {
+    const { computeMrrBridge } = require('../services/mrr-bridge');
+    res.json(await computeMrrBridge({ months: req.query.months }));
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/kpi-history?days=90
+// Per-metric daily series from kpi_snapshots (the daily cron's month-to-date
+// captures) for the KPI-tile sparklines. Series start at the first snapshot
+// date — the cron is young, so early tiles show short lines, not backfill.
+router.get('/kpi-history', dashboardCache, async (req, res, next) => {
+  try {
+    // Lazy-require mirrors kpi-snapshot's own lazy require of this router
+    // (it pulls computeCoreKpis) — a top-level require would be circular.
+    const { getKpiHistory } = require('../services/kpi-snapshot');
+    res.json(await getKpiHistory(req.query.days));
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/ebitda-bridge
+// Month-to-date adjusted-EBITDA waterfall: revenue → gross profit → contribution
+// (after marketing actuals) → adjusted EBITDA (after owner-entered overhead
+// assumptions, prorated to the elapsed month). Company-level profitability,
+// deliberately SEPARATE from the job-level gross-margin tile — see
+// services/ebitda-bridge.js for the formula and the "adjusted" caveats.
+router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildEbitdaBridge } = require('../services/ebitda-bridge');
+    const now = new Date();
+    const monthStart = etMonthStart(now);
+    const today = etDateString(now);
+    const elapsedDays = Number(today.slice(8, 10));
+    const daysInMonth = Number(etMonthEnd(now).slice(8, 10));
+    const monthFraction = elapsedDays / daysInMonth;
+
+    // Revenue + gross profit — same source, window shape, and margin-weighting
+    // convention as the core-KPIs gross-margin tile (uncosted rows count their
+    // revenue but zero GP), so the bridge and the tile can't disagree.
+    const fin = await db('service_records')
+      .where('service_date', '>=', monthStart).where('service_date', '<=', today)
+      .whereNotNull('revenue')
+      .select(
+        db.raw('SUM(revenue) as rev'),
+        db.raw('SUM(revenue * gross_margin_pct / 100.0) as gp'),
+        db.raw('SUM(revenue) FILTER (WHERE gross_margin_pct IS NULL) as uncosted'),
+        db.raw('COUNT(*) as jobs'),
+      ).first();
+
+    // Marketing ACTUALS for the window — the same three sources the capital-
+    // allocation card's all-in CAC uses (admin-ads.js fetchChannelAttribution):
+    // platform ad spend, channel retainers (prorated: they're monthly figures),
+    // and per-conversion referral rewards. Each guarded so a missing table
+    // (pre-migration env) zeroes that component instead of 500ing the bridge.
+    let adSpend = 0;
+    try {
+      const r = await db('ad_performance_daily').where('date', '>=', monthStart).sum({ c: 'cost' }).first();
+      adSpend = parseFloat(r?.c) || 0;
+    } catch { /* ad_performance_daily absent */ }
+    let fixedCosts = 0;
+    try {
+      const r = await db('channel_fixed_costs').sum({ c: 'monthly_amount' }).first();
+      fixedCosts = (parseFloat(r?.c) || 0) * monthFraction;
+    } catch { /* channel_fixed_costs not present yet */ }
+    let referralRewards = 0;
+    try {
+      let perConversion = 50; // fallback ONLY if the settings row can't be read
+      try {
+        const s = await require('../services/referral-engine').getSettings();
+        perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
+      } catch { /* settings unreadable — keep the default */ }
+      const [{ n }] = await db('ad_service_attribution')
+        .where({ lead_source: 'referral', funnel_stage: 'completed' })
+        .where('lead_date', '>=', monthStart)
+        .countDistinct({ n: 'customer_id' });
+      referralRewards = (Number(n) || 0) * perConversion;
+    } catch { /* no attribution rows — no referral cost */ }
+
+    // Overhead assumptions: latest company_financials row. Admin overhead is
+    // per-customer-year × active real customers ÷ 12 (a monthly figure like the
+    // other three; buildEbitdaBridge prorates all of them by monthFraction).
+    const finRow = await db('company_financials').orderBy('effective_date', 'desc').first().catch(() => null);
+    let overhead = null;
+    if (finRow) {
+      let activeCustomers = 0;
+      try {
+        const c = await db('customers').where({ active: true }).whereNull('deleted_at')
+          .modify(whereRealCustomer).count('* as count').first();
+        activeCustomers = parseInt(c?.count || 0, 10);
+      } catch (err) {
+        logger.error(`[admin-dashboard] ebitda-bridge customer count failed: ${err.message}`);
+      }
+      // Basis resolution (Phase 5): owner-typed ovh_* operating costs are
+      // authoritative once entered; otherwise fall back to the pricing-input
+      // approximation (labeled as such on the card). The two column families
+      // are deliberately separate — pricing tweaks must not rewrite the P&L
+      // view and vice versa.
+      const ovhKeys = ['ovh_office_payroll', 'ovh_rent', 'ovh_insurance', 'ovh_software', 'ovh_vehicle_fixed', 'ovh_other_ga'];
+      const hasEntered = finRow.overhead_entered_at != null && ovhKeys.some((k) => finRow[k] != null);
+      overhead = hasEntered
+        ? {
+          basis: 'entered',
+          enteredAt: finRow.overhead_entered_at,
+          components: {
+            payroll: parseFloat(finRow.ovh_office_payroll) || 0,
+            rent: parseFloat(finRow.ovh_rent) || 0,
+            insurance: parseFloat(finRow.ovh_insurance) || 0,
+            software: parseFloat(finRow.ovh_software) || 0,
+            vehicle: parseFloat(finRow.ovh_vehicle_fixed) || 0,
+            other: parseFloat(finRow.ovh_other_ga) || 0,
+          },
+        }
+        : {
+          basis: 'pricing_defaults',
+          components: {
+            vehicle: parseFloat(finRow.vehicle_cost_per_month) || 0,
+            insurance: parseFloat(finRow.insurance_cost_per_month) || 0,
+            software: parseFloat(finRow.software_cost_per_month) || 0,
+            admin: ((parseFloat(finRow.admin_cost_per_customer_year) || 0) * activeCustomers) / 12,
+          },
+        };
+    }
+
+    // COGS component split — window actuals from the job_costs ledger, gated
+    // to completed visits via scheduled_services (job_costs has no status
+    // column; the join also drops manual/equipment-only rows, matching
+    // ad-attribution-sync's customerRealized discipline). Guarded: a missing
+    // table/link just omits the detail.
+    let cogsSplit = null;
+    try {
+      const jc = await db('job_costs as jc')
+        .join('scheduled_services as ss', 'ss.id', 'jc.scheduled_service_id')
+        .where('ss.status', 'completed')
+        .where('jc.service_date', '>=', monthStart)
+        .where('jc.service_date', '<=', today)
+        .select(
+          db.raw('COALESCE(SUM(jc.labor_cost), 0) as labor'),
+          db.raw('COALESCE(SUM(jc.products_cost), 0) as materials'),
+          db.raw('COALESCE(SUM(COALESCE(jc.drive_cost, 0) + COALESCE(jc.equipment_cost, 0)), 0) as drive'),
+        ).first();
+      cogsSplit = {
+        labor: parseFloat(jc?.labor) || 0,
+        materials: parseFloat(jc?.materials) || 0,
+        drive: parseFloat(jc?.drive) || 0,
+      };
+    } catch { /* job_costs absent — headline COGS only */ }
+
+    const bridge = buildEbitdaBridge({
+      revenue: parseFloat(fin?.rev) || 0,
+      grossProfit: parseFloat(fin?.gp) || 0,
+      marketing: { adSpend, fixedCosts, referralRewards },
+      overhead,
+      cogsSplit,
+      monthFraction,
+    });
+    res.json({
+      ...bridge,
+      period: { from: monthStart, to: today, label: 'Month to date', elapsedDays, daysInMonth },
+      jobs: parseInt(fin?.jobs || 0, 10),
+      uncostedRevenue: Math.round((parseFloat(fin?.uncosted) || 0) * 100) / 100,
+    });
   } catch (err) { next(err); }
 });
 
@@ -1506,6 +1701,115 @@ function resolveAttributionWindow(period, range) {
 //
 // Joins call_log (where direction='inbound') against lead_sources on the
 // dialed number. Calls landing on numbers we haven't catalogued show up
+// GET /api/admin/dashboard/churn-reasons?months=12
+// Churn Pareto: churned customers in the trailing window grouped by
+// churn_reason_code (NULL → 'unclassified'), dollars = churn_mrr (the rate
+// snapshotted AT churn; pre-taxonomy rows fall back to current monthly_rate).
+// Shaping in services/churn-pareto.js; codes recorded from Jul 2026, earlier
+// rows stay unclassified until the owner-authorized backfill runs.
+router.get('/churn-reasons', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildChurnPareto } = require('../services/churn-pareto');
+    const months = Math.max(3, Math.min(24, parseInt(req.query.months || 12, 10) || 12));
+    const from = etMonthStart(new Date(), -(months - 1));
+    const qb = db('customers')
+      .whereNotNull('churned_at')
+      .where('churned_at', '>=', from)
+      .whereIn('pipeline_stage', ['churned', 'dormant']);
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      qb.whereNotIn(
+        db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+    const rows = await qb
+      .groupBy(db.raw("COALESCE(churn_reason_code, 'unclassified')"))
+      .select(
+        db.raw("COALESCE(churn_reason_code, 'unclassified') as code"),
+        db.raw('COUNT(*) as customers'),
+        db.raw('SUM(COALESCE(churn_mrr, monthly_rate, 0)) as mrr'),
+      );
+    res.json({ period: { from, months }, ...buildChurnPareto(rows) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/lead-funnel?period=mtd[&from=YYYY-MM-DD]
+// Per-source stage progression (lead → contacted → estimate → booked →
+// completed, + lost) from ad_service_attribution, same period selector as the
+// other attribution panels. Basis caveat (the card states it): attribution
+// rows, not the raw leads table — totals differ from Leads-by-Source, and
+// call↔lead linkage is call-SID based. Shaping in services/lead-funnel.js.
+router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildLeadFunnel } = require('../services/lead-funnel');
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    // Effective paid signal mirrors splitFacebookByPaid: a Meta click id
+    // (fbclid/_fbc) OR the explicit flag — is_paid alone is NULL on most
+    // historical rows and would misfile click-attributed paid Meta as organic.
+    const PAID_SQL = '(asa.is_paid IS TRUE OR asa.fbclid IS NOT NULL OR asa.fbc IS NOT NULL)';
+    // lead_date is an ET DATE column; the window's from/to are ET date
+    // strings, so direct comparison is timezone-safe. Parity with the sibling
+    // attribution panels: soft-deleted leads drop out (deleting a spam lead
+    // must clean this card too), and internal/test names are excluded via the
+    // linked lead OR customer — both joins are LEFT and the name expressions
+    // COALESCE to '', so unlinked rows are never silently dropped.
+    const qb = db('ad_service_attribution as asa')
+      .leftJoin('leads as l', 'l.id', 'asa.lead_id')
+      .leftJoin('customers as c', 'c.id', 'asa.customer_id')
+      .where('asa.lead_date', '>=', win.from)
+      .where('asa.lead_date', '<=', win.to)
+      .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)');
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      const marks = INTERNAL_TEST_CUSTOMERS.map(() => '?').join(',');
+      qb.whereRaw(
+        `LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) NOT IN (${marks})`,
+        INTERNAL_TEST_CUSTOMERS,
+      ).whereRaw(
+        `LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) NOT IN (${marks})`,
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+    const rows = await qb
+      .groupBy('asa.lead_source', 'asa.funnel_stage', db.raw(PAID_SQL))
+      .select(
+        'asa.lead_source',
+        'asa.funnel_stage',
+        db.raw(`${PAID_SQL} as is_paid`),
+        db.raw('COUNT(*) as n'),
+      );
+    res.json({ period: win, ...buildLeadFunnel(rows) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/channel-roi?period=mtd[&from=YYYY-MM-DD]
+// Per-channel ROI for the Growth section: revenue, gross profit, ad + fixed
+// spend (all-in), CAC, cost per booked job, ROAS, LTV:CAC. Thin wrapper over
+// the ads revenue-attribution fetch (routes/admin-ads.js) so this card, the
+// revenue page, and the capital-allocation card share ONE attribution/spend
+// basis; only the window differs — the dashboard's standard period selector
+// (ET calendar windows + attribution fresh-start floor, same resolution as
+// /lead-funnel) instead of the ads routes' trailing-days windows. Basis
+// caveat (the card states it): attribution rows + job costs, not raw leads.
+router.get('/channel-roi', dashboardCache, async (req, res, next) => {
+  try {
+    // Lazy require, mirroring the sibling handlers' service requires.
+    const { fetchChannelAttribution } = require('./admin-ads');
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    // Every dashboard window ends today, so the fetch's single `since` bound
+    // (lead_date >= from) reproduces from→to exactly. Fixed monthly costs
+    // prorate to the window's inclusive day span — a one-day window carries
+    // ~1/30 of a retainer, never zero — using the same 30.44 avg-month-length
+    // constant as the ads routes' periodWindow.
+    const days = Math.max(1, Math.round((Date.parse(win.to) - Date.parse(win.from)) / 86400000) + 1);
+    // Parity with the sibling Growth cards (/lead-funnel above): soft-deleted
+    // leads and internal/test names are excluded HERE — the ads routes keep
+    // their pre-existing unfiltered behavior (aligning them is a separate
+    // owner decision).
+    const exclude = { deletedLeads: true, internalNames: INTERNAL_TEST_CUSTOMERS };
+    res.json({ period: win, ...(await fetchChannelAttribution(win.from, days / 30.44, exclude)) });
+  } catch (err) { next(err); }
+});
+
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {

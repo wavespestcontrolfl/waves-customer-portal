@@ -36,7 +36,7 @@ function wrapHtml({ heading, body, ctaUrl, ctaLabel }) {
     ? `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(ctaUrl, ctaLabel)}</div>`
     : '';
   const headingHtml = heading
-    ? `<h1 style="margin:0 0 16px 0;font-family:'Source Serif 4',Georgia,serif;font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:500;">${heading}</h1>`
+    ? `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};${colors.HEADING_TRACKING ? `letter-spacing:${colors.HEADING_TRACKING};` : ''}">${heading}</h1>`
     : '';
   return wrapServiceEmail({
     preheader: heading,

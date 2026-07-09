@@ -13,7 +13,6 @@ const { authenticate } = require('../middleware/auth');
 const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-height-service');
 const { buildMowingHeightContext } = require('../services/service-report/turf-height');
 const logger = require('../services/logger');
-const { isCardCustomerSurfaceable } = require('../services/lawn-recommendation-visibility');
 
 const CARD_PRIORITY_RANK = { high: 1, medium: 2, low: 3 };
 
@@ -169,144 +168,6 @@ function parseJsonArray(value, fallback = []) {
   return fallback;
 }
 
-function formatCustomerSnapshot(row) {
-  if (!row) return null;
-  const findings = parseJsonArray(row.findings)
-    .map((finding) => ({
-      key: finding.key,
-      label: finding.label,
-      severity: finding.severity,
-      customerCopy: finding.customer_copy,
-      locationLabel: finding.location_label || null,
-    }))
-    .filter((finding) => finding.customerCopy);
-  const treatment = parseJsonObject(row.treatment_context);
-  const expectedWindow = parseJsonObject(row.expected_window);
-
-  return {
-    id: row.id,
-    assessmentId: row.assessment_id,
-    headline: row.headline,
-    summary: row.summary_customer,
-    status: row.status,
-    generatedAt: row.generated_at,
-    findings,
-    treatment: {
-      completedToday: treatment.completed_today === true,
-      serviceType: treatment.service_type || null,
-      productsAppliedSummary: treatment.products_applied_summary || null,
-    },
-    weatherContext: parseJsonObject(row.weather_context).customer_copy || null,
-    expectedWindow: {
-      minDays: expectedWindow.min_days || null,
-      maxDays: expectedWindow.max_days || null,
-    },
-    nextWatchItems: parseJsonArray(row.next_watch_items),
-    disclaimers: parseJsonArray(row.disclaimers),
-  };
-}
-
-function formatCustomerRecommendation(row) {
-  if (!row) return null;
-  const action = parseJsonObject(row.recommended_action);
-  return {
-    id: row.id,
-    type: row.type,
-    title: row.title,
-    priority: row.priority,
-    customerCopy: row.customer_copy,
-    action: {
-      type: action.action_type || null,
-      label: action.cta_label || null,
-      plan: action.plan || null,
-    },
-  };
-}
-
-const CUSTOMER_RECOMMENDATION_EVENT_TYPES = new Set([
-  'snapshot_viewed',
-  'recommendation_shown',
-  'recommendation_clicked',
-  'follow_up_requested',
-]);
-
-function recommendationEventMetadata(body = {}) {
-  const metadata = parseJsonObject(body.metadata);
-  return {
-    source: 'customer_portal',
-    surface: String(body.surface || metadata.surface || 'lawn_health').slice(0, 80),
-    placement: String(body.placement || metadata.placement || '').slice(0, 80) || null,
-    action_type: String(body.actionType || metadata.action_type || '').slice(0, 80) || null,
-  };
-}
-
-async function getCustomerVisibleSnapshotData(customerId, latestAssessmentId) {
-  const snapshot = await db('property_health_snapshots')
-    .where({
-      customer_id: customerId,
-      domain: 'lawn',
-      customer_visible: true,
-    })
-    .whereNotNull('approved_at')
-    .modify((query) => {
-      if (latestAssessmentId) query.where({ assessment_id: latestAssessmentId });
-    })
-    .orderBy('created_at', 'desc')
-    .first()
-    .catch(() => null);
-
-  if (!snapshot) return { latestSnapshot: null, recommendationCards: [] };
-
-  const rows = await db('property_recommendation_cards')
-    .where({
-      snapshot_id: snapshot.id,
-      customer_id: customerId,
-      domain: 'lawn',
-    })
-    .orderBy('created_at', 'asc')
-    .catch(() => []);
-
-  const cards = rows
-    .filter(isCardCustomerSurfaceable)
-    .sort((a, b) => (CARD_PRIORITY_RANK[a.priority] || 4) - (CARD_PRIORITY_RANK[b.priority] || 4))
-    .slice(0, 3);
-
-  return {
-    latestSnapshot: formatCustomerSnapshot(snapshot),
-    recommendationCards: cards.map(formatCustomerRecommendation).filter(Boolean),
-  };
-}
-
-async function getVisibleSnapshotForCustomer(customerId, snapshotId) {
-  if (!customerId || !snapshotId) return null;
-  return db('property_health_snapshots')
-    .where({
-      id: snapshotId,
-      customer_id: customerId,
-      domain: 'lawn',
-      customer_visible: true,
-    })
-    .whereNotNull('approved_at')
-    .first()
-    .catch(() => null);
-}
-
-async function getVisibleRecommendationForCustomer(customerId, recommendationId, snapshotId) {
-  if (!customerId || !recommendationId) return null;
-  const card = await db('property_recommendation_cards')
-    .where({
-      id: recommendationId,
-      customer_id: customerId,
-      domain: 'lawn',
-    })
-    .modify((query) => {
-      if (snapshotId) query.where({ snapshot_id: snapshotId });
-    })
-    .first()
-    .catch(() => null);
-  return isCardCustomerSurfaceable(card) ? card : null;
-}
-
 // =========================================================================
 // GET /api/lawn-health/:customerId — Full lawn health dashboard data
 // =========================================================================
@@ -343,8 +204,6 @@ router.get('/:customerId', async (req, res, next) => {
         photos: [],
         beforeAfter: null,
         trend: [],
-        latestSnapshot: null,
-        recommendationCards: [],
         mowingHeight,
       });
     }
@@ -463,8 +322,6 @@ router.get('/:customerId', async (req, res, next) => {
       }
     } catch { /* ignore */ }
 
-    const { latestSnapshot, recommendationCards } = await getCustomerVisibleSnapshotData(customerId, latest.id);
-
     res.json({
       hasLawnCare: true,
       scores: formatScore(latest),
@@ -475,64 +332,12 @@ router.get('/:customerId', async (req, res, next) => {
       recommendations,
       seasonalContext,
       neighborBenchmark: normalizeNeighborBenchmark(neighborBenchmark),
-      latestSnapshot,
-      recommendationCards,
       mowingHeight,
       assessmentCount: assessments.length,
       nextMilestone: assessments.length < 3
         ? { message: `${3 - assessments.length} more visit${assessments.length < 2 ? 's' : ''} until full trend data`, type: 'visits' }
         : null,
     });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// =========================================================================
-// POST /api/lawn-health/:customerId/recommendation-events — customer outcome tracking
-// =========================================================================
-router.post('/:customerId/recommendation-events', async (req, res, next) => {
-  try {
-    const { customerId } = req.params;
-    if (customerId !== req.customerId) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-
-    const eventType = String(req.body?.eventType || req.body?.event_type || '').trim();
-    if (!CUSTOMER_RECOMMENDATION_EVENT_TYPES.has(eventType)) {
-      return res.status(400).json({ error: 'Unsupported event type' });
-    }
-
-    const snapshotId = String(req.body?.snapshotId || req.body?.snapshot_id || '').trim() || null;
-    const recommendationId = String(req.body?.recommendationId || req.body?.recommendation_id || '').trim() || null;
-
-    const snapshot = snapshotId
-      ? await getVisibleSnapshotForCustomer(customerId, snapshotId)
-      : null;
-    if (snapshotId && !snapshot) return res.status(404).json({ error: 'Snapshot not found' });
-
-    const recommendation = recommendationId
-      ? await getVisibleRecommendationForCustomer(customerId, recommendationId, snapshotId)
-      : null;
-    if (recommendationId && !recommendation) return res.status(404).json({ error: 'Recommendation not found' });
-    if (eventType !== 'snapshot_viewed' && !recommendation) {
-      return res.status(400).json({ error: 'recommendationId is required for recommendation events' });
-    }
-    if (eventType === 'snapshot_viewed' && !snapshot) {
-      return res.status(400).json({ error: 'snapshotId is required for snapshot events' });
-    }
-
-    await db('property_recommendation_events').insert({
-      recommendation_id: recommendation?.id || null,
-      snapshot_id: snapshot?.id || recommendation?.snapshot_id || null,
-      customer_id: customerId,
-      event_type: eventType,
-      actor_type: 'customer',
-      actor_id: customerId,
-      metadata: JSON.stringify(recommendationEventMetadata(req.body)),
-    });
-
-    res.json({ success: true });
   } catch (err) {
     next(err);
   }
@@ -637,9 +442,6 @@ router.get('/:customerId/photos/:assessmentId', async (req, res, next) => {
 router._test = {
   normalizeNeighborBenchmark,
   photoAssessmentLookupCriteria,
-  formatCustomerSnapshot,
-  formatCustomerRecommendation,
-  recommendationEventMetadata,
 };
 
 module.exports = router;

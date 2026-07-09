@@ -215,6 +215,18 @@ function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     lead?.callback_at,
   ));
   const followUpDue = nextFollowUpAt ? nextFollowUpAt.getTime() <= nowMs : false;
+  // Expired estimates keep their sent/viewed STAGE (board columns are fixed),
+  // but the action must change: the follow-up/resend path refuses expired rows
+  // ("Estimate status expired cannot be sent"), so advertising "Follow up"
+  // here is a guaranteed 400 — Extend is the one action that works. Detect
+  // both the swept 'expired' status AND a past expiry the sweep hasn't
+  // stamped yet.
+  const estimateStatusForAction = normalizeStatus(estimate?.status);
+  const estimateExpiresAt = asDate(firstPresent(estimate?.expiresAt, estimate?.expires_at));
+  const estimateExpired = Boolean(estimate?.id)
+    && !['accepted', 'declined'].includes(estimateStatusForAction)
+    && (estimateStatusForAction === 'expired'
+      || (estimateExpiresAt ? estimateExpiresAt.getTime() < nowMs : false));
 
   if (stage === PIPELINE_STAGES.NEW_LEAD) {
     return { nextAction: 'contact', needsAction: true, nextActionLabel: 'Contact lead', isStale: false };
@@ -231,9 +243,18 @@ function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     return { nextAction: 'create_estimate', needsAction: true, nextActionLabel: 'Create estimate', isStale: false };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_DRAFT) {
+    // A swept-expired row with no sent/viewed stamp (e.g. an expired
+    // scheduled send) derives as draft-stage, but /send rejects expired
+    // estimates — Extend first.
+    if (estimateExpired) {
+      return { nextAction: 'extend_estimate', needsAction: true, nextActionLabel: 'Extend expiration', isStale: true };
+    }
     return { nextAction: 'send_estimate', needsAction: true, nextActionLabel: 'Send estimate', isStale: false };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_SENT) {
+    if (estimateExpired) {
+      return { nextAction: 'extend_estimate', needsAction: true, nextActionLabel: 'Extend expiration', isStale: true };
+    }
     const sentAt = asDate(firstPresent(estimate?.sentAt, estimate?.sent_at, estimate?.updatedAt, estimate?.updated_at));
     const stale = sentAt ? nowMs - sentAt.getTime() >= SENT_STALE_MS : false;
     return {
@@ -244,6 +265,9 @@ function deriveNextAction({ lead, estimate, stage, now = new Date() }) {
     };
   }
   if (stage === PIPELINE_STAGES.ESTIMATE_VIEWED) {
+    if (estimateExpired) {
+      return { nextAction: 'extend_estimate', needsAction: true, nextActionLabel: 'Extend expiration', isStale: true };
+    }
     const viewedAt = asDate(firstPresent(estimate?.viewedAt, estimate?.viewed_at, estimate?.lastViewedAt, estimate?.last_viewed_at));
     const stale = viewedAt ? nowMs - viewedAt.getTime() >= VIEWED_STALE_MS : true;
     return {
@@ -470,6 +494,10 @@ function opportunityMatchesFilter(opportunity, filter) {
     case 'follow_up':
       return opportunity.nextAction === 'follow_up' || (
         opportunity.needsAction === true
+        // Extend-only rows (expired estimates) need action, but Follow Up is
+        // exactly the action the server refuses for them — keep them out of
+        // the Follow Up queue/count.
+        && opportunity.nextAction !== 'extend_estimate'
         && [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.CONTACTED].includes(opportunity.stage)
       );
     case 'duplicate_risk':

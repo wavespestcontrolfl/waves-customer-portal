@@ -44,49 +44,6 @@ function dateColumnKey(value) {
   return match ? match[1] : text;
 }
 
-function slugify(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .slice(0, 80);
-}
-
-function imageExtFromMime(mime) {
-  if (mime === 'image/png') return 'png';
-  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
-  if (mime === 'image/webp') return 'webp';
-  return null;
-}
-
-function imageExtFromSource(value) {
-  const dataMatch = String(value || '').match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
-  return imageExtFromMime(dataMatch?.[1]?.toLowerCase()) || 'webp';
-}
-
-function blogSlug(post) {
-  return String(post.slug || slugify(post.title)).replace(/^\/+|\/+$/g, '');
-}
-
-function hasPublishedAstroHero(post) {
-  return post.astro_status === 'live';
-}
-
-function publicBlogImageUrl(blog) {
-  for (const raw of [blog.featured_image_url, blog.image_url, blog.og_image]) {
-    if (!raw) continue;
-    if (/^https?:\/\//i.test(raw)) return raw;
-    if (raw.startsWith('/')) return `https://www.wavespestcontrol.com${raw}`;
-    if (/^data:image\//i.test(raw) && hasPublishedAstroHero(blog)) {
-      const slug = blogSlug(blog);
-      if (slug) return `https://www.wavespestcontrol.com/images/blog/${slug}/hero.${imageExtFromSource(raw)}`;
-    }
-  }
-  return undefined;
-}
-
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
 
@@ -109,9 +66,13 @@ async function sharePublishedBlog(blog) {
       link,
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
-      imageUrl: publicBlogImageUrl(blog),
-      // Autonomous: use the blog's own image, else the brand card — never an AI
-      // image (publishToAll renders the card when no imageUrl resolves).
+      // Blog shares opt into every platform incl. Twitter — the omitted-
+      // channels default deliberately excludes it (admin preview flow).
+      channels: SocialMediaService.PUBLISH_PLATFORMS,
+      // No imageUrl: publishToAll's blog-hero branch resolves the live page's
+      // og:image and re-hosts it as JPEG (Instagram rejects the raw .webp hero
+      // the old publicBlogImageUrl handed it), falling back to the brand card
+      // on a miss — never an AI image.
       noAiImage: true,
     });
     if (result?.dryRun) {
@@ -477,13 +438,21 @@ const ContentScheduler = {
 
     // Un-strand blogs whose 'publishing' claim never resolved (process died
     // mid-publish). Without this the row is stuck forever AND — because
-    // pages-poll's auto-merge branch fires on pr_open + publishing — a
-    // stranded claim would keep that scheduler-only auto-merge path armed
+    // pages-poll's auto-merge branch fires on pr_open + publishing —
+    // a stranded claim would keep that scheduler-only auto-merge path armed
     // indefinitely. See the matching comment in pages-poll.pollPost().
     try {
       await this.resetStalePublishingBlogs();
     } catch (err) {
       logger.warn(`[content-scheduler] stale-publishing sweep failed: ${err.message}`);
+    }
+    // Same sweep for social rows — a crash mid-publishToAll strands them at
+    // 'publishing' with no other reader (the pending query selects only
+    // pending/dry_run).
+    try {
+      await this.resetStalePublishingSocials();
+    } catch (err) {
+      logger.warn(`[content-scheduler] stale social-publishing sweep failed: ${err.message}`);
     }
 
     // ── Process blog posts ──────────────────────────────────────
@@ -558,14 +527,78 @@ const ContentScheduler = {
       } catch (err) {
         errors++;
         const terminalFailure = err.message === 'Scheduled blog has no content; cannot open Astro publish PR';
+        // Deterministic content-policy rejections fail IDENTICALLY every
+        // run — frontmatter/schema, guardrails, comparison gate, fact
+        // check, MDX token leak are all properties of the post's content,
+        // not of the moment. Retrying them every 15 minutes re-burns the
+        // gates (the fact check is an LLM call) and can never succeed, so
+        // they park as 'failed' like the no-content terminal case: the
+        // author edits the post and republishes. Everything else (GitHub /
+        // network / DB blips) stays on the transient retry fork below.
+        const DETERMINISTIC_PUBLISH_CODES = new Set([
+          'BLOG_FRONTMATTER_INVALID',
+          'BLOG_GUARDRAILS_FAILED',
+          'BLOG_COMPARISON_GATE_FAILED',
+          'BLOG_FACTCHECK_FAILED',
+          'BLOG_MDX_TOKEN_LEAK',
+          // Curated hero URL that 404s / isn't an image — fails identically
+          // every attempt (AI hero GENERATION failures stay untagged/transient).
+          'BLOG_HERO_MEDIA_FAILED',
+        ]);
         // Only release a claim WE hold — if the claim update itself failed
-        // (or another instance holds it), writing pending_review here would
-        // stomp the active attempt's 'publishing' state.
+        // (or another instance holds it), writing here would stomp the
+        // active attempt's 'publishing' state (hence the publish_status
+        // guard on every branch).
         if (claimed) {
-          await db('blog_posts').where('id', blog.id).update({
-            publish_status: terminalFailure ? 'failed' : 'pending_review',
-            updated_at: new Date(),
-          }).catch(() => {});
+          if (terminalFailure || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
+            await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
+              .update({
+                publish_status: 'failed',
+                // publishAstro already stamped astro_status='publish_failed'
+                // (deterministic codes all throw pre-PR, so no PR marker) —
+                // clear it, or the fixed post re-scheduled via
+                // scheduleBlogPost (which only sets publish_status) is never
+                // re-selected: the pending query excludes publish_failed.
+                // Guarded on BOTH markers so a publish_failed row that DOES
+                // carry an opened PR or a surviving branch keeps its state
+                // for the retry cleanup.
+                astro_status: db.raw("CASE WHEN astro_status = 'publish_failed' AND astro_pr_number IS NULL AND astro_branch_name IS NULL THEN NULL ELSE astro_status END"),
+                updated_at: new Date(),
+              }).catch(() => {});
+          } else {
+            // Same fork as resetStalePublishingBlogs: where the row goes
+            // depends on whether Astro made external progress (publishAstro
+            // may have written state before throwing — re-check, don't
+            // trust the tick-start snapshot).
+            //   - no astro_status, OR 'publish_failed' with NO PR opened
+            //     (publishAstro's own catch stamps publish_failed on every
+            //     pre-PR throw before this handler ever sees the row, so a
+            //     bare whereNull never matched a transient GitHub blip):
+            //     release to 'pending' and clear the failed marker so the
+            //     next tick retries — parking at pending_review would
+            //     strand it permanently (the pending query only re-selects
+            //     pending_review rows when astro_status='live', and
+            //     pages-poll only watches pr_open/build_failed/merged).
+            //     astro_publish_error is kept for the audit trail.
+            //   - anything else (PR opened / surviving branch / build
+            //     failed / live — astro_pr_number marks an opened PR, and
+            //     astro_branch_name alone marks a branch the publisher
+            //     could not prove PR-less or could not delete):
+            //     'pending_review'; blind-retrying those could open a
+            //     duplicate PR.
+            const retried = await db('blog_posts').where('id', blog.id)
+              .where('publish_status', 'publishing')
+              .where(function () {
+                this.whereNull('astro_status').orWhere(function () {
+                  this.where('astro_status', 'publish_failed').whereNull('astro_pr_number').whereNull('astro_branch_name');
+                });
+              })
+              .update({ publish_status: 'pending', astro_status: null, updated_at: new Date() }).catch(() => 0);
+            if (!retried) {
+              await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
+                .update({ publish_status: 'pending_review', updated_at: new Date() }).catch(() => {});
+            }
+          }
         }
         logger.error(`[content-scheduler] Failed to publish blog ${blog.id}: ${err.message}`);
       }
@@ -586,13 +619,41 @@ const ContentScheduler = {
       .where('scheduled_for', '<=', now);
 
     for (const social of pendingSocials) {
+      let claimed = false;
       try {
-        await db('social_media_posts').where('id', social.id).update({ publish_status: 'publishing' });
+        // Atomic compare-and-set claim, same rule as the blog loop above:
+        // guard on the publish_status we selected so an overlapping
+        // instance (deploy overlap / slow prior tick) can't double-drive
+        // the same row into publishToAll — scheduled-source posts have no
+        // pre-post dedupe, so a double-drive here is a duplicate post on
+        // every enabled platform. Whoever flips to 'publishing' first
+        // wins; the loser sees 0 rows updated and skips.
+        claimed = (await db('social_media_posts')
+          .where('id', social.id)
+          .where('publish_status', social.publish_status)
+          .update({ publish_status: 'publishing' })) > 0;
+        if (!claimed) {
+          logger.info(`[content-scheduler] social ${social.id} already claimed by a concurrent tick — skipping`);
+          continue;
+        }
 
         const SocialMediaService = require('./social-media');
         const customContent = typeof social.custom_content === 'string'
           ? JSON.parse(social.custom_content)
           : social.custom_content;
+
+        // Pre-publish, platforms_posted holds the REQUESTED platform list the
+        // admin picked at scheduling time (publishToAll rewrites it with the
+        // results afterwards). Pass it through so a post scheduled for a
+        // narrower set (e.g. Facebook-only) never fans out to platforms the
+        // admin didn't select. Empty/missing → publishToAll's default set.
+        let storedPlatforms = social.platforms_posted;
+        if (typeof storedPlatforms === 'string') {
+          try { storedPlatforms = JSON.parse(storedPlatforms); } catch { storedPlatforms = null; }
+        }
+        const requestedChannels = Array.isArray(storedPlatforms)
+          ? storedPlatforms.map((p) => (typeof p === 'string' ? p : p?.platform)).filter(Boolean)
+          : [];
 
         const result = await SocialMediaService.publishToAll({
           title: social.title,
@@ -600,6 +661,7 @@ const ContentScheduler = {
           link: social.source_url,
           guid: social.source_guid || `social_${social.id}`,
           source: 'scheduled',
+          channels: requestedChannels.length ? requestedChannels : undefined,
           customContent,
         });
 
@@ -617,7 +679,16 @@ const ContentScheduler = {
         }
       } catch (err) {
         errors++;
-        await db('social_media_posts').where('id', social.id).update({ publish_status: 'failed' });
+        // Only mark failed a claim WE hold (and that is still 'publishing'):
+        // if the claim update itself failed — or another instance holds the
+        // row — writing 'failed' here would stomp the active attempt.
+        if (claimed) {
+          await db('social_media_posts')
+            .where('id', social.id)
+            .where('publish_status', 'publishing')
+            .update({ publish_status: 'failed' })
+            .catch(() => {});
+        }
         logger.error(`[content-scheduler] Failed to publish social "${social.title}": ${err.message}`);
       }
     }
@@ -648,13 +719,23 @@ const ContentScheduler = {
    */
   async resetStalePublishingBlogs({ staleMinutes = 30 } = {}) {
     const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    // Retryable = crashed with no Astro progress: either no astro state at
+    // all, or publishAstro's catch stamped 'publish_failed' with NEITHER
+    // marker (astro_pr_number = an opened PR; astro_branch_name alone = a
+    // branch the publisher could not prove PR-less or could not delete —
+    // with either out there, blind-retrying could open a duplicate, so
+    // those park below instead).
     const retried = await db('blog_posts')
       .where('publish_status', 'publishing')
       .where('updated_at', '<', cutoff)
-      .whereNull('astro_status')
-      .update({ publish_status: 'pending', updated_at: new Date() });
+      .where(function () {
+        this.whereNull('astro_status').orWhere(function () {
+          this.where('astro_status', 'publish_failed').whereNull('astro_pr_number').whereNull('astro_branch_name');
+        });
+      })
+      .update({ publish_status: 'pending', astro_status: null, updated_at: new Date() });
     if (retried > 0) {
-      logger.warn(`[content-scheduler] reset ${retried} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m with no Astro state back to pending (crashed pre-PR; publish will retry)`);
+      logger.warn(`[content-scheduler] reset ${retried} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m with no Astro progress back to pending (crashed pre-PR; publish will retry)`);
     }
     const reset = await db('blog_posts')
       .where('publish_status', 'publishing')
@@ -665,6 +746,36 @@ const ContentScheduler = {
       logger.warn(`[content-scheduler] reset ${reset} blog(s) stranded in publish_status='publishing' for >${staleMinutes}m back to pending_review (crashed mid-publish with Astro state)`);
     }
     return retried + reset;
+  },
+
+  /**
+   * Reset SOCIAL rows stranded at publish_status='publishing'.
+   *
+   * Same strand shape as the blogs: the claim is transient (publishToAll
+   * resolves within the tick), so a crash mid-publish leaves a row nothing
+   * re-selects (the pending query takes only pending/dry_run). Unlike the
+   * blog sweep this NEVER retries: publishToAll may have posted to some
+   * platforms before the crash, and a retry would duplicate those posts —
+   * the exact failure the CAS claim exists to prevent. Stranded rows go to
+   * 'failed' (the same state the error path uses) for a human to reschedule.
+   *
+   * social_media_posts has no updated_at column, so staleness keys on
+   * scheduled_for: a claim is only ever taken when scheduled_for <= now,
+   * so any row still 'publishing' well past its scheduled time is stranded.
+   * The 30-minute margin keeps a slow in-flight publish of an overdue
+   * backlog row safe (the cron also runs under an exclusive advisory lock,
+   * so no publish is in flight while this sweep runs).
+   */
+  async resetStalePublishingSocials({ staleMinutes = 30 } = {}) {
+    const cutoff = new Date(Date.now() - staleMinutes * 60000);
+    const reset = await db('social_media_posts')
+      .where('publish_status', 'publishing')
+      .where('scheduled_for', '<', cutoff)
+      .update({ publish_status: 'failed', status: 'failed' });
+    if (reset > 0) {
+      logger.warn(`[content-scheduler] marked ${reset} social post(s) stranded in publish_status='publishing' as failed (crashed mid-publish; NOT retried — platforms may have partially posted, reschedule manually)`);
+    }
+    return reset;
   },
 
   /**

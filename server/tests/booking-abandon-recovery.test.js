@@ -1,8 +1,8 @@
 /**
  * Abandoned-booking recovery service.
  *
- * Pins the contract: gate-off shadow mode (count, never claim/send), quiet-hours
- * skip, reply-pause skip, the claim + transactional-consent SMS send (touch 1),
+ * Pins the contract: gate-off shadow mode (count, never claim/send),
+ * reply-pause skip, the claim + transactional-consent SMS send (touch 1),
  * and the email send (touch 2). Mirrors the deposit-abandonment stage's mock
  * harness (estimate-followup-deposit-abandoned.test.js).
  */
@@ -23,12 +23,20 @@ jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(async () => "Hi Dana! You were almost booked for Pest Control: url"),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Hermetic experiment mock — the real module keys off GROWTHBOOK_CLIENT_KEY in
+// the environment; default here = not-in-experiment (today's behavior).
+jest.mock('../services/experimentation/growthbook', () => ({
+  assignBookingRecoveryExperiment: jest.fn(async () => ({
+    inExperiment: false, value: true, variationId: null, variationKey: null,
+  })),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const smsTemplates = require('../routes/admin-sms-templates');
+const Experiments = require('../services/experimentation/growthbook');
 const { _internals } = require('../services/booking-abandon-recovery');
 
 const updates = [];
@@ -52,10 +60,7 @@ function makeBuilder(table, cfg = {}) {
 let queues;
 function enqueue(table, cfg) { (queues[table] = queues[table] || []).push(cfg); }
 
-// 11:00 ET — inside the 8a–8p window.
 const NOW = new Date('2026-06-10T15:00:00Z');
-// 2:00 ET — quiet hours.
-const QUIET_NOW = new Date('2026-06-10T06:00:00Z');
 
 function intent(overrides = {}) {
   return {
@@ -81,6 +86,9 @@ beforeEach(() => {
   sendCustomerMessage.mockResolvedValue({ sent: true });
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({});
   smsTemplates.getTemplate.mockResolvedValue("Hi Dana! You were almost booked for Pest Control: url");
+  Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+    inExperiment: false, value: true, variationId: null, variationKey: null,
+  });
 });
 
 describe('runSmsStage (touch 1)', () => {
@@ -141,16 +149,6 @@ describe('runSmsStage (touch 1)', () => {
     expect(updates).toEqual([]);
   });
 
-  test('quiet hours → skips without sending', async () => {
-    enqueue('booking_intents', { rows: [intent()] });
-
-    const sent = await _internals.runSmsStage(QUIET_NOW, new Set());
-
-    expect(sent).toBe(0);
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(updates).toEqual([]);
-  });
-
   test('reply-pause → skips a phone that has texted Waves recently', async () => {
     enqueue('booking_intents', { rows: [intent()] });
     enqueue('messages', { first: { id: 'm-1' } }); // replied recently
@@ -180,8 +178,8 @@ describe('runSmsStage (touch 1)', () => {
     ]);
   });
 
-  test('retryable hold (quiet-hours) releases the claim so it retries next tick', async () => {
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', retryable: true });
+  test('retryable failure (transient provider) releases the claim so it retries next tick', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true });
     enqueue('booking_intents', { rows: [intent()] });
     enqueue('messages', { first: null });
     enqueue('booking_intents', { update: 1 }); // claim
@@ -305,6 +303,75 @@ describe('runEmailStage (touch 2)', () => {
     expect(updates).toEqual([
       { table: 'booking_intents', payload: expect.objectContaining({ followup_email_sent: true }) },
     ]);
+  });
+});
+
+// Measured-rollout holdback (GrowthBook booking-abandon-recovery): a control
+// assignment means NO touches — both stage flags claimed in one update, no
+// followup_sms_sent_at stamp (nothing sent). Any assignment miss/failure fails
+// open to today's send behavior.
+describe('experiment holdback', () => {
+  test('control assignment → no SMS, both stage flags claimed, no sent_at stamp', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+      inExperiment: true, value: false, variationId: 0, variationKey: 'holdback',
+    });
+    enqueue('booking_intents', { rows: [intent()] }); // candidates
+    enqueue('booking_intents', { update: 1 });        // holdback claim
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([{
+      table: 'booking_intents',
+      payload: expect.objectContaining({ followup_sms_sent: true, followup_email_sent: true }),
+    }]);
+    expect(updates[0].payload.followup_sms_sent_at).toBeUndefined();
+    expect(Experiments.assignBookingRecoveryExperiment).toHaveBeenCalledWith('9415550101', 'bi-1');
+  });
+
+  test('control assignment → email stage held back too', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+      inExperiment: true, value: false, variationId: 0, variationKey: 'holdback',
+    });
+    enqueue('booking_intents', { rows: [intent()] }); // candidates
+    enqueue('booking_intents', { update: 1 });        // holdback claim
+
+    const sent = await _internals.runEmailStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(updates).toEqual([{
+      table: 'booking_intents',
+      payload: expect.objectContaining({ followup_sms_sent: true, followup_email_sent: true }),
+    }]);
+  });
+
+  test('treatment assignment → sends exactly as before', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockResolvedValue({
+      inExperiment: true, value: true, variationId: 1, variationKey: 'recovery-on',
+    });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sibling-mark
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(1);
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('assignment failure → fails open to send (never blocks the program)', async () => {
+    Experiments.assignBookingRecoveryExperiment.mockRejectedValue(new Error('growthbook down'));
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sibling-mark
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(1);
   });
 });
 

@@ -3665,4 +3665,8 @@ router._test = {
   vendorNeedsLoginDiscovery,
 };
 
+// Shared with the Intelligence Bar stock tools (update_restock_request
+// receive) so both receive paths run the same WaveGuard readiness recheck.
+router.syncLawnReadinessAfterRestock = syncLawnReadinessAfterRestock;
+
 module.exports = router;

@@ -25,8 +25,14 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// The bridge's own SQL is unit-tested in lead-funnel-bridge.test.js — here we
+// only assert the sweep hands it the flipped ids on the same transaction.
+jest.mock('../services/lead-funnel-bridge', () => ({
+  bridgeLeadsFunnelStage: jest.fn(async () => ({ updated: 1 })),
+}));
 
 const logger = require('../services/logger');
+const { bridgeLeadsFunnelStage } = require('../services/lead-funnel-bridge');
 const {
   runLeadStalenessSweep,
   getThresholdDays,
@@ -182,6 +188,10 @@ describe('lead staleness sweep', () => {
 
       // One summary line: count + threshold.
       expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=2');
+
+      // Funnel rows collapse to the lost bucket for the flipped leads, on the
+      // SAME transaction (unresponsive is a closed status).
+      expect(bridgeLeadsFunnelStage).toHaveBeenCalledWith(['lead-1', 'lead-2'], 'unresponsive', expect.any(Function));
     });
 
     test('custom LEAD_STALENESS_DAYS drives the cutoff and the activity copy', async () => {
@@ -218,13 +228,14 @@ describe('lead staleness sweep', () => {
       expect(leadsChain.whereNull).toHaveBeenCalledWith('leads.deleted_at');
     });
 
-    test('no eligible leads: no activity insert, marked 0', async () => {
+    test('no eligible leads: no activity insert, no funnel bridge, marked 0', async () => {
       const { activityInsert } = installDb({ flipped: [] });
 
       const result = await runLeadStalenessSweep();
 
       expect(result).toEqual({ disabled: false, marked: 0 });
       expect(activityInsert).not.toHaveBeenCalled();
+      expect(bridgeLeadsFunnelStage).not.toHaveBeenCalled();
       expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=0');
     });
 

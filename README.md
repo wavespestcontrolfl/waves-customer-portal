@@ -1,107 +1,76 @@
-# Waves Pest Control — Customer Portal
+# Waves Pest Control — Operations Platform
 
-A full-stack customer portal for Waves Pest Control, integrating **Twilio** (SMS notifications), **Stripe** (payments/invoicing), and a **React** frontend.
+AI-native operations platform for Waves Pest Control & Lawn Care (SW Florida).
+One monorepo serves three surfaces plus the automation that runs the business:
 
-## Architecture
+- **Admin portal** (`/admin/*`) — owner/CSR dashboard: dispatch, customers,
+  estimates, communications, revenue, SEO/content, and the ⌘K Intelligence Bar.
+- **Customer portal** (`/`) — customer-facing PWA: service tracking, reports,
+  payments, referrals.
+- **Tech portal** (`/tech/*`) — field technician mobile app: route, protocols,
+  service completion, estimating.
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18 + Vite (dual style system — see `CLAUDE.md`) |
+| Backend | Node.js + Express + Knex.js |
+| Database | PostgreSQL on Railway (migrations in `server/models/migrations/`) |
+| Payments | Stripe — Payment Element (card/Apple Pay/Google Pay/ACH) + Terminal Tap-to-Pay via `ios/WavesPay` |
+| SMS/Voice | Twilio (messaging, voice recording + transcription, Lookup) |
+| AI | Anthropic Claude (+ routed OpenAI/Gemini for specific features) — model tiers in `server/config/models.js`, never hardcode model IDs |
+| Storage | AWS S3 (service photos, report assets) |
+| Hosting | Railway (`railway.toml`, plus `railway.seo-worker.toml`) |
+
+The marketing/SEO site (hub + spoke fleet) is a **separate repo**
+(`wavespestcontrolfl/wavespestcontrol-astro`) deployed to Cloudflare Pages;
+this repo's content engine writes blog posts into it via PR.
+
+## Layout
 
 ```
-waves-portal/
-├── server/                  # Node.js + Express API
-│   ├── config/              # Environment & service configuration
-│   ├── middleware/           # Auth, error handling, rate limiting
-│   ├── models/              # Database schemas (PostgreSQL via Knex)
-│   ├── routes/              # REST API endpoints
-│   ├── services/            # Twilio, Stripe, and business logic
-│   └── index.js             # Server entry point
-├── client/                  # React frontend (Vite)
-│   └── src/
-│       ├── components/      # Reusable UI components
-│       ├── pages/           # Tab/page-level views
-│       ├── hooks/           # Custom React hooks
-│       ├── utils/           # API client, helpers
-│       └── styles/          # Global styles & theme
-├── scripts/                 # DB migrations, seed data
-├── docs/                    # API documentation
-├── .env.example             # Required environment variables
-├── package.json             # Root package.json (workspaces)
-└── docker-compose.yml       # Local dev environment
+server/            Express API — routes/ (160+), services/ (business logic,
+                   intelligence-bar/, pricing-engine/, content/, dispatch/, …),
+                   models/migrations/ (Knex), middleware/, utils/, tests/
+client/            React app (all three portals)
+packages/          Workspaces: blog-schema, lawn-cost-floor
+ios/WavesPay       Stripe Terminal companion app (xcodegen; project.yml is SoT)
+ops/twilio/        Studio flow contract (legacy rollback path)
+scripts/           Operational scripts + git hooks (hooks/pre-push = Codex audit)
+docs/              Runbooks (DEPLOYMENT.md), design system (design/DECISIONS.md), audits
+wiki/              Dispatch/service protocols (seeded into the in-app knowledge base)
+.claude/skills/    Claude Code skills (ship flow, DB safety, billing, content)
 ```
 
-## Tech Stack
-
-| Layer       | Technology                        |
-|-------------|-----------------------------------|
-| Frontend    | React 18 + Vite + TailwindCSS     |
-| Backend     | Node.js + Express                 |
-| Database    | PostgreSQL via Knex.js             |
-| Auth        | JWT + bcrypt (phone/email login)   |
-| SMS         | Twilio Programmable Messaging      |
-| Payments    | Stripe (Payment Element)           |
-| File Storage| AWS S3 (service photos)            |
-| Hosting     | Railway / Render / Vercel          |
-
-## Quick Start
-
-### Prerequisites
-- Node.js 18+
-- PostgreSQL 14+
-- Twilio account (Account SID, Auth Token, Phone Number)
-- Stripe account (Secret Key, Publishable Key, Webhook Secret)
-
-### Setup
+## Development
 
 ```bash
-# 1. Clone and install
-git clone <repo-url> && cd waves-portal
-npm install
-
-# 2. Configure environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# 3. Run database migrations
-npm run db:migrate
-
-# 4. Seed sample data
-npm run db:seed
-
-# 5. Start development
-npm run dev
+npm install          # also wires the Codex pre-push hook (core.hooksPath)
+cp .env.example .env # DATABASE_URL is required — `predev` runs migrations
+npm run dev          # API :3001 + Vite :5173
 ```
 
-This starts both the API server (port 3001) and React dev server (port 5173).
+Key commands:
 
-### Environment Variables
-
-See `.env.example` for all required variables. At minimum you need:
-
-- `DATABASE_URL` — PostgreSQL connection string
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`
-- `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`
-- `JWT_SECRET` — random 64-char string for auth tokens
-- `S3_BUCKET` — for service photo uploads
-
-## API Endpoints
-
-See `docs/API.md` for full documentation. Key routes:
-
-- `POST /api/auth/login` — SMS-based login (sends Twilio verification code)
-- `GET  /api/customers/:id` — Customer profile + tier info
-- `GET  /api/services/:customerId` — Service history with tech notes
-- `GET  /api/schedule/:customerId` — Upcoming service appointments
-- `POST /api/schedule/:id/confirm` — Confirm an appointment
-- `GET  /api/billing/:customerId` — Payment history (Stripe)
-- `POST /api/billing/update-card` — Update payment method (Stripe)
-- `PUT  /api/notifications/preferences` — Update SMS preferences
+- `npm run db:migrate` / `db:rollback` — Knex (always via `server/knexfile.js`)
+- `npm run check:portal-brand` — customer-surface brand gate; **runs in Railway
+  `prebuild` and a violation fails every deploy** — run before pushing `client/`
+- `npm run verify:blog-schema` — blog schema vendor check (also in `prebuild`)
+- `npm test` / `npm run test:contracts` — server tests / contract tests
+- `npm run models:check` — compare available Anthropic models vs current tiers
 
 ## Deployment
 
-Recommended: **Railway** (easiest for full-stack Node + Postgres)
+Railway only — project `waves-pest-control`. Config-as-code in `railway.toml`
+(health check, pre-deploy migrations). See `docs/DEPLOYMENT.md` for the full
+runbook. User-visible features ship dark behind `GATE_*` env switches
+(see `.env.example`).
 
-1. Push to GitHub
-2. Connect Railway to repo
-3. Add PostgreSQL plugin
-4. Set environment variables
-5. Deploy — Railway auto-detects the start script
+## Where the real documentation lives
 
-Alternative: Vercel (frontend) + Render (API) + Supabase (DB)
+- `CLAUDE.md` — architecture, design systems, Intelligence Bar, rules
+- `AGENTS.md` — code-review rulebook (P0/P1) used by the Codex hook + bot
+- `CODEX.md` — sandbox/DB setup for agent sessions
+- `docs/design/DECISIONS.md` — append-only architectural decision log
+- `.claude/skills/` — operating procedures for ship flow, DB, billing, content

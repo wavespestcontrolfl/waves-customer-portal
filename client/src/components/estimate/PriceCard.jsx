@@ -1,15 +1,14 @@
+import { useState } from 'react';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
+import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
+import { fmtMoney, fmtMoneySigned } from '../../lib/money';
+import { W, PRICE_FONT } from './tokens';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
  * service-tier programs can keep a monthly bill while showing visit cadence.
  */
-const W = {
-  blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
-  yellow: '#FFD700', green: '#16A34A',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  white: '#FFFFFF', offWhite: '#F1F5F9', sand: '#FEF7E0', border: '#CBD5E1',
-};
 
 const SERVICE_INCLUSIONS = {
   pest_control: [
@@ -54,11 +53,6 @@ const SERVICE_INCLUSIONS = {
   ],
 };
 
-function fmtMoney(n) {
-  if (n == null) return '—';
-  const v = Math.round(Number(n) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
-}
 
 function normalizedTier(value) {
   const raw = String(value || '').replace(/^WaveGuard\s+/i, '');
@@ -96,9 +90,81 @@ const DEFAULT_WORDING = {
   guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING }) {
+// The glass day-lines (wording.dayLineByKey) anchor on concrete cheap items
+// ("less than a gas-station drink"), which becomes a false claim at high
+// per-day prices. Above this cap the comparison overlay is skipped and the
+// section's own service-specific dayLine (server wording) renders instead —
+// lawn stays lawn copy, never the pest-flavored module default. Conservative
+// on purpose: the comparison is a nice-to-have, a false claim is not.
+const DAY_LINE_COMPARISON_MAX = 4;
+
+// Pre-discount anchor for a frequency entry, expressed in the displayed
+// billing period. Pest entries carry a per-visit anchor (pest bills one visit
+// per interval, so per-visit == per-interval); non-pest entries (own-cadence
+// ladders and mirrored bundle rows) never get perVisit — they carry
+// monthlyBase, the pre-WaveGuard-discount monthly, so the anchor derives from
+// it. Without this fallback a tier-discounted lawn/tree/mosquito/termite
+// section shows its member price with no evidence a discount was applied.
+function anchorPeriodPrice(frequency = {}, intervalMonths = 1) {
+  const perVisit = Number(frequency.perVisit || 0);
+  if (perVisit > 0) return perVisit;
+  const monthlyBase = Number(frequency.monthlyBase || 0);
+  if (!(monthlyBase > 0)) return 0;
+  return Math.round(monthlyBase * intervalMonths * 100) / 100;
+}
+
+// A frequency whose entry carries a manualDiscount has its `monthly` already
+// net of that discount (lawn/tree/mosquito single-service ladders subtract it;
+// shapeFromV1 bundle totals do too), and the card renders the manual discount
+// as its own labeled row. Subtract the manual slice from the anchor-vs-billed
+// gap so a promo is never double-reported or mislabeled as WaveGuard savings.
+function manualDiscountPerInterval(frequency = {}, intervalMonths = 1) {
+  const md = frequency.manualDiscount;
+  if (!md || !(Number(md.amount) > 0)) return 0;
+  const recurringAnnual = Number(md.recurringAmount ?? md.amount);
+  if (!(recurringAnnual > 0)) return 0;
+  return Math.round((recurringAnnual / 12) * intervalMonths * 100) / 100;
+}
+
+// Inclusion list for a treatment row. Under glass the pest offer stack is
+// an accordion, collapsed by default behind "See everything included (N)"
+// (approved blueprint behavior) — the full seven bullets are a wall on
+// first paint; the count is the hook.
+function RowInclusions({ items, collapsible = false }) {
+  const [open, setOpen] = useState(false);
+  const list = (
+    <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
+      {items.map((item) => (
+        <li key={item} style={{ position: 'relative', paddingLeft: 20, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
+          <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+  if (!collapsible) return list;
+  return (
+    <>
+      <button
+        type="button"
+        className="gc-svc-hint"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? 'Hide details ▴' : `See everything included (${items.length}) ▾`}
+      </button>
+      {open ? list : null}
+    </>
+  );
+}
+
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
   if (!frequency) return null;
 
+  // Glass copy pack (PR B): tier display + pest inclusion swaps
+  // live here because they're card-internal content the parent never
+  // threads through props.
+  const glass = glassCopyActive();
   const monthly = frequency.monthly;
   const annual = frequency.annual;
   const quoteRequired = frequency.quoteRequired === true;
@@ -107,12 +173,34 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
   const periodLabel = wording?.periodLabelByKey?.[billingKey]
     || (billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo');
-  const serviceCadenceLabel = isSeparateServiceCadence(frequency) ? frequency.label : null;
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
-  const anchorPrice = Number(frequency.perVisit || 0);
-  const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
+  const anchorPrice = anchorPeriodPrice(frequency, intervalMonths);
+  // cadencePrice round-trips through the rounded monthly figure (e.g. a $94
+  // quarterly visit → $31.33/mo → $93.99/quarter), so a 0%-discount tier
+  // (WaveGuard Bronze) can land a phantom cent or two under the per-visit
+  // anchor. Anything below this threshold is rounding noise, not a member
+  // discount — show no anchor strike-through for it.
+  const SAVINGS_ROUNDING_NOISE = 0.05;
+  const rawSavings = cadencePrice != null && anchorPrice > cadencePrice
+    ? Math.round((anchorPrice - cadencePrice - manualDiscountPerInterval(frequency, intervalMonths)) * 100) / 100
+    : 0;
+  const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
+  // Applications-per-year highlight — only when the count is unambiguous.
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
+    : [];
+  // The cadence-key fallback only applies when there are NO per-service
+  // treatment rows: an unsplit combined frequency with several rows of
+  // differing counts must not advertise one number for all of them.
+  const visitsPerYear = Number(frequency.visitsPerYear) > 0
+    ? Number(frequency.visitsPerYear)
+    : (treatmentVisitRows.length === 1
+      ? Number(treatmentVisitRows[0].visitsPerYear)
+      : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
+  const showVisitsLine = !quoteRequired && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
   // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
   // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
@@ -153,27 +241,29 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
 
   return (
     <div style={{
-      padding: '8px 0 14px',
-      marginBottom: 6,
+      padding: '8px 0 16px',
+      marginBottom: 8,
     }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
-        {savings > 0 && !showLowConfidenceRange ? (
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+        {showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
-            fontFamily: "'Source Serif 4', Georgia, serif",
-            fontSize: 26,
-            color: '#9CA3AF',
+            fontSize: 15,
+            color: '#64748B',
             textDecoration: 'line-through',
             lineHeight: 1,
+            fontVariantNumeric: 'tabular-nums',
           }}>
             {fmtMoney(anchorPrice)}{periodLabel}
           </span>
         ) : null}
         <span style={{
-          fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: quoteRequired ? 42 : showLowConfidenceRange ? 40 : 58,
-          fontWeight: 500,
+          // Promoted 26->40 (design audit 2026-07-06): the price is the
+          // decision number — SSR renders it 62-84px; 26px lost to headings.
+          fontSize: quoteRequired ? 24 : showLowConfidenceRange ? 32 : PRICE_FONT,
+          fontWeight: 600,
           color: W.blueDeeper,
           lineHeight: 1,
+          fontVariantNumeric: 'tabular-nums',
         }}>
         {quoteRequired
           ? 'Quote required'
@@ -182,53 +272,50 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           : fmtMoney(cadencePrice)}
         </span>
         {!quoteRequired ? (
-          <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+          <span style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, whiteSpace: 'nowrap' }}>{periodLabel}</span>
         ) : null}
         {waveGuardTier ? (
           <span style={{
             display: 'inline-block',
             padding: '5px 11px',
-            background: '#EEF2FF',
+            background: W.badgeWash,
             color: W.blueDeeper,
             borderRadius: 6,
             fontSize: 13,
             fontWeight: 700,
             letterSpacing: '0.02em',
           }}>
-            WaveGuard {waveGuardTier}
+            WaveGuard {glass ? glassTierDisplay(waveGuardTier) : waveGuardTier}
           </span>
         ) : null}
       </div>
 
-      {savings > 0 && waveGuardTier && !showLowConfidenceRange ? (
-        <div style={{ marginTop: 12, color: W.green, fontSize: 16, fontWeight: 800 }}>
-          You save {fmtMoney(savings)}{periodLabel} with WaveGuard {waveGuardTier}
+      {showVisitsLine ? (
+        <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
+          <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
+          {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
         </div>
       ) : null}
 
-      {!quoteRequired && annual ? (
-        <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
-          {showLowConfidenceRange
-            ? `${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`
-            : `${fmtMoney(annual)} / year`}
+      {/* Standard exact prices show no annual figure (owner directive
+          2026-07-03) — only the site-confirmation commercial range keeps
+          its annual band, since the ranged /mo figure alone understates
+          the commitment being confirmed on site. */}
+      {!quoteRequired && annual && showLowConfidenceRange ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
+          {`${fmtMoney(annualRangeLow)} – ${fmtMoney(annualRangeHigh)} / year`}
         </div>
       ) : null}
 
       {showLowConfidenceRange ? (
-        <div style={{ fontSize: 14, color: '#475569', marginTop: 10, lineHeight: 1.5, fontWeight: 600 }}>
+        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5, fontWeight: 600 }}>
           Estimated range — we confirm your exact price with a quick site visit before your first service.
         </div>
       ) : null}
 
       {quoteRequired && quoteReason ? (
-        <div style={{ fontSize: 15, color: '#92400E', marginTop: 10, lineHeight: 1.45, fontWeight: 700 }}>
+        <div style={{ fontSize: 15, color: W.noticeText, marginTop: 12, lineHeight: 1.45, fontWeight: 700 }}>
           {quoteReason}
-        </div>
-      ) : null}
-
-      {serviceCadenceLabel ? (
-        <div style={{ fontSize: 14, color: '#475569', marginTop: 8, fontWeight: 700 }}>
-          Service visits: {serviceCadenceLabel}
         </div>
       ) : null}
 
@@ -239,39 +326,44 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           gap: 12,
           alignItems: 'center',
           marginTop: 12,
-          padding: '10px 12px',
+          padding: '12px 12px',
           border: '1px solid #DCFCE7',
           borderRadius: 10,
-          background: '#F0FDF4',
+          background: W.successWash,
           color: W.green,
           fontSize: 14,
           fontWeight: 800,
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
-          <strong style={{ whiteSpace: 'nowrap' }}>-{fmtMoney(manualDiscountInterval)}{periodLabel}</strong>
+          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</strong>
         </div>
       ) : null}
 
       {dayPrice && !showLowConfidenceRange ? (
-        <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-          {(wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
+        <div style={{ fontSize: 15, color: CUSTOMER_SURFACE.muted, marginTop: 8, lineHeight: 1.5 }}>
+          {((dayPrice <= DAY_LINE_COMPARISON_MAX && wording?.dayLineByKey?.[billingKey])
+            || wording?.dayLine
+            || DEFAULT_WORDING.dayLine
+          ).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}
 
-      <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
-        {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
-      </div>
+      {showGuarantee ? (
+        <div style={{ fontSize: 15, color: W.blueDeeper, marginTop: 12, lineHeight: 1.5 }}>
+          {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
+        </div>
+      ) : null}
 
       {treatmentRows.length ? (
-        <div style={{ display: 'grid', gap: 12, marginTop: 18 }}>
+        <div style={{ display: 'grid', gap: 12, marginTop: 20 }}>
           {treatmentRows.map((row, index) => (
             <div
               key={`${row.service || row.label || 'service'}-${index}`}
               style={{
                 border: `1px solid ${W.border}`,
                 borderRadius: 10,
-                padding: 14,
+                padding: 16,
                 background: W.white,
               }}
             >
@@ -279,22 +371,35 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                 <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, lineHeight: 1.35 }}>
                   {row.label || 'Service application'}
                 </div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap' }}>
-                  {fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span>
-                </div>
+                {/* Single-service glass cards quote ONE price — the header
+                    cadence price. Restating it per-application here showed a
+                    second, independently-rounded figure next to the real one
+                    ($94 vs $93.99; owner directive 2026-07-05). Multi-row
+                    breakdowns keep per-row prices — there the split IS the
+                    information. */}
+                {glass && treatmentRows.length === 1 ? null : (
+                  <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                    {fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span>
+                  </div>
+                )}
               </div>
               <div style={{ marginTop: 3, fontSize: 12, color: W.textCaption, lineHeight: 1.4 }}>
                 {Number(row.visitsPerYear) > 0 ? `${row.visitsPerYear} applications/year` : 'Service applications/year'}
-                {waveGuardTier ? ` - WaveGuard ${normalizedTier(waveGuardTier)}` : ''}
+                {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
               </div>
-              <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: '12px 0 0', borderTop: `1px solid ${W.offWhite}`, display: 'grid', gap: 7 }}>
-                {serviceInclusions(row).map((item) => (
-                  <li key={item} style={{ position: 'relative', paddingLeft: 18, color: W.textBody, fontSize: 13, fontWeight: 600, lineHeight: 1.4 }}>
-                    <span style={{ position: 'absolute', left: 0, top: 7, width: 6, height: 6, borderRadius: 999, background: W.blueDeeper }} />
-                    {item}
-                  </li>
-                ))}
-              </ul>
+              <RowInclusions
+                // Glass classifies via glassServiceSlug, not serviceKey():
+                // lawn_pest_* rows are PEST (server recurringServiceKey
+                // semantics) but serviceKey checks 'lawn' first — the glass
+                // stack must match the priced service (codex rd2). Null
+                // slug → baseline list, unchanged.
+                items={(glass && glassRowInclusions(
+                  glassServiceSlug(String(row.service || row.key || row.label || '')),
+                  row.visitsPerYear,
+                  glassSetupBullet,
+                )) || serviceInclusions(row)}
+                collapsible={glass}
+              />
             </div>
           ))}
         </div>

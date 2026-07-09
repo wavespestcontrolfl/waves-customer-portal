@@ -1,7 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // Display name that drops a missing/null last name so we never render
 // "Sam null" in alert titles, descriptions, or call-task messages.
@@ -20,7 +19,6 @@ const ALERT_RULES = [
     title: (data) => `Health score dropped ${Math.abs(data.scoreChange30d)} points in 30 days`,
     description: (data) => `${fullName(data.customer)}'s score fell from ${data.overall + Math.abs(data.scoreChange30d)} to ${data.overall}. Primary drivers: ${(data.churnSignals || []).map(s => String(s.signal || '').replace(/_/g, ' ')).filter(Boolean).join(', ') || 'general decline'}.`,
     actions: [
-      { label: 'Send check-in SMS', type: 'sms', template: 'check_in' },
       { label: 'Schedule courtesy call', type: 'call' },
     ],
   },
@@ -32,7 +30,6 @@ const ALERT_RULES = [
     description: (data) => `Score ${data.overall} (${data.grade}). Probability of churn: ${Math.round((data.churnProbability || 0) * 100)}%. Estimated ${data.daysUntilChurn || '?'} days until churn.`,
     actions: [
       { label: 'Call immediately', type: 'call' },
-      { label: 'Send retention offer', type: 'sms', template: 'retention_offer' },
     ],
   },
   {
@@ -45,7 +42,6 @@ const ALERT_RULES = [
     title: (data) => `No service in ${data.serviceDetails.daysSinceLastService} days`,
     description: (data) => `${fullName(data.customer)} hasn't had a service visit in over ${Math.round(data.serviceDetails.daysSinceLastService / 30)} months.`,
     actions: [
-      { label: 'Send rebooking SMS', type: 'sms', template: 'rebook' },
       { label: 'Schedule visit', type: 'call' },
     ],
   },
@@ -59,7 +55,6 @@ const ALERT_RULES = [
     title: (data) => `Payment issues detected for ${fullName(data.customer)}`,
     description: (data) => `Payment score: ${data.payment}. Failed payments: ${data.paymentDetails?.failedCount || 0}. Late payments: ${data.paymentDetails?.lateCount || 0}.`,
     actions: [
-      { label: 'Send payment reminder', type: 'sms', template: 'payment_reminder' },
       { label: 'Call about billing', type: 'call' },
     ],
   },
@@ -73,7 +68,7 @@ const ALERT_RULES = [
     title: (data) => `Low engagement: ${fullName(data.customer)}`,
     description: (data) => `No contact in ${data.engagementDetails.daysSinceLastContact} days. Engagement score: ${data.engagement}.`,
     actions: [
-      { label: 'Send friendly check-in', type: 'sms', template: 'check_in' },
+      { label: 'Schedule courtesy call', type: 'call' },
     ],
   },
   {
@@ -84,7 +79,6 @@ const ALERT_RULES = [
     description: (data) => `Satisfaction score: ${data.satisfaction}. Avg rating: ${data.satisfactionDetails?.avgRating || 'N/A'}. Complaints: ${data.satisfactionDetails?.complaintCount || 0}.`,
     actions: [
       { label: 'Call to address concerns', type: 'call' },
-      { label: 'Send apology + offer', type: 'sms', template: 'apology' },
     ],
   },
   {
@@ -97,44 +91,10 @@ const ALERT_RULES = [
     title: (data) => `New customer at risk: ${fullName(data.customer)}`,
     description: (data) => `Customer joined ${data.loyaltyDetails.tenureMonths} months ago with a score of ${data.overall}. Early intervention recommended.`,
     actions: [
-      { label: 'Send welcome follow-up', type: 'sms', template: 'welcome_followup' },
       { label: 'Schedule onboarding call', type: 'call' },
     ],
   },
 ];
-
-function purposeForHealthTemplate(template) {
-  if (template === 'payment_reminder') return 'billing';
-  if (template === 'retention_offer' || template === 'rebook') return 'retention';
-  return 'support_resolution';
-}
-
-async function sendHealthSms(customer, msg, action = {}) {
-  const purpose = purposeForHealthTemplate(action.template);
-  const result = await sendCustomerMessage({
-    to: customer.phone,
-    body: msg,
-    channel: 'sms',
-    audience: 'customer',
-    purpose,
-    customerId: customer.id,
-    identityTrustLevel: 'phone_matches_customer',
-    entryPoint: 'health_alerts',
-    consentBasis: purpose === 'retention' ? {
-      status: 'opted_in',
-      source: 'health_alert_action',
-      capturedAt: new Date().toISOString(),
-    } : undefined,
-    metadata: {
-      original_message_type: 'health_outreach',
-      action_template: action.template,
-    },
-  });
-  if (!result.sent) {
-    logger.warn(`[health-alerts] SMS blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
-  }
-  return result;
-}
 
 // ---------------------------------------------------------------------------
 // Generate alerts for a customer
@@ -263,65 +223,16 @@ async function executeAction(alertId, actionIndex) {
 
   let result = { success: false, message: '' };
 
-  if (action.type === 'sms') {
-    try {
-      const smsTemplatesRouter = require('../routes/admin-sms-templates');
-      const TEMPLATE_KEY_MAP = {
-        check_in: 'health_check_in',
-        retention_offer: 'health_retention_offer',
-        rebook: 'health_rebook',
-        payment_reminder: 'health_payment_reminder',
-        apology: 'health_apology',
-        welcome_followup: 'health_welcome_followup',
-      };
-      const FALLBACKS = {
-        check_in: `Hi ${customer.first_name || 'there'}, this is Adam from Waves Pest Control. Just checking in — everything going well with your service? Let us know if you need anything!`,
-        retention_offer: `Hi ${customer.first_name || 'there'}, Adam here from Waves. We value your business and want to make sure you're getting the best experience. Would you be open to a quick call to discuss how we can better serve you?`,
-        rebook: `Hi ${customer.first_name || 'there'}! It's been a while since your last service visit. We'd love to get you back on the schedule. Reply or call us to book your next treatment!`,
-        payment_reminder: `Hi ${customer.first_name || 'there'}, this is Waves Pest Control. We noticed a billing issue on your account. Please give us a call at your convenience so we can get it sorted. Thank you!`,
-        apology: `Hi ${customer.first_name || 'there'}, Adam from Waves here. I wanted to personally reach out — we always want you to be 100% satisfied. I'd love to hear your feedback. Mind if I give you a call?`,
-        welcome_followup: `Hi ${customer.first_name || 'there'}! Adam from Waves Pest Control. Just wanted to follow up on your service and make sure everything met your expectations. We're here for you!`,
-      };
-      const alertKey = action.template in TEMPLATE_KEY_MAP ? action.template : 'check_in';
-      let msg = FALLBACKS[alertKey];
-      try {
-        if (typeof smsTemplatesRouter.getTemplate === 'function') {
-          const rendered = await smsTemplatesRouter.getTemplate(
-            TEMPLATE_KEY_MAP[alertKey],
-            { first_name: customer.first_name || 'there' },
-            { workflow: 'health_alert_followup', entity_type: 'customer', entity_id: customer.id }
-          );
-          if (rendered && !rendered.includes('{first_name}')) msg = rendered;
-        }
-      } catch { /* use fallback */ }
-
-      if (customer.phone) {
-        const smsResult = await sendHealthSms(customer, msg, action);
-        result = smsResult.sent
-          ? { success: true, message: 'SMS sent' }
-          : { success: false, message: `SMS blocked/failed: ${smsResult.code || smsResult.reason || 'unknown'}` };
-      } else {
-        result = { success: false, message: 'Customer has no phone number' };
-      }
-    } catch (err) {
-      result = { success: false, message: `SMS failed: ${err.message}` };
-    }
-  } else if (action.type === 'send_sms') {
-    // Alias — same as sms
-    try {
-      const msg = (action.message || `Hi ${customer.first_name || 'there'}, this is Adam from Waves Pest Control. Just checking in — everything going well? Let us know if you need anything!`)
-        .replace(/{first_name}/g, customer.first_name || 'there');
-      if (customer.phone) {
-        const smsResult = await sendHealthSms(customer, msg, action);
-        result = smsResult.sent
-          ? { success: true, message: 'SMS sent' }
-          : { success: false, message: `SMS blocked/failed: ${smsResult.code || smsResult.reason || 'unknown'}` };
-      } else {
-        result = { success: false, message: 'Customer has no phone number' };
-      }
-    } catch (err) {
-      result = { success: false, message: `SMS failed: ${err.message}` };
-    }
+  if (action.type === 'sms' || action.type === 'send_sms') {
+    // Health outreach texting retired (owner directive 2026-07-06) — the
+    // health_* templates are deleted and old alerts may still carry sms
+    // actions, so treat them like the retired save-sequence actions. Health
+    // alerts remain admin-facing (call/discount/free-service actions).
+    return {
+      success: false,
+      code: 'retired_action_type',
+      message: 'Health outreach SMS actions are no longer available — call the customer instead.',
+    };
   } else if (action.type === 'call' || action.type === 'schedule_call') {
     // Create customer_interactions task for callback
     try {

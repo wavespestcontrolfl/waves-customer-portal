@@ -108,9 +108,18 @@ const QUIZZES = {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Brand palette (mirrors newsletter-draft COLORS — kept local so this module
-// stays dependency-light and never imports the draft assembler).
-const C = { navy: '#1B2C5B', blue: '#009CDE', muted: '#8B8680', rule: '#E7E2D7', cardBg: '#FAFAF8' };
+// Brand palette resolved from the active email theme (glass) so quiz blocks
+// match the newsletter chrome they're substituted into — the old hardcoded
+// literals (#1B2C5B/#009CDE warm set) rendered old-navy fragments inside
+// glass newsletters. Still never imports the draft assembler.
+const { newsletterPalette } = require('./email-template');
+const C = {
+  get navy() { return newsletterPalette().navy; },
+  get blue() { return newsletterPalette().blue; },
+  get muted() { return newsletterPalette().muted; },
+  get rule() { return newsletterPalette().rule; },
+  get cardBg() { return newsletterPalette().cardBg; },
+};
 
 function getQuiz(quizId) {
   return QUIZZES[quizId || DEFAULT_QUIZ_ID] || null;

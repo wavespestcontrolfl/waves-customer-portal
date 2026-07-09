@@ -39,7 +39,13 @@ const {
   _private: aiPrivate,
 } = require('../services/property-lookup/ai-property-lookup');
 
-const { leadingHouseNumber, situsHouseNumberMismatch } = aiPrivate;
+const {
+  leadingHouseNumber,
+  situsHouseNumberMismatch,
+  situsHouseNumberExactMatch,
+  houseNumberFromSourceUrl,
+  aiRecordHouseNumberMismatch,
+} = aiPrivate;
 
 const TYPED = '13649 Luxe Avenue, Bradenton, FL 34211';
 const GEO = {
@@ -177,5 +183,277 @@ describe('lookupPropertyFromAITrio GIS acceptance', () => {
       expect.stringContaining('situs house number disagrees'),
     );
     expect(fetchUrls.some((u) => u.includes('pao-model-parcel-search-results'))).toBe(true);
+  });
+});
+
+describe('lookupPropertyFromAITrio interpolated-geocode acceptance', () => {
+  const GEO_INTERPOLATED = { ...GEO, locationType: 'RANGE_INTERPOLATED' };
+
+  test('interpolated point + POSITIVE situs match keeps the by-parcel path', async () => {
+    lookupParcelByPoint.mockResolvedValue(
+      complexParcel({ situsAddress: '13649 LUXE AVE' }),
+    );
+
+    await lookupPropertyFromAITrio(TYPED, GEO_INTERPOLATED);
+
+    expect(fetchUrls.some((u) => u.includes('pao-model-land'))).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('lacks a confirming situs house number'),
+    );
+  });
+
+  test('interpolated point + BLANK situs (vacant developer lot) drops the parcel', async () => {
+    lookupParcelByPoint.mockResolvedValue(
+      complexParcel({ situsAddress: 'LUXE AVE' }),
+    );
+
+    const result = await lookupPropertyFromAITrio(TYPED, GEO_INTERPOLATED);
+
+    expect(fetchUrls.some((u) => u.includes('pao-model-land'))).toBe(false);
+    expect(fetchUrls.some((u) => u.includes('pao-model-parcel-search-results'))).toBe(true);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('lacks a confirming situs house number'),
+    );
+    expect(result).toBeNull();
+  });
+
+  test('interpolated point + mismatching situs drops the parcel via the existing guard', async () => {
+    lookupParcelByPoint.mockResolvedValue(complexParcel());
+
+    await lookupPropertyFromAITrio(TYPED, GEO_INTERPOLATED);
+
+    expect(fetchUrls.some((u) => u.includes('pao-model-land'))).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('situs house number disagrees'),
+    );
+  });
+
+  test('approximate geocodes still never reach the GIS point path', async () => {
+    lookupParcelByPoint.mockResolvedValue(complexParcel({ situsAddress: '13649 LUXE AVE' }));
+
+    await lookupPropertyFromAITrio(TYPED, { ...GEO, locationType: 'APPROXIMATE' });
+
+    expect(lookupParcelByPoint).not.toHaveBeenCalled();
+  });
+});
+
+describe('situsHouseNumberExactMatch (interpolated acceptance rule)', () => {
+  test('true only when both sides expose the same clean number on the same street', () => {
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 LUXE AVE APT 101')).toBe(true);
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13510 LUXE AVE')).toBe(false);
+  });
+  test('a cross-street parcel sharing the house number is NOT a positive match (codex P1)', () => {
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 PINE ST')).toBe(false);
+  });
+  test('suffix and post-direction are part of the street identity (codex P2)', () => {
+    // Same name, different suffix or directional = a different street.
+    expect(situsHouseNumberExactMatch('4506 45th St W', '4506 45TH AVE W')).toBe(false);
+    expect(situsHouseNumberExactMatch('4506 45th St W', '4506 45TH ST E')).toBe(false);
+    expect(situsHouseNumberExactMatch('4506 45th Street W', '4506 45TH ST W')).toBe(true);
+  });
+  test('suffix spelling differences do not break street agreement', () => {
+    expect(situsHouseNumberExactMatch('14375 Skipping Stone Lp', '14375 SKIPPING STONE LOOP')).toBe(true);
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13649 LUXE AVE')).toBe(true);
+  });
+  test('bare "#" unit markers do not defeat the street comparison (codex P2)', () => {
+    expect(situsHouseNumberExactMatch('13649 Luxe Ave #110, Bradenton, FL 34211', '13649 LUXE AVE')).toBe(true);
+    expect(situsHouseNumberExactMatch('13649 Luxe Ave #110', '13649 LUXE AVE APT 101')).toBe(true);
+  });
+  test('missing or range numbers are NOT a positive match', () => {
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', 'LUXE AVE')).toBe(false);
+    expect(situsHouseNumberExactMatch('Luxe Avenue', '13649 LUXE AVE')).toBe(false);
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', '13500-13700 LUXE AVE')).toBe(false);
+    expect(situsHouseNumberExactMatch('13649 Luxe Avenue', null)).toBe(false);
+  });
+  test('anchored to the TYPED number when the geocoder snapped (codex P2)', () => {
+    // Google snapped nonexistent typed 14384 to real neighbor 14380: the
+    // canonical searchAddress and the situs agree with EACH OTHER, but not
+    // with what the customer typed — no positive confirmation.
+    expect(situsHouseNumberExactMatch(
+      '14380 Skipping Stone Loop, Parrish, FL 34219', // canonical (snapped)
+      '14380 SKIPPING STONE LOOP',
+      '14384 Skipping Stone Lp, Parrish, FL 34219', // typed
+    )).toBe(false);
+    // No snap: typed agrees → confirmed.
+    expect(situsHouseNumberExactMatch(
+      '14380 Skipping Stone Loop, Parrish, FL 34219',
+      '14380 SKIPPING STONE LOOP',
+      '14380 Skipping Stone Lp, Parrish, FL 34219',
+    )).toBe(true);
+    // Typed address without a clean number cannot positively confirm.
+    expect(situsHouseNumberExactMatch(
+      '14380 Skipping Stone Loop, Parrish, FL 34219',
+      '14380 SKIPPING STONE LOOP',
+      'Skipping Stone Lp, Parrish, FL 34219',
+    )).toBe(false);
+  });
+});
+
+describe('AI web-record house-number guard', () => {
+  // Live miss (2026-07-08): lookup for 14384 Skipping Stone Lp accepted the
+  // realtor.com listing for 14375 — the nearest listed NEIGHBOR — and its lot
+  // size became the trusted "listing" value. The guard reads the house number
+  // out of the source URL slug and drops the record on a clean disagreement.
+  test('extracts house numbers from the major listing URL shapes', () => {
+    expect(houseNumberFromSourceUrl(
+      'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219',
+    )).toBe('14375');
+    expect(houseNumberFromSourceUrl(
+      'https://www.zillow.com/homedetails/14343-Skipping-Stone-Loop-Parrish-FL-34219/2063272367_zpid/',
+    )).toBe('14343');
+    expect(houseNumberFromSourceUrl(
+      'https://www.coldwellbankerhomes.com/fl/parrish/14344-skipping-stone-loop/pid_60888176/',
+    )).toBe('14344');
+    expect(houseNumberFromSourceUrl(
+      'https://www.redfin.com/FL/Parrish/14384-Skipping-Stone-Lp-34219/home/123456',
+    )).toBe('14384');
+  });
+
+  test('no signal from pages that do not embed an address slug', () => {
+    // County parcel page (query-string keyed), builder floorplan, numeric ids.
+    expect(houseNumberFromSourceUrl('https://www.manateepao.gov/parcel/?parid=497332659')).toBeNull();
+    expect(houseNumberFromSourceUrl('https://www.lennar.com/new-homes/florida/sarasota/parrish/canoe-creek')).toBeNull();
+    expect(houseNumberFromSourceUrl('https://example.com/listing/2063272367/')).toBeNull();
+    expect(houseNumberFromSourceUrl('not a url')).toBeNull();
+    expect(houseNumberFromSourceUrl(null)).toBeNull();
+  });
+
+  test('ordinal street names still yield the HOUSE number, not the id segment', () => {
+    expect(houseNumberFromSourceUrl(
+      'https://www.zillow.com/homedetails/4506-45th-Street-W-Bradenton-FL-34209/2063272367_zpid/',
+    )).toBe('4506');
+  });
+
+  test('fires only on a clean two-sided disagreement', () => {
+    const neighbor = { _aiSourceUrl: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' };
+    expect(aiRecordHouseNumberMismatch(neighbor, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
+    expect(aiRecordHouseNumberMismatch(neighbor, '14375 Skipping Stone Loop, Parrish, FL 34219')).toBe(false);
+    // Positive-only: no URL number, no typed number, or no record → no drop.
+    expect(aiRecordHouseNumberMismatch({ _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=1' }, '14384 Skipping Stone Lp')).toBe(false);
+    expect(aiRecordHouseNumberMismatch(neighbor, 'Skipping Stone Lp, Parrish')).toBe(false);
+    expect(aiRecordHouseNumberMismatch(null, '14384 Skipping Stone Lp')).toBe(false);
+  });
+
+  test('the trio anchors the guard to the TYPED address, not the canonical one (codex P2)', () => {
+    // Google can snap a nonexistent typed number (14384) to a real neighbor
+    // (14380) — the canonical searchAddress then carries 14380 and would
+    // bless the neighbor's own listing. The trio passes the typed address.
+    const snappedNeighborListing = {
+      _aiSourceUrl: 'https://www.realtor.com/realestateandhomes-detail/14380-Skipping-Stone-Loop_Parrish_FL_34219',
+      _aiSourceType: 'listing',
+    };
+    expect(aiRecordHouseNumberMismatch(snappedNeighborListing, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
+    expect(aiRecordHouseNumberMismatch(snappedNeighborListing, '14380 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+  });
+
+  test('every citation is scanned, not just the primary URL (codex P2)', () => {
+    // Primary source is a generic page; a secondary citation is the
+    // neighbor's listing that actually supplied the facts.
+    const hiddenNeighbor = {
+      _aiSourceUrl: 'https://www.zillow.com/parrish-fl/',
+      _aiSources: [
+        { provider: 'openai', url: 'https://www.zillow.com/parrish-fl/' },
+        { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
+      ],
+    };
+    expect(aiRecordHouseNumberMismatch(hiddenNeighbor, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
+
+    // An exact-address citation CONFIRMS the record even when a comps link
+    // for a neighbor rides beside it.
+    const confirmedWithComps = {
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/14384-Skipping-Stone-Loop-Parrish-FL-34219/111_zpid/',
+      _aiSources: [
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/14384-Skipping-Stone-Loop-Parrish-FL-34219/111_zpid/' },
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/14380-Skipping-Stone-Loop-Parrish-FL-34219/222_zpid/' },
+      ],
+    };
+    expect(aiRecordHouseNumberMismatch(confirmedWithComps, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+  });
+
+  test('only classified listing/aggregator URLs enter the comparison (codex P1+P2)', () => {
+    // Builder floorplan URLs carry PLAN numbers in the slug position — a
+    // valid prompt-allowed source that must never read as a wrong house.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/1820-magnolia-plan',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.buildzoom.com/permit/12345-some-permit',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    // An UNCLASSIFIED host with a plan-number slug is excluded too — an
+    // unrecognized builder's page must not torpedo new-construction evidence.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.some-swfl-builder.com/1820-magnolia-plan',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    // Substring host traps: "marondahomes.com" contains "homes.com" but is a
+    // BUILDER — exact host matching keeps its plan slugs out (codex P2).
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.marondahomes.com/1820-magnolia-plan',
+    }, '14384 Skipping Stone Lp')).toBe(false);
+    // A real homes.com subdomain still participates.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.homes.com/property/14343-skipping-stone-loop-parrish-fl/id-400/',
+    }, '14384 Skipping Stone Lp')).toBe(true);
+    // Coldwell Banker detail slugs participate too (codex P2).
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.coldwellbankerhomes.com/fl/parrish/14344-skipping-stone-loop/pid_60888176/',
+    }, '14384 Skipping Stone Lp')).toBe(true);
+    // A classified listing with the same slug shape still fires.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/14343-Skipping-Stone-Loop-Parrish-FL-34219/2063272367_zpid/',
+    }, '14384 Skipping Stone Lp')).toBe(true);
+  });
+
+  test('a trusted primary source is never vetoed by a secondary comp citation (codex P2)', () => {
+    // Facts came from the county page; a neighbor listing cited beside it
+    // (comps, "similar homes") must not drop the record.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=497325009',
+      _aiSources: [
+        { provider: 'openai', url: 'https://www.manateepao.gov/parcel/?parid=497325009' },
+        { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
+      ],
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+    // Same for a builder floorplan primary in the new-construction case.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/canoe-creek/magnolia',
+      _aiSources: [
+        { provider: 'claude', url: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/canoe-creek/magnolia' },
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/14380-Skipping-Stone-Loop-Parrish-FL-34219/222_zpid/' },
+      ],
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+    // The trusted source can sit ANYWHERE in the citation set — providers
+    // don't reliably put the fact source first (codex P2).
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.zillow.com/parrish-fl/',
+      _aiSources: [
+        { provider: 'openai', url: 'https://www.zillow.com/parrish-fl/' },
+        { provider: 'openai', url: 'https://www.manateepao.gov/parcel/?parid=497325009' },
+        { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
+      ],
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+  });
+
+  test('confirmation requires the full slug identity — same number on a different street neither confirms nor drops alone (codex P2)', () => {
+    const crossStreet = {
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/4506-45th-Ave-W-Bradenton-FL-34209/333_zpid/',
+    };
+    // Same number, different street: no signal by itself…
+    expect(aiRecordHouseNumberMismatch(crossStreet, '4506 45th St W, Bradenton, FL 34209')).toBe(false);
+    // …it does NOT confirm, so it cannot mask a disagreeing citation.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: crossStreet._aiSourceUrl,
+      _aiSources: [
+        { provider: 'openai', url: crossStreet._aiSourceUrl },
+        { provider: 'openai', url: 'https://www.zillow.com/homedetails/4510-45th-St-W-Bradenton-FL-34209/444_zpid/' },
+      ],
+    }, '4506 45th St W, Bradenton, FL 34209')).toBe(true);
+    // A true full-identity citation still confirms over a comp.
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.zillow.com/homedetails/4506-45th-St-W-Bradenton-FL-34209/555_zpid/',
+      _aiSources: [
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/4506-45th-St-W-Bradenton-FL-34209/555_zpid/' },
+        { provider: 'claude', url: 'https://www.zillow.com/homedetails/4510-45th-St-W-Bradenton-FL-34209/444_zpid/' },
+      ],
+    }, '4506 45th St W, Bradenton, FL 34209')).toBe(false);
   });
 });

@@ -1236,7 +1236,9 @@ describe('admin projects routes', () => {
 
   test('applicators endpoint withholds expired license numbers and only defaults a tech to themselves', async () => {
     const technicianRows = [
-      { id: 'tech-1', name: 'Adam Benetti', fl_applicator_license: 'JF111111', license_expiry: '2099-01-01' },
+      // Printed name set: certificates get the full legal name while the
+      // casual display name rides along as legacyName for old-draft matching.
+      { id: 'tech-1', name: 'Adam', applicator_printed_name: 'Adam Benetti', fl_applicator_license: 'JF111111', license_expiry: '2099-01-01' },
       { id: 'tech-2', name: 'Jose Alvarado', fl_applicator_license: 'JF222222', license_expiry: '2020-01-01' },
       { id: 'tech-3', name: 'Jacob Heaton', fl_applicator_license: 'JF333333', license_expiry: null },
       { id: 'tech-4', name: 'Sam Rivera', fl_applicator_license: '', license_expiry: null },
@@ -1256,13 +1258,15 @@ describe('admin projects routes', () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.applicators).toEqual([
-        { id: 'tech-1', name: 'Adam Benetti', fdacsId: 'JF111111' },
+        // Printed name wins for the certificate; legacyName carries the old
+        // display name so drafts saved as "Adam" still match and upgrade.
+        { id: 'tech-1', name: 'Adam Benetti', legacyName: 'Adam', fdacsId: 'JF111111' },
         // Expired license: the tech stays pickable, the number is withheld.
-        { id: 'tech-2', name: 'Jose Alvarado', fdacsId: null },
+        { id: 'tech-2', name: 'Jose Alvarado', legacyName: 'Jose Alvarado', fdacsId: null },
         // No expiry on file counts as active (same as admin-compliance-v2).
-        { id: 'tech-3', name: 'Jacob Heaton', fdacsId: 'JF333333' },
-        { id: 'tech-4', name: 'Sam Rivera', fdacsId: null },
-        { id: 'tech-5', name: 'Dana Ortiz', fdacsId: 'JF555555' },
+        { id: 'tech-3', name: 'Jacob Heaton', legacyName: 'Jacob Heaton', fdacsId: 'JF333333' },
+        { id: 'tech-4', name: 'Sam Rivera', legacyName: 'Sam Rivera', fdacsId: null },
+        { id: 'tech-5', name: 'Dana Ortiz', legacyName: 'Dana Ortiz', fdacsId: 'JF555555' },
       ]);
       expect(body.defaultTechnicianId).toBe('tech-1');
 

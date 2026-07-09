@@ -202,7 +202,7 @@ function MobileBlock({ service, top, height, laneIdx, laneCount, onEdit }) {
       }}
       title={`${service.customerName} · ${serviceDisplayName(service)} · ${service.windowStart || ''}`}
     >
-      <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      <div style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {firstName}
       </div>
       {!tooSmall && serviceDisplayName(service) && (
@@ -627,7 +627,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
             else el.click();
           }}
           className="w-full h-full flex items-center justify-center gap-1.5 px-4"
-          style={{ color: '#18181B', fontSize: 14, fontWeight: 600 }}
+          style={{ color: '#18181B', fontSize: 14, fontWeight: 500 }}
         >
           <span>{monthLabel}</span>
           <span aria-hidden style={{ fontSize: 10, color: '#71717A' }}>▾</span>

@@ -15,11 +15,12 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
-const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
+const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
+const { buildRescheduleLink } = require('./reschedule-link');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -118,14 +119,23 @@ function apptChannel(value) {
 // ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
 // per-occurrence keys, so calling it as both a fallback and a primary send for
 // the same occurrence will not double-deliver. Best-effort — never throws.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
+    // Callers that already minted the reschedule link for their SMS leg pass
+    // it through; paths that reach email directly (undelivered-SMS fallback,
+    // booking's channel-aware confirmation) mint it here so the email's
+    // "Reschedule appointment" CTA still renders. Best-effort — null just
+    // hides the CTA block.
+    let resolvedRescheduleUrl = rescheduleUrl;
+    if (!resolvedRescheduleUrl && scheduledServiceId && (kind === 'confirmation' || kind === '72h' || kind === '24h')) {
+      resolvedRescheduleUrl = (await buildRescheduleLink(scheduledServiceId, { customerId })).url;
+    }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -163,9 +173,9 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 //             customer is still reached (no admin alert unless BOTH fail)
 //   'both'  → send SMS and email
 // Returns true if the customer was reached on any channel. Best-effort.
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt }) {
   const ch = apptChannel(channel);
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -382,20 +392,64 @@ async function buildServiceLabel(scheduledServiceId, parentName) {
   }
 }
 
-function mergeServiceLabels(existingLabel, nextLabel) {
-  const existing = smsServiceLabelStored(existingLabel);
-  const next = smsServiceLabelStored(nextLabel);
-  if (!existing || existing === 'service') return next || 'service';
-  if (!next || next === 'service') return existing;
+async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }) {
+  // Rebuild the merged label from the PRISTINE service names of every
+  // reminder sharing this customer+slot — never parse a merged label back
+  // apart. Real service names contain both list delimiters (e.g. "Rodent
+  // Trapping, Exclusion & Sanitation Service", "Tree & Shrub Care"), so any
+  // string split corrupts them. Suppressed sibling rows keep their
+  // scheduled_service_id, which joins to the untouched source name;
+  // ar.service_type is only the fallback for legacy rows with no link.
+  const rows = await conn('appointment_reminders as ar')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .orderBy('ar.created_at', 'asc')
+    .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
-  const existingLower = existing.toLowerCase();
-  const nextLower = next.toLowerCase();
-  if (existingLower.includes(nextLower)) return existing;
-  if (nextLower.includes(existingLower)) return next;
+  // Each part must be the same customer-facing label registration stored:
+  // parent + add-ons + smsServiceLabel cleanup (buildServiceLabel semantics,
+  // but through the caller's connection so in-transaction addon rows are
+  // visible). Raw ss.service_type would silently drop add-ons.
+  const candidateLabels = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    let label = String(r.label || '').trim();
+    if (r.scheduled_service_id) {
+      try {
+        const addons = await conn('scheduled_service_addons')
+          .where({ scheduled_service_id: r.scheduled_service_id })
+          .pluck('service_name');
+        const all = [label, ...(Array.isArray(addons) ? addons : [])].map(smsServiceLabel).filter(Boolean);
+        if (all.length === 2) label = `${all[0]} & ${all[1]}`;
+        else if (all.length > 2) label = `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
+        else if (all.length === 1) label = all[0];
+      } catch { /* keep the base label */ }
+    }
+    candidateLabels.push(label);
+  }
+  candidateLabels.push(String(nextLabel || '').trim());
 
-  return /(?:\s&\s|,\s)/.test(existing)
-    ? `${existing}, and ${next}`
-    : `${existing} & ${next}`;
+  const parts = [];
+  for (const raw of candidateLabels) {
+    const label = String(raw || '').trim();
+    if (!label) continue;
+    const lower = label.toLowerCase();
+    // 'service' is the smsServiceLabel fallback placeholder, not a real
+    // component — merging it produces "service & Quarterly Pest Control".
+    // It only survives via the final fallback when NO real label exists.
+    if (lower === 'service') continue;
+    // Same containment semantics the pairwise merge had: skip a candidate an
+    // existing part already covers; a candidate that covers existing parts
+    // replaces them.
+    if (parts.some((part) => part.toLowerCase().includes(lower))) continue;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (lower.includes(parts[i].toLowerCase())) parts.splice(i, 1);
+    }
+    parts.push(label);
+  }
+  if (parts.length === 0) return String(nextLabel || '').trim() || 'service';
+  if (parts.length === 1) return parts[0];
+  // List-style join (owner call 07-06): "A, B & C".
+  return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
 }
 
 function reminderFlagsCoveredByNotice(appointmentTime, now = new Date()) {
@@ -554,18 +608,21 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
   return { customer, techName };
 }
 
-async function getReminderPrefs(customerId) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
-
-  // Delivery channel is an account-level "how to reach me" preference, saved on
-  // the account owner's (primary profile's) row in the portal. Reminders load
-  // prefs by each appointment's service-property customer id, so a secondary
-  // property would otherwise miss the channel choice and default to SMS.
-  // Resolve it from the account's primary customer profile. (customers.account_id
-  // references customer_accounts.id, NOT a customers.id — so look up the primary
-  // profile rather than reading prefs by account_id directly.)
+// Delivery channel is an account-level "how to reach me" preference, saved on
+// the account owner's (primary profile's) row in the portal. Send paths load
+// prefs by each appointment's service-property customer id, so a secondary
+// property would otherwise miss the channel choice and default to SMS.
+// Resolve it from the account's primary customer profile. (customers.account_id
+// references customer_accounts.id, NOT a customers.id — so look up the primary
+// profile rather than reading prefs by account_id directly.)
+// `customerRow` is an optional pre-fetched customers row (must include
+// account_id / is_primary_profile) so callers that already loaded the customer
+// skip the extra query. Falls back to the passed `prefs` row on any miss.
+async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null) {
   let channelPrefs = prefs;
-  const customer = await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
+  const customer = (customerRow && customerRow.account_id !== undefined)
+    ? customerRow
+    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
   if (customer && customer.is_primary_profile !== true && customer.account_id) {
     const primary = await db('customers')
       .where({ account_id: customer.account_id, is_primary_profile: true })
@@ -576,6 +633,12 @@ async function getReminderPrefs(customerId) {
       if (ownerPrefs) channelPrefs = ownerPrefs;
     }
   }
+  return channelPrefs;
+}
+
+async function getReminderPrefs(customerId) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
     raw: prefs || {},
@@ -638,6 +701,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       const date = formatDate(apptTime);
       const time = formatTime(apptTime);
 
+      // Self-serve reschedule deep link — one mint shared by the SMS clause
+      // and the email CTA. Best-effort: a null link renders clean copy.
+      const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       const sent = await deliverAppointmentNotice({
@@ -647,11 +714,12 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         scheduledServiceId,
         apptTime,
         serviceLabel,
+        rescheduleUrl: reschedule.url,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-          const firstName = contact.name || customer.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           return renderTemplate(
             'appointment_confirmation',
-            { first_name: firstName, service_type: serviceLabel, date, time, day },
+            { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
         }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }),
@@ -728,7 +796,7 @@ const AppointmentReminders = {
       ])
       .first();
     if (sameAppointment) {
-      const merged = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+      const merged = await buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel: serviceLabel });
       if (merged !== sameAppointment.service_type) {
         await conn('appointment_reminders')
           .where({ id: sameAppointment.id })
@@ -739,7 +807,9 @@ const AppointmentReminders = {
           scheduled_service_id: scheduledServiceId,
           customer_id: customerId,
           appointment_time: apptTime,
-          service_type: merged,
+          // The suppressed row keeps its own pristine label (it never sends;
+          // buildMergedServiceLabel reads per-row names, not the merged one).
+          service_type: serviceLabel,
           source: reminderSource,
           confirmation_sent: true,
           confirmation_sent_at: now,
@@ -827,7 +897,7 @@ const AppointmentReminders = {
           .first();
 
         if (sameAppointment) {
-          const mergedServiceLabel = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+          const mergedServiceLabel = await buildMergedServiceLabel(trx, { customerId, apptTime, nextLabel: serviceLabel });
           if (mergedServiceLabel !== sameAppointment.service_type) {
             await trx('appointment_reminders')
               .where({ id: sameAppointment.id })
@@ -839,7 +909,8 @@ const AppointmentReminders = {
             scheduled_service_id: scheduledServiceId,
             customer_id: customerId,
             appointment_time: apptTime,
-            service_type: mergedServiceLabel,
+            // Pristine per-row label — see buildMergedServiceLabel.
+            service_type: serviceLabel,
             source,
             confirmation_sent: true,
             confirmation_sent_at: now,
@@ -1085,6 +1156,9 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
+            // Self-serve reschedule deep link — one mint shared by the SMS
+            // clause and the email CTA. Best-effort: null renders clean copy.
+            const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
             await deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
@@ -1092,11 +1166,12 @@ const AppointmentReminders = {
               scheduledServiceId: r.scheduled_service_id,
               apptTime,
               serviceLabel,
+              rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-                const firstName = contact.name || customer?.first_name || 'there';
+                const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1145,6 +1220,9 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
+            // Self-serve reschedule deep link — one mint shared by the SMS
+            // clause and the email CTA. Best-effort: null renders clean copy.
+            const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
             await deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -1152,11 +1230,12 @@ const AppointmentReminders = {
               scheduledServiceId: r.scheduled_service_id,
               apptTime,
               serviceLabel,
+              rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-                const firstName = contact.name || customer?.first_name || 'there';
+                const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time },
+                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1385,7 +1464,7 @@ const AppointmentReminders = {
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
         const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = contact.name || customer?.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_rescheduled', {
             first_name: firstName,
             service_type: serviceLabel,
@@ -1479,7 +1558,7 @@ const AppointmentReminders = {
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = contact.name || customer?.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_cancelled', {
             first_name: firstName,
             service_type: serviceLabel,
@@ -1538,6 +1617,7 @@ const AppointmentReminders = {
           'scheduled_services.customer_id',
           'scheduled_services.scheduled_date',
           'scheduled_services.window_start',
+          'scheduled_services.service_type',
           'technicians.name as tech_name',
         )
         .first();
@@ -1572,7 +1652,7 @@ const AppointmentReminders = {
       }
 
       await safeSendAppointment(customer, prefs || {}, async (contact) => {
-        const customerFirst = contact.name || customer?.first_name || 'there';
+        const customerFirst = firstNameFrom(contact.name) || customer?.first_name || 'there';
         return renderTemplate('appointment_no_show', {
           first_name: customerFirst,
           tech_name: techFirst,
@@ -1590,6 +1670,27 @@ const AppointmentReminders = {
         // and 'appointment_no_show' is not a registered MessagePurpose).
       }, 'appointment_no_show', 'appointment_cancellation');
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      // Email twin (appointment.no_show template) — second channel like the
+      // other appointment notices. Best-effort: an email failure never
+      // fails the SMS leg or the status flip. `when` is the same composed
+      // same-day/back-dated phrase the SMS used; the fee outcome comes
+      // from the dispatch route (options.feeCharged) so the charge line
+      // is always truthful.
+      try {
+        const AppointmentEmail = require('./appointment-email');
+        await AppointmentEmail.sendAppointmentNoShowEmail({
+          customerId: svc.customer_id,
+          scheduledServiceId,
+          serviceLabel: svc.service_type,
+          missedWhen: when,
+          noShowReason: options.noShowReason || '',
+          feeOutcome: options.feeOutcome
+            || (options.feeCharged === true ? 'charged' : 'none'),
+        });
+      } catch (e) {
+        logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
+      }
 
       return { customer_id: svc.customer_id };
     } catch (err) {
@@ -1641,7 +1742,7 @@ const AppointmentReminders = {
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = contact.name || customer?.first_name || 'there';
+          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderTemplate(
             'appointment_series_cancelled',
             { first_name: firstName, service_type: serviceLabel, scope: scopeText },
@@ -1668,6 +1769,13 @@ AppointmentReminders.alertNoReachableChannel = alertNoReachableChannel;
 // call-created) can route their own confirmation SMS through the customer's
 // account-level confirmation channel preference.
 AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel;
+
+// Exposed so the tech-tracking send paths in services/twilio.js can honor the
+// customer's account-level delivery channel (en_route_channel /
+// tech_arrived_channel) with the same normalization and primary-profile
+// resolution the appointment reminders use.
+AppointmentReminders.apptChannel = apptChannel;
+AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
 
 AppointmentReminders._test = {
   maskPhone,

@@ -1,16 +1,10 @@
 :root {
-  /* ── Primary ── */
-  --waves-blue:          #0A7EC2;
-  --waves-blue-dark:     #065A8C;
-  --waves-blue-deeper:   #04395E;
-  --waves-blue-light:    #E8F4FC;
-  --waves-blue-50:       #F0F7FC;
-
-  /* ── Accent ── */
-  --waves-red:           #C0392B;
-  --waves-red-light:     #FDECEA;
-  --waves-gold:          #F0A500;
-  --waves-gold-light:    #FEF7E0;
+  /* ── Primary/Accent brand colors ──
+     The --waves-* custom properties that used to sit here had ZERO var()
+     consumers anywhere in the repo (Tailwind's waves.* classes carry their
+     own literals in tailwind.config.js, and JS consumers use theme-brand.js
+     COLORS). Removed 2026-07-06 during token consolidation — brand color
+     sources of truth are theme-brand.js (JS) and tailwind.config.js (classes). */
 
   /* ── Neutrals ── */
   --slate-900:           #0F172A;

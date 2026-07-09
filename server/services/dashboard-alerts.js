@@ -298,6 +298,9 @@ async function computeDashboardAlertsUncached() {
     const waitingQuery = excludeInternalLeads(
       db('leads')
         .where('status', 'new')
+        // Soft-deleted leads are invisible on every Leads surface — a
+        // critical item the operator can't find or act on must not page.
+        .whereNull('deleted_at')
         .whereNull('response_time_minutes')
         .whereNotNull('first_contact_at')
         .whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`),
@@ -426,14 +429,19 @@ async function computeDashboardAlertsUncached() {
   // 12. Data quality: this week's leads with no lead_source — they render as
   //     'Unknown' in every attribution panel and silently corrupt LTV:CAC.
   //     Complements calls_unmapped_today (which catches un-catalogued NUMBERS;
-  //     this catches sourceless LEADS). Both comparison sides are coerced to
-  //     naive ET wall-clock — a bare timestamptz created_at against the naive
+  //     this catches sourceless LEADS). Windowed on first_contact_at — the
+  //     SAME basis /leads-by-source windows on — so this counts exactly the
+  //     rows that land in that panel's 'Unattributed' bucket (created_at can
+  //     differ for imported/backfilled leads). Both comparison sides are
+  //     coerced to naive ET wall-clock — a bare timestamptz against the naive
   //     ET-date RHS would resolve the week boundary at UTC midnight in a UTC
   //     session (4-5h shifted week).
   try {
     const unattributed = await excludeInternalLeads(
       db('leads')
         .whereNull('lead_source_id')
+        // Deleted leads are out of every Leads surface — don't nag on them.
+        .whereNull('deleted_at')
         // Mirror /leads-by-source: a null-source email/referral lead falls
         // back to its own direct bucket there ('Email (direct)' / 'Referral
         // (direct)'), so it is deliberate attribution, not a gap — only leads
@@ -441,7 +449,7 @@ async function computeDashboardAlertsUncached() {
         // null-channel rows counted (NULL NOT IN (...) is never true).
         .whereRaw("COALESCE(first_contact_channel, '') NOT IN ('email', 'referral')")
         .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-        .whereRaw("(created_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')"),
+        .whereRaw("(first_contact_at AT TIME ZONE 'America/New_York') >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '6 days')"),
     )
       .count('* as count')
       .first();

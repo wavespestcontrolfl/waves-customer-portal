@@ -10,6 +10,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  redactEmailAddresses: (s) => String(s || ''),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),

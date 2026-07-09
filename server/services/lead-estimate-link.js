@@ -3,6 +3,7 @@ const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
+const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
 
@@ -312,10 +313,18 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
     // a concurrent first-view may already have advanced the lead to estimate_viewed,
     // and this predicate prevents a stale 'new' read from downgrading it back to
     // estimate_sent. The status whitelist also subsumes the closed-status guard.
-    await database('leads')
+    const advanced = await database('leads')
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted'])
       .update({ status: 'estimate_sent', updated_at: new Date() });
+    // Mirror the transition onto the lead's ad_service_attribution funnel row —
+    // but ONLY when the status update actually applied. A replayed send event
+    // on a lead that is already won/lost updates 0 rows, and bridging anyway
+    // would advance a closed deal's funnel row to an intermediate estimate
+    // stage it should never re-enter (the won/lost transition already stamped
+    // its terminal stage). The bridge's monotonic rank guards downgrades; this
+    // guards phantom advances.
+    if (advanced) await bridgeLeadFunnelStage(lead.id, 'estimate_sent', database);
     await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
     await database('lead_activities').insert({
       lead_id: lead.id,
@@ -335,10 +344,14 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
     if (rescued && estimate && (await linkRescuedLead(database, lead, estimate, performedBy)) === 'conflict') continue;
     // Conditional in SQL on the current status (estimate_viewed is the terminal of
     // these three, so this is monotonic and races can't move the lead backward).
-    await database('leads')
+    const advanced = await database('leads')
       .where({ id: lead.id })
       .whereIn('status', ['new', 'contacted', 'estimate_sent'])
       .update({ status: 'estimate_viewed', updated_at: new Date() });
+    // Funnel-row mirror, gated on the status actually transitioning — a
+    // replayed view on a won/lost lead must not advance its funnel row
+    // (see the send path).
+    if (advanced) await bridgeLeadFunnelStage(lead.id, 'estimate_viewed', database);
     await database('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'estimate_viewed',
@@ -765,6 +778,19 @@ async function convertLeadFromEvent({
 // only surfaces in attribution + LTV:CAC reporting. An existing lead is left
 // untouched: a web lead already captured its own click ids, and stamping this
 // booking's click id onto a call/manual-origin lead would mis-channel it.
+//
+// NON-PAID bookings (no deterministic click id) mint NOTHING — the paid-click +
+// new-customer minting policy is unchanged — but they now DO get an
+// ad_service_attribution funnel row (is_paid=false, lead_source classified by
+// the same determineLeadSource semantics the lead webhook uses), so organic /
+// referral / GBP self-bookings stop being invisible to channel attribution.
+// PAID clicks from PRE-EXISTING customers (repeat bookers) likewise get a
+// row-only record (is_paid=true, lead_source = the click's platform) — still
+// no minted lead. Both no-lead rows carry lead_id NULL and dedupe per BOOKING
+// via the unique self_booked_appointment_id (migration 20260705000201) — the
+// lead_id unique index can't dedupe NULLs. Owned sources (recovery /
+// estimate-originated links) skip ALL of this via the up-front
+// bookingSourceSkipReason gate — same journey, already attributed.
 // Best-effort + idempotent — never throws into the (already-committed) booking.
 // ---------------------------------------------------------------------------
 
@@ -796,16 +822,246 @@ function clickIdColumnsFromAttribution(attribution) {
   return out;
 }
 
+// Hostname for the same normalized comparison lead-source-resolver uses; null
+// on garbage so a bad URL can never satisfy a host check.
+function attributionHost(url) {
+  if (!url) return null;
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
+}
+
+// True only when the payload contains a REAL client-side capture: any UTM
+// value, a click id (paid or Meta cookie), a referrer, or a landing URL. The
+// ambient _fbp cookie alone does NOT count — it carries zero classification
+// signal. Callers that never capture (the legacy BookingPage posts no
+// attribution at all; createSelfBooking is shared by non-HTTP callers like the
+// voice agent) must not fabricate a 'website' funnel row out of an empty
+// object — those rows would later be completed by the revenue sync and
+// pollute channel ROI.
+function attributionHasCapture(attribution) {
+  if (!attribution || typeof attribution !== 'object') return false;
+  const utm = (attribution.utm && typeof attribution.utm === 'object') ? attribution.utm : {};
+  return !!(
+    Object.values(utm).some(Boolean)
+    || attribution.gclid || attribution.wbraid || attribution.gbraid
+    || attribution.fbclid || attribution.fbc
+    || attribution.referrer || attribution.landing_url
+  );
+}
+
+// Owned re-engagement booking sources — a booking that arrives through OUR
+// OWN outbound recovery link (booking-abandon-recovery's BOOKING_URL sends
+// /book?source=booking_recovery) is the SAME funnel journey completing, not a
+// new acquisition touch. Its landing_url is an owned portal address, so
+// classifying it would file the booking under waves_website and inflate
+// website ROI; the customer's original capture (booking_intents.attribution /
+// an existing lead row) already carries the true channel. Only the
+// acquisition-row mint is suppressed — the raw capture still persists on
+// self_booked_appointments.attribution (and the booking's source column
+// labels it booking_recovery).
+const NON_ACQUISITION_BOOKING_SOURCES = new Set(['booking_recovery']);
+
+// Owned estimate-originated booking sources — bookings that arrive through OUR
+// OWN follow-up/accept links (PublicBookingPage's estimate sources plus the
+// admin one-time resend link). Those journeys already carry their originating
+// attribution row (the public quote wizard inserts one when the estimate is
+// created; the estimate lanes convert their own lead), and PublicBookingPage
+// still posts a portal landing_url for them — so letting them through the
+// capture check would insert a SECOND, lead_id-NULL row classified as generic
+// website and double-count the journey. Same suppression contract as recovery:
+// only the acquisition row is skipped; the raw capture still persists on
+// self_booked_appointments.attribution.
+const ESTIMATE_ORIGINATED_BOOKING_SOURCES = new Set([
+  'quote-wizard', 'quote-wizard-onetime', 'estimate-accept', 'admin-manual-booking-resend',
+]);
+
+// The single up-front owned-source gate. attributeSelfBooking checks it BEFORE
+// dispatching to ANY acquisition writer (paid-click mint, paid repeat row,
+// organic row) — a recovered visitor's browser can still carry the original
+// ad's _fbc, and gating only the organic recorder (round 3) let that click id
+// re-mint the same completing journey as a brand-new won paid lead. Skip
+// reasons stay distinct per source class so telemetry can tell a recovery
+// rebooking from an estimate-originated booking.
+function bookingSourceSkipReason(bookingSource) {
+  const src = String(bookingSource || '').trim().toLowerCase();
+  if (NON_ACQUISITION_BOOKING_SOURCES.has(src)) return 'recovery_rebooking';
+  if (ESTIMATE_ORIGINATED_BOOKING_SOURCES.has(src)) return 'estimate_originated';
+  return null;
+}
+
+// Organic (non-paid) self-booking → funnel row only, no lead. Classified with
+// the shared determineLeadSource. This branch is only reachable WITHOUT a
+// deterministic paid click id; is_paid comes from the classifier's channel —
+// exactly like the lead webhook — so a paid Meta/Google click whose click id
+// was stripped but whose cpc UTMs survived is still counted paid
+// (splitFacebookByPaid would otherwise misfile it as facebook_organic).
+//
+// Embedded-iframe correction (booking context ONLY — lead-webhook semantics
+// are untouched): PublicBookingPage captures landing_url = the PORTAL's own
+// /book iframe URL while the real spoke/hub page arrives as document.referrer,
+// so classifying the landing would file every embedded booking under the
+// portal's host. The portal's own surface is attribution-neutral: when the
+// landing host IS the portal (utils/portal-url), classify the referrer instead
+// — kept only when it carries a real signal (not the generic 'website'
+// fallback), so a google.com/opaque referrer never downgrades the landing
+// classification. UTM/click-id branches short-circuit inside
+// determineLeadSource before any URL handling, so they are unaffected.
+//
+// Requires the booking id — without it there is no per-booking dedupe key, so
+// it fails closed rather than risking duplicate funnel rows. Requires a real
+// capture (attributionHasCapture) — a no-capture booking writes no row, in
+// parity with its self_booked_appointments.attribution staying NULL.
+// Owned-source (recovery / estimate-originated) bookings never reach here —
+// attributeSelfBooking's up-front bookingSourceSkipReason gate short-circuits
+// them before ANY acquisition writer runs.
+async function recordOrganicSelfBookingAttribution({
+  customerId,
+  attribution,
+  serviceInterest,
+  selfBookedAppointmentId,
+  database,
+}) {
+  if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
+  if (!attributionHasCapture(attribution)) return { attributed: false, reason: 'no_attribution_capture' };
+
+  const attr = attribution;
+  const utm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
+  const { determineLeadSource } = require('./lead-source-classify');
+  const classify = (url) => determineLeadSource(
+    '', url || '',
+    utm.source || '', utm.medium || '', utm.campaign || '', utm.content || '',
+    attr.fbclid || '', attr.fbc || '', attr.gclid || '', attr.wbraid || '', attr.gbraid || '',
+  );
+
+  let classified = classify(attr.landing_url || attr.referrer);
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const portalHost = attributionHost(publicPortalUrl());
+  const landingHost = attributionHost(attr.landing_url);
+  const referrerHost = attributionHost(attr.referrer);
+  if (portalHost && landingHost === portalHost && referrerHost && referrerHost !== portalHost) {
+    const viaReferrer = classify(attr.referrer);
+    if (viaReferrer.source !== 'website') classified = viaReferrer;
+  }
+
+  const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+  // _fbp is kept as an auxiliary CAPI match key (the webhook stores it on
+  // organic rows too); it is never a paid signal.
+  const fbp = (typeof attr.fbp === 'string' && attr.fbp.trim())
+    ? attr.fbp.trim().slice(0, LEAD_CLICK_ID_MAX.fbp) : null;
+  await database('ad_service_attribution').insert({
+    customer_id: customerId,
+    self_booked_appointment_id: selfBookedAppointmentId,
+    service_line: inferServiceLine(serviceInterest),
+    specific_service: inferSpecificService(serviceInterest),
+    service_bucket: inferServiceBucket(serviceInterest),
+    lead_date: etDateString(),
+    lead_source: classified.source,
+    lead_source_detail: classified.detail || null,
+    fbp,
+    utm_campaign: utm.campaign || null,
+    utm_term: utm.term || null,
+    // The booking is already COMMITTED when this runs, so the row is born at
+    // the stage that actually occurred — 'booked', not 'lead' (buildLeadFunnel
+    // counts booked/completed only; a 'lead' row would underreport organic
+    // self-book conversions until the revenue sync). 'completed' stays the
+    // sync's to write ('booked' is in its ADVANCEABLE_STAGES).
+    funnel_stage: 'booked',
+    // Paid flag from the classifier's channel — mirrors lead-webhook.js. A
+    // cpc-UTM booking with a stripped click id classifies channel='paid' and
+    // must count paid; everything genuinely organic classifies otherwise.
+    is_paid: classified.channel === 'paid',
+  }).onConflict('self_booked_appointment_id').ignore();
+
+  return { attributed: true, organic: true, leadSource: classified.source };
+}
+
+// Paid click, PRE-EXISTING customer → per-booking attribution row ONLY, never
+// a lead. A repeat booker arriving on a deterministic click id (gclid/_fbc/…)
+// is the strongest-evidence paid conversion there is; before round 4 the paid
+// branch returned existing_customer before inserting ANY row, so those
+// bookings vanished from per-booking channel reporting while the weaker
+// cpc-UTM-without-click-id case (organic recorder, is_paid from the
+// classifier) WAS counted. Minting stays reserved for a customer the booking
+// just created — this row carries lead_id NULL and dedupes per booking on the
+// same unique self_booked_appointment_id the organic recorder uses (so it
+// fails closed without a booking id, exactly like that path). lead_source is
+// the click id's platform — the deterministic paid click IS the channel, so
+// is_paid is true by construction (no classifier needed).
+async function recordPaidRepeatBookingAttribution({
+  customerId,
+  attribution,
+  clickIds,
+  serviceInterest,
+  selfBookedAppointmentId,
+  database,
+}) {
+  if (!selfBookedAppointmentId) return { attributed: false, reason: 'no_booking_id' };
+  const ppcSource = (clickIds.gclid || clickIds.wbraid || clickIds.gbraid) ? 'google_ads'
+    : (clickIds.fbclid || clickIds.fbc) ? 'facebook' : null;
+  // Unreachable behind attributionHasPaidClickId, but never guess a channel.
+  if (!ppcSource) return { attributed: false, reason: 'no_click_ids' };
+
+  // Read-only source resolution — reused only for the human-readable detail
+  // string ('Google Ads click (gclid)' / 'Meta click (fbclid)').
+  const { leadSourceDetail } = await resolveLeadSource(attribution);
+  const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+  const utm = (attribution && typeof attribution.utm === 'object' && attribution.utm) || {};
+  await database('ad_service_attribution').insert({
+    customer_id: customerId,
+    self_booked_appointment_id: selfBookedAppointmentId,
+    service_line: inferServiceLine(serviceInterest),
+    specific_service: inferSpecificService(serviceInterest),
+    service_bucket: inferServiceBucket(serviceInterest),
+    lead_date: etDateString(),
+    lead_source: ppcSource,
+    lead_source_detail: leadSourceDetail || null,
+    gclid: clickIds.gclid || null,
+    wbraid: clickIds.wbraid || null,
+    gbraid: clickIds.gbraid || null,
+    fbclid: clickIds.fbclid || null,
+    fbc: clickIds.fbc || null,
+    fbp: clickIds.fbp || null,
+    utm_campaign: utm.campaign || null,
+    utm_term: utm.term || null,
+    // Born at 'booked' — the booking is already committed when this runs
+    // (same contract as the organic and minted-lead rows).
+    funnel_stage: 'booked',
+    is_paid: true,
+  }).onConflict('self_booked_appointment_id').ignore();
+
+  return { attributed: true, repeatPaid: true, leadSource: ppcSource };
+}
+
 async function attributeSelfBooking({
   customerId,
   attribution,
   serviceInterest = null,
   customerCreated = false,
+  selfBookedAppointmentId = null,
+  bookingSource = null,
+  leadConverted = false,
   database = db,
 }) {
   try {
-    if (!customerId || !attributionHasPaidClickId(attribution)) {
-      return { attributed: false, reason: 'no_paid_click_id' };
+    if (!customerId) return { attributed: false, reason: 'no_customer_id' };
+    // Converted-lead gate FIRST: when this booking just converted an existing
+    // open lead (convertLeadFromEvent → markConverted → funnel bridge), that
+    // lead's ad_service_attribution row was advanced to booked — it IS the
+    // journey's funnel entry. Minting a lead_id-NULL organic or repeat-paid
+    // row here would make one booking count as two booked funnel entries.
+    // Same rule for both paths: the lead is the canonical journey record.
+    if (leadConverted) return { attributed: false, reason: 'lead_converted' };
+    // Owned-source gate next — before the paid-click AND organic paths. A
+    // recovery/estimate-originated booking is our own link completing an
+    // already-attributed journey; its browser can still carry the original
+    // ad's click id (_fbc/gclid), so gating only the organic recorder would
+    // let that click id fall through to the mint below.
+    const sourceSkip = bookingSourceSkipReason(bookingSource);
+    if (sourceSkip) return { attributed: false, reason: sourceSkip };
+    if (!attributionHasPaidClickId(attribution)) {
+      // No deterministic paid click → organic funnel row, never a minted lead.
+      return await recordOrganicSelfBookingAttribution({
+        customerId, attribution, serviceInterest, selfBookedAppointmentId, database,
+      });
     }
     const clickIds = clickIdColumnsFromAttribution(attribution);
     if (!Object.keys(clickIds).length) return { attributed: false, reason: 'no_click_ids' };
@@ -816,7 +1072,12 @@ async function attributeSelfBooking({
     // feed the offline-conversion pipeline a synthetic "new qualified lead" and
     // inflate paid-channel conversions. (Legacy/admin customers can have prior
     // activity but no lead row, so an existing-lead check alone is insufficient.)
-    if (!customerCreated) return { attributed: false, reason: 'existing_customer' };
+    // Their paid click still counts: record the per-booking row, mint nothing.
+    if (!customerCreated) {
+      return await recordPaidRepeatBookingAttribution({
+        customerId, attribution, clickIds, serviceInterest, selfBookedAppointmentId, database,
+      });
+    }
 
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) return { attributed: false, reason: 'no_customer' };
@@ -869,6 +1130,9 @@ async function attributeSelfBooking({
         await database('ad_service_attribution').insert({
           customer_id: customerId,
           lead_id: minted.id,
+          // Booking lineage + the same per-booking dedupe key the organic rows
+          // use (unique; NULL for pre-column rows and non-booking writers).
+          self_booked_appointment_id: selfBookedAppointmentId || null,
           service_line: inferServiceLine(serviceInterest),
           specific_service: inferSpecificService(serviceInterest),
           service_bucket: inferServiceBucket(serviceInterest),
@@ -883,7 +1147,12 @@ async function attributeSelfBooking({
           fbp: clickIds.fbp || null,
           utm_campaign: utm.campaign || null,
           utm_term: utm.term || null,
-          funnel_stage: 'lead',
+          // Born at 'booked': the booking is committed and the minted lead is
+          // CREATED at status 'won' (a direct insert, so no status transition
+          // ever fires the lead-funnel-bridge for it). A 'lead' row here would
+          // sit at the bottom rung forever and underreport paid self-book
+          // conversions. 'completed' stays the revenue sync's to write.
+          funnel_stage: 'booked',
         }).onConflict('lead_id').ignore();
       } catch (attrErr) {
         logger.warn(`[self-booking-attribution] PPC funnel row failed (non-blocking): ${attrErr.message}`);

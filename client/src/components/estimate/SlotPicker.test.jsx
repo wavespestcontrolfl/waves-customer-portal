@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SlotPicker from './SlotPicker';
+import { setGlassDefault } from '../../lib/estimate-glass-copy';
 
 vi.mock('../booking/WavesAIScheduleSearch', () => ({
   default: () => null,
@@ -43,7 +44,139 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('SlotPicker (glass stale-selection sweep)', () => {
+  const setGlass = (on) => setGlassDefault(on);
+
+  it('preserves a selected slot while the availability fetch is still pending', async () => {
+    setGlass(true);
+    const pending = deferred();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pending.promise));
+    const onSelect = vi.fn();
+    const onSelectMeta = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="kept-slot"
+          onSelect={onSelect}
+          onSelectMeta={onSelectMeta}
+          refreshSignal={0}
+        />,
+      );
+      // Loading: the sweep must treat the empty list as "unknown", not
+      // "gone" — a review-cancel remount preserves selectedSlotId on
+      // purpose and the payment choices hang off it.
+      expect(onSelect).not.toHaveBeenCalled();
+      pending.resolve(jsonResponse({ primary: [slot('kept-slot', '2099-06-01')], expander: [] }));
+      await screen.findByText(/Arrival window:/);
+      expect(onSelect).not.toHaveBeenCalledWith(null);
+    } finally {
+      setGlass(false);
+    }
+  });
+
+  it('keeps a held selection missing from the refetched list while its window is bookable', async () => {
+    setGlass(true);
+    // The customer's own review-cancel hold occupies the slot server-side,
+    // so the refetched list does NOT include it — the fallback meta from
+    // the page is what keeps the retry path alive.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ primary: [slot('other-slot', '2099-06-01')], expander: [] }),
+    ));
+    const onSelect = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="held-slot"
+          selectedSlotFallbackMeta={{ slotId: 'held-slot', date: '2099-06-01', windowStart: '10:00', dow: 'Mon', time: '10:00 AM' }}
+          onSelect={onSelect}
+          refreshSignal={0}
+        />,
+      );
+      await screen.findByText(/Arrival window:/);
+      expect(onSelect).not.toHaveBeenCalledWith(null);
+      // The tech chip stays up for the held selection.
+      expect(screen.getByText(/Your technician/)).toBeInTheDocument();
+    } finally {
+      setGlass(false);
+    }
+  });
+
+  it('clears the selection once loaded slots no longer include it', async () => {
+    setGlass(true);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ primary: [slot('other-slot', '2099-06-01')], expander: [] }),
+    ));
+    const onSelect = vi.fn();
+    try {
+      render(
+        <SlotPicker
+          token="tok"
+          selectedSlotId="gone-slot"
+          onSelect={onSelect}
+          refreshSignal={0}
+        />,
+      );
+      await waitFor(() => expect(onSelect).toHaveBeenCalledWith(null));
+    } finally {
+      setGlass(false);
+    }
+  });
+});
+
 describe('SlotPicker', () => {
+  it('renders the date finder inside the booking card, above the slot list', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2026-06-01')], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="quarterly"
+      />,
+    );
+
+    const firstSlot = await screen.findByText('Monday, June 1');
+    const heading = screen.getByText('Find a date & time that works for you');
+    const finderLabel = screen.getByText(/pick one that works for you/i);
+
+    // Order: heading → finder → slot windows (matches the SSR booking card).
+    expect(heading.compareDocumentPosition(finderLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(finderLabel.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows a 2-hour arrival window from the slot start, not the job block', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        // windowEnd is the 1-hour JOB block — the customer-facing arrival
+        // window is always start + 2h.
+        primary: [slot('initial', '2026-06-01', { windowStart: '09:00', windowEnd: '10:00' })],
+        expander: [],
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <SlotPicker
+        token="estimate-token"
+        selectedSlotId={null}
+        onSelect={vi.fn()}
+        refreshSignal={0}
+        serviceMode="recurring"
+        selectedFrequency="quarterly"
+      />,
+    );
+
+    expect(await screen.findByText(/Arrival window: 9:00 AM–11:00 AM/)).toBeInTheDocument();
+  });
+
   it('ignores stale picked-date availability responses', async () => {
     const firstDateFetch = deferred();
     const secondDateFetch = deferred();

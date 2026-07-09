@@ -16,6 +16,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
+const { isBotUserAgent } = require('../utils/bot-ua');
 
 // Lowercase alphanum, no ambiguous chars (0/o/1/l/i) — the code shows up in
 // SMS and occasionally gets read over the phone to support.
@@ -76,8 +77,12 @@ function baseUrl() {
 /**
  * Create a short code for targetUrl. Returns { code, shortUrl }.
  *
- * opts: { kind, entityType, entityId, customerId, createdBy, expiresAt }
- * all optional except targetUrl.
+ * opts: { kind, entityType, entityId, customerId, createdBy, expiresAt,
+ *         leadId, channel, purpose, messageRef } — all optional except
+ * targetUrl. leadId/channel/purpose/messageRef are the click-tracking
+ * linkage columns (migration 20260705000110); they're only added to the
+ * insert when provided so call sites that don't pass them stay byte-for-byte
+ * unchanged.
  *
  * On insert collision (race on same code), retry up to 5× at length 5, then
  * bump to length 6. Unique index is the source of truth — generateCode alone
@@ -97,6 +102,10 @@ async function createShortCode(targetUrl, opts = {}) {
     created_by: opts.createdBy || null,
     expires_at: opts.expiresAt || null,
   };
+  if (opts.leadId) row.lead_id = opts.leadId;
+  if (opts.channel) row.channel = opts.channel;
+  if (opts.purpose) row.purpose = opts.purpose;
+  if (opts.messageRef) row.message_ref = opts.messageRef;
 
   let lastErr;
   const prefix = sanitizeCodePart(opts.codePrefix || '', 58);
@@ -143,6 +152,23 @@ async function resolveShortCode(code, { ip, userAgent } = {}) {
     updated_at: new Date(),
   }).catch((err) => logger.error(`[short-url] click-log update failed: ${err.message}`));
 
+  // Per-click row alongside the cached counter — click_count stays the cheap
+  // aggregate; short_code_clicks is what the click-followup queue reads. Same
+  // fire-and-forget contract as the counter bump. Human clicks only: the
+  // /l/:code route already skips telemetry for bot/preview/scanner UAs, and
+  // this guard keeps any future caller from logging unfurler hits as
+  // engagement (bot hits get no row at all — simpler than is_bot flagging).
+  if (!isBotUserAgent(userAgent)) {
+    db('short_code_clicks').insert({
+      short_code_id: row.id,
+      clicked_at: new Date(),
+      // sha256 of the client IP — distinct-clicker signal without storing PII.
+      ip_hash: ip ? crypto.createHash('sha256').update(ip.toString()).digest('hex') : null,
+      user_agent: userAgent ? userAgent.toString().slice(0, 500) : null,
+      is_bot: false,
+    }).catch((err) => logger.error(`[short-url] click-row insert failed: ${err.message}`));
+  }
+
   return row.target_url;
 }
 
@@ -161,8 +187,30 @@ async function shortenOrPassthrough(longUrl, opts = {}) {
   }
 }
 
+/**
+ * Tracked variant of shortenOrPassthrough for callers that need the minted
+ * code back (e.g. to stamp message_ref once the carrying message row exists)
+ * WITHOUT giving up the never-block-a-send fallback. Returns
+ * { code, shortUrl }; on any shortener failure, { code: null, shortUrl:
+ * longUrl } — same graceful degradation as shortenOrPassthrough, which keeps
+ * its bare-string contract untouched for the existing call sites.
+ *
+ * NOT for bearer-token URLs — those must use createShortCode directly and
+ * fail closed (see voicemail-lead-sms.js).
+ */
+async function createTrackedShortLink(longUrl, opts = {}) {
+  try {
+    const { code, shortUrl } = await createShortCode(longUrl, opts);
+    return { code, shortUrl };
+  } catch (err) {
+    logger.error(`[short-url] tracked shorten failed, using long URL: ${err.message}`);
+    return { code: null, shortUrl: longUrl };
+  }
+}
+
 module.exports = {
   createShortCode,
+  createTrackedShortLink,
   resolveShortCode,
   shortenOrPassthrough,
   invoiceShortCodePrefix,

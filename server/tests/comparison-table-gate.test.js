@@ -98,10 +98,18 @@ describe('comparison-table-gate', () => {
     expect(r.pass).toBe(true);
   });
 
-  test('finding B: a non-comparison draft mentioning a competitor/IPM passes untouched', () => {
+  test('finding B (superseded): a non-comparison draft naming a competitor now routes to review', () => {
+    // Previously this passed untouched — the no-table early return skipped
+    // ALL scanning, so prose competitor claims (and defamation) were never
+    // checked. Policy: a competitor may be named ONLY inside a
+    // <ComparisonTable>, where every cell is validated. IPM/category prose
+    // without the competitor name still passes (see the table-less suite).
     const r = gate.evaluate({ body: 'Integrated Pest Management works. Orkin is a national brand. No table here.' }, { namedCompetitorEnabled: true });
-    expect(r.pass).toBe(true);
-    expect(r.findings).toHaveLength(0);
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && f.severity === 'P1')).toBe(true);
+    const clean = gate.evaluate({ body: 'Integrated Pest Management works. No table here.' }, { namedCompetitorEnabled: true });
+    expect(clean.pass).toBe(true);
+    expect(clean.findings).toHaveLength(0);
   });
 
   test('finding E: a self-declared ranking in PROSE (outside the table) is caught', () => {
@@ -308,6 +316,18 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
     // The same reliability word with no nearby competitor (DIY efficacy) is NOT flagged.
     expect(gate.evaluate({ body: `DIY sprays are unreliable on termites.\n\n${CATEGORY_TABLE}` }, {})
+      .findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+  });
+
+  test('does/doesn\'t reliability forms are caught like never/won\'t (Codex round 17)', () => {
+    // Named-competitor proximity path.
+    const named = gate.evaluate({ body: `Orkin does not answer the phone when you call.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(named.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // Generic business-shaped name as subject (table-less prose path).
+    const generic = gate.evaluate({ body: "Acme Pest Solutions doesn't call back after you leave a message." });
+    expect(generic.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // The require-idiom "call for" stays clean even next to a provider name.
+    expect(gate.evaluate({ body: `Orkin agrees light infestations do not call for fumigation.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true })
       .findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
   });
 
@@ -550,6 +570,228 @@ describe('comparison-table-gate', () => {
     const r = gate.evaluate({ body: `All \\"U\\" Need Pest Control never answers the phone when you call.\n\n${sourced}` }, { namedCompetitorEnabled: true });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+});
+
+describe('table-less drafts: named-target legal scan (regression — these previously passed untouched)', () => {
+  test('disparaging an arbitrary business-shaped name in plain prose is P0', () => {
+    const r = gate.evaluate({ body: 'Acme Pest Solutions is dishonest and will overcharge you for everything they do.' });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('a negative service-reliability claim near a business name is P1', () => {
+    const r = gate.evaluate({ body: 'Gulf Coast Termite Specialists never answers the phone when customers call about warranty work.' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY' && f.severity === 'P1')).toBe(true);
+  });
+  test('an allowlisted competitor named in prose with no table is P1 (table cells only)', () => {
+    const r = gate.evaluate({ body: 'Orkin offers free same-day service in Sarasota, which many homeowners like.' }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && f.severity === 'P1')).toBe(true);
+  });
+  test('title/meta are part of the scanned legal surface', () => {
+    const r = gate.evaluate({
+      body: 'Ordinary body copy about ants.',
+      frontmatter: { meta_description: 'Why Terminix is unreliable and what to do instead.' },
+    });
+    expect(r.pass).toBe(false);
+  });
+  test('a clean normal blog post passes', () => {
+    const r = gate.evaluate({ body: 'Centipedes eat roaches, silverfish, and other small insects around Southwest Florida homes.' });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('a business-shaped phrase with NO nearby negativity does not block (unlike the table path)', () => {
+    const r = gate.evaluate({
+      body: 'Here is how to keep ants out of your kitchen this summer.',
+      frontmatter: { title: 'Sarasota Pest Control Guide: Kitchen Ants' },
+    });
+    expect(r.pass).toBe(true);
+  });
+  test('consumer-protection prose with no named target stays allowed', () => {
+    const r = gate.evaluate({ body: 'Avoid pest control scams by checking licenses. Watch out for hidden fees when comparing quotes.' });
+    expect(r.pass).toBe(true);
+  });
+  test('empty body still passes', () => {
+    expect(gate.evaluate({ body: '' }).pass).toBe(true);
+  });
+});
+
+describe('table-less drafts: negativity must be DIRECTED at generic business names (Codex round 1)', () => {
+  test('problem-framing negativity near a business-shaped phrase does NOT block', () => {
+    // "Worst" describes the roach problem, not a provider — bare proximity
+    // previously P0\'d this exact title shape.
+    const r = gate.evaluate({
+      body: 'How to handle roaches in your kitchen this summer.',
+      frontmatter: { title: 'Sarasota Pest Control Guide: Worst Roach Problems' },
+    });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('name-as-subject disparagement still blocks', () => {
+    const r = gate.evaluate({ body: 'Acme Pest Solutions is dishonest and will overcharge you.' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('negative adjective immediately modifying the name still blocks', () => {
+    const r = gate.evaluate({ body: 'Avoid the dishonest Acme Pest Solutions crew at all costs.' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('curated competitor names keep the stricter proximity scan', () => {
+    const r = gate.evaluate({ body: 'Many say the worst experience around here has been Terminix in recent years.' }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+});
+
+describe('table-less drafts: directed-scan tightening (Codex round 2)', () => {
+  test('ACTIVE-verb disparagement with the name as subject is P0 (no linking verb needed)', () => {
+    for (const body of [
+      'Acme Pest Solutions scams customers in Venice.',
+      'Acme Pest Solutions charges hidden fees on every renewal.',
+      'Gulf Coast Termite Specialists routinely rips off homeowners.',
+    ]) {
+      const r = gate.evaluate({ body });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+  test('title-case noun use of "scams" with no victim object does not trip the active-verb pattern', () => {
+    const r = gate.evaluate({
+      body: 'Check licenses before you sign anything.',
+      frontmatter: { title: 'How to Avoid Pest Control Scams in Sarasota' },
+    });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('a reliability negative aimed at DIY sprays near a business-shaped title phrase does NOT block', () => {
+    // Bare 60-char proximity previously P1\'d this exact title shape.
+    const r = gate.evaluate({
+      body: 'Store-bought products lose potency fast in Florida humidity.',
+      frontmatter: { title: 'Sarasota Pest Control Guide: Why DIY Sprays Are Unreliable' },
+    });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('reliability negatives as the direct predicate or verb-linked still flag P1', () => {
+    for (const body of [
+      'Acme Pest Solutions never answers the phone.',
+      'Acme Pest Solutions is unresponsive during termite swarming season.',
+    ]) {
+      const r = gate.evaluate({ body });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY' || f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    }
+  });
+});
+
+describe('table-less drafts: operator-authorized competitor naming (Codex round 3)', () => {
+  // The Aptive intercept brief's own text — the operator personally named
+  // the competitor, so the draft routes to the APPROVABLE named-competitor
+  // review path instead of a hard UNKNOWN_COMPETITOR block.
+  const BRIEF_TEXT = [
+    "Aptive's Cancellation Fee, Explained",
+    'aptive cancellation fee',
+    "What Aptive's contract actually costs and how the cancellation fee works",
+    'how to cancel aptive',
+  ].join('\n');
+
+  test('an operator-named recognized competitor passes with requiresHumanReview', () => {
+    const r = gate.evaluate({
+      body: 'Aptive charges a $199 early-cancel fee per its published contract terms; here is the dispute path.',
+      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+    }, { operatorBriefText: BRIEF_TEXT });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('the same draft with NO operator brief text stays hard-blocked (mined lane unchanged)', () => {
+    const r = gate.evaluate({ body: 'Aptive charges a $199 early-cancel fee per its contract terms.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
+  });
+  test('a competitor the operator did NOT name still flags', () => {
+    const r = gate.evaluate({
+      body: 'Aptive charges a cancellation fee, and Terminix has similar terms in its contracts.',
+    }, { operatorBriefText: BRIEF_TEXT });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+  test('disparaging the operator-authorized name still blocks (full curated strictness)', () => {
+    const r = gate.evaluate({
+      body: 'Aptive is dishonest and scams customers out of hundreds every year.',
+    }, { operatorBriefText: BRIEF_TEXT });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+  test('non-titlecase provider names still get the negativity scan (Codex round 8)', () => {
+    const r = gate.evaluate({ body: 'acme pest solutions is dishonest and overpriced.' });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    // lowercase category prose stays excluded, exactly like its Title Case form
+    const clean = gate.evaluate({ body: 'a local pest control company can quote you same-day in most cases.' });
+    expect(clean.pass).toBe(true);
+    expect(clean.findings).toHaveLength(0);
+  });
+  test('prose fragments ending in an industry suffix are NOT names (Codex round 9)', () => {
+    // The CI pass excludes common prose words from every token position —
+    // "compared with professional pest control" must not become a
+    // genericName that nearby negativity ("useless") gets directed at.
+    const r = gate.evaluate({ body: 'Store-bought sprays are useless compared with professional pest control.' });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('a detection-only alias in the brief authorizes the FULLER surface form (word-boundary containment, Codex round 7)', () => {
+    // "Aptive" (brief) and "Aptive Environmental" (draft) canonicalize to
+    // DIFFERENT unknown names — exact-string matching sent the operator's
+    // own Aptive draft to the hard UNKNOWN_COMPETITOR block.
+    const r = gate.evaluate({
+      body: 'Aptive Environmental charges a $199 early-cancel fee per its published contract.',
+    }, { operatorBriefText: 'aptive cancellation fee explained\nhow to cancel aptive' });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+  test('an ALIAS in the brief authorizes the canonical name in the draft (Codex round 4)', () => {
+    // Authorization runs findBusinessMentions over the brief text, so both
+    // sides canonicalize identically — a raw substring compare missed every
+    // alias↔canonical pair ("Massey" in the brief vs "Massey Services" in
+    // the draft) and hard-blocked legitimate operator intercepts.
+    const r = gate.evaluate({
+      body: 'Massey Services publishes its termite bond terms; here is what the contract covers.',
+    }, { operatorBriefText: 'why massey termite bonds confuse homeowners\nmassey bond explained' });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+});
+
+describe('top-level title/meta in comparison scans (Codex round 10)', () => {
+  test('a disparaging TOP-LEVEL title is scanned even though frontmatter is empty', () => {
+    // The runner and sibling gates accept the metadata-at-top-level draft
+    // shape; draftScanTexts only read frontmatter, so a disparaging title
+    // there escaped the legal scan entirely.
+    const r = gate.evaluate({ body: 'Clean prose about seasonal pests.', title: 'Orkin is dishonest about pricing' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+  });
+  test('a metadata-only draft (no body) still gets its title scanned', () => {
+    const r = gate.evaluate({ title: 'Orkin overcharges everyone' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+  test('clean top-level title passes', () => {
+    const r = gate.evaluate({ body: 'Clean prose.', title: 'Seasonal Pest Guide for Bradenton' }, {});
+    expect(r.pass).toBe(true);
+  });
+});
+
+describe('top-level title/meta on the TABLE path (Codex round 11)', () => {
+  test('a top-level competitor title alongside a sourced table raises the prose finding, not just review', () => {
+    // The table path rebuilt metaText from frontmatter only, so a TOP-LEVEL
+    // "Orkin vs Waves" title rode along with requiresHumanReview alone.
+    const body = [
+      'Intro prose.',
+      '<ComparisonTable competitor="Orkin" sources={["https://www.orkin.com/plans"]}>',
+      '| Feature | Waves | Orkin |',
+      '</ComparisonTable>',
+    ].join('\n');
+    const r = gate.evaluate({ body, title: 'Orkin vs Waves in Sarasota' }, {});
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
 });

@@ -9,7 +9,14 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { etDateString } from "../../lib/timezone";
+import {
+  etDateString,
+  etDatetimeLocalValue,
+  etDatetimeLocalToISO,
+  formatETTime,
+  formatETDate,
+  formatETDateTime,
+} from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -132,9 +139,17 @@ function getMonday(d) {
 }
 
 function addDays(dateStr, n) {
-  const d = new Date(dateStr);
-  d.setDate(d.getDate() + n);
-  return etDateString(d);
+  // Pure calendar arithmetic on a 'YYYY-MM-DD' string. `new Date(dateStr)`
+  // parses the date-only string as UTC midnight, but getDate/setDate then run
+  // in the browser's local zone and etDateString re-projects to ET — west of
+  // UTC that combination shifts the result a day early (addDays(x,0) === x-1),
+  // which dropped Sunday from the payroll week. Do the math in UTC and format
+  // the UTC components so the answer is timezone-independent.
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  const pad = (v) => String(v).padStart(2, "0");
+  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -1075,14 +1090,10 @@ function TimesheetTab({ showToast }) {
                       </span>
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
-                      {e.clock_in
-                        ? new Date(e.clock_in).toLocaleTimeString()
-                        : "--"}
+                      {e.clock_in ? formatETTime(e.clock_in) : "--"}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
-                      {e.clock_out
-                        ? new Date(e.clock_out).toLocaleTimeString()
-                        : "--"}
+                      {e.clock_out ? formatETTime(e.clock_out) : "--"}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
                       {e.duration_minutes ? fmtHrs(e.duration_minutes) : "--"}
@@ -1415,9 +1426,7 @@ function EntriesTab({ showToast }) {
                 >
                   {" "}
                   <td style={tdStyle}>
-                    {e.clock_in
-                      ? new Date(e.clock_in).toLocaleDateString()
-                      : "--"}
+                    {e.clock_in ? formatETDate(e.clock_in) : "--"}
                   </td>{" "}
                   <td style={tdStyle}>{e.tech_name || "--"}</td>{" "}
                   <td style={tdStyle}>
@@ -1431,14 +1440,10 @@ function EntriesTab({ showToast }) {
                     </span>
                   </td>{" "}
                   <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
-                    {e.clock_in
-                      ? new Date(e.clock_in).toLocaleTimeString()
-                      : "--"}
+                    {e.clock_in ? formatETTime(e.clock_in) : "--"}
                   </td>{" "}
                   <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
-                    {e.clock_out
-                      ? new Date(e.clock_out).toLocaleTimeString()
-                      : "--"}
+                    {e.clock_out ? formatETTime(e.clock_out) : "--"}
                   </td>{" "}
                   <td style={{ ...tdStyle, fontFamily: MONO }}>
                     {e.duration_minutes ? fmtHrs(e.duration_minutes) : "--"}
@@ -1545,12 +1550,8 @@ function EntriesTab({ showToast }) {
 function EditEntryModal({ entry, onClose, onSave }) {
   const [form, setForm] = useState({
     id: entry.id,
-    clock_in: entry.clock_in
-      ? new Date(entry.clock_in).toISOString().slice(0, 16)
-      : "",
-    clock_out: entry.clock_out
-      ? new Date(entry.clock_out).toISOString().slice(0, 16)
-      : "",
+    clock_in: etDatetimeLocalValue(entry.clock_in),
+    clock_out: etDatetimeLocalValue(entry.clock_out),
     entry_type: entry.entry_type,
     notes: entry.notes || "",
     edit_reason: "",
@@ -1600,9 +1601,9 @@ function EditEntryModal({ entry, onClose, onSave }) {
               borderRadius: 6,
             }}
           >
-            Original: {new Date(entry.original_clock_in).toLocaleString()} -{" "}
+            Original: {formatETDateTime(entry.original_clock_in)} -{" "}
             {entry.original_clock_out
-              ? new Date(entry.original_clock_out).toLocaleString()
+              ? formatETDateTime(entry.original_clock_out)
               : "active"}
           </div>
         )}
@@ -1732,7 +1733,25 @@ function EditEntryModal({ entry, onClose, onSave }) {
             </button>{" "}
             <button
               disabled={!form.edit_reason}
-              onClick={() => onSave(form)}
+              onClick={() => {
+                // If a clock field wasn't touched, send back the exact stored
+                // instant rather than re-deriving it from the ET wall clock.
+                // A wall-clock string can't distinguish the two 1 AM instants
+                // on a DST fall-back day, so re-deriving an untouched value
+                // would silently shift a repeated-hour entry by an hour on any
+                // unrelated edit. Only convert when the operator changed it.
+                const resolve = (field, original) =>
+                  form[field] === etDatetimeLocalValue(original)
+                    ? original
+                      ? new Date(original).toISOString()
+                      : null
+                    : etDatetimeLocalToISO(form[field]);
+                onSave({
+                  ...form,
+                  clock_in: resolve("clock_in", entry.clock_in),
+                  clock_out: resolve("clock_out", entry.clock_out),
+                });
+              }}
               style={{
                 ...sBtn(D.teal, D.white),
                 opacity: form.edit_reason ? 1 : 0.5,
@@ -3468,7 +3487,8 @@ function DocumentsTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [catFilter, setCatFilter] = useState("all");
-  const [techFilter, setTechFilter] = useState("all"); // 'all' | 'company' | <techId>const [showUpload, setShowUpload] = useState(false);
+  const [techFilter, setTechFilter] = useState("all"); // 'all' | 'company' | <techId>
+  const [showUpload, setShowUpload] = useState(false);
   const [uploadForm, setUploadForm] = useState({
     title: "",
     category: "general",

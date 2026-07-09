@@ -100,6 +100,40 @@
       }
     },
 
+    "secondary_contact": {
+      "type": ["object", "null"],
+      "description": "A SECOND person named as a party to the service (a realtor's home buyer, a landlord's tenant, a spouse). null when no such person was named. The caller's own identity always stays in `caller`. 1.2.0 additive — absent in older payloads. phone_e164/email are deliberately unpatterned here: a garbled spoken value must not schema-fail the whole extraction; the server normalizer validates and nulls them.",
+      "additionalProperties": false,
+      "required": ["role", "wants_notifications"],
+      "properties": {
+        "name_full": { "type": ["string", "null"] },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "phone_e164": {
+          "type": ["string", "null"],
+          "description": "Callback number stated for this person, E.164 preferred. Server re-validates."
+        },
+        "phone_raw_spoken": { "type": ["string", "null"] },
+        "email": {
+          "type": ["string", "null"],
+          "description": "Only when clearly said or spelled in full. Server re-validates."
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "home_buyer", "home_seller", "tenant", "landlord", "spouse_partner",
+            "family_member", "real_estate_agent", "property_manager", "other", "unknown"
+          ],
+          "description": "This person's relationship to the transaction — the BUYER a realtor books for is home_buyer, not real_estate_agent."
+        },
+        "wants_notifications": {
+          "type": "boolean",
+          "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to this person. A merely-mentioned or explicitly-excluded person is false."
+        },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+
     "consent": {
       "type": "object",
       "description": "TCPA-relevant consent capture. SMS dispatch MUST check sms_consent_given=true and do_not_contact_request=false before firing.",
@@ -197,6 +231,46 @@
         "access_notes": {
           "type": ["string", "null"],
           "description": "Gate code, side gate locked, dogs in back, lockbox info."
+        },
+        "additional_properties": {
+          "type": "array",
+          "maxItems": 5,
+          "description": "OTHER properties the caller wants serviced or discussed owning (second home, rental, another unit). The primary property stays in service_address; every additional one goes here. Empty when only one property is discussed.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "raw_text": { "type": ["string", "null"] },
+              "street_line_1": { "type": ["string", "null"] },
+              "street_line_2": { "type": ["string", "null"] },
+              "city": { "type": ["string", "null"] },
+              "state": { "type": ["string", "null"], "enum": ["FL", null] },
+              "postal_code": {
+                "type": ["string", "null"],
+                "pattern": "^\\d{5}(-\\d{4})?$"
+              },
+              "subdivision_or_community": { "type": ["string", "null"] },
+              "property_type": {
+                "type": ["string", "null"],
+                "enum": [
+                  "single_family", "condo", "townhouse", "mobile_home",
+                  "multi_family", "hoa_common_area", "commercial",
+                  "vacant_lot", "unknown", null
+                ]
+              },
+              "occupancy": {
+                "type": ["string", "null"],
+                "enum": [
+                  "owner_occupied", "rental_investment", "commercial",
+                  "seasonal", "vacant", "unknown", null
+                ]
+              },
+              "notes": {
+                "type": ["string", "null"],
+                "description": "What the caller said about this property: services wanted, access, exterior covered by HOA, etc."
+              }
+            }
+          }
         }
       }
     },
@@ -211,6 +285,7 @@
           "enum": [
             "pest_general", "termite", "rodent", "mosquito",
             "stinging_insect", "lawn_care", "palm_injection",
+            "bed_bug", "wdo",
             "exclusion", "inspection_only", "bundled_waveguard", "other"
           ]
         },
@@ -221,6 +296,7 @@
             "enum": [
               "pest_general", "termite", "rodent", "mosquito",
               "stinging_insect", "lawn_care", "palm_injection",
+              "bed_bug", "wdo",
               "exclusion", "inspection_only", "bundled_waveguard", "other"
             ]
           }
@@ -251,7 +327,8 @@
                   "silverfish", "earwigs", "millipedes", "centipedes",
                   "chinch_bugs", "sod_webworms", "armyworms", "mole_crickets", "grubs", "fire_ants_lawn",
                   "palm_weevils", "scale_insects", "whiteflies",
-                  "iguanas", "snakes", "other_wildlife",
+                  "iguanas", "snakes", "moles", "bats", "other_wildlife",
+                  "no_see_ums", "flies_gnats", "scorpions", "love_bugs",
                   "unspecified", "other"
                 ]
               },
@@ -260,6 +337,7 @@
                 "type": "string",
                 "enum": [
                   "sighting_single", "sighting_multiple", "active_infestation",
+                  "swarmers_seen",
                   "structural_damage_visible", "lawn_damage_visible",
                   "person_stung_or_bitten", "unknown"
                 ]
@@ -296,6 +374,14 @@
         "quoted_price_usd": {
           "type": ["number", "null"],
           "description": "Total USD price the agent quoted AND the caller accepted for the service being booked. null when no price was quoted/accepted or the amount is uncertain."
+        },
+        "quote_requested": {
+          "type": ["boolean", "null"],
+          "description": "Getting a quote/estimate/pricing was a reason for the call."
+        },
+        "quote_promised": {
+          "type": ["boolean", "null"],
+          "description": "The AGENT committed to send a quote/estimate after the call. Means work is still owed to the caller — set even when an appointment was also booked."
         }
       }
     },
@@ -331,7 +417,7 @@
         "confirmed_start_at": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 datetime in Eastern Time when appointment is confirmed. Only set when status='confirmed' AND both specific date AND specific time agreed."
+          "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to)."
         },
         "requested_date_range_start": { "type": ["string", "null"], "format": "date" },
         "requested_date_range_end": { "type": ["string", "null"], "format": "date" },
@@ -456,10 +542,17 @@
           "cancellation_request",
           "manual_review_requested",
           "ambiguous_scheduling",
-          "reschedule_or_cancel"
+          "reschedule_or_cancel",
+          "existing_appointment_coordination",
+          "multi_property_call",
+          "quote_promised"
         ]
       },
       "uniqueItems": true
+    },
+    "other_parties_mentioned": {
+      "type": ["boolean", "null"],
+      "description": "true when the call names MORE people as parties to the service than the single secondary_contact captured (buyer + co-buyer + agent; tenant + owner) — tells the office to re-listen for the additional parties. null/false otherwise. 1.2.0 additive."
     }
   }
 }

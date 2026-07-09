@@ -33,6 +33,9 @@
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
 import { FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
+import { useGlassSurface } from '../glass/glass-engine';
+import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -42,6 +45,8 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -78,8 +83,8 @@ function fmtDate(d) {
 }
 
 const subtlePanel = {
-  background: '#FAF8F3',
-  border: '1px solid #E7E2D7',
+  background: CUSTOMER_SURFACE.page,
+  border: `1px solid ${CUSTOMER_SURFACE.border}`,
   borderRadius: 8,
 };
 
@@ -106,11 +111,12 @@ function StatusPill({ tone = 'neutral', children }) {
     processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
     refunded: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
     partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
   };
   const t = tones[tone] || tones.neutral;
+  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
   return (
-    <span style={{
+    <span {...glassClear} style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 6,
@@ -195,6 +201,10 @@ function SuccessCheck({ size = 56 }) {
 }
 
 export default function ReceiptPage() {
+  // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
+  // retired; the pay lane renders the same scene as every glass surface).
+  // Native data-glass markup — no classify() walker on this page.
+  useGlassSurface(true, 'full');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -300,6 +310,10 @@ export default function ReceiptPage() {
   const serviceLabel = invoice.title || service.type || 'Service';
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
+  // Unpaid = the invoice reverted after a failed payment (e.g. an ACH debit
+  // bounced post-redirect) — the old neutral state still said "Receipt /
+  // Total charged / keep this for your records" for money never collected.
+  const unpaid = !paid && !processing && invoice.status !== 'refunded' && !refundState;
   const statusTone = refundState === 'fully_refunded'
     ? 'refunded'
     : refundState === 'partially_refunded'
@@ -317,15 +331,25 @@ export default function ReceiptPage() {
         ? 'Processing'
         : paid
           ? 'Paid'
-          : 'Receipt';
-  const heading = processing ? 'Bank payment submitted' : paid ? 'Payment received' : 'Receipt';
+          : unpaid
+            ? 'Not paid'
+            : 'Receipt';
+  const heading = processing
+    ? 'Bank payment submitted'
+    : paid
+      ? 'Payment received'
+      : unpaid
+        ? 'Payment not completed'
+        : 'Receipt';
   const statusDetail = processing
     ? 'Bank payments usually take 3-5 business days to clear. We will send the final receipt after the payment settles.'
     : refundState === 'fully_refunded'
       ? 'This payment has been fully refunded.'
       : refundState === 'partially_refunded'
         ? `${fmtCurrency(payment.refundAmount)} has been refunded. Net paid: ${fmtCurrency(payment.remainingPaid)}.`
-        : 'Keep this receipt for your records.';
+        : unpaid
+          ? 'This payment didn’t go through, so the invoice is still open. Please use your payment link to try again, or call us at (941) 297-5749.'
+          : 'Keep this receipt for your records.';
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -498,7 +522,7 @@ export default function ReceiptPage() {
             <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
           </div>
 
-          <div style={{
+          <div data-glass-clear="" style={{
             ...subtlePanel,
             padding: 18,
             marginBottom: 20,
@@ -508,7 +532,7 @@ export default function ReceiptPage() {
             alignItems: 'center',
           }}>
             <div>
-              <div style={eyebrow}>{processing ? 'Submitted amount' : 'Receipt total'}</div>
+              <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
               <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
                 {fmtCurrency(chargedTotal)}
               </div>
@@ -516,7 +540,7 @@ export default function ReceiptPage() {
                 {statusDetail}
               </div>
             </div>
-            <span style={{
+            <span data-glass="soft" style={{
               width: 42,
               height: 42,
               borderRadius: 8,
@@ -594,7 +618,7 @@ export default function ReceiptPage() {
             <div style={{ marginBottom: 20 }}>
               <div style={{ ...eyebrow, marginBottom: 8 }}>Receipt items</div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                <div style={{
+                <div data-glass-clear="" style={{
                   display: 'grid',
                   gridTemplateColumns: '1fr auto auto',
                   gap: '0 14px',
@@ -603,8 +627,8 @@ export default function ReceiptPage() {
                   color: 'var(--text-muted)',
                   fontWeight: 850,
                   textTransform: 'uppercase',
-                  background: '#FAF8F3',
-                  borderBottom: '1px solid #E7E2D7',
+                  background: CUSTOMER_SURFACE.page,
+                  borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                 }}>
                   <div>Description</div>
                   <div style={{ textAlign: 'right' }}>Qty</div>
@@ -635,7 +659,7 @@ export default function ReceiptPage() {
             </div>
           )}
 
-          <div style={{ ...subtlePanel, padding: 16 }}>
+          <div data-glass-clear="" style={{ ...subtlePanel, padding: 16 }}>
             <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
             {invoice.discountAmount > 0 && (
               <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -655,7 +679,7 @@ export default function ReceiptPage() {
             {invoice.creditApplied > 0 && (
               <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
             )}
-            <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
+            <SummaryRow label={processing ? 'Total submitted' : unpaid ? 'Amount due' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
 
             {refundState && payment?.refundAmount > 0 && (
               <>
@@ -670,7 +694,7 @@ export default function ReceiptPage() {
           </div>
 
           {invoice.notes && (
-            <div style={{ marginTop: 18, ...subtlePanel, padding: 16 }}>
+            <div data-glass-clear="" style={{ marginTop: 18, ...subtlePanel, padding: 16 }}>
               <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
               <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                 {invoice.notes}
@@ -682,6 +706,17 @@ export default function ReceiptPage() {
             {hasReceiptPdf ? (
               <a
                 href={`${API_BASE}/receipt/${token}/pdf`}
+                onClick={(e) => {
+                  // Capacitor webview: a bare PDF navigation replaces the SPA
+                  // with no back control — share sheet instead (F-046). Old
+                  // binaries without the plugins keep the legacy navigation.
+                  if (canSaveNative()) {
+                    e.preventDefault();
+                    saveUrlNative(`${API_BASE}/receipt/${token}/pdf`, 'Waves_Receipt.pdf')
+                      .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                  }
+                }}
+                data-glass="chip" data-glass-pill=""
                 style={{
                   minHeight: 40,
                   display: 'inline-flex',
@@ -705,9 +740,13 @@ export default function ReceiptPage() {
                 Receipt PDF available after bank payment clears
               </span>
             ) : null}
+            {/* window.print() is a no-op in the Capacitor webview — hide the
+                button there; the Receipt PDF share sheet carries Print on iOS. */}
+            {isNativeApp() ? null : (
             <button
               type="button"
               onClick={() => window.print()}
+              data-glass="chip" data-glass-pill=""
               style={{
                 minHeight: 40,
                 display: 'inline-flex',
@@ -727,11 +766,20 @@ export default function ReceiptPage() {
               <Icon name="print" size={16} strokeWidth={2} />
               Print
             </button>
+            )}
           </div>
         </BrandCard>
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
+        </div>
+        {/* Standard pre-footer newsletter card + identity footer — every
+            glass surface carries the same footer as /track (owner
+            2026-07-08/09). Hidden from the receipt printout via
+            waves-no-print. */}
+        <div className="waves-no-print">
+          <GlassNewsletterCard source="receipt_footer" />
+          <BrandFooter />
         </div>
       </div>
     </WavesShell>

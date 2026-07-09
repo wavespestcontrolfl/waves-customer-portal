@@ -45,6 +45,9 @@ const path = require('path');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { parseETDateTime } = require('../../utils/datetime-et');
+// Same claim-budget ceiling claimNext/peek enforce — the reseed CASE below
+// resets exhausted counts against this exact number, never a private copy.
+const { _internals: { maxClaimAttempts } } = require('./opportunity-queue');
 const interceptSeeder = require('./intercept-brief-seeder');
 const { normalizeSpokeSites } = require('../content-astro/spoke-sites');
 const { spokeBlogNetworkEnabled } = require('./spoke-blog-network');
@@ -245,12 +248,28 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
                            THEN opportunity_queue.status
                            ELSE 'pending'
                       END,
+             -- Reviving a skipped/expired row is a fresh explicit operator
+             -- signal — reset the lifetime claim budget, or a re-seeded
+             -- attempts_exhausted row would be pending yet unclaimable
+             -- (claimNext refuses it, the janitor instantly re-skips it).
+             -- The pending-with-exhausted-count arm covers the window
+             -- between the claim that hit the budget and the daily sweep
+             -- that flips it to skipped — still 'pending' there, so the
+             -- skipped/expired arm alone left the reseed silently inert.
+             attempt_count = CASE WHEN opportunity_queue.status IN ('skipped', 'expired')
+                                  THEN 0
+                                  WHEN opportunity_queue.status = 'pending'
+                                       AND opportunity_queue.attempt_count >= ?
+                                  THEN 0
+                                  ELSE opportunity_queue.attempt_count
+                             END,
              updated_at = now()
       `,
       [
         row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,
         row.score, JSON.stringify(row.score_breakdown), JSON.stringify(row.signal_metadata), row.status,
         row.mined_at, row.expires_at, row.available_at, row.dedupe_key,
+        maxClaimAttempts(),
       ]
     );
     count += result.rowCount || 1;

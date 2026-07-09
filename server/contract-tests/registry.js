@@ -66,7 +66,6 @@ function collectManagedAgents() {
   const configs = [
     { file: 'bi-agent-config.js',           surface: 'bi-agent' },
     { file: 'lead-response-agent-config.js', surface: 'lead-response-agent' },
-    { file: 'retention-agent-config.js',     surface: 'retention-agent' },
   ];
   const out = [];
   for (const c of configs) {

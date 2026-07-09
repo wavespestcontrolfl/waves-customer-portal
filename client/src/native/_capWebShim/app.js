@@ -4,6 +4,7 @@ export const App = {
   addListener: async () => ({ remove() {} }),
   removeAllListeners: async () => {},
   getInfo: async () => ({ name: 'web', version: '0', build: '0' }),
+  getLaunchUrl: async () => undefined,
   exitApp: async () => {},
 };
 export default { App };

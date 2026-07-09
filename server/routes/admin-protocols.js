@@ -1354,7 +1354,7 @@ async function getProtocolProducts() {
       'label_verified_at', 'rainfast_minutes', 'rei_hours',
       'labeled_turf_species', 'excluded_turf_species',
       'requires_surfactant', 'allows_surfactant',
-      'label_source_note',
+      'label_source_note', 'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
     )
     .catch(() => []);
 
@@ -1508,9 +1508,13 @@ router.get('/match', async (req, res, next) => {
 // lines that never resolve to a catalog row by design. Only unmatched lines
 // carrying a "($N...)" cost tag — the protocol convention for a priced
 // product application — indicate a real catalog/alias gap.
+function isPricedProtocolLine(raw) {
+  return /\(\s*\$\s*\d/.test(raw || '');
+}
+
 function unmatchedPricedProtocolLines(items) {
   return items
-    .filter((item) => !item.matched && /\(\s*\$\s*\d/.test(item.raw || ''))
+    .filter((item) => !item.matched && isPricedProtocolLine(item.raw))
     .map((item) => item.raw);
 }
 
@@ -1552,22 +1556,37 @@ router.get('/lawn-mix', async (req, res, next) => {
       const product = line.product;
       const selected = line.selected;
       const carrier = calibrationExpired ? 0 : Number(calibration?.carrier_gal_per_1000 || 0);
-      const areaFactor = effectiveAreaFactor(line, {
+      const areaContext = {
         plan: req.query.plan,
         weedPressure: req.query.weedPressure,
         conditionFlags: req.query.conditionFlags,
         propertyFlags: req.query.propertyFlags,
         includePremiumOnly: req.query.includePremiumOnly === 'true',
         isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
-      });
+      };
+      const areaFactor = effectiveAreaFactor(line, areaContext);
       const jobMix = selected && product && carrier
         ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets })
         : null;
+      // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
+      // would put down if the line's trigger fired (rescue threshold met,
+      // premium add-on taken). Inspection/scout lines keep a zero factor so a
+      // "SKIP" or audit line never shows product math. jobMix stays
+      // selected-only — it alone feeds the material-cost summary.
+      const plannedAreaFactor = selected
+        ? areaFactor
+        : effectiveAreaFactor({ ...line, selected: true }, { ...areaContext, includePremiumOnly: true });
+      const plannedMix = jobMix || (product && carrier && plannedAreaFactor > 0
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets })
+        : null);
       const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
       const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
       const fullTankMix = selected && product && carrier && tankCoverageSqft
         ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
         : null;
+      const plannedFullTankMix = fullTankMix || (product && carrier && tankCoverageSqft && plannedAreaFactor > 0
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
+        : null);
 
       return {
         raw: line.raw,
@@ -1584,6 +1603,10 @@ router.get('/lawn-mix', async (req, res, next) => {
         selectionReason: line.selectionReason,
         selected,
         matched: !!product,
+        // Scout/task/expectation lines carry no "($N)" cost tag and never
+        // resolve to a catalog row by design — flag them so the UI can render
+        // them as tasks instead of alerting on a missing product match.
+        taskLine: !product && !isPricedProtocolLine(line.raw),
         product: product ? {
           id: product.id,
           name: product.name,
@@ -1611,9 +1634,15 @@ router.get('/lawn-mix', async (req, res, next) => {
           mixingOrderCategory: product.mixing_order_category,
           mixingInstructions: product.mixing_instructions,
           labelSourceNote: product.label_source_note,
+          labelUrl: product.label_url || null,
+          sdsUrl: product.sds_url || null,
+          epaRegNumber: product.epa_reg_number || null,
+          manufacturer: product.manufacturer || null,
         } : null,
         jobMix,
         fullTankMix,
+        plannedMix,
+        plannedFullTankMix,
       };
     });
 
@@ -2491,6 +2520,7 @@ router._internals = {
   defaultProductStockPublishIssue,
   stockStatusForProduct,
   unmatchedPricedProtocolLines,
+  isPricedProtocolLine,
 };
 
 module.exports = router;

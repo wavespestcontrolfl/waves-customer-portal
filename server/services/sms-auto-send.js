@@ -22,7 +22,7 @@
  *   6. Claim-before-send — an idempotency-keyed agent_decisions row makes the
  *      FIRST inserter the sole sender; a retry/concurrent run aborts.
  *   7. Send through the SAME policy-checked provider path the inbox uses
- *      (quiet hours, consent, suppression, identity trust all enforced).
+ *      (consent, suppression, identity trust all enforced).
  *
  * Crash safety: the draft is NOT flipped off 'shadow' until the provider
  * confirms the send. A crash anywhere before that leaves a judge-safe shadow
@@ -347,7 +347,7 @@ async function maybeAutoSend(params = {}) {
       if (parkedIds.length) await suggest.reopenScheduledSuggestions({ decisionIds: parkedIds, reason });
     };
 
-    // (7) Send via the policy-checked provider path (quiet hours, consent,
+    // (7) Send via the policy-checked provider path (consent,
     //     suppression, identity trust all enforced upstream).
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
     let result;

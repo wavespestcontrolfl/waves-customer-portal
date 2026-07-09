@@ -12,8 +12,10 @@ const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
 // Bump this whenever a global report-content rule changes so every cached PDF
 // becomes a cache miss and re-renders. 20260619: WaveGuard-member reports now
-// hide the per-visit "Time on site" duration, which changes rendered content.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'public-surface-20260619';
+// hide the per-visit "Time on site" duration. 20260705: headline carries the
+// service type, contact block (name/email/phone/address) under the headline,
+// Visit Timeline moved directly below Re-entry — all change rendered content.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'public-surface-20260705';
 
 const s3 = new S3Client({
   region: config.s3?.region,

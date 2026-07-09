@@ -7,9 +7,8 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -204,17 +203,155 @@ function streetNameTokens(value) {
   return [...new Set(ADDRESS_SUFFIX_VARIANTS[token] || [token])];
 }
 
-function addressMatchesCustomer(customer, address, zip) {
-  const lookupAddress = normalizeAddress(address);
-  const customerAddress = normalizeAddress(customer?.address_line1);
+// The identity of a unit is its value, not its designator or notation —
+// "Apt A", "#A", and "Unit A" are the same door (normalizeUnitLine strips
+// '#'; unitLineValueKey drops a lone designator).
+function unitValueKey(value) {
+  return unitLineValueKey(normalizeUnitLine(value));
+}
+
+// Units only conflict when BOTH sides carry one — a blank side stays
+// compatible, since most on-file addresses predate unit capture.
+function unitsConflict(customerLine2, submittedUnit) {
+  const a = unitValueKey(customerLine2);
+  const b = unitValueKey(submittedUnit);
+  return !!a && !!b && a !== b;
+}
+
+// A manual booking can enter the unit in BOTH fields ("123 Main St Apt 4" +
+// unit "Apt 4"). When the inline unit value-matches the dedicated one, strip
+// it from the street line so line1+line2 displays never repeat it. A
+// DIFFERENT inline unit is left untouched — addressMatchesCustomer treats
+// that as a conflict, never silent data loss. The duplicate may sit inline in
+// the first comma segment or span one or more comma segments of its own
+// ("123 Main St, Bldg 2, Apt 4, Sarasota") — grow the head one segment at a
+// time and let the comma-aware splitter decide; the remaining tail
+// (city/state) is preserved either way.
+function stripInlineUnitFromLine(line, submittedUnit) {
+  const submittedKey = unitValueKey(submittedUnit);
+  if (!submittedKey) return line;
+  const segments = String(line || '').split(',');
+  for (let k = 0; k < segments.length; k += 1) {
+    const split = splitStreetLineUnit(segments.slice(0, k + 1).join(','));
+    if (split.unit && unitValueKey(split.unit) === submittedKey) {
+      return [split.street, ...segments.slice(k + 1)].join(',');
+    }
+  }
+  // A comma-free one-line address hides the duplicate mid-line behind its
+  // city/state/zip tail ("123 Main St Apt A Sarasota FL 34236") — parse the
+  // tail off, re-peel, and rebuild in comma form (street, city, state zip) so
+  // the stored value keeps every part except the double-stored unit.
+  const parsed = parseRawAddress(line || '');
+  const tailSplit = parsed.line1 ? splitStreetLineUnit(parsed.line1) : { street: '', unit: '' };
+  if (tailSplit.unit && unitValueKey(tailSplit.unit) === submittedKey) {
+    const stateZip = [parsed.state, parsed.zip].filter(Boolean).join(' ');
+    return [tailSplit.street, parsed.city, stateZip].filter(Boolean).join(', ');
+  }
+  return line;
+}
+
+// The unit a customer record carries: the dedicated column, or a legacy
+// inline unit still living in address_line1.
+function customerUnitOf(customer) {
+  return customer?.address_line2 || splitStreetLineUnit(customer?.address_line1 || '').unit;
+}
+
+// Street + inline unit of a SUBMITTED line. splitStreetLineUnit only peels
+// trailing units; a full one-line address ("123 Main St Apt A Sarasota FL
+// 34236") hides the unit mid-line behind the city/state tail, so when the
+// direct peel finds nothing, parse the tail off and re-peel. The re-parse is
+// used only when it actually finds a unit — otherwise the direct split keeps
+// its existing street semantics.
+function submittedStreetAndUnit(line) {
+  const direct = splitStreetLineUnit(line || '');
+  if (direct.unit) return direct;
+  const parsedLine1 = parseRawAddress(line || '').line1 || '';
+  const reparsed = parsedLine1 ? splitStreetLineUnit(parsedLine1) : { street: '', unit: '' };
+  return reparsed.unit ? reparsed : direct;
+}
+
+function submittedInlineUnit(line) {
+  return submittedStreetAndUnit(line).unit;
+}
+
+// The dedicated unit field of a submission — trimmed, because a whitespace-only
+// value is truthy and would otherwise mask an inline unit while normalizing to
+// "no unit" in every comparison.
+function submittedDedicatedUnit(newCustomer) {
+  return String(newCustomer?.address_line2 || '').trim();
+}
+
+// A submitted unit that disagrees with the RESOLVED customer's on-file unit
+// is a booking against the wrong door (Apt B posted against the Apt A
+// record) — even on identity-proven paths that never ran the address match.
+// The unit may arrive in the dedicated field OR inline in the street line
+// (legacy/manual clients). Only same-street submissions count: a different
+// street line is not a unit statement about this record.
+function submittedUnitConflictsWithCustomer(customer, newCustomer) {
+  // Tail-aware split: a one-line submitted address must yield both its
+  // mid-line unit AND its bare street, or the street compare below could
+  // never match the on-file record.
+  const submitted = submittedStreetAndUnit(newCustomer?.address_line1);
+  const submittedUnit = submittedDedicatedUnit(newCustomer) || submitted.unit;
+  if (!submittedUnit) return false;
+  const submittedStreet = normalizeAddress(submitted.street);
+  const onFileStreet = normalizeAddress(splitStreetLineUnit(customer?.address_line1 || '').street);
+  if (!submittedStreet || !onFileStreet || submittedStreet !== onFileStreet) return false;
+  return unitsConflict(customerUnitOf(customer), submittedUnit);
+}
+
+// Unit to carry on the VISIT's own records when it can't be written to the
+// customer row (unit writes are token-proven): the booker's submitted unit,
+// only for a same-street submission against a record that has no unit of its
+// own. Conflicting submissions never reach this — they 400 upstream.
+function carriedVisitUnit(customer, newCustomer) {
+  if (!newCustomer || customerUnitOf(customer)) return '';
+  const submitted = submittedStreetAndUnit(newCustomer.address_line1);
+  const submittedUnit = submittedDedicatedUnit(newCustomer) || submitted.unit;
+  if (!submittedUnit) return '';
+  const submittedStreet = normalizeAddress(submitted.street);
+  const onFileStreet = normalizeAddress(splitStreetLineUnit(customer.address_line1 || '').street);
+  if (!submittedStreet || submittedStreet !== onFileStreet) return '';
+  return normalizeUnitLine(submittedUnit);
+}
+
+function addressMatchesCustomer(customer, address, zip, unit) {
+  // Legacy records may still carry the unit inline in address_line1
+  // ("123 Main St Apt A", empty address_line2) — split both sides so a
+  // street-only + dedicated-unit submission still matches its own record.
+  const submitted = splitStreetLineUnit(address);
+  // A submission carrying TWO disagreeing units (inline in the street field
+  // AND the dedicated box) is ambiguous — fail it rather than pick one.
+  if (unitsConflict(submitted.unit, unit)) return false;
+  const onFile = splitStreetLineUnit(customer?.address_line1);
+  const lookupAddress = normalizeAddress(submitted.street);
+  const customerAddress = normalizeAddress(onFile.street);
   if (!lookupAddress || !customerAddress || lookupAddress !== customerAddress) return false;
+  // Same street is NOT the same household in a multi-unit building — a
+  // submitted unit that disagrees with the one on file fails verification.
+  if (unitsConflict(customerUnitOf(customer), unit || submitted.unit)) return false;
   const lookupZip = normalizeZip(zip);
   const customerZip = normalizeZip(customer?.zip);
   return !lookupZip || !customerZip || lookupZip === customerZip;
 }
 
-async function findUniqueCustomerByAddress(address, city, zip) {
-  const normalizedAddress = normalizeAddress(address);
+// Narrow same-street candidates by the submitted unit: exact unit matches
+// win outright; only when none exists do blank-unit records stay compatible.
+// Otherwise a street-only legacy row on the same street would destroy the
+// uniqueness check and cost a returning customer their exact Apt match.
+function narrowCandidatesByUnit(candidates, submittedUnit) {
+  const compatible = candidates.filter((c) => !unitsConflict(customerUnitOf(c), submittedUnit));
+  const submittedKey = unitValueKey(submittedUnit);
+  if (!submittedKey) return compatible;
+  const exact = compatible.filter((c) => unitValueKey(customerUnitOf(c)) === submittedKey);
+  return exact.length ? exact : compatible;
+}
+
+async function findUniqueCustomerByAddress(address, city, zip, unit) {
+  const submitted = splitStreetLineUnit(address);
+  // Two disagreeing units in one submission is ambiguous — no match.
+  if (unitsConflict(submitted.unit, unit)) return null;
+  const normalizedAddress = normalizeAddress(submitted.street);
   if (!normalizedAddress) return null;
   const number = streetNumber(address);
   if (!number) return null;
@@ -239,10 +376,13 @@ async function findUniqueCustomerByAddress(address, city, zip) {
   });
 
   const candidates = await query
-    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip', 'phone')
+    .select('id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone')
     .limit(1000);
 
-  const matches = candidates.filter(customer => normalizeAddress(customer.address_line1) === normalizedAddress);
+  const sameStreet = candidates.filter(
+    (customer) => normalizeAddress(splitStreetLineUnit(customer.address_line1).street) === normalizedAddress
+  );
+  const matches = narrowCandidatesByUnit(sameStreet, unit || submitted.unit);
   const normalizedZip = normalizeZip(zip);
   const cityValue = String(city || '').trim().toLowerCase();
   if (normalizedZip || cityValue) {
@@ -270,8 +410,8 @@ async function findUniqueCustomerByAddress(address, city, zip) {
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
-    const { phone, address, city, zip } = req.query;
-    const customerFields = ['id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'state', 'zip'];
+    const { phone, address, city, zip, unit } = req.query;
+    const customerFields = ['id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
     const phoneCustomerFields = [...customerFields, 'phone'];
     let customer = null;
 
@@ -295,10 +435,22 @@ router.get('/customer-lookup', async (req, res, next) => {
       // disclosing. The booking funnel always collects the address (step 1)
       // before the phone step, so legitimate returning-customer autofill is
       // unaffected; only the address-less enumeration path is closed.
-      if (customer && !(address && addressMatchesCustomer(customer, address, zip))) {
+      if (customer && !(address && addressMatchesCustomer(customer, address, zip, unit))) {
         customer = null;
       }
-      return res.json({ customer: customer || null });
+      // address_line2 is needed ABOVE for the unit-aware match but must not
+      // be disclosed: a blank submitted unit stays compatible by design, so
+      // phone + street knowledge would otherwise read back the apartment
+      // number. Same for a legacy unit still inline in address_line1 — the
+      // response carries the street only. The booking UI never consumes
+      // either field from this response.
+      if (customer) {
+        const { address_line2: _undisclosedUnit, ...publicCustomer } = customer;
+        publicCustomer.address_line1 = splitStreetLineUnit(publicCustomer.address_line1 || '').street
+          || publicCustomer.address_line1;
+        return res.json({ customer: publicCustomer });
+      }
+      return res.json({ customer: null });
     }
 
     if (address) {
@@ -311,7 +463,7 @@ router.get('/customer-lookup', async (req, res, next) => {
       // would hit the phone-on-file guard (409) on a valid booking. Tightening
       // the id->booking trust (book-on-behalf via a guessed address) is a
       // separate, pre-existing hardening item, not in scope here.
-      const match = await findUniqueCustomerByAddress(address, city, zip);
+      const match = await findUniqueCustomerByAddress(address, city, zip, unit);
       return res.json({
         customer: match ? { id: match.id } : null,
         possible_match: !!match,
@@ -329,6 +481,9 @@ router.get('/config', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {};
     res.json({
       enabled: isEnabled('selfBooking') && config.enabled !== false,
+      // Marketing-site (astro /book) AI search bar — fail-closed dark-ship
+      // flag; the portal's own booking surfaces don't read this.
+      ai_search: isEnabled('bookAiSearch'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -453,13 +608,17 @@ async function loadBookingConfig() {
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [] }) {
   const result = await findAvailableSlots({
     lat,
     lng,
     durationMinutes: duration,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
+    // Relocating an existing visit (public self-reschedule): drop its own row
+    // from the occupied-route set so it doesn't block the slot it's moving
+    // out of. Default [] = identical behavior for every other caller.
+    excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
     dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
     // The default best-4 window is narrow, so 200 ranked candidates is ample.
@@ -786,9 +945,24 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // A new_customer payload whose street line carries a DIFFERENT inline
+    // unit than the dedicated field points at two doors at once — fail closed
+    // like the matching paths, instead of minting (or backfilling from) a
+    // self-contradictory address. submittedInlineUnit also finds a unit
+    // hiding mid-line in a full one-line address ("… Apt A Sarasota FL 34236").
+    if (new_customer && unitsConflict(submittedInlineUnit(new_customer.address_line1), submittedDedicatedUnit(new_customer))) {
+      return { ok: false, status: 400, error: 'The street address and unit number disagree — please re-enter your address.' };
+    }
+
     // Resolve customer
     let custId = null;
     let estimate = null;
+    // Only TOKEN-PROVEN paths (verified estimate, or a wizard estimate whose
+    // share token the caller possesses) may write a submitted unit onto an
+    // existing record. Phone-on-file and the public address lookup are
+    // knowledge, not possession — anyone who knows the phone or address could
+    // otherwise attach an arbitrary unit to the customer.
+    let unitBackfillAllowed = false;
     if (estimate_id) {
       estimate = await db('estimates').where('id', estimate_id).first();
       // Do NOT resolve identity from an unverified quote-wizard / handoff draft
@@ -797,7 +971,10 @@ async function createSelfBooking(payload = {}) {
       // book under that customer. Only verified estimates (admin/accepted,
       // source !== 'quote_wizard') resolve identity; quote handoffs are used for
       // PRICING only, via pricing_estimate_id.
-      if (!custId && estimate && estimate.source !== 'quote_wizard') custId = estimate.customer_id;
+      if (!custId && estimate && estimate.source !== 'quote_wizard') {
+        custId = estimate.customer_id;
+        unitBackfillAllowed = true;
+      }
       // A quote-wizard estimate still resolves identity when the caller proves
       // possession of its SHARE token (the legacy /book/:estimateToken page
       // posts the token it loaded the estimate with). Share tokens are
@@ -810,6 +987,7 @@ async function createSelfBooking(payload = {}) {
           && estimate.token && estimate_share_token
           && String(estimate.token) === String(estimate_share_token)) {
         custId = estimate.customer_id;
+        unitBackfillAllowed = true;
       }
     }
     // NB: ?lead=<lead_id> is NOT trusted for identity. A lead_id is mintable
@@ -845,6 +1023,10 @@ async function createSelfBooking(payload = {}) {
           return { ok: false, status: 400, error: 'Customer lookup mismatch' };
         }
         custId = existing.id;
+        // Phone + customer_id resolves the BOOKING, but is knowledge, not
+        // possession: the id comes from the public address lookup and the
+        // phone can be typed by anyone who knows it. Not enough to WRITE a
+        // unit onto the record — only token-proven estimate paths backfill.
       }
     }
 
@@ -859,7 +1041,7 @@ async function createSelfBooking(payload = {}) {
       if (
         !addressVerifiedCustomer
         || !new_customer
-        || !addressMatchesCustomer(addressVerifiedCustomer, new_customer.address_line1, new_customer.zip)
+        || !addressMatchesCustomer(addressVerifiedCustomer, new_customer.address_line1, new_customer.zip, new_customer.address_line2)
       ) {
         return { ok: false, status: 400, error: 'Address verification required for existing customer booking' };
       }
@@ -874,7 +1056,8 @@ async function createSelfBooking(payload = {}) {
         last_name: new_customer.last_name || '',
         phone: phoneDigits,
         email: new_customer.email || null,
-        address_line1: new_customer.address_line1 || null,
+        address_line1: stripInlineUnitFromLine(new_customer.address_line1, new_customer.address_line2) || null,
+        address_line2: normalizeUnitLine(new_customer.address_line2) || null,
         city: new_customer.city || null,
         state: new_customer.state || 'FL',
         zip: new_customer.zip || null,
@@ -893,11 +1076,46 @@ async function createSelfBooking(payload = {}) {
 
     const customer = await db('customers').where('id', custId).first();
     if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
+
+    // Estimate-token and phone-resolved paths never ran the address match, so
+    // a submitted unit that disagrees with the resolved record's on-file unit
+    // must fail closed here — never schedule Apt B's request against Apt A's
+    // account. (A just-created customer already passed the payload guard.)
+    if (!createdCustomerId && submittedUnitConflictsWithCustomer(customer, new_customer)) {
+      return { ok: false, status: 400, error: 'The unit number doesn\'t match the one we have on file for this address.' };
+    }
+
+    // Returning booker supplying a unit their record lacks: attach it, but only
+    // on a TOKEN-PROVEN path (unitBackfillAllowed — verified/share-token
+    // estimate; never phone-on-file or the public address-only lookup, both of
+    // which are knowledge anyone could hold), only when the submitted street
+    // line matches the record (same rule as lead-webhook — never bolt a unit
+    // onto a different address), and never when a legacy record already
+    // carries the unit inline in address_line1 (double-store).
+    // New customers already got it at insert.
+    if (unitBackfillAllowed && !createdCustomerId && new_customer?.address_line2
+        && !customer.address_line2 && !splitStreetLineUnit(customer.address_line1).unit) {
+      const submittedUnit = normalizeUnitLine(new_customer.address_line2);
+      if (submittedUnit && addressMatchesCustomer(customer, new_customer.address_line1, new_customer.zip, new_customer.address_line2)) {
+        try {
+          await db('customers').where('id', customer.id).update({ address_line2: submittedUnit });
+          customer.address_line2 = submittedUnit;
+        } catch (unitErr) {
+          logger.warn(`[booking] could not persist unit for customer ${customer.id}: ${unitErr.message}`);
+        }
+      }
+    }
     await db('notification_prefs')
       .insert({ customer_id: custId })
       .onConflict('customer_id')
       .ignore();
-	
+
+    // A unit submitted on a no-backfill path must not vanish: the customer row
+    // stays untouched, but the visit's notes and the confirmation still carry
+    // the door the booker gave us. Empty when the record already has a unit,
+    // when this booking just created the customer, or on a different street.
+    const visitUnit = createdCustomerId ? '' : carriedVisitUnit(customer, new_customer);
+
 	    const config = (await db('booking_config').first()) || {};
     const duration = duration_minutes || config.slot_duration_minutes || 60;
 
@@ -1105,6 +1323,11 @@ async function createSelfBooking(payload = {}) {
         confirmation_code: confCode,
         source: source || 'direct',
         referrer_url: referrer_url || null,
+        // Full client attribution capture (UTMs + click ids + referrer/landing)
+        // for EVERY booking — raw record; classification happens at read time
+        // (attributeSelfBooking below only persisted the paid-click slice).
+        attribution: (attribution && typeof attribution === 'object')
+          ? JSON.stringify(attribution) : null,
         service_type: resolvedServiceType,
       }).returning('*');
 
@@ -1118,7 +1341,12 @@ async function createSelfBooking(payload = {}) {
         status: 'confirmed',
         customer_confirmed: true,
         confirmed_at: new Date(),
-        notes: customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+        notes: [
+          customer_notes ? `Self-booked. Notes: ${customer_notes}` : 'Self-booked via portal',
+          // Dispatch/tech surfaces render the address from the customer row,
+          // which has no unit on no-backfill paths — the note is the carrier.
+          visitUnit ? `Unit: ${visitUnit}` : null,
+        ].filter(Boolean).join(' — '),
         source: source || 'self_booked',
         self_booking_id: bookingRow.id,
         estimated_duration_minutes: duration,
@@ -1268,68 +1496,30 @@ async function createSelfBooking(payload = {}) {
                 ? row.scheduled_date.toISOString().slice(0, 10)
                 : String(row.scheduled_date || '').slice(0, 10));
         const windowStart = String(row.window_start || slot_start || '08:00').slice(0, 5);
+        // The primary visit confirms through the shared appointment_confirmation
+        // flow (prefs/channel-aware, email fallback, reschedule link) — the
+        // bespoke self_booking_confirmation template was retired 2026-07-06.
+        // Follow-up series rows stay confirmation-free as before.
         await AppointmentReminders.registerAppointment(
           row.id,
           custId,
           `${scheduledDate}T${windowStart}`,
           row.service_type || resolvedServiceType,
           row.id === serviceRow.id ? 'booking_new' : 'booking_followup',
-          { sendConfirmation: false },
+          { sendConfirmation: row.id === serviceRow.id },
         );
       }
     } catch (err) {
       logger.error(`[booking:confirm] Appointment reminder registration failed for ${serviceRow.id}: ${err.message}`);
     }
 
-    // SMS notifications (best-effort)
+    // Customer confirmation is handled by registerAppointment above
+    // (sendConfirmation: true on the primary row). Internal alert only here.
     try {
       const dateLabel = new Date(slotDateStr + 'T12:00:00').toLocaleDateString('en-US', {
         weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
       const startLabel = minToTime12(timeToMin(slot_start));
-      const endLabel = minToTime12(endMin);
-      const timeLabel = `${startLabel} - ${endLabel}`;
-      const addressLabel = `${customer.address_line1}, ${customer.city}`;
-      const smsBody = await renderSmsTemplate(
-        'self_booking_confirmation',
-        {
-          first_name: customer.first_name || 'there',
-          date: dateLabel,
-          time: timeLabel,
-          address: addressLabel,
-          confirmation_code: confCode,
-        },
-        { workflow: 'self_booking_confirmation', entity_type: 'scheduled_service', entity_id: serviceRow.id }
-      );
-      if (!smsBody) {
-        logger.warn(`[booking:confirm] self_booking_confirmation template missing/disabled — skipping SMS for customer ${custId}`);
-      }
-
-      // Honor the customer's account-level New Appointment Confirmation channel
-      // (sms | email | both). Default 'sms' keeps the exact prior send.
-      await AppointmentReminders.deliverConfirmationByChannel({
-        customerId: custId,
-        scheduledServiceId: serviceRow?.id,
-        serviceLabel: resolvedServiceType,
-        smsAttempt: async () => {
-          if (!smsBody) return false;
-          const customerSms = await sendCustomerMessage({
-            to: customer.phone,
-            body: smsBody,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'appointment_confirmation',
-            customerId: custId,
-            appointmentId: serviceRow?.id,
-            identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'booking_confirmation', source: source || 'portal' },
-          });
-          if (customerSms && !customerSms.sent) {
-            logger.warn(`[booking:confirm] Customer SMS blocked/failed for customer ${custId}: ${customerSms.code || customerSms.reason || 'unknown'}`);
-          }
-          return !!customerSms?.sent;
-        },
-      });
 
       if (process.env.ADAM_PHONE) {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
@@ -1352,10 +1542,11 @@ async function createSelfBooking(payload = {}) {
     // recurring series. `lead_id` is only a trigger flag; the conversion is
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
+    let leadConversion = null;
     if (followUpRows.length > 0 || lead_id) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({
+        leadConversion = await convertLeadFromEvent({
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
@@ -1369,8 +1560,14 @@ async function createSelfBooking(payload = {}) {
     // offline-conversion pipeline (data-manager qualified_lead / Meta CAPI) can
     // report it to Google/Meta by deterministic click id, not just hashed PII.
     // A cold ad click that books straight from the funnel has no lead otherwise,
-    // so it would be invisible to ad optimization. Best-effort (booking is
-    // already committed); only mints for ad-tracked bookers with no lead on file.
+    // so it would be invisible to ad optimization. Non-paid bookings mint
+    // nothing but still get a channel-classified funnel row (deduped per
+    // booking via self_booked_appointment_id); owned re-engagement links
+    // (booking_recovery) are excluded — same journey completing, not a new
+    // acquisition. Best-effort (booking is already committed); only mints
+    // won leads for ad-tracked bookers with no lead on file. A booking that
+    // just converted an existing lead records nothing here: the bridge
+    // advanced that lead's own attribution row to booked already.
     try {
       const { attributeSelfBooking } = require('../services/lead-estimate-link');
       await attributeSelfBooking({
@@ -1380,12 +1577,36 @@ async function createSelfBooking(payload = {}) {
         // Only a customer this booking just created is a fresh paid acquisition;
         // a resolved existing customer is a repeat booker, not a new lead.
         customerCreated: !!createdCustomerId,
+        selfBookedAppointmentId: booking?.id || null,
+        bookingSource: source || null,
+        leadConverted: !!leadConversion?.converted,
       });
     } catch (err) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
     }
 
     return { ok: true, body: { booking, confirmationCode: confCode } };
+}
+
+// Public shape for a self_booked_appointments row — an EXPLICIT allow-list,
+// never `self_booked_appointments.*`. The raw row now persists the full
+// attribution capture (gclid, _fbc/_fbp, full referrer, and landing_url —
+// which can embed booking/estimate handoff tokens), and referrer_url carries
+// the same class of data. Unauthenticated callers reach these rows with just
+// a confirmation code (GET /status/:code) or the confirm response, so new
+// columns stay private unless deliberately added here.
+const PUBLIC_BOOKING_FIELDS = [
+  'id', 'confirmation_code', 'status', 'date', 'start_time', 'end_time',
+  'duration_minutes', 'service_type', 'customer_notes', 'source',
+  'created_at', 'updated_at',
+];
+function toPublicBookingShape(row) {
+  if (!row || typeof row !== 'object') return null;
+  const out = {};
+  for (const field of PUBLIC_BOOKING_FIELDS) {
+    if (field in row) out[field] = row[field];
+  }
+  return out;
 }
 
 // POST /api/booking/confirm — thin HTTP adapter over createSelfBooking. The
@@ -1403,7 +1624,10 @@ router.post('/confirm', async (req, res, next) => {
       payAtVisit: isEnabled('bookingPayAtVisit'),
     });
     if (!result.ok) return res.status(result.status).json({ error: result.error });
-    return res.json(result.body);
+    // Sanitize HERE, not inside createSelfBooking — the service returns the
+    // full row for internal callers; the public response gets the safe shape
+    // (covers BOTH the fresh-booking body and the double-submit replay body).
+    return res.json({ ...result.body, booking: toPublicBookingShape(result.body.booking) });
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);
@@ -1501,7 +1725,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       first_name: str(nc.first_name, 120),
       last_name: str(nc.last_name, 120),
       email: str(nc.email, 200),
-      address_line1: str(nc.address_line1 || b.address, 250),
+      // booking_intents has no unit column — keep the unit inline so the
+      // recovery link/prefill still carries it.
+      address_line1: str(
+        [nc.address_line1, normalizeUnitLine(nc.address_line2)].filter(Boolean).join(', ') || b.address,
+        250
+      ),
       city: str(nc.city, 120),
       state: str(nc.state, 40),
       zip: str(nc.zip, 20),
@@ -1656,14 +1885,17 @@ router.get('/sources', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/booking/status/:code
+// GET /api/booking/status/:code — public (anyone holding a confirmation code).
+// Selects the explicit allow-list, NOT the wildcard row: the attribution jsonb
+// (click ids, referrer/landing URLs with handoff tokens) and referrer_url must
+// never ride along on a public payload.
 router.get('/status/:code', async (req, res, next) => {
   try {
     const booking = await db('self_booked_appointments')
       .where('confirmation_code', req.params.code)
       .leftJoin('customers', 'self_booked_appointments.customer_id', 'customers.id')
       .select(
-        'self_booked_appointments.*',
+        ...PUBLIC_BOOKING_FIELDS.map((field) => `self_booked_appointments.${field}`),
         'customers.first_name', 'customers.last_name',
         'customers.address_line1', 'customers.city'
       )
@@ -1678,6 +1910,12 @@ module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
   cleanBookingServiceLabel,
+  addressMatchesCustomer,
+  unitsConflict,
+  stripInlineUnitFromLine,
+  narrowCandidatesByUnit,
+  submittedUnitConflictsWithCustomer,
+  carriedVisitUnit,
   // Read-only engine surface reused by the voice agent's quoting tools so a
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).
@@ -1688,4 +1926,8 @@ module.exports._internals = {
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,
+  // Public-response allow-list for self_booked_appointments rows (P1 guard:
+  // the raw row carries the full attribution capture).
+  PUBLIC_BOOKING_FIELDS,
+  toPublicBookingShape,
 };

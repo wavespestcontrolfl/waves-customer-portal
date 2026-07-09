@@ -1,5 +1,6 @@
 const {
   inferFrequencyKeyFromEstimateData,
+  intervalPriceFromAnnual,
   intervalPriceFromMonthly,
   normalizeFrequencyKey,
   resolveBillingCadence,
@@ -53,5 +54,36 @@ describe('billing cadence helpers', () => {
 
     expect(inferFrequencyKeyFromEstimateData(estimateData)).toBe('bi_monthly');
     expect(resolveBillingCadence({ monthlyRate: 44.5, estimateData }).amount).toBe(89);
+  });
+
+  test('converts exact annuals to cadence charge amounts', () => {
+    // Quarterly $392/yr = 4 x $98.00 exactly — never 32.67 * 3 = 98.01.
+    expect(intervalPriceFromAnnual(392, 'quarterly')).toBe(98);
+    expect(intervalPriceFromAnnual(392, 'bi_monthly')).toBe(65.33);
+    expect(intervalPriceFromAnnual(392, 'monthly')).toBe(32.67);
+  });
+
+  test('interval charge derives from the exact annual when it corresponds to the monthly', () => {
+    const cadence = resolveBillingCadence({
+      monthlyRate: 32.67,
+      annualRate: 392,
+      frequencyKey: 'quarterly',
+    });
+    // Rounded-monthly path gave 32.67 * 3 = 98.01; the quoted per-visit is 98.00.
+    expect(cadence.amount).toBe(98);
+    expect(cadence.monthlyRate).toBe(32.67);
+  });
+
+  test('monthly cadence is unchanged by a corresponding annual', () => {
+    expect(resolveBillingCadence({ monthlyRate: 32.67, annualRate: 392, frequencyKey: 'monthly' }).amount).toBe(32.67);
+  });
+
+  test('a non-corresponding annual is ignored — the monthly stays the billing authority', () => {
+    // e.g. a stale/foreign annual (real price change never synced): drift > $0.50.
+    expect(resolveBillingCadence({ monthlyRate: 32.67, annualRate: 432, frequencyKey: 'quarterly' }).amount).toBe(98.01);
+  });
+
+  test('callers that do not pass annualRate keep the legacy monthly derivation', () => {
+    expect(resolveBillingCadence({ monthlyRate: 32.67, frequencyKey: 'quarterly' }).amount).toBe(98.01);
   });
 });

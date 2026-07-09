@@ -14,7 +14,9 @@ const SWFL_BOUNDS = {
  *   value       — controlled input string
  *   onChange    — (value) => void  (fires on typing)
  *   onSelect    — (parts) => void  (fires when user picks a suggestion)
- *                 parts: { formatted, line1, city, state, zip, lat, lng }
+ *                 parts: { formatted, line1, line2, city, state, zip, lat, lng }
+ *                 line2 = Google subpremise (unit/apt) when the user typed one;
+ *                 line1 stays street-only so geocode/parcel matching is clean
  *   placeholder
  *   autoFocus
  *   style       — inline style overrides for the input
@@ -34,7 +36,11 @@ export default function AddressAutocomplete({
 }) {
   const inputRef = useRef(null);
   const acRef = useRef(null);
-  const lastSelectedRef = useRef('');
+  // Every value a parent might render for the last selection (formatted OR
+  // street-only line1) — parents differ, and the blur fallback must not
+  // re-geocode a value that IS the current selection (it would come back
+  // without the subpremise and wipe the unit).
+  const lastSelectedRef = useRef([]);
   const onSelectRef = useRef(onSelect);
 
   useEffect(() => {
@@ -88,6 +94,7 @@ export default function AddressAutocomplete({
         const parts = {
           formatted: p.formatted_address || '',
           line1,
+          line2: get('subpremise'),
           city: get('locality') || get('sublocality') || get('postal_town'),
           state: getShort('administrative_area_level_1'),
           zip: get('postal_code'),
@@ -95,7 +102,7 @@ export default function AddressAutocomplete({
           lng: p.geometry?.location?.lng?.() ?? null,
         };
         if (parts.state && parts.state !== 'FL') return;
-        lastSelectedRef.current = parts.formatted || parts.line1 || '';
+        lastSelectedRef.current = [parts.formatted, parts.line1].filter(Boolean);
         onSelectRef.current?.(parts);
       });
       acRef.current = ac;
@@ -135,7 +142,7 @@ export default function AddressAutocomplete({
       onChange={(e) => onChange?.(e.target.value)}
       onBlur={() => {
         const typed = (inputRef.current?.value || '').trim();
-        if (!typed || typed === lastSelectedRef.current || !window.google?.maps?.Geocoder) return;
+        if (!typed || lastSelectedRef.current.includes(typed) || !window.google?.maps?.Geocoder) return;
         const geocoder = new window.google.maps.Geocoder();
         geocoder.geocode({
           address: typed,
@@ -156,6 +163,7 @@ export default function AddressAutocomplete({
           const parts = {
             formatted: p.formatted_address || typed,
             line1,
+            line2: get('subpremise'),
             city: get('locality') || get('sublocality') || get('postal_town'),
             state: getShort('administrative_area_level_1'),
             zip: get('postal_code'),
@@ -163,7 +171,7 @@ export default function AddressAutocomplete({
             lng: p.geometry?.location?.lng?.() ?? null,
           };
           if (parts.state && parts.state !== 'FL') return;
-          lastSelectedRef.current = parts.formatted || parts.line1 || typed;
+          lastSelectedRef.current = [parts.formatted, parts.line1, typed].filter(Boolean);
           onSelectRef.current?.(parts);
         });
       }}

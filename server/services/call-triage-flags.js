@@ -1,3 +1,6 @@
+const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
+
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
 // A reachable number, not a withheld-caller-ID placeholder. Twilio delivers
@@ -156,9 +159,17 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       flags.push('out_of_service_area');
     } else if (avStatus === 'confirm_needed' || avStatus === 'missing_component' || avStatus === 'ambiguous') {
       flags.push('address_unverified');
+    } else if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
+      // AV accepted a REAL premise — but the model wasn't sure it heard the
+      // right street. "Palm Ave" misheard as "Park Ave" validates cleanly at
+      // the wrong (real) house; the model's low confidence was the only
+      // signal, and it used to be discarded here. Advisory: the call still
+      // auto-routes on AV's verdict, the office just reads the street back.
+      flags.push('address_readback');
     }
-    // validated_accept / corrected → clean, no address flag (the whole point:
-    // a corrected bad zip clears triage instead of holding the call).
+    // validated_accept / corrected → clean, no blocking address flag (the
+    // whole point: a corrected bad zip clears triage instead of holding the
+    // call).
   } else {
     if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
       flags.push('missing_service_address');
@@ -244,6 +255,22 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (detectRentalSignal({ extracted: { call_summary: extraction.meta.call_summary }, callerRelationship: caller.relationship_to_property })) {
     flags.push('rental_or_tenant_occupied');
   }
+  // Multi-property + promised-quote signals — deterministic from the extraction
+  // body so they reach Needs Review even when the model omitted the flag.
+  // Both ADVISORY: they inform the office, never hold an appointment.
+  if (Array.isArray(property.additional_properties) && property.additional_properties.length > 0) {
+    flags.push('multi_property_call');
+  }
+  if (extraction.service_request?.quote_promised === true) {
+    flags.push('quote_promised');
+  }
+  // A second person was named as a party to the service (realtor's buyer,
+  // landlord's tenant) — deterministic from the extraction body. ADVISORY:
+  // the office confirms their contact info; the booking itself is fine.
+  const secondary = extraction.secondary_contact;
+  if (secondary && (secondary.name_full || secondary.first_name || secondary.phone_e164 || secondary.email)) {
+    flags.push('secondary_contact_captured');
+  }
 
   // A decisive AV acceptance is authoritative for the address + service area —
   // drop any address flags reached above (incl. a lead_quality-sourced
@@ -263,6 +290,22 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   'missing_last_name',
   'rental_or_tenant_occupied',
   'second_service_address',
+  // Recovered-street read-back reminder — informs the callback, never blocks
+  // routing (the recovered premise passed Address Validation).
+  'address_recovered',
+  // AV accepted a real premise but the model's own address confidence was low
+  // (possible valid-but-wrong-street mishear) — read the street back on the
+  // confirmation call; never blocks the AV-approved routing.
+  'address_readback',
+  // Caller discussed more than one property — the extra addresses are recorded
+  // (customer_properties) / surfaced on the lead; the booked visit itself is fine.
+  'multi_property_call',
+  // Agent promised to send a quote after the call — work is owed to the caller,
+  // but the appointment that was ALSO booked must still auto-route.
+  'quote_promised',
+  // A second contact (buyer/tenant/spouse) was named on the call — the office
+  // confirms their info; never holds the appointment.
+  'secondary_contact_captured',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -361,12 +404,27 @@ function streetCompareKey(s) {
  * `extracted` record, and the V2 model triage flags, returns:
  *   - normalizedAddress: the {address_line1, city, state, zip} subset to adopt
  *     when AV decisively accepted/corrected an in-area premise (null otherwise),
+ *   - normalizedEmail: a HIGH-confidence domain-typo correction of the captured
+ *     email ("jane@gmial.com" → "jane@gmail.com") to adopt BEFORE the upsert and
+ *     the first-touch sends read extracted.email (null otherwise) — catching at
+ *     intake what bounce-recovery would otherwise repair after a bounce,
  *   - needsConfirmation: human-review reasons — an unverifiable / out-of-area
- *     address (only when a street was actually given), caller-not-owner, and a
- *     missing surname on a real (hot/warm) prospect.
+ *     address (only when a street was actually given), caller-not-owner, a
+ *     missing surname on a real (hot/warm) prospect, and a transcription-spelled
+ *     email (email_unverified / email_invalid) to read back on the callback.
+ *     The email reasons are ADVISORY ONLY, mirroring address_unverified here:
+ *     they ride needs_confirmation, never the routing triage flags — most
+ *     spelled emails are fine and must not hold a call for review.
+ * `addressRecovery` (optional) is the address-validation/recovery.js result for
+ * an unverifiable street: when it confirmed exactly ONE real premise, that
+ * premise is adopted as normalizedAddress and the review reason becomes
+ * address_recovered (read the recovered street back on the callback) instead of
+ * address_unverified — the transcription garbled the street ("C Phone Trl"),
+ * recovery found what the caller plausibly said ("Seafoam Trl"), and a human
+ * still confirms it before anyone drives there.
  * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
  */
-function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null } = {}) {
+function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null, addressRecovery = null } = {}) {
   const av = addressValidation || null;
   const status = av && av.status ? av.status : null;
   const hadStreet = !!String(extracted.address_line1 || '').trim();
@@ -416,7 +474,18 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
       }
     }
   } else if (hadStreet && (status === 'missing_component' || status === 'ambiguous' || status === 'confirm_needed')) {
-    needsConfirmation.push('address_unverified');
+    if (addressRecovery && addressRecovery.recovered && addressRecovery.recovered.address_line1) {
+      const r = addressRecovery.recovered;
+      normalizedAddress = {
+        address_line1: r.address_line1,
+        ...(r.city ? { city: r.city } : {}),
+        ...(r.state ? { state: r.state } : {}),
+        ...(r.zip ? { zip: r.zip } : {}),
+      };
+      needsConfirmation.push('address_recovered');
+    } else {
+      needsConfirmation.push('address_unverified');
+    }
   } else if (hadStreet && status === 'out_of_service_area') {
     needsConfirmation.push('out_of_service_area');
   }
@@ -435,7 +504,79 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
     needsConfirmation.push('rental_or_tenant_occupied');
   }
 
-  return { normalizedAddress, needsConfirmation };
+  // Email review — shared with the enforce-mode/V2-off fallback in the call
+  // processor, so email hygiene is never shadow-bridge-only.
+  const emailReview = deriveEmailReview(extracted);
+  needsConfirmation.push(...emailReview.needsConfirmation);
+
+  return { normalizedAddress, normalizedEmail: emailReview.normalizedEmail, needsConfirmation };
+}
+
+// Syntactic sanity only — deliverability is unknowable until a send. Anything
+// failing this is transcription garbage, not an address worth storing plans on.
+const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/**
+ * Email review — pure, extraction-mode-independent (the call processor runs
+ * it via the shadow bridge OR directly in enforce/V2-off modes; first-touch
+ * sends read extracted.email in every mode).
+ *
+ * A transcription-spelled email is the top source of hard bounces (letters
+ * mishear: "A-L-L-E-N-S" → "K-L-L-E-N-S"; the mailbox can't be verified
+ * live), and the first automated email fires within seconds of intake — so
+ * every call-captured email gets a read-back reason, and a high-confidence
+ * domain typo is corrected up front. Local parts are NEVER touched
+ * (email-typo-correction contract): a wrong local part is only discoverable
+ * by asking the caller, which is what the reason drives.
+ * extracted.email_raw carries what intake normalization rejected (the
+ * normalizer nulls non-regex emails before this runs) so invalid captures
+ * still get their reason — and a missing-dot typo its fix.
+ */
+function deriveEmailReview(extracted = {}) {
+  const needsConfirmation = [];
+  let normalizedEmail = null;
+  const rawEmail = String(extracted.email || extracted.email_raw || '').trim().toLowerCase();
+  if (rawEmail) {
+    // URL-shaped local part ("www.cw63@gmail.com") = transcription garble the
+    // normalizer already demoted to email_raw. Classify it email_invalid
+    // BEFORE domain correction — a garbled local part must never be repaired
+    // into an adoptable address (the literal may be a stranger's mailbox).
+    if (looksGarbledTranscriptEmail(rawEmail)) {
+      needsConfirmation.push('email_invalid');
+      return { normalizedEmail, needsConfirmation };
+    }
+    // Correction BEFORE shape classification: correctEmailDomain repairs
+    // shapes the basic regex rejects ("jane@gmailcom" → missing-dot rule), so
+    // classifying first would strand exactly the typos the adopt path fixes.
+    const candidate = correctEmailDomain(rawEmail);
+    if (candidate && meetsConfidence(candidate.confidence, 'high')) {
+      normalizedEmail = candidate.corrected;
+      needsConfirmation.push('email_unverified');
+    } else if (!BASIC_EMAIL_SHAPE.test(rawEmail)) {
+      needsConfirmation.push('email_invalid');
+    } else {
+      needsConfirmation.push('email_unverified');
+    }
+  }
+  return { normalizedEmail, needsConfirmation };
+}
+
+/**
+ * Merge needs_confirmation reasons across calls on the same lead. Reasons are
+ * read-back reminders that persist until the office confirms them — a later
+ * call that never restates the address/email must not erase the earlier call's
+ * warnings (the lead's extracted_data is otherwise a rolling latest-call
+ * snapshot, so a quick follow-up call was wiping address_unverified /
+ * email_unverified off the lead). Union of both, with one supersede rule: an
+ * address recovered-and-validated on the newer call replaces the stale
+ * address_unverified.
+ */
+function mergeNeedsConfirmation(prior, next) {
+  const nextArr = Array.isArray(next) ? next : [];
+  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
+  return nextArr.includes('address_recovered')
+    ? merged.filter((r) => r !== 'address_unverified')
+    : merged;
 }
 
 /**
@@ -459,6 +600,8 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   deriveCallReviewBridge,
+  deriveEmailReview,
+  mergeNeedsConfirmation,
   detectRentalSignal,
   streetCompareKey,
   canAutoRoute,

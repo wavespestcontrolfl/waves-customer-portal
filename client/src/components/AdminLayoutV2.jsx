@@ -19,6 +19,7 @@ import { cn } from "./ui/cn";
 import { Building2 } from "lucide-react";
 import {
   LayoutDashboard,
+  Camera,
   Users,
   ClipboardList,
   Calendar,
@@ -52,6 +53,7 @@ import {
   Send,
   Newspaper,
   Bot,
+  Leaf,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags } from "../hooks/useFeatureFlag";
@@ -112,6 +114,7 @@ const NAV_SECTIONS = [
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
+      { path: "/admin/lawn-assessments", icon: Camera, label: "Assessments" },
     ],
   },
   {
@@ -123,6 +126,10 @@ const NAV_SECTIONS = [
   {
     section: "Field & Equipment",
     items: [
+      // The standalone photo-scoring flow (/admin/lawn-assessment) survived the
+      // V2 shell cutover as a route but lost its nav entry — restore it so the
+      // upload → analyze → review-scores area is reachable again.
+      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/price-match", icon: Tags, label: "Price Match" },
@@ -207,6 +214,16 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
   }, [location.pathname, isMobile]);
+
+  // .admin-main is the scroll container (the window never scrolls in this
+  // shell), so the browser's scroll restoration can't reach it. Snap to the
+  // top on navigation so pages don't open at the previous page's scroll
+  // position. "instant" opts out of the shell's smooth scroll-behavior —
+  // animating across a route change is disorienting.
+  const mainRef = useRef(null);
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0, behavior: "instant" });
+  }, [location.pathname]);
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
@@ -606,6 +623,7 @@ export default function AdminLayoutV2() {
           background: "var(--surface-page)",
         }}
         className="admin-main"
+        ref={mainRef}
       >
         <Outlet />
       </div>

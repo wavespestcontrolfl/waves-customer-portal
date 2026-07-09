@@ -8,8 +8,8 @@ const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
-const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
@@ -138,7 +138,6 @@ const reportEventLimiter = rateLimit({
   message: { error: 'Too many report events. Please try again in a minute.' },
 });
 
-const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const ALLOWED_REPORT_EVENTS = new Set([
   'service_report_viewed',
   'ai_summary_viewed',
@@ -213,8 +212,16 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // Only the /data route resolves it (staffCanViewSuppressed — the same
   // staff-JWT signal as the Phase-1b suppressed-report gate); PDF, ask, and
   // every other caller stays a customer view.
-  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer });
+  // mode rides into the builder so mode-sensitive copy (the pest Visit
+  // Summary narrative) can exclude the live-only next appointment from
+  // pdf/static text — the field-level strip below can't reach prose.
+  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer, mode });
   if (service?.report_template_version !== 'service_report_v1') return data;
+
+  // nextAppointment is LIVE-VIEW ONLY: cached PDFs / static renders are
+  // content-key-insensitive snapshots, and a reschedule after render would
+  // leave a stale appointment time fossilized in the downloadable document.
+  if (mode !== 'live') delete data.nextAppointment;
 
   // buildPestPressureCustomerView returns null only when Pest Pressure
   // is hidden from the customer (feature disabled, showOnCustomerReport
@@ -310,7 +317,8 @@ async function findProjectByReportSegment(segment) {
     .leftJoin('technicians as t', 'p.created_by_tech_id', 't.id')
     .select(
       'p.*',
-      'c.first_name', 'c.last_name', 'c.city', 'c.state',
+      'c.first_name', 'c.last_name', 'c.email as customer_email', 'c.phone as customer_phone',
+      'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -374,26 +382,19 @@ router.get('/project/:token/data', async (req, res, next) => {
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
     }));
 
-    let upcomingAppointment = null;
-    const appointmentSelect = [
-      's.id',
-      's.service_type',
-      's.scheduled_date',
-      's.window_start',
-      's.window_end',
-      's.status',
-      'st.name as technician_name',
-    ];
-    const todayET = etDateString();
-    if (project.scheduled_service_id) {
-      upcomingAppointment = await db('scheduled_services as s')
-        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
-        .where('s.scheduled_date', '>=', todayET)
-        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
-        .leftJoin('technicians as st', 's.technician_id', 'st.id')
-        .select(appointmentSelect)
-        .first();
-    }
+    // The report labels this "Follow-up" / "your next visit", so it must be
+    // the documented visit's own continuation — never the visit the report
+    // documents (the old bug: on the service day the linked appointment is
+    // the just-treated visit itself, so the report printed today's service
+    // as its own follow-up), and never an unrelated appointment on the
+    // customer's calendar (a shareable report token must not disclose the
+    // routine schedule). Scoping rules live in the shared helper, which the
+    // admin project detail endpoint also uses so the staff preview matches
+    // this page.
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    });
 
     // WDO: serve the as-sent findings snapshot archived at send time, so the
     // public link always matches the emailed signed FDACS-13645 PDF even if
@@ -422,7 +423,22 @@ router.get('/project/:token/data', async (req, res, next) => {
       status: project.status,
       title: project.title,
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
+      // Customer email/phone for the hero contact lines — the report hero
+      // mirrors the customer estimate, which prints the recipient's own
+      // contact block under the headline. NEVER on a WDO: sendWdoReportCopies
+      // emails this same public link to the third parties named on the FDACS
+      // form (realtor/title company), and a link the system itself hands to
+      // outsiders must not carry the homeowner's direct contact details.
+      // Every other project type's link is sent to the customer only.
+      customerEmail: project.project_type === 'wdo_inspection' ? null : (project.customer_email || null),
+      customerPhone: project.project_type === 'wdo_inspection' ? null : (project.customer_phone || null),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
+      // Full service address for the hero — the report page mirrors the
+      // customer estimate, which shows the street address under the headline.
+      customerAddress: [
+        [project.address_line1, project.address_line2].filter(Boolean).join(' ').trim(),
+        [project.city, [project.state, project.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+      ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
@@ -760,17 +776,17 @@ router.post('/:token/ask', async (req, res, next) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const [data, nextAppointment] = await Promise.all([
-      buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' }),
-      db('scheduled_services')
-        .where({ customer_id: service.customer_id })
-        .where('scheduled_date', '>=', etDateString())
-        .whereNotIn('status', ['cancelled', 'completed', 'complete'])
-        .orderBy('scheduled_date')
-        .orderBy('window_start')
-        .first('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'status')
-        .catch(() => null),
-    ]);
+    const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' });
+    // The Q&A answer and the report hero must never disagree about the next
+    // visit — reuse the builder's service-line-matched nextAppointment (the
+    // old standalone query here was any-line and included stale rows).
+    const nextAppointment = data.nextAppointment
+      ? {
+        service_type: data.nextAppointment.serviceType,
+        scheduled_date: data.nextAppointment.scheduledDate,
+        window_start: data.nextAppointment.windowStart,
+      }
+      : null;
 
     const productContext = await loadReportAssistantProductContext(data).catch(() => ({ byApplicationId: {}, byProductName: {} }));
     const answer = answerServiceReportQuestion({
@@ -1037,7 +1053,30 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer }));
+      const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer });
+      // "Your Visit, in Motion" — surface the tech-approved recap inside the
+      // report (owner ask 2026-07-05; the standalone /recap/:token player was
+      // retired 2026-07-09 — the report is now the only surface). Pest reports
+      // only, and only when an approved rendered video actually exists (owner
+      // 2026-07-09). Live views only: the player streams
+      // /reports/:token/recap/video, meaningless in pdf/static renders.
+      // Best-effort — never blocks.
+      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly && v1Data.serviceLine === 'pest') {
+        try {
+          const { getRecap } = require('../services/service-report/recap-pipeline');
+          const recap = await getRecap(service.scheduled_service_id);
+          if (recap && recap.status === 'approved' && recap.s3_key) {
+            v1Data.recap = { ready: true, durationMs: recap.duration_ms || null };
+          }
+        } catch { /* best-effort */ }
+      }
+      // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
+      // Live views only — pdf/static/sms_preview renders never mount the scene,
+      // so the print pipeline stays byte-identical.
+      if (mode === 'live') {
+        v1Data.glassDefault = true;
+      }
+      return res.json(v1Data);
     }
 
     res.json({

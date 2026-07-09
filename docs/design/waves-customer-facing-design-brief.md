@@ -118,3 +118,16 @@ When writing the full spec, the following need answers:
 This is a direction, not a spec. A full detailed spec comparable to the admin document should be written before any of these surfaces are redesigned. The admin tier 1 migration (Dashboard, Dispatch, Customers, Estimates, Communications) takes priority in the build order — customer-facing work begins after admin is stable and Virginia has signed off.
 
 **Strict scope boundary: if Claude Code is working on admin surfaces, it does not touch customer-facing surfaces. And vice versa.**
+
+---
+
+## Addendum — Estimate surface: liquid-glass direction (owner-approved 2026-07-04)
+
+The estimate page no longer follows the warm-serif direction sketched above. After an
+all-day live preview session, the owner approved a **liquid-glass** direction for the
+estimate surface specifically: system SF type stack with a deep-blue heading hierarchy
+(`#04395E`), translucent glass surface tiers over a mesh-gradient scene, and gold accent
+CTAs. The authoritative spec is `docs/design/estimate-glass-plan.md` (implementation) and
+`docs/design/estimate-glass-blueprint.js` (approved behavior); shipped dark behind
+`?glass=1` (PRs #2358/#2359 + the copy PR). The rest of this brief still governs the other
+customer surfaces (booking, invoice, portal, follow-up) until their own specs exist.

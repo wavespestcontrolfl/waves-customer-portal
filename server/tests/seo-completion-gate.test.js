@@ -248,3 +248,29 @@ describe('seo-completion-gate', () => {
     });
   });
 });
+
+describe('detectHardcodedPrice / detectPii parity (regression)', () => {
+  const { detectHardcodedPrice, detectPii } = SeoCompletionGate._internals;
+
+  test('comma-grouped price is detected — "$1,200" previously produced no finding', () => {
+    expect(detectHardcodedPrice('A termite bond costs $1,200 per year flat.')).toBe(true);
+    expect(detectHardcodedPrice('Bait stations cost $9 each.')).toBe(true);
+  });
+  test('regulatory-fine exemption now matches content-guardrails (single-sourced policy)', () => {
+    expect(detectHardcodedPrice('The county ordinance carries fines of up to $1,000 per violation.')).toBe(false);
+    expect(detectHardcodedPrice('Use our calculator — quotes land near $1,200 depending on size.')).toBe(false);
+  });
+  test('phone allowlist keys on the FULL number, not the last seven digits', () => {
+    // Same last-7 as the LWR Waves line, different area code → customer PII.
+    expect(detectPii('Call 212-318-7612 anytime.')).toBe(true);
+    expect(detectPii('Call (941) 318-7612 anytime.')).toBe(false);
+  });
+  test('attached phone extensions still match (Codex round 17 — x99 blocked the trailing boundary)', () => {
+    // Supporting blogs skip redaction_passed, so this is the only phone
+    // guard on that path — the extension form must not evade it.
+    expect(detectPii('Call the customer at 212-555-1234x99 to reschedule.')).toBe(true);
+    // Waves' own line with an extension: the CORE number drives the
+    // allowlist compare, so extension digits don't poison the last-10.
+    expect(detectPii('Call (941) 318-7612 ext 2 for the office.')).toBe(false);
+  });
+});

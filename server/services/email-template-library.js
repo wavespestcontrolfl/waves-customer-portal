@@ -6,8 +6,13 @@ const {
   wrapNewsletter,
   ensureLegalTextFooter,
   ctaButton,
+  ctaChip,
+  blockPalette,
+  stripeFooterLine,
 } = require('./email-template');
 const { auditNotificationTemplateIssue } = require('./audit-log');
+const logger = require('./logger');
+const NotificationService = require('./notification-service');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -256,18 +261,24 @@ function normalizeBlocks(blocks) {
 function renderBlocks(blocks, payload) {
   const htmlParts = [];
   const textParts = [];
+  const B = blockPalette();
+  // Only the FIRST rendered CTA gets the primary button; later CTA
+  // blocks render as quiet chips (owner ask 2026-07-05 — templates like
+  // appointment.confirmation carry reschedule + view, and two stacked
+  // primary buttons read as competing asks).
+  let renderedCtaCount = 0;
 
   for (const block of normalizeBlocks(blocks)) {
     if (block.type === 'heading') {
       const content = renderInline(block.content, payload);
       if (content) {
-        htmlParts.push(`<h2 style="margin:0 0 12px 0;font-family:Inter,Arial,sans-serif;font-size:18px;line-height:1.3;color:#0F172A;font-weight:700;">${content}</h2>`);
+        htmlParts.push(`<h2 style="margin:0 0 12px 0;font-family:${B.font};font-size:18px;line-height:1.3;color:${B.heading};font-weight:700;">${content}</h2>`);
         textParts.push(renderInline(block.content, payload, { html: false }).toUpperCase());
       }
     } else if (block.type === 'callout') {
       const content = renderInline(block.content, payload);
       if (content) {
-        htmlParts.push(`<div style="margin:18px 0;padding:14px 16px;border-left:4px solid #FFD700;background:#FDF6EC;color:#334155;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;">${content}</div>`);
+        htmlParts.push(`<div style="margin:18px 0;padding:14px 16px;border-left:4px solid ${B.calloutBorder};background:${B.calloutBg};color:${B.calloutText};font-family:${B.font};font-size:14px;line-height:1.55;">${content}</div>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     } else if (block.type === 'details') {
@@ -280,11 +291,11 @@ function renderBlocks(blocks, payload) {
       }).filter((row) => String(row.valueText || '').trim() !== '');
       if (rows.length) {
         htmlParts.push(`
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
               <tr>
-                <td style="padding:8px 0;font-family:Inter,Arial,sans-serif;font-size:14px;color:#64748B;">${row.labelHtml}</td>
-                <td align="right" style="padding:8px 0;font-family:Inter,Arial,sans-serif;font-size:14px;color:#0F172A;font-weight:700;">${row.valueHtml}</td>
+                <td style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
+                <td align="right" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
               </tr>
             `).join('')}
           </table>
@@ -295,7 +306,9 @@ function renderBlocks(blocks, payload) {
       const href = block.url_variable ? textFor(payload, block.url_variable) : block.url;
       if (href) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
-        htmlParts.push(`<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(href), escapeHtml(label))}</div>`);
+        const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
+        renderedCtaCount += 1;
+        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0 9px 0' : '9px 0 24px 0'};text-align:center;">${render(escapeHtml(href), escapeHtml(label))}</div>`);
         textParts.push(`${label}: ${href}`);
       }
     } else if (block.type === 'image') {
@@ -323,17 +336,21 @@ function renderBlocks(blocks, payload) {
         else if (href) textParts.push(href);
       }
     } else if (block.type === 'divider') {
-      htmlParts.push('<hr style="border:none;border-top:1px solid #E2E8F0;margin:22px 0;" />');
+      htmlParts.push(`<hr style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
       textParts.push('---');
     } else if (block.type === 'signature') {
       const content = renderInline(block.content || 'The Waves Pest Control team', payload);
-      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.58;color:#334155;">${content}</p>`);
+      // white-space:pre-line lets authored signatures split onto two lines
+      // ("We look forward to servicing your home.\n— The Waves Team")
+      // without HTML in block content; single-line signatures render
+      // exactly as before.
+      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};white-space:pre-line;">${content}</p>`);
       textParts.push(renderInline(block.content || 'The Waves Pest Control team', payload, { html: false }));
     } else {
       const content = renderInline(block.content, payload);
       if (content) {
         const small = block.type === 'small_note';
-        htmlParts.push(`<p style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:Inter,Arial,sans-serif;font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? '#64748B' : '#334155'};">${content}</p>`);
+        htmlParts.push(`<p style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     }
@@ -449,6 +466,38 @@ async function activeSuppressionFor(template, email, suppressionGroupKey) {
   )) || null;
 }
 
+// A suppressed recipient blocks the send BEFORE SendGrid (correct — never
+// bypass bounce management), but until now the blocked email_messages row was
+// the only trace: an invoice, payment-failure, or appointment email for a
+// bounce-suppressed customer silently went nowhere. Surface every blocked
+// operational send to the admin notification feed, deduped per address so a
+// dunning series doesn't stack alerts. Marketing-stream blocks stay silent —
+// an unsubscribe doing its job is not an incident.
+// Best-effort: an alert failure must never fail (or retry-loop) the send path.
+async function alertBlockedOperationalSend({ template, suppressionGroupKey, to, suppression }) {
+  try {
+    if (isMarketingSend(template, suppressionGroupKey)) return;
+    const email = String(to || '').trim().toLowerCase();
+    if (!email) return;
+    const dedupeKey = `email-send-blocked:${email}`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '168 hours'"))
+      .first('id');
+    if (existing) return;
+    const suppressionType = String(suppression?.suppression_type || 'unknown');
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Email blocked by suppression',
+      `${template.template_key} to ${email} was not sent — address is suppressed (${suppressionType}). The customer is not receiving operational email; collect a working address.`,
+      { link: '/admin/communications', metadata: { dedupeKey, template_key: template.template_key, suppression_type: suppressionType } },
+    );
+  } catch (err) {
+    logger.warn(`[email-template-library] blocked-send alert failed: ${err.message}`);
+  }
+}
+
 async function loadTemplateByKey(templateKey) {
   const template = await db('email_templates').where({ template_key: templateKey }).first();
   if (!template) return null;
@@ -469,9 +518,20 @@ async function loadVersion(versionId) {
   return version;
 }
 
-function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
+// A NULL/blank first_name (phone-captured leads, business accounts) would
+// render the greeting as "Hi ," — first_name is not a validated-required
+// variable, and ~20 send sites pass it through bare. Defaulting here covers
+// every template at once. Applied AFTER requiredPayloadMissing so templates
+// that DO declare first_name as required still fail closed on a missing value.
+function payloadWithNameFallback(payload = {}) {
+  if (String(payload.first_name ?? '').trim()) return payload;
+  return { ...payload, first_name: 'there' };
+}
+
+function renderTemplate({ template, version, payload: rawPayload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
   if (!template || !version) throw new Error('template and version required');
-  const missingPayload = requiredPayloadMissing(template, payload);
+  const missingPayload = requiredPayloadMissing(template, rawPayload);
+  const payload = payloadWithNameFallback(rawPayload);
   const subject = renderInline(version.subject || template.name, payload, { html: false }).trim();
   const previewText = renderInline(version.preview_text || '', payload, { html: false }).trim();
   let { bodyHtml, bodyText } = renderBlocks(version.blocks, payload);
@@ -482,16 +542,38 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
     bodyText = [bodyText, defaultCta.bodyText].filter(Boolean).join('\n\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
+  // Billing-family templates carry the Stripe trust line (owner scope
+  // 2026-07-05): invoice.sent / invoice.receipt / invoice.followup_*,
+  // deposit.* payment receipts, the billing_late_payment_* dunning series,
+  // and payer.statement.* NET statements. This renderer is the path
+  // production sends actually take, so the line must live here, not only
+  // in invoice-email.js's SMTP fallback.
+  const templateKey = String(template.template_key || '');
+  const isInvoiceTemplate = templateKey.startsWith('invoice.')
+    || templateKey.startsWith('deposit.')
+    || templateKey.startsWith('billing_late_payment')
+    || templateKey.startsWith('payer.statement');
+  // Under glass (now the only email theme) the default "Questions?" line is
+  // dropped (owner call 07-06 — the pill header and fine print already carry
+  // the phone); billing templates keep the Stripe trust line.
+  const serviceFooter = isInvoiceTemplate ? stripeFooterLine() : null;
+  // A marketing-stream template pinned to service chrome (referral.invite)
+  // is still a commercial email — the visible unsubscribe link must survive
+  // the wrapper swap. unsubscribeUrl is only resolved for marketing-stream
+  // sends, so plain service emails are unaffected.
+  const unsubFooterHtml = unsubscribeUrl
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from referral emails.`
+    : null;
   const footerNote = mode === 'marketing'
     ? null
-    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:#006B99;text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
+    : [serviceFooter, unsubFooterHtml].filter(Boolean).join(' ') || null;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
     : bodyText;
-  const text = mode === 'marketing'
+  const text = (mode === 'marketing' || unsubscribeUrl)
     ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
     : textBody;
 
@@ -779,12 +861,24 @@ async function sendTemplate({
     throw err;
   }
 
+  // A template may pin service chrome while riding a marketing_* suppression
+  // stream (referral.invite — owner directive 2026-07-06: user-unsubscribable
+  // via marketing_referral, rendered like the service emails). The pin is
+  // layout_wrapper_id === 'service_pinned_v1'; every other template keeps the
+  // stream-driven newsletter wrapper, and the unsubscribe/ASM requirements
+  // above are untouched (they key on isMarketingSend, not the wrapper).
+  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
+  // A pin must FORCE 'service' (not just skip the marketing override):
+  // renderTemplate falls back to template.mode, and a pinned template may
+  // carry mode 'marketing' from its seed (referral.invite does).
   const rendered = renderTemplate({
     template,
     version,
     payload,
     unsubscribeUrl: effectiveUnsubscribeUrl,
-    modeOverride: isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null,
+    modeOverride: pinsServiceChrome
+      ? 'service'
+      : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
   });
   if (rendered.missingPayload.length) {
     const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
@@ -897,6 +991,12 @@ async function sendTemplate({
           return await resolveIdempotencyCollision(err, idempotencyKey);
         }
       }
+      await alertBlockedOperationalSend({
+        template,
+        suppressionGroupKey: effectiveSuppressionGroupKey,
+        to,
+        suppression,
+      });
       return { sent: false, blocked: true, reason, message: blocked, rendered };
     }
   }
@@ -1018,6 +1118,7 @@ module.exports = {
   normalizeBlocks,
   validationFor,
   redactedPayloadSnapshot,
+  redactEmailAddresses,
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,

@@ -1018,6 +1018,31 @@ const EstimateConverter = {
     // converter auto-pick the next feasible zone date. Self-accept paths
     // still auto-schedule when there's no reservation row.
     const skipAutoSchedule = opts.skipAutoSchedule === true;
+    // Prepay-on-book (admin-schedule accept-on-book): the caller books the
+    // first visit itself under skipAutoSchedule, so the converter can't see
+    // that row and would otherwise anchor the renewal term to today — a
+    // future-dated booking could then renew before its first service. The
+    // caller passes the booked first date here (date-only 'YYYY-MM-DD').
+    const annualPrepayTermStart = typeof opts.annualPrepayTermStart === 'string' && opts.annualPrepayTermStart
+      ? opts.annualPrepayTermStart
+      : null;
+    // Coverage override for a prepay accept made WHILE booking: the booked
+    // scheduled_services rows are the coverage series, so the term's
+    // coverage_service_type must equal the BOOKED service_type (and the visit
+    // count/cadence the booked series') for attach/stamp to find them. Only
+    // honored as a pair — a service type without a positive visit count would
+    // create a term applyPrepaidCoverageForTerm can't stamp, so an incomplete
+    // override falls back to the converter's own derivation instead.
+    const annualPrepayCoverageOverride = (
+      typeof opts.coverageServiceType === 'string' && opts.coverageServiceType
+      && Number.isInteger(opts.coverageVisitCount) && opts.coverageVisitCount > 0
+    )
+      ? {
+        serviceType: opts.coverageServiceType,
+        visitCount: opts.coverageVisitCount,
+        cadence: typeof opts.coverageCadence === 'string' && opts.coverageCadence ? opts.coverageCadence : undefined,
+      }
+      : null;
     const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
@@ -1135,12 +1160,33 @@ const EstimateConverter = {
     const billingCadence = inferredFrequencyKey
       ? resolveBillingCadence({
           monthlyRate,
+          annualRate: parseFloat(estimate.annual_total || 0),
           frequencyKey: inferredFrequencyKey,
           estimateData,
           fallbackFrequencyKey: inferredFrequencyKey,
         })
       : null;
 
+    // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
+    // their membership model — an unconditional per_application stamp would
+    // stop the monthly cron for them and start billing every completion per
+    // visit (Codex round-7 P1). "Current member" = live pipeline stage + a
+    // positive monthly_rate + not already an estimate-flow mode. Everyone
+    // else (new signups, leads, churned/dormant re-signups) converts to
+    // per-visit billing per the owner ruling; annual-prepay accepts are
+    // re-stamped at the term choke point either way.
+    const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+      && Number(customer.monthly_rate) > 0
+      && !['per_application', 'annual_prepay'].includes(customer.billing_mode || '');
+    // Pre-migration compatibility (Codex round-8): billing_mode +
+    // per_application_fee ship in migration 20260709000010 — on a database
+    // that hasn't run it (preview env, deploy window) the update keys would
+    // fail the whole acceptance with "column does not exist". One probe
+    // covers both columns (same migration).
+    let billingModeColumnsExist = false;
+    try {
+      billingModeColumnsExist = await database.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy update shape */ }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -1174,6 +1220,44 @@ const EstimateConverter = {
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
           monthly_rate: monthlyRate,
+          // Estimate-flow recurring customers bill PER VISIT (owner ruling
+          // 2026-07-09), never as a monthly membership subscription: the
+          // monthly billing cron skips non-membership modes and completion
+          // collects per_application_fee each visit. Annual-prepay accepts are
+          // re-stamped 'annual_prepay' at their term choke point
+          // (createTermForAnnualPrepay), which every prepay path runs through.
+          // CURRENT monthly members accepting an add-on keep their existing
+          // model (see preservesExistingMembership above). Column-guarded —
+          // pre-migration accepts keep the legacy update shape.
+          ...(billingModeColumnsExist ? {
+            billing_mode: preservesExistingMembership
+              ? (customer.billing_mode || null)
+              : 'per_application',
+          // Exact per-visit charge at the accepted billing cadence (quarterly
+          // derives from the exact annual: $98.00, not 3 x rounded-monthly
+          // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
+          // only — the same gate the scheduled-row estimated_price writer
+          // uses: a multi-service plan creates one row per service, and a
+          // customer-level whole-plan fee would bill the full package on
+          // EVERY row's completion (Codex P1). Multi-service plans leave the
+          // fee NULL so completion keeps its existing per-row precedence.
+            // An already-per_application customer accepting an ADD-ON keeps
+            // their established fee (Codex round-10): the customer-level fee
+            // is the fallback for EVERY per-app visit without a row price,
+            // so overwriting it with the add-on's cadence amount would
+            // re-price the ORIGINAL series; the add-on's own rows carry
+            // their explicit estimated_price (single-service writer).
+            per_application_fee: preservesExistingMembership
+              ? (customer.per_application_fee ?? null)
+              : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
+                ? Number(customer.per_application_fee)
+                : ((recurringServicesForConversion.length === 1
+                  && billingCadence && Number(billingCadence.amount) > 0)
+                  ? Number(billingCadence.amount)
+                  : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+                    ? Number(monthlyRate)
+                    : null))),
+          } : {}),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former
@@ -1333,6 +1417,10 @@ const EstimateConverter = {
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `skipAutoSchedule=true (manual Mark Won)`,
       );
+      // Prepay-on-book: the caller booked the first visit itself — align the
+      // annual-prepay renewal term to that booked date (else it defaults to
+      // today in createTermForAnnualPrepay).
+      if (annualPrepayTermStart) termStartDate = annualPrepayTermStart;
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;
@@ -1517,6 +1605,30 @@ const EstimateConverter = {
               baseRate: await resolveCommercialPrepayBaseRate(customerId, { database }),
             })
             : undefined;
+          // Acceptance deposit credits against this prepay invoice through
+          // create()'s depositCredit param, exactly like the standard branch
+          // below — prepay-annual accepts owe the $49 deposit (owner decision
+          // 2026-07-05), and this invoice is the only one a prepay estimate
+          // ever mints, so a credit missed here would strand on the ledger
+          // (covered visits invoice nothing at completion, and the
+          // required-path sweep never refunds it). That is also why the
+          // ledger read fails CLOSED: the accept gate may have just verified
+          // a real deposit, so a read error must abort the accept
+          // (retryable) rather than mint the year with the credit silently
+          // dropped. A clean null read is the legitimate no-deposit path
+          // (legacy/manual conversions). Ledger read and consumption both
+          // ride `database` (the accept transaction when called from
+          // accept): the credit line exists IFF the ledger consumed exactly
+          // that amount, or the whole accept rolls back — never an accepted
+          // prepay beside an unconsumed deposit row.
+          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+          let prepayDepositCredit;
+          try {
+            prepayDepositCredit = await pendingDepositCredit(estimateId, database);
+          } catch (ledgerErr) {
+            throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
+          }
+          const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
           const inv = await InvoiceService.create({
             database,
             customerId,
@@ -1529,11 +1641,31 @@ const EstimateConverter = {
             notes: prepayNotes,
             dueDate: etDateString(),
             ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
+            ...(requestedPrepayDepositCredit > 0
+              ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
+              : {}),
           });
+          // Assign the id BEFORE consuming the credit: an allocation-mismatch
+          // throw below must leave draftInvoiceId set so the outer cleanup can
+          // void the just-created invoice on a no-caller-transaction run
+          // (accept-path runs ride the caller trx and roll back wholesale).
           draftInvoiceId = inv?.id || null;
-          // Quote the amount actually invoiced/charged (tax-inclusive) so the
-          // customer/admin messaging matches the PaymentIntent. For residential
-          // (untaxed) inv.total === annualAmount, so this is a no-op there.
+          const appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
+          if (inv?.id && appliedPrepayDepositCredit > 0) {
+            const allocated = await consumeDepositCredit({
+              estimateId,
+              amount: appliedPrepayDepositCredit,
+              invoiceId: inv.id,
+              trx: database,
+            });
+            if (Math.round(allocated * 100) !== Math.round(appliedPrepayDepositCredit * 100)) {
+              throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
+            }
+          }
+          // Quote the amount actually invoiced/charged (tax-inclusive, net of
+          // the deposit credit) so the customer/admin messaging matches what
+          // the pay link collects. For residential (untaxed, no deposit)
+          // inv.total === annualAmount, so this is a no-op there.
           draftInvoiceAmount = inv?.total != null ? Number(inv.total) : annualAmount;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
 
@@ -1549,7 +1681,18 @@ const EstimateConverter = {
           let coverageServiceType;
           let coverageVisitCount;
           let coverageCadence;
-          if (recurringServicesForConversion.length === 1) {
+          if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
+            // Prepay-on-book: the caller (admin-schedule accept-on-book) already
+            // created the coverage series with the BOOKED service_type/cadence
+            // and the operator's visit count — those rows, not a derived label,
+            // are what attach/stamp must match, so the override wins. Gated to
+            // the single-recurring case like the derivation below, so the
+            // (0-recurring) prepay edge keeps its no-coverage/no-seeding shape
+            // and can't grow phantom seeded visits from an override.
+            coverageServiceType = annualPrepayCoverageOverride.serviceType;
+            coverageVisitCount = annualPrepayCoverageOverride.visitCount;
+            coverageCadence = annualPrepayCoverageOverride.cadence;
+          } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
             const cadence = RecurringAppointmentSeeder.inferRecurringPattern({
@@ -1617,11 +1760,16 @@ const EstimateConverter = {
               prepayInvoiceId: draftInvoiceId,
               planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
-              // The TAX-INCLUSIVE invoice total (what the customer actually pays).
-              // Admin/portal read the term's prepayAmount as the paid amount and
-              // coverage stamping splits it across visits. Residential is untaxed
-              // so draftInvoiceAmount === annualAmount there.
-              prepayAmount: draftInvoiceAmount,
+              // The GROSS tax-inclusive prepay value (what the customer pays in
+              // total for the year): the net invoice total PLUS the acceptance
+              // deposit already collected and credited against it. Admin/portal
+              // read the term's prepayAmount as the paid amount and coverage
+              // stamping splits it across visits — recording the net would
+              // understate the year by the deposit. Residential with no deposit
+              // is untaxed so this stays === annualAmount there.
+              prepayAmount: draftInvoiceAmount != null
+                ? Math.round((draftInvoiceAmount + appliedPrepayDepositCredit) * 100) / 100
+                : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get
               // stamped on payment. A single service that couldn't be derived
@@ -1917,6 +2065,21 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+// Annual prepay supports exactly ONE recurring coverage unit — the same math
+// as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
+// guard (recurring.services lines + any supplemental companion a solo primary
+// absorbs into one combo visit). Shared with the public /deposit-intent mirror
+// so a deposit is never collected for a prepay the converter will 422.
+module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUnitCount(estimateData = {}) {
+  const recurring = recurringServicesFromEstimateData(estimateData);
+  const companions = supplementalCompanionLines(estimateData);
+  const soloKey = recurring.length === 1 ? recurringServiceKey(recurring[0]) : null;
+  const absorbed = soloKey
+    ? companions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
+      soloKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
+    : [];
+  return recurring.length + absorbed.length;
+};
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
 module.exports.reservedRowComboRewrites = reservedRowComboRewrites;

@@ -1162,23 +1162,37 @@ router.post('/rewrite-sms', async (req, res) => {
       }
     }
 
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const msg = await client.messages.create({
-      model: MODELS.WORKHORSE,
-      max_tokens: 500,
-      messages: [{
-        role: 'user',
-        content: buildSmsRewritePrompt({
-          body: cleanBody,
-          customer,
-          lastInboundMessage: req.body?.lastInboundMessage,
-          recentMessages: req.body?.recentMessages,
-        }),
-      }],
+    const rewritePrompt = buildSmsRewritePrompt({
+      body: cleanBody,
+      customer,
+      lastInboundMessage: req.body?.lastInboundMessage,
+      recentMessages: req.body?.recentMessages,
     });
 
-    const rewritten = cleanSmsRewriteOutput(msg.content?.[0]?.text || '');
+    // Tone rewrite runs on Claude Sonnet (ROUTES.smsToneRewrite — owner
+    // directive 2026-07-05); a routed miss falls back to the original
+    // WORKHORSE call so the composer button never breaks.
+    let rewriteText = '';
+    const routed = await require('../services/llm/call')
+      .dispatch(MODELS.ROUTES.smsToneRewrite, { text: rewritePrompt, jsonMode: false, maxTokens: 500 });
+    // A blank routed body counts as a miss (provider-side empty response /
+    // content-filtered output can come back ok at the HTTP level) — otherwise
+    // this would 502 the composer button while the fallback could still work.
+    if (routed.ok && (routed.text || '').trim()) {
+      rewriteText = routed.text;
+    } else {
+      logger.warn(`[sms-rewrite] routed rewrite unavailable (${routed.ok ? 'empty_response' : routed.reason}); falling back to ${MODELS.WORKHORSE}`);
+      const Anthropic = require('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      const msg = await client.messages.create({
+        model: MODELS.WORKHORSE,
+        max_tokens: 500,
+        messages: [{ role: 'user', content: rewritePrompt }],
+      });
+      rewriteText = msg.content?.[0]?.text || '';
+    }
+
+    const rewritten = cleanSmsRewriteOutput(rewriteText);
     if (!rewritten) return res.status(502).json({ error: 'rewrite returned empty message' });
     res.json({ body: rewritten });
   } catch (err) {

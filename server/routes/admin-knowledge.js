@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const WikiCompiler = require('../services/knowledge/wiki-compiler');
 const WikiQA = require('../services/knowledge/wiki-qa');
 const WikiLinter = require('../services/knowledge/wiki-linter');
@@ -217,8 +217,9 @@ router.post('/import-blog-posts', async (req, res, next) => {
 // HEALTH CHECK
 // =========================================================================
 
-// GET /api/admin/knowledge/health
-router.get('/health', async (req, res, next) => {
+// GET /api/admin/knowledge/health — admin-only: the health report exposes
+// brain-wide review/trust state, the owner's surface rather than a tech's.
+router.get('/health', requireAdmin, async (req, res, next) => {
   try {
     const result = await WikiLinter.runHealthCheck();
     res.json(result);

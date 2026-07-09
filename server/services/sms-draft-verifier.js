@@ -130,7 +130,10 @@ Rewrite the reply now. State ONLY facts present in the context above. For anythi
 }
 
 module.exports = {
-  VERIFIER_MODEL: MODELS.FLAGSHIP,
+  // DEEP (fable-5): the verify loop is the safety net behind a mini drafting
+  // model, so it gets the deepest reasoner. Callers go through
+  // services/llm/deep.js (thinking-strip + refusal fallback to FLAGSHIP).
+  VERIFIER_MODEL: MODELS.DEEP,
   buildVerifierSystemPrompt,
   buildVerifierUserPrompt,
   parseVerifierResponse,

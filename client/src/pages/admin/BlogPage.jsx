@@ -1620,7 +1620,10 @@ function PostEditor({ post, onBack, onUpdate }) {
         >
           Save Draft
         </button>
-        {(editing.status === "published" || editing.content) && (
+        {/* Share only for LIVE posts — the server enforces the same gate
+            (409 otherwise): sharing a draft/pending post publishes a dead
+            404 link to every enabled platform. */}
+        {editing.astro_status === "live" && (
           <button
             onClick={handleShareSocial}
             disabled={sharing}

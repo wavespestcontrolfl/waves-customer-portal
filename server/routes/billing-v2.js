@@ -8,6 +8,7 @@ const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const { logAutopay } = require('../services/autopay-log');
 
 router.use(authenticate);
 
@@ -78,6 +79,10 @@ router.get('/', async (req, res, next) => {
         amount: parseFloat(p.amount),
         status: p.status,
         description: p.description,
+        // Same canonical marker billing-cron uses to identify the monthly
+        // obligation. The client's Recurring/One-Time filter and YTD split
+        // read this — it was previously never serialized (always $0.00).
+        type: (p.description || '').includes('WaveGuard Monthly') ? 'recurring' : 'one_time',
         cardBrand: p.card_brand,
         lastFour: p.last_four,
         processor: 'stripe',
@@ -380,7 +385,7 @@ router.put('/cards/:id/default', async (req, res, next) => {
   try {
     const currentDefault = await db('payment_methods')
       .where({ customer_id: req.customerId, is_default: true })
-      .first('id');
+      .first('id', 'autopay_enabled');
 
     const card = await db('payment_methods')
       .where({ id: req.params.id, customer_id: req.customerId })
@@ -388,13 +393,44 @@ router.put('/cards/:id/default', async (req, res, next) => {
 
     if (!card) return res.status(404).json({ error: 'Payment method not found' });
 
-    await db('payment_methods')
-      .where({ customer_id: req.customerId })
-      .update({ is_default: false });
+    // Auto Pay eligibility requires the DEFAULT method to carry
+    // autopay_enabled, so a bare default swap silently stopped charging
+    // while the AutopayCard still showed Active. Carry the flag to the new
+    // default when it's chargeable; otherwise disable autopay honestly.
+    const carriesAutopay = !!currentDefault?.autopay_enabled && currentDefault.id !== card.id;
+    const newCardChargeable = card.processor === 'stripe' && !!card.stripe_payment_method_id;
 
-    await db('payment_methods')
-      .where({ id: req.params.id })
-      .update({ is_default: true });
+    await db.transaction(async (trx) => {
+      await trx('payment_methods')
+        .where({ customer_id: req.customerId })
+        .update({ is_default: false });
+
+      await trx('payment_methods')
+        .where({ id: req.params.id })
+        .update({ is_default: true, ...(carriesAutopay && newCardChargeable ? { autopay_enabled: true } : {}) });
+
+      if (carriesAutopay) {
+        await trx('payment_methods').where({ id: currentDefault.id }).update({ autopay_enabled: false });
+        if (newCardChargeable) {
+          await trx('customers').where({ id: req.customerId }).update({ autopay_payment_method_id: card.id });
+        } else {
+          await trx('customers').where({ id: req.customerId }).update({ autopay_enabled: false, autopay_payment_method_id: null });
+        }
+      }
+    });
+
+    if (carriesAutopay) {
+      const event = newCardChargeable ? 'autopay_method_changed' : 'autopay_disabled';
+      logAutopay(req.customerId, event, {
+        details: {
+          source: 'set_default_card',
+          old_payment_method_id: currentDefault.id,
+          new_payment_method_id: newCardChargeable ? card.id : null,
+        },
+      }).catch((logErr) => {
+        logger.warn(`[billing-v2] autopay log failed for customer ${req.customerId}: ${logErr.message}`);
+      });
+    }
 
     if (currentDefault?.id !== card.id) {
       PaymentLifecycleEmail.sendPaymentMethodUpdated({

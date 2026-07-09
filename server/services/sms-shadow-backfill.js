@@ -124,7 +124,7 @@ function boundContextToInbound(context, inboundAt) {
  * builder so tests can pin the invariants (backdated created_at, shadow
  * status, backfill prompt_version).
  */
-function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs, verify }) {
+function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs, verify, model }) {
   return {
     sms_log_id: inbound.id,
     customer_id: inbound.customer_id,
@@ -136,7 +136,10 @@ function buildBackfillDraftRow({ inbound, parsed, intent, context, draftMs, veri
     flags: JSON.stringify(context.flags || []),
     status: 'shadow',
     drafter: 'house_voice',
-    model: MODELS.FLAGSHIP,
+    // The model that actually produced the draft (routed default /
+    // save-the-sale, or the FLAGSHIP fallback) — judge data must not
+    // attribute a routed draft to FLAGSHIP.
+    model: model || MODELS.FLAGSHIP,
     prompt_version: BACKFILL_PROMPT_VERSION,
     intended_actions: JSON.stringify({
       actions: parsed.intended_actions,
@@ -298,7 +301,7 @@ async function draftOneBackfill(inbound, customer) {
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   // Same draft→verify→revise loop the live drafter uses (v3).
-  const { parsed, passes, converged } = await drafter.generateGroundedDraft({
+  const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
     client,
     context,
     inboundMessage: inbound.message_body,
@@ -311,7 +314,7 @@ async function draftOneBackfill(inbound, customer) {
   }
 
   const row = buildBackfillDraftRow({
-    inbound, parsed, intent, context, draftMs: Date.now() - startedAt, verify: { passes, converged },
+    inbound, parsed, intent, context, draftMs: Date.now() - startedAt, verify: { passes, converged }, model,
   });
   const [inserted] = await db('message_drafts')
     .insert(row)

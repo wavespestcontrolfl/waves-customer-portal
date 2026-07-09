@@ -177,12 +177,12 @@ describe('protocol matcher specialty routing', () => {
     expect(match('Fleas')).toEqual({
       programKey: 'pest',
       visit: 4,
-      reason: 'flea_tick',
+      reason: 'flea_service',
     });
     expect(match('Ticks')).toEqual({
       programKey: 'pest',
       visit: 4,
-      reason: 'flea_tick',
+      reason: 'tick_service',
     });
   });
 });

@@ -2352,7 +2352,15 @@ const InvoiceService = {
    * webhook and pay-v2 confirm handlers wrap the call in their own
    * .catch() with loud error logging.
    */
-  async sendReceipt(invoiceId, { force = false, recordActivity = true } = {}) {
+  // hasEmailLeg: the caller declares whether THIS receipt attempt is paired
+  // with a sendReceiptEmail sidecar (the receipt-delivery queue, the batch
+  // resend, the prepaid completion receipt). It opts the SMS leg into the
+  // email-only channel gate (channelGate 'opt_in' on the payment_receipt
+  // policy) — a paired caller's SMS skips as channel_email_only and the email
+  // carries the receipt. Manual single-channel operator sends (via='sms')
+  // must NOT declare it: the operator explicitly chose the text, and there is
+  // no email leg on that route to carry the receipt (codex round 5).
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -2455,8 +2463,43 @@ const InvoiceService = {
       invoiceId,
       entryPoint: "invoice_receipt_sms",
       metadata: { original_message_type: "receipt" },
+      // Caller-declared (see the sendReceipt option doc above) — only flows
+      // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
+      hasEmailLeg,
     });
     if (sendResult.blocked || sendResult.sent === false) {
+      // Email-only delivery preference is an intentional suppression, not a
+      // failure — return a skip (like payer_billed above) so callers such as
+      // the receipt-delivery queue don't retry/fail a receipt whose email leg
+      // delivered fine.
+      if (sendResult.code === "CHANNEL_EMAIL_ONLY") {
+        logger.info(
+          `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — customer prefers email-only receipts`,
+        );
+        return { sent: false, reason: "channel_email_only" };
+      }
+      // Same for a receipt-texts opt-out (payment_receipt=false or the
+      // portal's payment_confirmation_sms toggle off): the customer asked for
+      // this suppression, so it must not read as a delivery failure.
+      if (sendResult.code === "PURPOSE_OPTED_OUT") {
+        logger.info(
+          `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — customer opted out of receipt texts`,
+        );
+        return { sent: false, reason: "receipt_texts_opted_out" };
+      }
+      // A STOP-style SMS opt-out is permanent until the customer texts START
+      // — retrying can never deliver this leg, so it must not wedge the
+      // receipt job either. (STOP writes a messaging_suppression row, which
+      // the pipeline checks BEFORE consent, so an email-only customer who
+      // texted STOP surfaces here as SUPPRESSED_OPT_OUT rather than
+      // CHANNEL_EMAIL_ONLY.) The email leg — when the customer has one — is
+      // the receipt.
+      if (sendResult.code === "SUPPRESSED_OPT_OUT" || sendResult.code === "SMS_OPTED_OUT") {
+        logger.info(
+          `[invoice] Receipt SMS skipped for ${invoice.invoice_number} — recipient has opted out of SMS (${sendResult.code})`,
+        );
+        return { sent: false, reason: "sms_suppressed" };
+      }
       const err = new Error(
         `receipt SMS blocked: ${sendResult.code || sendResult.reason || "unknown"}`,
       );
@@ -2595,9 +2638,25 @@ const InvoiceService = {
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
-        q.where("invoices.status", "paid").whereNull(
-          "invoices.receipt_sent_at",
-        );
+        q.where("invoices.status", "paid")
+          .whereNull("invoices.receipt_sent_at")
+          // payment_receipt=false customers opted out of receipts on every
+          // channel — their paid invoices are handled, not "needing" a
+          // receipt, and listing them here nudges the operator to resend
+          // against the customer's own preference (the manual resend path is
+          // deliberately not gated). Payer-billed invoices stay listed: the
+          // receipt goes to the payer AP inbox, which homeowner prefs don't
+          // govern.
+          .andWhere(function () {
+            this.whereNotNull("invoices.payer_id").orWhereNotExists(
+              db("notification_prefs")
+                .select(db.raw("1"))
+                .whereRaw(
+                  "notification_prefs.customer_id = invoices.customer_id",
+                )
+                .where("notification_prefs.payment_receipt", false),
+            );
+          });
       } else if (directStatuses.has(normalizedStatus)) {
         q.where("invoices.status", normalizedStatus);
       }
@@ -3464,6 +3523,37 @@ const InvoiceService = {
         ),
       )
       .whereNull("archived_at");
+
+    // Estimate-deposit visibility: deposits live in their own ledger
+    // (estimate_deposits), never as payments/invoices rows, so without this
+    // block collected deposit money is invisible on the invoices surface.
+    // "On hand" = received rows' unapplied remainder (same formula as
+    // pendingDepositCredit); "collected" = all money that ever arrived
+    // (received/credited/refunding/refunded — received_at is only stamped on
+    // real Stripe success). Fail-soft: a ledger read miss must not take down
+    // the invoice stats header.
+    let deposits = { onHand: 0, onHandCount: 0, collected: 0 };
+    try {
+      const [d] = await db("estimate_deposits").select(
+        db.raw(
+          "COALESCE(SUM(GREATEST(amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0), 0)) FILTER (WHERE status = 'received'), 0) as on_hand",
+        ),
+        db.raw(
+          "COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count",
+        ),
+        db.raw(
+          "COALESCE(SUM(amount - COALESCE(refunded_amount, 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
+        ),
+      );
+      deposits = {
+        onHand: parseFloat(d.on_hand),
+        onHandCount: parseInt(d.on_hand_count),
+        collected: parseFloat(d.collected),
+      };
+    } catch (err) {
+      logger.warn(`[invoice] deposit stats read failed: ${err.message}`);
+    }
+
     return {
       total: parseInt(totals.total),
       paid: parseInt(totals.paid),
@@ -3471,6 +3561,7 @@ const InvoiceService = {
       overdue: parseInt(totals.overdue),
       totalCollected: parseFloat(totals.total_collected),
       totalOutstanding: parseFloat(totals.total_outstanding),
+      deposits,
     };
   },
 };

@@ -87,6 +87,37 @@ const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-see
 // claim path doesn't depend on the seeder module loading.
 const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
 
+// The operator-authored text of an intercept brief (title/keywords/thesis/
+// outline/sourcing), for the comparison gate's operator-authorized-
+// competitor exception: a recognized competitor the OPERATOR named there
+// (e.g. the Aptive cancellation brief) routes the draft to the approvable
+// named-competitor review path instead of a hard UNKNOWN_COMPETITOR block.
+// Only operator_intercept opportunities produce text — mined briefs get '',
+// so nothing changes for them. Both gate call sites (runNext and the
+// approval re-check) MUST derive this identically, or a draft parked as
+// approvable would fail its own approval re-evaluation.
+function operatorBriefTextForComparisonGate(opp, brief) {
+  if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return '';
+  const ob = brief?.voice_constraints?.operator_brief || null;
+  if (!ob) return '';
+  return [
+    ob.working_title,
+    ob.primary_kw,
+    ob.thesis,
+    ...(Array.isArray(ob.secondary_kws) ? ob.secondary_kws : []),
+    ...(Array.isArray(ob.outline) ? ob.outline : []),
+    // Sourcing fields are operator-authored too: a REQUIRED competitor
+    // citation (required_sources URL like https://www.orkin.com/...) or a
+    // source note naming the competitor authorizes that name exactly like
+    // the title/outline do. Without these, the binding citation URL itself
+    // read as an unauthorized mention in the draft and hard-blocked the
+    // run at comparison_table_failed instead of the review path the
+    // operator's own brief was steering it to.
+    ...(Array.isArray(ob.required_sources) ? ob.required_sources : []),
+    ...(Array.isArray(ob.source_notes) ? ob.source_notes : []),
+  ].filter(Boolean).join('\n');
+}
+
 // City → GBP location for autonomous gbp_post distribution, backed by the
 // canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the
 // single profile whose service area covers the opportunity's city — never
@@ -464,6 +495,21 @@ class AutonomousRunner {
     const factsCtx = run.facts_sufficiency;
     if (factsCtx && factsCtx.applicable && factsCtx.sufficient && draft) {
       const claimsValidator = getClaimsLedgerValidator();
+      if (!claimsValidator) {
+        // Fail CLOSED (same posture as the uniqueness-gate-unavailable path):
+        // this draft REQUIRES claims validation — a facts_pack was supplied
+        // and the agent was told to emit a ledger — so an unloadable
+        // validator must route to review, not silently skip the
+        // hallucinated-fact P0s.
+        run.claims_ledger_result = { pass: false, findings: [{ severity: 'P1', code: 'CLAIMS_LEDGER_UNAVAILABLE', message: 'claims-ledger-validator module failed to load' }] };
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'claims_ledger_unavailable',
+          reviewer_notes: 'Claims-ledger validator module failed to load — failing closed; draft routed to review instead of publishing unvalidated local claims.',
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_unavailable', { claimToken });
+        return finalized;
+      }
       if (claimsValidator) {
         let claimsResult;
         try {
@@ -498,72 +544,40 @@ class AutonomousRunner {
 
     // 3c. Content guardrails — page-policy checks on the drafted body
     // (hardcoded price on any page type, brand-token leak on multi-domain
-    // pages, FAQ on a policy-blocked service, keyword stuffing). Applies to
-    // every body-content action. P0/P1 → human review.
+    // pages, FAQ on a policy-blocked service, disallowed external links,
+    // keyword stuffing). Applies to every body-content action. P0/P1 →
+    // human review. Module-load failure fails CLOSED below — these are the
+    // price/brand/FAQ/link P0s, and a bad deploy must not silently disable
+    // them while runs keep publishing.
     const contentGuardrails = getContentGuardrails();
-    if (contentGuardrails && draft) {
-      // For a refresh, the draft carries only editable meta — the live page's
-      // domains are frozen by publishRefresh. Hydrate them so the brand-token
-      // check enforces against the page that will actually be written. If we
-      // CAN'T read the live page (null/throw), fail CLOSED: route to review
-      // rather than silently treating it as hub-only and skipping the guard
-      // (which would let a literal-brand draft leak onto a spoke domain).
-      let liveDomains = null;
-      if (brief.action_type === 'refresh_existing_page') {
-        const publisher = getAstroPublisher();
-        if (publisher?.getLiveFrontmatter) {
-          let liveFm;
-          try {
-            liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
-          } catch (err) {
-            logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
-            liveFm = null;
-          }
-          if (liveFm == null) {
-            const finalized = await finalize(run, t0, {
-              outcome: 'skipped_gate_fail',
-              skip_reason: 'refresh_domains_load_failed',
-              reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
-            });
-            await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
-            return finalized;
-          }
-          liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
-        }
-      }
-      // Narrow operator-FAQ exception: an operator_intercept brief whose
-      // seeded manifest explicitly requires an FAQ (operator_brief.
-      // faq_required, derived from the manifest payload — owner directive
-      // 2026-06-11: FAQPage on every intercept post) may keep its FAQ even
-      // on a FAQ-blocked service id (the termite-cluster consumer-protection
-      // posts). Bucket AND the composed brief flag must both agree; mined
-      // opportunities can never set this.
-      const operatorFaqException = opp.bucket === OPERATOR_INTERCEPT_BUCKET
-        && brief?.voice_constraints?.operator_brief?.faq_required === true;
-      // For NEW spoke-targeted posts the publisher stamps frontmatter.domains to
-      // the spoke AFTER these gates run, so the draft's own frontmatter still
-      // reads hub-only here. Pass the brief's resolved spoke domains explicitly
-      // so the brand-token guard enforces against the domain the post will
-      // ACTUALLY publish to — the intentional hub-link anchor is exempt, any
-      // other literal-brand mention on the spoke still fails. Refresh keeps the
-      // live-page domains hydrated above.
-      const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
-      const guardDomains = liveDomains != null
-        ? liveDomains
-        : (spokeDomains.length ? spokeDomains : null);
-      // A spoke seed keeps the coarse 'pest' service for the link gates but tags
-      // a FAQ-blocked pest topic on operator_brief.faq_blocked_topic; fold it
-      // into the service the FAQ-blocked guard sees (faqBlockedFinding already
-      // accepts an array) so a writer-added FAQ on a blocked topic still P0s.
-      const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
-      const baseService = opp.service || brief.service || null;
-      const guardService = faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService;
-      const guardResult = contentGuardrails.evaluate(draft, {
-        service: guardService,
-        primaryKeyword: brief.target_keyword || null,
-        domains: guardDomains,
-        operatorFaqException,
+    if (!contentGuardrails && draft) {
+      run.content_guardrails_result = { pass: false, findings: [{ severity: 'P0', code: 'CONTENT_GUARDRAILS_UNAVAILABLE', message: 'content-guardrails module failed to load' }] };
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_gate_fail',
+        skip_reason: 'content_guardrails_unavailable',
+        reviewer_notes: 'Content-guardrails module failed to load — failing closed; draft routed to review instead of publishing without the price/brand/FAQ/link P0 checks.',
       });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken });
+      return finalized;
+    }
+    if (contentGuardrails && draft) {
+      // Option derivation is shared with the named-competitor approval
+      // re-check (_deriveGuardrailOptions) so the stored-draft revalidation
+      // can never drift from what parked the run.
+      let guardOptions;
+      try {
+        guardOptions = await this._deriveGuardrailOptions(opp, brief);
+      } catch (err) {
+        if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED') throw err;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'refresh_domains_load_failed',
+          reviewer_notes: `Could not read live page frontmatter to enforce the brand-token guard for a multi-domain refresh (${brief.target_url || opp.page_url}) — routed to review (fail-closed).`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'refresh_domains_load_failed', { claimToken });
+        return finalized;
+      }
+      const guardResult = contentGuardrails.evaluate(draft, guardOptions);
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
         const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -582,11 +596,24 @@ class AutonomousRunner {
     // buyer's-guide listicles honest: no disparagement, no self-declared
     // rankings, named competitors only from the curated competitor-facts
     // allowlist, and every named-competitor post routed to a human. Applies to
-    // any body-content action; a draft with no comparison table passes
-    // untouched. P0/P1 → human review. namedCompetitorComparison is gated OFF
-    // in prod by default, so a named-competitor draft routes to review rather
-    // than auto-publishing until the owner enables it.
+    // any body-content action; a draft with NO comparison table still gets the
+    // named-target legal scan (disparagement/reliability negativity near a
+    // business name, competitor naming outside a table). P0/P1 → human review.
+    // namedCompetitorComparison is gated OFF in prod by default, so a
+    // named-competitor draft routes to review rather than auto-publishing
+    // until the owner enables it. Module-load failure fails CLOSED below —
+    // these are the disparagement/unknown-competitor P0s.
     const comparisonGate = getComparisonTableGate();
+    if (!comparisonGate && draft) {
+      run.comparison_table_result = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_UNAVAILABLE', message: 'comparison-table-gate module failed to load' }] };
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_gate_fail',
+        skip_reason: 'comparison_table_unavailable',
+        reviewer_notes: 'Comparison-table gate module failed to load — failing closed; draft routed to review instead of publishing without the disparagement/competitor checks.',
+      });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_unavailable', { claimToken });
+      return finalized;
+    }
     if (comparisonGate && draft) {
       let namedCompetitorEnabled = false;
       try {
@@ -595,7 +622,10 @@ class AutonomousRunner {
       } catch (_) { namedCompetitorEnabled = false; }
       let comparisonResult;
       try {
-        comparisonResult = comparisonGate.evaluate(draft, { namedCompetitorEnabled });
+        comparisonResult = comparisonGate.evaluate(draft, {
+          namedCompetitorEnabled,
+          operatorBriefText: operatorBriefTextForComparisonGate(opp, brief),
+        });
       } catch (err) {
         logger.warn(`[autonomous-runner] comparison-table gate threw: ${err.message}`);
         comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
@@ -2133,8 +2163,27 @@ class AutonomousRunner {
     const row = await db('autonomous_runs')
       .where('action_type', actionType)
       .where('shadow_mode', false)
-      .where('outcome', 'completed_published')
       .where('completed_at', '>=', since)
+      .where(function countable() {
+        this.where('outcome', 'completed_published')
+          // A run parked on an OPEN Astro PR is a publish in flight and must
+          // consume the cap at PR-open time: the blog lane NEVER produces
+          // 'completed_published' directly (the poller flips it after merge),
+          // so counting only that outcome made the daily/weekly caps a no-op
+          // for the main lane — one batch could open up to batchLimit PRs the
+          // same day and, with AUTONOMOUS_BLOG_AUTO_MERGE on, merge them all.
+          // Closed-unmerged / superseded runs rewrite skip_reason and drop
+          // back out of the count. astro_pr_url NOT NULL: a malformed
+          // adapter result can park with the pending reason but NO PR (the
+          // reviewer routes it manually) — that's not a publish in flight,
+          // and counting it would let one bad adapter response consume the
+          // whole day/week cap and block real publishes until it rolls over.
+          .orWhere(function prPending() {
+            this.where('outcome', 'completed_pending_review')
+              .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+              .whereNotNull('astro_pr_url');
+          });
+      })
       .count('id as count')
       .first();
     return Number(row?.count || 0);
@@ -2205,16 +2254,45 @@ class AutonomousRunner {
     if (!opp) { const e = new Error('Opportunity not found'); e.statusCode = 404; throw e; }
 
     // Re-confirm the comparison gate still passes on the stored draft (defense
-    // against a tampered draft_payload between parking and approval).
+    // against a tampered draft_payload between parking and approval). Same
+    // operatorBriefText derivation as runNext's gate call — an operator-
+    // intercept draft parked as approvable BECAUSE the operator named the
+    // competitor must not fail its own approval re-evaluation.
     const gate = getComparisonTableGate();
     if (gate) {
       let namedEnabled = false;
       try { namedEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedEnabled = false; }
-      const g = gate.evaluate(draft, { namedCompetitorEnabled: namedEnabled });
+      const g = gate.evaluate(draft, {
+        namedCompetitorEnabled: namedEnabled,
+        operatorBriefText: operatorBriefTextForComparisonGate(opp, brief),
+      });
       if (!g.pass) {
         const codes = (g.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => f.code).join('; ');
         const e = new Error(`Comparison-table gate no longer passes: ${codes}`); e.statusCode = 409; throw e;
       }
+    }
+
+    // Re-run the content guardrails on the stored draft too — the price/
+    // brand/FAQ/link P0s ran only before parking, and publishOrUpdatePage
+    // does not run them again, so the tampered-draft defense above was one
+    // gate short: an off-fleet URL or hardcoded price inserted into
+    // draft_payload after parking would still have published on approval.
+    // Same fail-closed posture as the comparison re-check; options come
+    // from the SAME derivation runNext used (_deriveGuardrailOptions), so
+    // the revalidation can't drift from what parked the run.
+    const guardrailsMod = getContentGuardrails();
+    if (!guardrailsMod) {
+      const e = new Error('Content-guardrails module unavailable — cannot re-validate the stored draft before publishing (fail closed)');
+      e.statusCode = 409;
+      throw e;
+    }
+    const guardOptions = await this._deriveGuardrailOptions(opp, brief); // throws 422 on refresh live-domain load failure — operator retries
+    const guardRecheck = guardrailsMod.evaluate(draft, guardOptions);
+    if (!guardRecheck.pass) {
+      const codes = guardRecheck.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => `${f.severity} ${f.code}`).join('; ');
+      const e = new Error(`Content guardrails no longer pass on the stored draft: ${codes}`);
+      e.statusCode = 409;
+      throw e;
     }
 
     // Same canary / publish-cap guards as the autonomous lane (now serialized
@@ -2227,9 +2305,15 @@ class AutonomousRunner {
     // 'claimed') AND the run before publishing. Moving it off 'pending_review'
     // means a concurrent requeue/dismiss is rejected (the review decisions
     // require pending_review), so it can't overwrite the in-flight publish.
+    // claimed_at MUST be stamped fresh here: the row still carries the
+    // runner's original claim timestamp (days old by review time), so
+    // without the refresh this claim is stale the moment it's taken —
+    // recoverStaleClaims would bounce the row to 'pending' mid-publish and
+    // a new run could re-draft an opportunity whose PR/post already exists.
+    const approvalClaimedAt = new Date();
     const oppClaimed = await db('opportunity_queue')
       .where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_review' })
-      .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', updated_at: new Date() });
+      .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', claimed_at: approvalClaimedAt, updated_at: new Date() });
     if (!oppClaimed) {
       const e = new Error('This opportunity is no longer parked for named-competitor review'); e.statusCode = 409; throw e;
     }
@@ -2319,6 +2403,176 @@ class AutonomousRunner {
       published_url: patch.published_url || null,
       astro_pr_url: patch.astro_pr_url || null,
       publish_status: patch.publish_status || null,
+    };
+  }
+
+  /**
+   * Janitor for the one transient state approveAndPublishNamedCompetitor
+   * holds: a crash between the claim and the final persist strands the run
+   * at outcome='publishing_named_competitor' (no code path ever reads it)
+   * and the opportunity at claimed/'named_competitor_publishing'.
+   *
+   * The janitor CANNOT know whether the crash happened before or after the
+   * irreversible external side effect (_publishAndDistribute may have
+   * opened a PR or gone live), so it never retries and never releases the
+   * row back to a claimable state. Both records park at pending_review /
+   * 'named_competitor_publish_interrupted' — a reason the approval path
+   * does NOT accept (it requires 'named_competitor_review'), so the item
+   * surfaces in the review queue for a human to reconcile against GitHub
+   * but can't be blindly re-published or re-drafted. Pairs with
+   * recoverStaleClaims skipping 'named_competitor_publishing' claims.
+   *
+   * staleMinutes must comfortably exceed a slow publish (Astro PR open +
+   * IndexNow + social ≈ a couple of minutes); 60 is generous — and as a
+   * second line of defense the sweep only runs while briefly HOLDING the
+   * engine advisory lock, so a still-alive approval (which holds that lock
+   * for its whole duration) can never be parked as crashed no matter how
+   * slow it is.
+   */
+  async recoverStuckNamedCompetitorPublishes({ staleMinutes = 60 } = {}) {
+    // Engine-lock probe before treating anything as crashed:
+    // approveAndPublishNamedCompetitor runs UNDER the engine advisory lock,
+    // so if this brief acquisition fails, an approval (or batch run) is
+    // still alive on some instance — a slow-but-live publish past the
+    // cutoff must not be parked out from under it (an operator could then
+    // requeue/dismiss while the original still opens a PR and persists
+    // final state). Holding the lock for the sweep also stops a new
+    // approval starting mid-sweep. Fail CLOSED on any probe error — unlike
+    // _withEngineLock's proceed-without-lock batch posture, a janitor that
+    // can't prove exclusivity just waits for the next 2-minute tick.
+    let lockConn = null;
+    try {
+      lockConn = await db.client.acquireConnection();
+      const res = await lockConn.query('SELECT pg_try_advisory_lock($1) AS locked', [ENGINE_PUBLISH_LOCK_KEY]);
+      if (res?.rows?.[0]?.locked !== true) {
+        try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+        return { runs: 0, opps: 0, skipped: 'engine_locked' };
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-runner] named-competitor janitor: engine-lock probe failed (${err.message}); skipping this tick`);
+      if (lockConn) { try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ } }
+      return { runs: 0, opps: 0, skipped: 'lock_probe_failed' };
+    }
+    try {
+      const cutoff = new Date(Date.now() - staleMinutes * 60000);
+      const REASON = 'named_competitor_publish_interrupted';
+      const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
+      const runs = await db('autonomous_runs')
+        .where('outcome', 'publishing_named_competitor')
+        .where('updated_at', '<', cutoff)
+        .update({
+          outcome: 'completed_pending_review',
+          skip_reason: REASON,
+          reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
+          updated_at: new Date(),
+        });
+      // Ids first (we hold the engine lock, so nothing claims or approves
+      // between the read and the writes): the parked opportunities' runs
+      // that are STILL at named_competitor_review must be parked too — a
+      // crash after the opportunity claim but before the run flips to
+      // publishing_named_competitor leaves the run untouched, and the
+      // review model derives the approve button from the run alone, so the
+      // interrupted item would keep an approve action whose path 409s on
+      // the parked opportunity.
+      const stuckOpps = await db('opportunity_queue')
+        .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', '<', cutoff)
+        .select('id');
+      const stuckOppIds = stuckOpps.map((r) => r.id);
+      let opps = 0;
+      let reviewRuns = 0;
+      if (stuckOppIds.length) {
+        opps = await db('opportunity_queue')
+          .whereIn('id', stuckOppIds)
+          .update({
+            status: 'pending_review',
+            skip_reason: REASON,
+            completed_at: new Date(),
+            updated_at: new Date(),
+          });
+        reviewRuns = await db('autonomous_runs')
+          .whereIn('opportunity_id', stuckOppIds)
+          .where('outcome', 'completed_pending_review')
+          .where('skip_reason', 'named_competitor_review')
+          .update({
+            skip_reason: REASON,
+            reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
+            updated_at: new Date(),
+          });
+      }
+      if (runs > 0 || opps > 0 || reviewRuns > 0) {
+        logger.error(`[autonomous-runner] parked ${runs} run(s) / ${opps} opportunit${opps === 1 ? 'y' : 'ies'} / ${reviewRuns} review-stage run(s) stuck in named-competitor publishing for human reconciliation (${REASON})`);
+      }
+      return { runs, opps, review_runs: reviewRuns };
+    } finally {
+      try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
+      catch (err) { logger.warn(`[autonomous-runner] named-competitor janitor: advisory unlock failed (${err.message}); lock auto-clears on session end`); }
+      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    }
+  }
+
+  /**
+   * The content-guardrails options for a given opportunity+brief — ONE
+   * derivation shared by runNext's gate and the named-competitor approval
+   * re-check, so the stored-draft revalidation can never drift from what
+   * parked the run.
+   *
+   * - Refresh actions hydrate the LIVE page's domains (publishRefresh
+   *   freezes frontmatter, so the draft's own domains lie); an unreadable
+   *   live page throws REFRESH_DOMAINS_LOAD_FAILED — fail CLOSED, never
+   *   silently treat a multi-domain refresh as hub-only.
+   * - New spoke-targeted posts pass the brief's resolved spoke domains
+   *   explicitly (the publisher stamps frontmatter.domains AFTER gating).
+   * - Operator-intercept briefs carry the narrow FAQ exception and the
+   *   sourcing exceptions (required_sources / source_notes); mined
+   *   opportunities can never set these.
+   */
+  async _deriveGuardrailOptions(opp, brief) {
+    let liveDomains = null;
+    if (brief.action_type === 'refresh_existing_page') {
+      const publisher = getAstroPublisher();
+      if (publisher?.getLiveFrontmatter) {
+        let liveFm;
+        try {
+          liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
+        } catch (err) {
+          logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
+          liveFm = null;
+        }
+        if (liveFm == null) {
+          const e = new Error(`Could not read live page frontmatter for ${brief.target_url || opp.page_url} — cannot enforce the brand-token guard (fail closed)`);
+          e.code = 'REFRESH_DOMAINS_LOAD_FAILED';
+          e.statusCode = 422;
+          throw e;
+        }
+        liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+      }
+    }
+    const operatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
+      ? (brief?.voice_constraints?.operator_brief || null)
+      : null;
+    // Narrow operator-FAQ exception (owner directive 2026-06-11: FAQPage on
+    // every intercept post) — manifest-derived, never from generated content.
+    const operatorFaqException = operatorBrief?.faq_required === true;
+    const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
+    const guardDomains = liveDomains != null
+      ? liveDomains
+      : (spokeDomains.length ? spokeDomains : null);
+    // A spoke seed keeps the coarse 'pest' service for the link gates but
+    // tags a FAQ-blocked pest topic on operator_brief.faq_blocked_topic —
+    // fold it in so a writer-added FAQ on a blocked topic still P0s.
+    // Deliberately NOT bucket-gated (unlike the exceptions above): this
+    // TIGHTENS the guard, and spoke seeds carry it outside the intercept
+    // bucket.
+    const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
+    const baseService = opp.service || brief.service || null;
+    return {
+      service: faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService,
+      primaryKeyword: brief.target_keyword || null,
+      domains: guardDomains,
+      operatorFaqException,
+      requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
+      operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
     };
   }
 
@@ -2852,4 +3106,5 @@ module.exports._internals = {
   startOfEtDay,
   startOfEtWeek,
   gbpLocationIdForCity,
+  operatorBriefTextForComparisonGate,
 };

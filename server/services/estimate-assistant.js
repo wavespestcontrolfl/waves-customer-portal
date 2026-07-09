@@ -2,7 +2,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
-const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
+const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
 
 let Anthropic;
@@ -656,12 +656,400 @@ function supportRowMatchesQuestion(row = {}, question = '') {
   return !terms.length || terms.some((term) => text.includes(term));
 }
 
+// Both the active-ingredient sentence and the label-facts line answer from
+// the SAME scoped row set (scopeCatalogRowsToQuestion below) — a targeted
+// question must not name one product's ingredient while quoting another's
+// label, and a question with no attributable product names nothing.
 function activeIngredientsFromSupport(context = {}, question = '') {
-  const ingredients = [];
-  for (const row of supportRows(context)) {
-    if (row.source === 'admin_product_catalog' && row.activeIngredient) ingredients.push(row.activeIngredient);
-  }
+  const catalogRows = supportRows(context)
+    .filter((row) => row.source === 'admin_product_catalog');
+  const scoped = scopeCatalogRowsToQuestion(catalogRows, context, question);
+  const ingredients = scoped.map((row) => row.activeIngredient).filter(Boolean);
   return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
+}
+
+// Safety/product questions with support rows never reach the live models —
+// they force-route to the deterministic fallback so answers only ever quote
+// reviewed label facts. water/irrigat/sprinkl and the rainfast phrasings are
+// here for the same reason: the label watering guidance and rainfast window
+// live in the fallback's safety branch, so "when can I run the sprinklers?"
+// or "what if it rains after treatment?" must not go to an LLM that could
+// miss or hallucinate them. Bare "rain"/"treatment" deliberately do NOT
+// trigger: "will you still come if it rains?" is a scheduling question and
+// "how long does the treatment last?" is a duration question — both belong
+// on the normal path, not in safety copy.
+// water(?:ing|ed|s)? with the (?!\s+bugs?\b) lookahead instead of water\w*:
+// "water bugs" is a PEST, not a watering question, and must keep its
+// pest-branch answer. The rain-after alternates are anchored to treatment
+// vocabulary and accept BOTH word orders — "what if it rains after
+// treatment?" and "how soon after my lawn service can it rain?" are the
+// same label question — but "will you still come if it rains after 2pm?"
+// is scheduling and must stay on the normal path.
+// "water" alternates are irrigation-anchored: watering-context wording
+// ("water the lawn", "how soon can I water") routes here, but "standing
+// water" (mosquito breeding) and "keep mosquitoes off" (efficacy) are
+// service questions and stay on the normal path. keep-off is restricted to
+// people/pets — that's re-entry wording.
+const FORCE_FALLBACK_QUESTION_PATTERN = /\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
+
+// Generic treatment vocabulary says nothing about WHICH product a question
+// targets, so it never counts as naming one.
+// Broad product-category nouns ("the herbicide") — weaker targeting than a
+// product name; shared by category coordination, adjectival scoping, and the
+// unresolved-product guard.
+const CATEGORY_NOUNS = '(?:herbicides?|insecticides?|fungicides?|termiticides?|rodenticides?|fertilizers?|adjuvants?|baits?|igrs?|growth\\s+regulators?)';
+
+const GENERIC_QUESTION_TERMS = new Set([
+  'what', 'when', 'does', 'each', 'visit', 'safe', 'kids', 'pets', 'product', 'products',
+  'spray', 'sprays', 'sprayed', 'treatment', 'treatments', 'treated', 'chemical', 'chemicals',
+  'application', 'applications', 'applied', 'service', 'services', 'yard', 'home', 'house',
+  'area', 'areas', 'okay', 'after', 'before', 'around', 'inside', 'outside', 'water', 'long',
+  'active', 'ingredient', 'ingredients',
+  // bug/insect wording is family vocabulary, not a product name — and
+  // "insect" substring-matches the insecticide CATEGORY, which would let
+  // "lawn insect" questions mention-match pest products before family
+  // scoping runs. Saying "insecticide" itself still counts as a mention.
+  'bugs', 'insect', 'insects',
+]);
+
+function questionTermsForMatching(question = '') {
+  return cleanText(question)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((term) => term.length >= 4 && !GENERIC_QUESTION_TERMS.has(term));
+}
+
+// Taxonomy rank markers inside expanded biological actives ("Bacillus
+// thuringiensis subsp. israelensis") — dropped before acronym generation so
+// "subsp." never breaks the initials customers actually use.
+const TAXONOMY_RANK_TOKENS = new Set(['subsp', 'subspecies', 'ssp', 'spp', 'var', 'strain', 'serotype', 'sp']);
+
+// Tokens with which the question names this SPECIFIC product: the product
+// name (via the builder-stamped questionNameTokens — each one is a word the
+// customer already typed, so the name itself never rides along in the row)
+// or an active ingredient. Title and snippet are deliberately excluded:
+// every catalog row's title reads "<category> active ingredient", and
+// snippet would let generic re-entry copy ("...sprays have dried") match.
+// Callers group naming signals BY TOKEN: several rows can share one active
+// ("2,4-D" appears in multiple herbicides) and one on-estimate row
+// satisfies that token, while a token whose rows are all off-estimate means
+// the customer named a product this estimate does not carry.
+function catalogRowNamingTokens(row = {}, question = '') {
+  const tokens = [];
+  if (row.questionNameMatch === true) {
+    tokens.push(...(Array.isArray(row.questionNameTokens) && row.questionNameTokens.length
+      ? row.questionNameTokens
+      : ['__name__'])); // pre-token contexts: one shared name group
+  }
+  const ingredientText = cleanText(row.activeIngredient || '').toLowerCase();
+  if (!ingredientText) return [...new Set(tokens)];
+  for (const term of questionTermsForMatching(question)) {
+    if (ingredientText.includes(term)) tokens.push(term);
+  }
+  // Short/punctuated active-ingredient names ("2,4-D", "Bti") never survive
+  // the >=4-char term filter above — compare whole normalized question words
+  // against normalized ingredient aliases by exact equality instead.
+  // Ingredient lists separate aliases with +, /, ; or "and" — NOT comma,
+  // which is part of names like 2,4-D.
+  // A short active stored inside a longer salt/ester form ("2,4-D
+  // dimethylamine salt") never equals the whole normalized segment, so each
+  // segment's DISTINCTIVE words (digit-bearing or >=5 chars — "24d",
+  // "dimethylamine", never everyday-short "salt") count as aliases too.
+  const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const aliasSegments = cleanText(row.activeIngredient || '').split(/[+/;]|\band\b/i);
+  const aliases = aliasSegments
+    .map(normalize)
+    .filter((alias) => alias.length >= 2);
+  const aliasWords = aliasSegments
+    .flatMap((segment) => segment.split(/\s+/))
+    .map(normalize)
+    .filter((word) => word.length >= 2 && (/\d/.test(word) || word.length >= 5));
+  // Expanded actives answer to their initials ("Bti" for Bacillus
+  // thuringiensis israelensis): every >=3-char PREFIX acronym of a
+  // segment's words counts, so trailing formulation words ("... solids")
+  // don't break the match.
+  const acronyms = aliasSegments
+    .map((segment) => segment.split(/\s+/)
+      .map(normalize)
+      .filter((word) => word.length >= 1 && !TAXONOMY_RANK_TOKENS.has(word)))
+    .filter((words) => words.length >= 3)
+    .flatMap((words) => words.slice(2).map((_, index) => words.slice(0, index + 3).map((word) => word[0]).join('')))
+    .filter((acronym) => acronym.length >= 3);
+  const comparable = [...aliases, ...aliasWords, ...acronyms];
+  if (comparable.length) {
+    const questionWords = cleanText(question).split(/\s+/).map(normalize).filter(Boolean);
+    for (const word of questionWords) {
+      if (comparable.includes(word)) tokens.push(word);
+    }
+  }
+  return [...new Set(tokens)];
+}
+
+function catalogRowNamesProduct(row = {}, question = '') {
+  return catalogRowNamingTokens(row, question).length > 0;
+}
+
+// True when the question names this row's broad CATEGORY ("the herbicide",
+// "the insecticide") — weaker targeting than naming the product, so callers
+// intersect these with any named families instead of trusting them alone.
+function catalogRowMentionsCategory(row = {}, question = '') {
+  const text = cleanText([row.category, row.path].filter(Boolean).join(' ')).toLowerCase();
+  if (!text) return false;
+  if (questionTermsForMatching(question).some((term) => text.includes(term))) return true;
+  // Short category acronyms (IGR, PGR — both live catalog categories) never
+  // survive the >=4-char term filter — compare 3-char question tokens
+  // against whole category words by plural-tolerant equality instead.
+  const shortTokens = cleanText(question).toLowerCase().split(/[^a-z0-9]+/)
+    .filter((token) => token.length === 3);
+  if (!shortTokens.length) return false;
+  const categoryWords = text.split(/[^a-z0-9]+/).filter(Boolean);
+  return shortTokens.some((token) => categoryWords.includes(token) || categoryWords.includes(`${token}s`));
+}
+
+// Scope targeted questions to the product(s) they target — the support
+// context is built from ALL estimate services (and the catalog search can
+// pull rows that aren't on this estimate at all, e.g. every herbicide when
+// the question says "herbicide"), so the wrong product's label facts must
+// never answer for another. Attribution = the serviceKeys each row carries
+// from the service library's default_products linkage.
+// Targeting precedence, most specific first:
+//   1. Explicit product mention ("is bifenthrin safe?", "is the 2,4-D lawn
+//      spray safe?") — narrows to the mentioned row(s) that are ALSO
+//      attributed to this estimate's services; a mentioned row we can't tie
+//      to the estimate is not "your product" and fails closed.
+//   2. Named service families ("the lawn and mosquito treatments") — rows
+//      attributed to ANY named family AND on this estimate; unattributed
+//      rows fail closed even on a single-family estimate, and asking about
+//      a family the estimate doesn't include ("is the mosquito spray safe?"
+//      on a lawn-only estimate) quotes nothing — the question terms can pull
+//      that family's products into the support context, but the customer
+//      didn't buy them.
+//   3. Nothing targeted ("is it pet safe?") — prefer estimate-attributed
+//      rows when any exist, otherwise keep every row (linkage can be sparse
+//      for peripheral services and a generic question is answerable from
+//      whatever the estimate loaded).
+// No survivors = an empty set (callers fail closed to generic copy) rather
+// than the wrong treatment's rows.
+// Families of what the customer is actually LOOKING AT: in one-time mode the
+// recurring alternative still rides along in context.recurringServices, but
+// its products must not answer for the selected one-time service.
+function estimateFamiliesForScoping(context = {}) {
+  if (cleanText(context.serviceMode).toLowerCase() === 'one_time') {
+    return serviceKeysFromContext({
+      services: context.services,
+      oneTime: context.oneTime,
+    }, '');
+  }
+  return serviceKeysFromContext(context, '');
+}
+
+function scopeCatalogRowsToQuestion(rows, context = {}, question = '') {
+  if (!rows.length) return rows;
+  const estimateFamilies = estimateFamiliesForScoping(context);
+  const attributedTo = (row, families) => Array.isArray(row.serviceKeys)
+    && row.serviceKeys.some((key) => families.includes(key));
+  const onEstimate = (row) => (estimateFamilies.length
+    ? attributedTo(row, estimateFamilies)
+    : (Array.isArray(row.serviceKeys) && row.serviceKeys.length > 0));
+  const questionFamilies = serviceFamiliesFromText(question);
+  // Named rows are tracked BEFORE the on-estimate filter: a customer naming
+  // an off-estimate product ("is glyphosate safe?" on a Quinclorac lawn
+  // plan) must fail closed to generic copy, not fall through to the
+  // estimate's own products' facts.
+  const namingTokensByRow = new Map(rows.map((row) => [row, catalogRowNamingTokens(row, question)]));
+  const namedRows = rows.filter((row) => namingTokensByRow.get(row).length > 0);
+  const productMentions = namedRows.filter(onEstimate);
+  // The customer named a product and NONE of the named rows are on this
+  // estimate: fail closed outright. Category words in the same breath ("is
+  // glyphosate HERBICIDE safe?") describe that product — they must not fall
+  // through to the estimate's own products' facts.
+  if (namedRows.length && !productMentions.length) return [];
+  // EVERY named product must resolve to an on-estimate row: "are 2,4-D and
+  // glyphosate safe?" on a 2,4-D-only plan must not answer with the 2,4-D
+  // facts alone as though the answer covered both. Naming signals group by
+  // the question token that matched — several rows can share one active and
+  // one on-estimate row satisfies that token — and a token whose rows are
+  // ALL off-estimate fails the whole question closed.
+  const coveredTokens = new Set(productMentions.flatMap((row) => namingTokensByRow.get(row)));
+  const namedTokens = namedRows.flatMap((row) => namingTokensByRow.get(row));
+  if (namedTokens.some((token) => !coveredTokens.has(token))) return [];
+  // A product-looking word that resolves to NO loaded row means the
+  // customer named a product the catalog does not carry at all — the
+  // dedicated named-product fetch would have loaded any catalog match.
+  // Answering from the estimate's own rows would read as covering it: fail
+  // closed. Two ANCHORED detections keep ordinary nouns out:
+  //   1. Coordinated with a RESOLVED product mention ("2,4-D and Roundup")
+  //      — "safe for kids and adults" names no product on either side.
+  //   2. A LONE mention in product-ask position ("Is Roundup safe for
+  //      pets?", "do you use Roundup?") — "is it safe for my golden
+  //      retriever" has no candidate in the subject slot.
+  const resolvedTokens = new Set(namedTokens.filter((token) => token !== '__name__'));
+  const normalizeWord = (word) => word.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const questionWordList = cleanText(question).replace(/&/g, ' and ').split(/\s+/).map(normalizeWord).filter(Boolean);
+  const looksLikeUnresolvedProduct = (word) => Boolean(word)
+    && (word.length >= 5 || /\d/.test(word))
+    && !resolvedTokens.has(word)
+    && !GENERIC_QUESTION_TERMS.has(word)
+    && !new RegExp(`^${CATEGORY_NOUNS}$`, 'i').test(word)
+    && !/^(?:lawns?|turf|grass|weeds?|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|ornamentals?|palms?|roach\w*|cockroach\w*|ants?|spiders?|fleas?|ticks?|bees?|wasps?|treat\w*|sprays?|services?|products?|chemicals?|pesticides?|barriers?|granul\w*|dunks?|tablets?|stations?|traps?|concentrates?|liquids?|waveguard)$/.test(word);
+  if (resolvedTokens.size) {
+    const CONJUNCTION_WORDS = new Set(['and', 'plus', 'or']);
+    const SKIPPABLE_ARTICLES = new Set(['the', 'my', 'our', 'a', 'an', 'this', 'that', 'other']);
+    for (let i = 0; i < questionWordList.length; i += 1) {
+      if (!CONJUNCTION_WORDS.has(questionWordList[i])) continue;
+      const leftWord = i > 0 ? questionWordList[i - 1] : '';
+      let j = i + 1;
+      while (j < questionWordList.length && SKIPPABLE_ARTICLES.has(questionWordList[j])) j += 1;
+      const rightWord = j < questionWordList.length ? questionWordList[j] : '';
+      if ((resolvedTokens.has(leftWord) && looksLikeUnresolvedProduct(rightWord))
+        || (resolvedTokens.has(rightWord) && looksLikeUnresolvedProduct(leftWord))) {
+        return [];
+      }
+    }
+  }
+  // A pre-token flag match ('__name__') can't say WHICH question word named
+  // its row — the lone-mention scan would misread that word as unresolved,
+  // so it only runs when every name match is tokenized (the builder always
+  // stamps tokens; only legacy/hand-built contexts lack them).
+  if (!namedTokens.includes('__name__')) {
+    const normalizedQuestion = ` ${questionWordList.join(' ')} `;
+    for (const word of new Set(questionWordList)) {
+      if (!looksLikeUnresolvedProduct(word)) continue;
+      // Auxiliary shapes keep the product in ask position: "will Roundup BE
+      // safe?", "would Roundup be safe?" — the optional be/being/stay/remain
+      // link covers them without loosening the safety-adjective anchor.
+      const askSubject = new RegExp(`\\b(?:is|are|was|were|will|would|can|could|should|might|do|does)\\s+(?:the\\s+|my\\s+|our\\s+|a\\s+|an\\s+|any\\s+)?${word}\\s+(?:be\\s+|being\\s+|stay\\s+|remain\\s+)?(?:safe|ok|okay|toxic|dangerous|harmful|poisonous)\\b`, 'i');
+      const askUsage = new RegExp(`\\b(?:use|uses|used|using|sprayed|spraying|applied|applying)\\s+(?:the\\s+|any\\s+)?${word}\\b`, 'i');
+      // Passive/product-subject usage puts the product BEFORE the verb:
+      // "will Roundup be used on my lawn?", "is Roundup being sprayed?",
+      // "Roundup was applied last visit". The product-ask anchors above only
+      // see verb-then-product order, so without this the question falls
+      // through to the scoped family rows and their facts read as covering
+      // the off-catalog name.
+      const askPassiveUsage = new RegExp(`\\b${word}\\s+(?:will\\s+|would\\s+|going\\s+to\\s+)?(?:be|being|is|are|was|were|gets?|got)\\s+(?:being\\s+)?(?:used|sprayed|applied|put)\\b`, 'i');
+      if (askSubject.test(normalizedQuestion) || askUsage.test(normalizedQuestion) || askPassiveUsage.test(normalizedQuestion)) return [];
+    }
+  }
+  const categoryMentions = rows.filter((row) => catalogRowMentionsCategory(row, question) && onEstimate(row));
+  if (namedRows.length || categoryMentions.length) {
+    const questionText = cleanText(question);
+    // When the customer NAMED a product, a category word in the same breath
+    // ("is the 2,4-D herbicide safe?") is adjectival — it describes that
+    // product, so sibling on-estimate rows of the category must not ride
+    // along and quote label facts for products the customer did not ask
+    // about. Category rows join a named product only when a conjunction
+    // makes the category its own subject ("2,4-D and the other herbicides"),
+    // in either order — mirroring the family coordination below.
+    const coordinatesOntoCategory = new RegExp(`\\b(?:and|plus|&|along with|as well as)\\s+(?:the\\s+|my\\s+|our\\s+|other\\s+|any\\s+)*${CATEGORY_NOUNS}\\b`, 'i').test(questionText)
+      || new RegExp(`\\b${CATEGORY_NOUNS}\\s+(?:and|plus|&|along with|as well as)\\b`, 'i').test(questionText);
+    // Broad category mentions ("the lawn insecticide") can match every
+    // on-estimate row of that category — when a family word ADJECTIVALLY
+    // qualifies the category, they must stay inside that family. But a
+    // family that is only its own COORDINATED subject ("the herbicide and
+    // mosquito treatment") does not constrain the category: intersecting
+    // herbicides with mosquito would empty the set and starve both answers.
+    const familyAdjacentToCategory = new RegExp(`\\b(?:lawn|turf|grass|pest|mosquito|termite|rodent|tree|shrub)\\w*\\s+${CATEGORY_NOUNS}`, 'i').test(questionText);
+    const scopedCategory = (namedRows.length && !coordinatesOntoCategory)
+      ? []
+      : (questionFamilies.length && (familyAdjacentToCategory || !coordinatesOntoCategory)
+        ? categoryMentions.filter((row) => attributedTo(row, questionFamilies))
+        : categoryMentions);
+    // A COORDINATED question ("is Bifenthrin AND the lawn treatment safe?",
+    // "the lawn treatment PLUS Bifenthrin") asks about both the named
+    // product and the named family — union them. The conjunction must join
+    // family/treatment wording on EITHER side: "safe for kids and pets" is
+    // not a product+family coordination, and without one the family word is
+    // adjectival ("the 2,4-D lawn spray") so the explicit product stays the
+    // narrower, correct scope. service(?!\s+dog/animal): "safe for kids and
+    // service dog" is a RECIPIENT list, not coordination onto the service.
+    const coordinatesOntoFamily = /\b(?:and|plus|&|along with|as well as)\s+(?:the\s+|my\s+|our\s+)?(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service(?!\s+(?:dogs?|animals?)))\b/i.test(questionText)
+      || /\b(?:lawn\w*|turf|grass|pest\w*|mosquito\w*|termite\w*|rodent\w*|trees?|shrubs?|roach\w*|cockroach\w*|ants?|spiders?|perimeter|treat\w*|spray\w*|service(?!\s+(?:dogs?|animals?)))\s+(?:and|plus|&|along with|as well as)\b/i.test(questionText);
+    // Category mentions coordinate onto families too: "the herbicide and
+    // mosquito treatment" asks about both, and without the union the
+    // category branch would return no mosquito facts at all.
+    const coordinatedFamilyRows = ((productMentions.length || categoryMentions.length) && questionFamilies.length && coordinatesOntoFamily)
+      ? rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row))
+      : [];
+    return [...new Set([...productMentions, ...scopedCategory, ...coordinatedFamilyRows])];
+  }
+  if (questionFamilies.length) {
+    return rows.filter((row) => attributedTo(row, questionFamilies) && onEstimate(row));
+  }
+  const attributed = rows.filter(onEstimate);
+  return attributed.length ? attributed : rows;
+}
+
+// Deterministic label-safety line for the forced-fallback safety answer, built
+// from the label-verified catalog rows estimate-ai-context attaches. Safety
+// questions never reach the live models (the force-fallback gate below), so
+// these reviewed label facts must surface here or nowhere. Fail closed: only
+// rows estimate-ai-context marked labelVerified carry these fields at all.
+// Applicator PPE is deliberately excluded — it is what the technician wears,
+// and in a customer answer it reads as customer instructions.
+function labelSafetyFactsFromSupport(context = {}, question = '') {
+  // Scope over ALL catalog rows first, then keep only verified survivors —
+  // if the question names a product whose row is unverified, the answer must
+  // carry NO label facts, not another (verified) product's facts. scopedRows
+  // (verified or not) stays around as the denominator for the rainfast
+  // completeness check below.
+  const catalogRows = supportRows(context)
+    .filter((row) => row.source === 'admin_product_catalog');
+  const scopedRows = scopeCatalogRowsToQuestion(catalogRows, context, question);
+  const scoped = scopedRows.filter((row) => row.labelVerified);
+  if (!scoped.length) return '';
+  const reentries = [...new Set(scoped.map((row) => cleanText(row.reentry || '')).filter(Boolean))];
+  const signalWords = [...new Set(scoped.map((row) => cleanText(row.signalWord || '')).filter(Boolean))];
+  const rainfast = scoped
+    .map((row) => Number(row.rainfastMinutes))
+    .filter((minutes) => Number.isFinite(minutes) && minutes > 0);
+  const irrigation = [...new Set(scoped.map((row) => cleanText(row.irrigationNotes || '')).filter(Boolean))];
+  const parts = [];
+  // Every fact line below carries the same completeness rule as the rainfast
+  // claim: the copy reads as covering the whole treatment, so the blanket
+  // form may only be used when EVERY scoped product (verified or not, hence
+  // scopedRows not scoped — unverified rows never carry the field) states the
+  // fact AND the catalog slice wasn't truncated at a row cap. A truncated
+  // slice can't prove completeness — an omitted product may carry a longer
+  // re-entry interval, a harsher signal word, or contrary watering guidance —
+  // so the qualified variants say what is and is not on file.
+  const catalogTruncated = (context.supportContext || context.aiSupport || {}).productCatalogTruncated === true;
+  const coversEveryScopedRow = (field) => !catalogTruncated
+    && scoped.filter((row) => cleanText(row[field] || '')).length === scopedRows.length;
+  if (reentries.length) {
+    const listed = reentries.map((text) => text.replace(/\.$/, '')).join('; ');
+    if (coversEveryScopedRow('reentry')) {
+      parts.push(reentries.length === 1
+        ? `Label re-entry guidance: ${listed}.`
+        : `Label re-entry guidance by product: ${listed}.`);
+    } else {
+      parts.push(reentries.length === 1
+        ? `Where a product label provides re-entry guidance: ${listed}; not every product on this estimate has re-entry guidance on file.`
+        : `Where product labels provide re-entry guidance, by product: ${listed}; not every product on this estimate has re-entry guidance on file.`);
+    }
+  }
+  if (signalWords.length) parts.push(`Label signal word${signalWords.length > 1 ? 's' : ''}${coversEveryScopedRow('signalWord') ? '' : ' for the products on file'}: ${signalWords.join(', ')}.`);
+  // Multiple products: quote the longest (most conservative) window. The
+  // label seed intentionally leaves rainfast blank where the label doesn't
+  // state a window, so one product's window must not become a claim about
+  // the rest.
+  if (rainfast.length === scopedRows.length && rainfast.length && !catalogTruncated) {
+    parts.push(`Treated areas are rainfast in about ${Math.max(...rainfast)} minutes.`);
+  } else if (rainfast.length) {
+    parts.push(`Where a product label states a rainfast window, treated areas are rainfast in about ${Math.max(...rainfast)} minutes; not every product on this estimate has a stated window on file.`);
+  }
+  if (irrigation.length) {
+    const listed = irrigation.map((text) => text.replace(/\.$/, '')).join('; ');
+    if (coversEveryScopedRow('irrigationNotes')) {
+      parts.push(irrigation.length === 1
+        ? `Label watering/irrigation guidance: ${listed}.`
+        : `Label watering/irrigation guidance by product: ${listed}.`);
+    } else {
+      parts.push(irrigation.length === 1
+        ? `Where a product label provides watering/irrigation guidance: ${listed}; not every product on this estimate has watering guidance on file.`
+        : `Where product labels provide watering/irrigation guidance, by product: ${listed}; not every product on this estimate has watering guidance on file.`);
+    }
+  }
+  return parts.join(' ');
 }
 
 function summarizeSupportContext(context = {}, question = '') {
@@ -719,19 +1107,30 @@ function treatmentApproachForQuestion(question = '', context = {}) {
     }
     return 'For cockroaches, treatment targets harborage areas, entry points, and food and moisture sources, with follow-up based on the activity found at your property.';
   }
-  if (/\bant|ants\b/.test(q)) {
+  // Whole-word only: `ants\b` alone would match the suffix of "plants", and
+  // watering questions ("can I water my plants after treatment?") route
+  // through here via the safety branch.
+  if (/\bants?\b/.test(q)) {
     return 'For ants, the goal is to reduce exterior entry pressure, treat trails and nesting zones when found, and support interior activity when it is included or needed.';
   }
   if (/\bbed\s*bug|bedbug\b/.test(q)) {
     return 'For bed bugs, the approach depends on inspection findings and can combine targeted crack-and-crevice treatment, growth-regulator strategy, and follow-up guidance.';
   }
-  if (/\blawn|turf|grass|weed|fungus|fertil|chinch\b/.test(q)) {
+  // Family-level copy must scope the way the label facts below it do:
+  // serviceFamiliesFromText strips recipient wording, so "is the mosquito
+  // spray safe for the lawn?" reads mosquito — a raw-text regex would see
+  // "lawn" first and open with lawn copy above mosquito label facts. Raw
+  // text still decides when no single family survives (untargeted or
+  // coordinated questions keep their previous behavior).
+  const families = serviceFamiliesFromText(q);
+  const family = families.length === 1 ? families[0] : null;
+  if (family === 'lawn_care' || (!family && /\blawn|turf|grass|weed|fungus|fertil|chinch\b/.test(q))) {
     return 'For lawns, Waves starts from turf condition, weed pressure, fungus pressure, irrigation clues, and seasonal Southwest Florida restrictions before selecting the treatment.';
   }
-  if (/\bmosquito|mosquitoes\b/.test(q)) {
+  if (family === 'mosquito' || (!family && /\bmosquito|mosquitoes\b/.test(q))) {
     return 'For mosquitoes, the focus is shaded resting zones, breeding-pressure checks, and timing around weather so the barrier treatment has the best chance to hold.';
   }
-  if (/\btermite|termites\b/.test(q)) {
+  if (family === 'termite_bait' || (!family && /\btermite|termites\b/.test(q))) {
     return 'For termites, the treatment method depends on whether the estimate is for monitoring, bait, soil treatment, or a construction-stage treatment.';
   }
   return 'The technician selects the treatment method from the service type, inspection findings, label directions, and conditions at your property that day.';
@@ -847,16 +1246,33 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join(' ');
   }
 
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application)\b/.test(q)) {
+  // water/irrigat/sprinkl + rainfast/rain-after phrasings: watering and
+  // rainfast questions are force-routed to this fallback, and the label
+  // watering guidance + rainfast window live in labelSafetyFacts — so they
+  // must land in this branch. Bare "rain"/"treatment" deliberately do NOT
+  // match: "will you still come if it rains?" (scheduling) and "how long
+  // does the treatment last?" (duration) belong to the branches below.
+  // Same intent anchoring as the force gate: irrigation-context "water",
+  // people/pet "keep off", treatment-anchored rain-after in BOTH word
+  // orders ("rains after my service" / "after my service can it rain"),
+  // re-entry/dry wording. "water bugs"/"standing water"/"keep mosquitoes
+  // off" are service questions and belong to the branches below.
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*|dry|dries|dried|drying)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
+    const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
     if (activeIngredients.length) {
       return [
         `${treatmentApproachForQuestion(question, context)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
+        labelSafetyFacts,
         `${labelCopy} If you have pets, kids, sensitivities, or want the exact product for your home that day, call or text Waves at ${phone}.`,
       ].filter(Boolean).join(' ');
     }
-    return `${treatmentApproachForQuestion(question, context)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
+    return [
+      `${treatmentApproachForQuestion(question, context)}`,
+      labelSafetyFacts,
+      `${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`,
+    ].filter(Boolean).join(' ');
   }
 
   if (/\b(lawn|turf|weed|fungus|grass|fertil)\b/.test(q)) {
@@ -871,7 +1287,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
       : `I do not see lawn care on this estimate. Call or text Waves at ${phone} if you want it added.`;
   }
 
-  if (/\b(pest|bug|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
+  if (/\b(pest|bugs?|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
     const pest = findService(context, /pest|roach|ant|spider|perimeter/i);
     const activeIngredients = activeIngredientsFromSupport(context, question);
     return pest
@@ -987,8 +1403,7 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
-      && supportRows(context).length) {
+  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',
@@ -1023,4 +1438,5 @@ module.exports = {
   buildEstimateAssistantContext,
   cleanAssistantAnswer,
   selectPricingFrequency,
+  FORCE_FALLBACK_QUESTION_PATTERN,
 };

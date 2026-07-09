@@ -20,7 +20,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
 jest.mock('../services/email-template-automation-executor', () => ({
-  processTrigger: jest.fn(async () => ({ automation_count: 1, results: [] })),
+  processTrigger: jest.fn(async () => ({
+    automation_count: 1,
+    results: [{ automation_key: 'prep', run: { id: 'run-1', status: 'queued' }, deduped: false }],
+  })),
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -56,11 +59,25 @@ function service(overrides = {}) {
 }
 
 let customerRow;
+let priorBookingRow;
 
 function customersQuery() {
   const q = {
     where: jest.fn(() => q),
     first: jest.fn(async () => customerRow),
+  };
+  return q;
+}
+
+// First-time gate lookup (hasPriorSameTypeBooking) — resolves the prior
+// same-family scheduled_services row, null = first-time treatment.
+function priorBookingQuery() {
+  const q = {
+    where: jest.fn(() => q),
+    whereIn: jest.fn(() => q),
+    whereNot: jest.fn(() => q),
+    whereNotIn: jest.fn(() => q),
+    first: jest.fn(async () => priorBookingRow),
   };
   return q;
 }
@@ -75,7 +92,10 @@ describe('appointment tagger prep email automation', () => {
       last_name: 'Example',
       email: 'taylor@example.com',
     };
-    db.mockImplementation(() => customersQuery());
+    priorBookingRow = null;
+    db.mockImplementation((table) => (
+      table === 'scheduled_services' ? priorBookingQuery() : customersQuery()
+    ));
   });
 
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
@@ -103,8 +123,8 @@ describe('appointment tagger prep email automation', () => {
     expect(call.payload.customer_portal_url).toContain('?tab=visits');
   });
 
-  test('flea booking maps to prep.flea with no SMS companion', async () => {
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+  test('flea booking maps to prep.flea and renders the auto_flea SMS companion', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
 
     await AppointmentTagger.triggerPestPrep(
       service({ service_type: 'Flea Treatment - Interior & Exterior' }),
@@ -115,7 +135,43 @@ describe('appointment tagger prep email automation', () => {
     const call = executor.processTrigger.mock.calls[0][0];
     expect(call.automationKey).toBe('prep.flea');
     expect(call.payload.project_type).toBe('Flea Treatment');
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_flea',
+      { first_name: 'Taylor' },
+      { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
+    );
+  });
+
+  test('no prep SMS when the guide email run was deduped or skipped (re-run safety)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    executor.processTrigger.mockResolvedValueOnce({
+      automation_count: 1,
+      results: [{ automation_key: 'prep.cockroach', run: { id: 'run-1', status: 'queued' }, deduped: true }],
+    });
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('no prep SMS when the automation is inactive (zero results)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    executor.processTrigger.mockResolvedValueOnce({ automation_count: 0, results: [] });
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('skips prep entirely when the customer already had a same-family booking', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    priorBookingRow = { id: 'svc-0' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 
   test('classifier tags flea service types', () => {
@@ -205,11 +261,14 @@ describe('appointment tagger prep email automation', () => {
   });
 
   test('skips when the customer has no valid email on any contact', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
     customerRow = { ...customerRow, email: '' };
 
     await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
 
     expect(executor.processTrigger).not.toHaveBeenCalled();
+    // The SMS asserts "we emailed your guide" — no queued email, no SMS.
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('prep.bed_bug'));
   });
 

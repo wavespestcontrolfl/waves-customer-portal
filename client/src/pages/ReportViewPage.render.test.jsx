@@ -45,6 +45,41 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
+  // The recap SMS links /report/:token#visit-recap, but the card only exists
+  // after /data resolves — the browser's native fragment scroll runs against
+  // the loading skeleton and lands nowhere. The page re-runs the scroll in a
+  // post-load effect; these tests pin that.
+  let scrollSpy;
+
+  beforeEach(() => {
+    scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    window.location.hash = '#visit-recap';
+  });
+
+  afterEach(() => {
+    window.location.hash = '';
+    delete Element.prototype.scrollIntoView;
+  });
+
+  it('scrolls to the recap card once the report has rendered', async () => {
+    renderReport({ ...legacyLawnReport, recap: { ready: true } });
+    await screen.findByText('Visit Summary');
+
+    expect(scrollSpy).toHaveBeenCalled();
+    const target = scrollSpy.mock.instances?.[0] || scrollSpy.mock.contexts?.[0];
+    expect(target?.id).toBe('visit-recap');
+  });
+
+  it('stays at the top when the recap card never renders', async () => {
+    renderReport(legacyLawnReport); // no recap payload → card absent
+    await screen.findByText('Visit Summary');
+
+    expect(scrollSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('ReportViewPage — legacy lawn layout (reportV2 off)', () => {
   it('renders Products Applied and Visit Timeline exactly once', async () => {
     const { container } = renderReport(legacyLawnReport);
@@ -52,7 +87,10 @@ describe('ReportViewPage — legacy lawn layout (reportV2 off)', () => {
 
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
-    expect(container.querySelectorAll('#map')).toHaveLength(1);
+    // The Visit Timeline now renders directly under Re-entry (owner ask
+    // 2026-07-05), so #map only exists when the coverage card itself shows —
+    // and lawn reports hide the per-area coverage map.
+    expect(container.querySelectorAll('#map')).toHaveLength(0);
   });
 
   it('omits the lawn trend chart on a first assessment (single data point)', async () => {

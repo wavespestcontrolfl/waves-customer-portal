@@ -9,6 +9,12 @@ function isLawnReportPath(reqPath = '') {
   return /^\/lawn-report\/[a-f0-9]{32}\/?$/.test(String(reqPath || ''));
 }
 
+// Public tokenized pest identification report — same bearer-token contract as
+// the lawn report.
+function isPestReportPath(reqPath = '') {
+  return /^\/pest-report\/[a-f0-9]{32}\/?$/.test(String(reqPath || ''));
+}
+
 // Public tokenized post-service report shells: the customer report
 // (/report/<32-hex token>) and the project report
 // (/report/project/<slug>-<token prefix>). The token is a bearer credential in
@@ -44,7 +50,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -55,6 +61,7 @@ module.exports = {
   applySensitiveSpaHeaders,
   isServiceOutlinePath,
   isLawnReportPath,
+  isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
 };

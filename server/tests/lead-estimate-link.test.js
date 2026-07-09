@@ -5,10 +5,16 @@ jest.mock('../services/lead-source-resolver', () => ({
   MAIN_SITE_NAME: 'Main Site (wavespestcontrol.com)',
   SPOKE_DOMAIN_TO_SOURCE_NAME: {},
 }));
+// The bridge's own SQL monotonicity is unit-tested in lead-funnel-bridge.test.js;
+// here we only assert the transitions CALL it with the right stage + db handle.
+jest.mock('../services/lead-funnel-bridge', () => ({
+  bridgeLeadFunnelStage: jest.fn(async () => ({ updated: 1 })),
+}));
 
 const db = require('../models/db');
 const leadAttribution = require('../services/lead-attribution');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const {
   attachLeadToEstimate,
   markLinkedLeadEstimateAccepted,
@@ -801,7 +807,7 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     });
 
     const result = await attributeSelfBooking({
-      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', customerCreated: true, database,
+      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control', customerCreated: true, selfBookedAppointmentId: 'sba-paid', database,
     });
 
     expect(result).toMatchObject({ attributed: true, minted: true, leadId: 'minted-1' });
@@ -834,18 +840,68 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       customer_id: 'c1',
       lead_source: 'facebook',
       fbclid: 'fb-click-123',
-      funnel_stage: 'lead',
+      // Born at booked: the booking is committed and the won lead is a direct
+      // insert (no transition ever fires the bridge for it).
+      funnel_stage: 'booked',
+      // booking lineage + the shared per-booking dedupe key
+      self_booked_appointment_id: 'sba-paid',
     });
   });
 
-  test('does NOT mint for a pre-existing customer (repeat booker, not a fresh paid lead)', async () => {
+  test('pre-existing customer on a paid Meta click: records a row-only booking row (correct paid channel), mints NO lead', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1', attribution: FB_ATTR, serviceInterest: 'General Pest Control',
+      customerCreated: false, selfBookedAppointmentId: 'sba-repeat', database,
+    });
+
+    expect(result).toEqual({ attributed: true, repeatPaid: true, leadSource: 'facebook' });
+    // The strongest-evidence paid conversion there is — but a repeat booker is
+    // NOT a fresh acquisition: no minted lead, no activity, row only.
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    expect(database._inserted.some((i) => i.table === 'lead_activities')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row).toBeTruthy();
+    expect(row.row).toMatchObject({
+      customer_id: 'c1',
+      self_booked_appointment_id: 'sba-repeat', // per-booking dedupe key
+      lead_source: 'facebook',
+      is_paid: true, // deterministic paid click id IS the paid channel
+      funnel_stage: 'booked',
+      fbclid: 'fb-click-123',
+      fbc: 'fb.1.1700000000000.fb-click-123',
+      fbp: 'fb.1.1700000000000.987654321',
+    });
+    // No-lead path: the row must not claim a lead.
+    expect(row.row).not.toHaveProperty('lead_id');
+  });
+
+  test('pre-existing customer on a paid Google click records lead_source google_ads (still no mint)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: { source: 'google', medium: 'cpc' }, gclid: 'g-click-9', wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null },
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-repeat-g',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: true, repeatPaid: true, leadSource: 'google_ads' });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ lead_source: 'google_ads', gclid: 'g-click-9', is_paid: true });
+  });
+
+  test('pre-existing customer paid click WITHOUT a booking id fails closed (no dedupe key → no row, like the organic path)', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 
     const result = await attributeSelfBooking({
       customerId: 'c1', attribution: FB_ATTR, customerCreated: false, database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'existing_customer' });
+    expect(result).toEqual({ attributed: false, reason: 'no_booking_id' });
     expect(database._inserted).toEqual([]);
   });
 
@@ -885,18 +941,198 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(ppc.row.gclid).toHaveLength(200);
   });
 
-  test('does NOT mint when the touch carries no deterministic click id (a bare _fbp cookie is not a click)', async () => {
+  test('does NOT mint when the touch carries no deterministic click id (a bare _fbp cookie is not a click) — organic funnel row instead', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 
     const result = await attributeSelfBooking({
       customerId: 'c1',
-      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null,
+        fbp: 'fb.1.x.ambient',
+        landing_url: 'https://wavespestcontrol.com/book', // real capture — the client always sends the landing
+      },
       customerCreated: true,
+      selfBookedAppointmentId: 'sba-1',
       database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'no_paid_click_id' });
+    expect(result).toMatchObject({ attributed: true, organic: true });
+    // No lead is EVER minted without a paid click id — only a funnel row.
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row).toBeTruthy();
+    expect(row.row).toMatchObject({
+      customer_id: 'c1',
+      self_booked_appointment_id: 'sba-1',
+      is_paid: false,
+      funnel_stage: 'booked', // the booking already committed when this runs
+      fbp: 'fb.1.x.ambient', // aux CAPI match key only — never a paid signal
+    });
+  });
+
+  test('no capture, no row: attribution-less bookings (legacy page / voice agent / fbp-only) fabricate nothing', async () => {
+    for (const attribution of [
+      null,
+      undefined,
+      {},
+      { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null, referrer: null, landing_url: null },
+      // ambient _fbp alone is not a capture — it carries zero classification signal
+      { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
+    ]) {
+      const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+      const result = await attributeSelfBooking({
+        customerId: 'c1', attribution, customerCreated: true, selfBookedAppointmentId: 'sba-none', database,
+      });
+      expect(result).toEqual({ attributed: false, reason: 'no_attribution_capture' });
+      expect(database._inserted).toEqual([]);
+    }
+  });
+
+  test('recovery-link booking mints NO acquisition row (same journey completing) and is labeled as such', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        // The abandoned-booking recovery SMS/email links to the OWNED portal URL
+        // (booking-abandon-recovery BOOKING_URL) — a real capture, but not a new
+        // acquisition touch.
+        landing_url: 'https://portal.wavespestcontrol.com/book?source=booking_recovery',
+        referrer: null,
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-recovery',
+      bookingSource: 'booking_recovery',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'recovery_rebooking' });
     expect(database._inserted).toEqual([]);
+  });
+
+  test('recovery booking still carrying the ORIGINAL ad click id (_fbc) mints nothing — the source gate runs before the paid-click branch', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        // Same journey completing: the visitor abandoned after a real Meta ad
+        // click, so the browser still carries the live _fbc/fbclid. Round 3
+        // only gated the organic recorder, so this used to fall through to
+        // the paid-click mint and re-mint the journey as a NEW won paid lead.
+        ...FB_ATTR,
+        landing_url: 'https://portal.wavespestcontrol.com/book?source=booking_recovery',
+      },
+      customerCreated: true, // the recovery booking creates the customer
+      selfBookedAppointmentId: 'sba-recovery-fbc',
+      bookingSource: 'booking_recovery',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'recovery_rebooking' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('owned estimate-originated sources skip acquisition minting with their own labeled reason (portal capture alone must not double-count the journey)', async () => {
+    for (const bookingSource of ['quote-wizard', 'quote-wizard-onetime', 'estimate-accept', 'admin-manual-booking-resend']) {
+      const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+      const result = await attributeSelfBooking({
+        customerId: 'c1',
+        attribution: {
+          utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+          // PublicBookingPage always posts the portal landing_url — a real
+          // capture, but the journey's attribution row already exists
+          // (public-quote inserts it at estimate time).
+          landing_url: `https://portal.wavespestcontrol.com/book?source=${bookingSource}`,
+          referrer: null,
+        },
+        customerCreated: false,
+        selfBookedAppointmentId: `sba-${bookingSource}`,
+        bookingSource,
+        database,
+      });
+
+      expect(result).toEqual({ attributed: false, reason: 'estimate_originated' });
+      expect(database._inserted).toEqual([]);
+    }
+  });
+
+  test('estimate-originated source gates the PAID path too (a lingering click id must not mint or row a second journey)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: FB_ATTR,
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-qw-paid',
+      bookingSource: 'quote-wizard',
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'estimate_originated' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('a booking that just converted an existing lead records NO row-only attribution (the bridge advanced that lead\'s own funnel row — a second row double-counts the booking)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: { source: 'google', medium: 'organic', campaign: null, term: null, content: null },
+        gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        landing_url: 'https://wavespestcontrol.com/book',
+        referrer: 'https://www.google.com/',
+      },
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-converted-organic',
+      leadConverted: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'lead_converted' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('converted-lead gate runs before the PAID branch too (a live click id on a converting booking must not add a repeat-paid row)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: FB_ATTR,
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-converted-paid',
+      leadConverted: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'lead_converted' });
+    expect(database._inserted).toEqual([]);
+  });
+
+  test('paid Meta UTMs with a stripped click id stay PAID (is_paid from the classifier channel, like the webhook)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: { source: 'facebook', medium: 'cpc', campaign: 'spring', term: null, content: null },
+        gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        landing_url: 'https://wavespestcontrol.com/book',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-fbcpc',
+      database,
+    });
+
+    // Still no minted lead (no deterministic click id) — but the funnel row
+    // carries the paid channel so splitFacebookByPaid keeps it under paid Meta.
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'facebook' });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ lead_source: 'facebook', is_paid: true, funnel_stage: 'booked' });
   });
 
   test('does NOT mint on a non-ad UTM + ambient _fbp (newsletter/organic must not become a paid won lead)', async () => {
@@ -906,10 +1142,114 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
       customerId: 'c1',
       attribution: { utm: { source: 'newsletter', medium: 'email', campaign: 'june' }, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: 'fb.1.x.ambient' },
       customerCreated: true,
+      selfBookedAppointmentId: 'sba-2',
       database,
     });
 
-    expect(result).toEqual({ attributed: false, reason: 'no_paid_click_id' });
+    expect(result).toMatchObject({ attributed: true, organic: true });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    // determineLeadSource fallback: unknown UTM source keys the bucket.
+    expect(row.row).toMatchObject({
+      lead_source: 'newsletter',
+      utm_campaign: 'june',
+      is_paid: false,
+    });
+  });
+
+  test('organic booking with a GBP UTM classifies via the shared determineLeadSource (google_business)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: { source: 'gbp', medium: 'organic', campaign: 'gbp', term: null, content: 'unknown-profile' },
+        gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        referrer: 'https://www.google.com/', landing_url: 'https://wavespestcontrol.com/book',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-3',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'google_business' });
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row.lead_source).toBe('google_business');
+    expect(row.row.is_paid).toBe(false);
+  });
+
+  test('organic REPEAT-customer booking still records a funnel row (per-booking capture, still no lead)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null, landing_url: 'https://wavespestcontrol.com/book' },
+      customerCreated: false, // resolved existing customer
+      selfBookedAppointmentId: 'sba-4',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ self_booked_appointment_id: 'sba-4', is_paid: false });
+  });
+
+  test('embedded iframe booking: portal landing_url defers to the spoke-page referrer (domain_website, not the portal host)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        // PublicBookingPage inside a spoke iframe: landing = the portal's own
+        // /book URL; the real page the customer was on arrives as referrer.
+        landing_url: 'https://portal.wavespestcontrol.com/book?service=lawn_care',
+        referrer: 'https://www.parrishfllawncare.com/lawn-care-parrish/',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-iframe',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'domain_website' });
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row.lead_source).toBe('domain_website');
+    expect(row.row.lead_source_detail).toBe('parrishfllawncare.com');
+    expect(row.row.funnel_stage).toBe('booked');
+  });
+
+  test('portal landing with a signal-less referrer (google.com) keeps the landing classification — never downgrades to the generic bucket', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: {
+        utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null,
+        landing_url: 'https://portal.wavespestcontrol.com/book',
+        referrer: 'https://www.google.com/',
+      },
+      customerCreated: true,
+      selfBookedAppointmentId: 'sba-google-ref',
+      database,
+    });
+
+    // google.com classifies to the generic 'website' fallback, so the landing's
+    // waves_website classification (portal host ⊂ wavespestcontrol.com) wins.
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'waves_website' });
+  });
+
+  test('organic booking WITHOUT a booking id fails closed (no per-booking dedupe key → no row)', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { utm: null, gclid: null, wbraid: null, gbraid: null, fbclid: null, fbc: null, fbp: null },
+      customerCreated: true,
+      database,
+    });
+
+    expect(result).toEqual({ attributed: false, reason: 'no_booking_id' });
     expect(database._inserted).toEqual([]);
   });
 
@@ -1084,7 +1424,9 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
             whereIn: (col, vals) => ({
               update: async (patch) => {
                 updates.push({ id: clause.id, whereIn: vals, patch });
-                return 1;
+                // statusRows=0 simulates a replayed event on a lead whose
+                // status is already outside the whitelist (won/lost/…).
+                return opts.statusRows == null ? 1 : opts.statusRows;
               },
             }),
             update: async (patch) => {
@@ -1126,6 +1468,10 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   // The open-status guard the rescue stamp applies (CLOSED_LEAD_STATUSES order).
   const CLOSED = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 
+  // The bridge call log must not leak across tests (the replay cases assert
+  // not.toHaveBeenCalled).
+  beforeEach(() => { bridgeLeadFunnelStage.mockClear(); });
+
   test('FK-linked send is unchanged — flips status, no contact-match link activity', async () => {
     const database = makeEventDb({
       linked: [{ id: 'L1', status: 'new', estimate_id: 'e-1' }],
@@ -1137,6 +1483,37 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       { id: 'L1', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
+    // Funnel-row mirror fires with the caller's database handle.
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('L1', 'estimate_sent', database);
+  });
+
+  test('replayed send on a closed lead (status update touches 0 rows) does NOT bridge the funnel row', async () => {
+    const database = makeEventDb({
+      // FK-linked lead whose stale loaded status passes the loop, but the
+      // guarded UPDATE finds it already won/lost → 0 rows.
+      linked: [{ id: 'L-won', status: 'new', estimate_id: 'e-replay' }],
+      statusRows: 0,
+    });
+
+    await markLinkedLeadEstimateSent({ estimateId: 'e-replay', sendMethod: 'sms', database });
+
+    // The status update was attempted (and applied nothing)…
+    expect(database._updates).toEqual([
+      { id: 'L-won', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+    ]);
+    // …so the funnel row must NOT be advanced for a deal that never transitioned.
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
+  test('replayed view on a closed lead does NOT bridge the funnel row', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-lost', status: 'new', estimate_id: 'e-replay-2' }],
+      statusRows: 0,
+    });
+
+    await markLinkedLeadEstimateViewed({ estimateId: 'e-replay-2', database });
+
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('standalone estimate: rescues a single contact-matched open lead — links it then flips to estimate_sent', async () => {
@@ -1214,6 +1591,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
       { id: 'L-view', whereIn: ['new', 'contacted', 'estimate_sent'], patch: expect.objectContaining({ status: 'estimate_viewed' }) },
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_viewed']);
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('L-view', 'estimate_viewed', database);
   });
 
   test('rescue stamp loses to a DIFFERENT estimate (0 rows) → does not advance or log for this estimate', async () => {

@@ -118,6 +118,7 @@ describe('lookupCountyParcelByPoint', () => {
       PAR_SUBDIV_NAME: 'ISLES AT LAKEWOOD RANCH PHASE I-A',
       PAR_SWIMPOOL_FLAG: 'N',
       CUR_ROLL_YEAR: 2026,
+      FEATS_SQFT_IMPERV: 1394,
     });
 
     const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee County' });
@@ -138,9 +139,24 @@ describe('lookupCountyParcelByPoint', () => {
       landUseDescription: 'Half Duplex/Paired Villa (1554)',
       subdivision: 'ISLES AT LAKEWOOD RANCH PHASE I-A',
       poolFlag: false,
+      imperviousAreaSf: 1394,
       gisProvider: 'manatee_gis',
     });
     expect(parcel.polygonAreaSqft).toBeGreaterThan(0);
+  });
+
+  test('Manatee: an unassessed impervious figure (0 on a new build) reads as null, not 0', async () => {
+    mockArcgis({
+      PARID: '497325009',
+      SITUS_ADDRESS: '14388 SKIPPING STONE LOOP',
+      SITUS_POSTAL_CITY: 'PARRISH',
+      SITUS_POSTAL_ZIP: '34219',
+      LAND_SQFT_CAMA: 10338,
+      BLDGS_SQFT_LIVING: 3477,
+      FEATS_SQFT_IMPERV: 0, // live probe: just-sold 2024 build carries 0 = not yet assessed
+    });
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' });
+    expect(parcel.imperviousAreaSf).toBeNull();
   });
 
   test('Charlotte: no land figure → lot size derived from the polygon geometry', async () => {
@@ -239,6 +255,9 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(record.squareFootage).toBe(2450);
     expect(record.lotSize).toBe(7200);
     expect(record._source).toBe('county');
+    // GIS-only records feed the footprint-turf shadow: impervious rides along.
+    expect(buildCadastralRecord({ ...parcel, imperviousAreaSf: 1394 }, 'addr').imperviousAreaSf).toBe(1394);
+    expect(record.imperviousAreaSf).toBeNull();
     // county GIS host classifies as county (100) for per-field evidence weight
     expect(record._fieldEvidence.propertyType[0].sourceType).toBe('county');
     expect(record._fieldEvidence.propertyType[0].sourceQuality).toBe(100);
@@ -386,6 +405,33 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(String(merged._raw.landUse).toLowerCase()).toContain('commercial');
     const profile = buildEnrichedProfile(merged, {}, 27.4, -82.4);
     expect(profile.category).toBe('COMMERCIAL');
+  });
+
+  test('GIS impervious figure survives a PAO-wins merge (footprint-turf input)', () => {
+    const { preserveCountyGisImpervious } = aiPrivate;
+    const gis = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '1 A ST', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 9750, livingAreaSqft: 2914, yearBuilt: 2023, dorUseCode: '01',
+      imperviousAreaSf: 1394,
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    }, 'addr');
+    const pao = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '1 A ST', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 9750, livingAreaSqft: 2914, yearBuilt: 2023, dorUseCode: '01',
+      sourceUrl: 'https://www.manateepao.gov/x',
+    }, 'addr');
+
+    // PAO wins the merge tie by input order; its features scrape didn't run,
+    // so without the backfill the GIS impervious figure is dropped.
+    const merged = mergePropertyRecords([pao, gis], 'addr');
+    expect(merged.imperviousAreaSf ?? null).toBeNull();
+    preserveCountyGisImpervious(merged, gis);
+    expect(merged.imperviousAreaSf).toBe(1394);
+
+    // Backfill-only: a real PAO features value is never overwritten.
+    merged.imperviousAreaSf = 900;
+    preserveCountyGisImpervious(merged, gis);
+    expect(merged.imperviousAreaSf).toBe(900);
   });
 
   test('county-assessed pool flag is carried as hasPool (codex P2)', () => {

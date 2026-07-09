@@ -1,4 +1,5 @@
 const {
+  annualPrepayRecurringUnitCount,
   calculateAnnualPrepayAmount,
   canAutoSendDraftInvoice,
   countTierQualifyingRecurringServices,
@@ -387,6 +388,35 @@ describe('estimate converter annual prepay amount', () => {
       firstScheduledServiceId: null,
       firstApplicationAmount: 128.45,
     })).toBe(false);
+  });
+});
+
+describe('annualPrepayRecurringUnitCount (deposit-intent mirror of the converter multi-service block)', () => {
+  test('solo recurring service counts 1; bundles count each line', () => {
+    expect(annualPrepayRecurringUnitCount({
+      recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] },
+    })).toBe(1);
+    expect(annualPrepayRecurringUnitCount({
+      recurring: {
+        services: [
+          { service: 'pest_control', name: 'Pest Control' },
+          { service: 'lawn_care', name: 'Lawn Care' },
+        ],
+      },
+    })).toBe(2);
+    expect(annualPrepayRecurringUnitCount({})).toBe(0);
+  });
+
+  test('a supplemental combo companion (e.g. rodent bait beside pest) counts as a second unit', () => {
+    const count = annualPrepayRecurringUnitCount({
+      recurring: {
+        services: [{ service: 'pest_control', name: 'Pest Control' }],
+        rodentBaitMo: 20,
+      },
+    });
+    // Mirrors convertEstimate's recurringUnitCount: 1 primary + 1 absorbed
+    // companion = 2 → prepay unsupported.
+    expect(count).toBe(2);
   });
 });
 

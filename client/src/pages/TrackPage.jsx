@@ -1,10 +1,13 @@
 import Icon from '../components/Icon';
+import BrandFooter from '../components/BrandFooter';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell } from '../components/brand';
+import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -30,16 +33,8 @@ function socketOrigin() {
 }
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const TRACK_SURFACE = {
-  surface: '#FFFFFF',
-  page: '#FAF8F3',
-  border: '#E7E2D7',
-  soft: '#F8FCFE',
-  softBorder: '#CFE7F5',
-  text: '#1B2C5B',
-  body: '#3F4A65',
-  muted: '#6B7280',
-};
+// Values from the shared customer palette (muted was drifted gray-500).
+const TRACK_SURFACE = { ...CUSTOMER_SURFACE, surface: '#FFFFFF' };
 
 const TRACK_PRIMARY_CTA = {
   display: 'flex',
@@ -58,11 +53,14 @@ const TRACK_PRIMARY_CTA = {
   textDecoration: 'none',
 };
 
-function formatWindow(startIso, endIso) {
+// The arrival window quoted to customers is ALWAYS start + 2 hours (owner
+// directive — see server/utils/sms-time-format.js). The API's window.end is
+// the internal job-duration block and never renders on customer surfaces.
+function formatWindow(startIso) {
   if (!startIso) return '';
   try {
     const s = new Date(startIso);
-    const e = endIso ? new Date(endIso) : null;
+    const e = Number.isNaN(s.getTime()) ? null : new Date(s.getTime() + 120 * 60000);
     const dateFmt = { weekday: 'short', month: 'short', day: 'numeric' };
     const timeFmt = { hour: 'numeric', minute: '2-digit' };
     const datePart = s.toLocaleDateString(undefined, dateFmt);
@@ -78,8 +76,10 @@ function formatWindow(startIso, endIso) {
 function formatCompleteDate(iso) {
   if (!iso) return '';
   try {
+    // completed_at is a real UTC instant; render its ET calendar day so the
+    // date matches the visit regardless of the viewer's device timezone.
     return new Date(iso).toLocaleDateString(undefined, {
-      weekday: 'long', month: 'long', day: 'numeric',
+      weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
     });
   } catch {
     return '';
@@ -164,8 +164,9 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
+        <BrandFooter />
       </div>
     </WavesShell>
   );
@@ -173,7 +174,7 @@ function Page({ children }) {
 
 function StatusPill({ label, color }) {
   return (
-    <div style={{
+    <div data-glass="chip" data-glass-pill="" style={{
       display: 'inline-block',
       fontSize: 12, fontWeight: 700,
       letterSpacing: 0, textTransform: 'uppercase',
@@ -234,7 +235,7 @@ function TrackerMap({ tech, property }) {
 
   if (!MAPS_KEY || loadError) {
     return (
-      <div style={{
+      <div data-glass="soft" style={{
         marginTop: 20, height: 200, borderRadius: 8,
         background: TRACK_SURFACE.soft,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -300,27 +301,9 @@ function TrackerMap({ tech, property }) {
   );
 }
 
-function PrepLink({ prepToken }) {
-  if (!prepToken) return null;
-  return (
-    <a
-      href={`/prep/${prepToken}`}
-      style={{
-        display: 'block', marginTop: 16, padding: '12px 20px',
-        background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
-        textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 14,
-        textDecoration: 'none', border: `1px solid ${TRACK_SURFACE.border}`,
-        fontFamily: FONT_BODY,
-      }}
-    >
-      View prep instructions
-    </a>
-  );
-}
-
 function Card({ children, accent }) {
   return (
-    <div style={{
+    <div data-glass="card" style={{
       background: TRACK_SURFACE.surface,
       borderRadius: 8,
       padding: 24,
@@ -371,30 +354,33 @@ function TechBlock({ tech, size = 'md' }) {
         <div style={{ fontSize: size === 'lg' ? 22 : 18, fontWeight: 600, color: TRACK_SURFACE.text }}>
           {tech.firstName || 'Your technician'}
         </div>
-        {tech.yearsWithWaves ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted }}>
-            {tech.yearsWithWaves}+ years with Waves
-          </div>
-        ) : null}
       </div>
     </div>
   );
 }
 
-function ServiceMeta({ data }) {
-  const window = formatWindow(data.window?.start, data.window?.end);
+// Client identity block (owner spec 2026-07-06): replaces the old
+// "Today's visit" service-description/window/address meta — the card
+// shows WHO the visit is for (name, address, email, phone).
+function ClientMeta({ data }) {
+  const c = data.customer || {};
   const addrLines = fullAddressLines(data.property);
+  if (!c.name && addrLines.length === 0 && !c.email && !c.phone) return null;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
-      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 4 }}>Today's visit</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{data.service?.type}</div>
-      {window ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>{window}</div>
+      {c.name ? (
+        <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{c.name}</div>
       ) : null}
       {addrLines.length > 0 ? (
-        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 4, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
           {addrLines.map((line, i) => <div key={i}>{line}</div>)}
         </div>
+      ) : null}
+      {c.email ? (
+        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{c.email}</div>
+      ) : null}
+      {c.phone ? (
+        <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>{c.phone}</div>
       ) : null}
     </div>
   );
@@ -403,7 +389,7 @@ function ServiceMeta({ data }) {
 // ── State cards ──────────────────────────────────────────────────
 function ScheduledCard({ data }) {
   const techFirst = data.tech?.firstName || 'your tech';
-  const window = formatWindow(data.window?.start, data.window?.end);
+  const window = formatWindow(data.window?.start);
   return (
     <Card accent={COLORS.wavesBlue}>
       <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0 }}>
@@ -416,16 +402,7 @@ function ScheduledCard({ data }) {
       <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
-      {(() => {
-        const lines = fullAddressLines(data.property);
-        if (lines.length === 0) return null;
-        return (
-          <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 16, lineHeight: 1.5 }}>
-            {lines.map((line, i) => <div key={i}>{line}</div>)}
-          </div>
-        );
-      })()}
-      <PrepLink prepToken={data.prepToken} />
+      <ClientMeta data={data} />
     </Card>
   );
 }
@@ -461,7 +438,7 @@ function EnRouteCard({ data }) {
             ) : null}
           </>
         ) : (
-          <div style={{
+          <div data-glass="soft" style={{
             marginTop: 20, padding: 14, background: TRACK_SURFACE.soft,
             borderRadius: 8, fontSize: 14, color: TRACK_SURFACE.body,
           }}>
@@ -476,16 +453,16 @@ function EnRouteCard({ data }) {
           <TechBlock tech={data.tech} size="lg" />
         </div>
 
-        <ServiceMeta data={data} />
+        <ClientMeta data={data} />
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
+          data-glass-accent=""
           style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
           TEXT {techFirst.toUpperCase()}
         </a>
-        <PrepLink prepToken={data.prepToken} />
-      </Card>
+        </Card>
     </>
   );
 }
@@ -507,8 +484,7 @@ function OnPropertyCard({ data }) {
           On site for {elapsed}.
         </div>
       ) : null}
-      <ServiceMeta data={data} />
-      <PrepLink prepToken={data.prepToken} />
+      <ClientMeta data={data} />
     </Card>
   );
 }
@@ -549,6 +525,7 @@ function CompleteCard({ data }) {
         {summary.serviceReportToken ? (
           <a
             href={`/report/${summary.serviceReportToken}`}
+            data-glass-accent=""
             style={{
               display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
@@ -559,6 +536,7 @@ function CompleteCard({ data }) {
         {summary.reviewUrl ? (
           <a
             href={summary.reviewUrl}
+            data-glass-accent=""
             style={{
               display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
@@ -569,6 +547,7 @@ function CompleteCard({ data }) {
         {summary.invoiceToken ? (
           <a
             href={`/pay/${summary.invoiceToken}`}
+            data-glass="chip"
             style={{
               display: 'block', padding: '14px 20px', background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
@@ -599,6 +578,7 @@ function CancelledCard({ data }) {
       ) : null}
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.blueDeeper, color: COLORS.white,
@@ -626,6 +606,7 @@ function NoShowCard({ data }) {
       </div>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.blueDeeper, color: COLORS.white,
@@ -664,12 +645,54 @@ function NotFoundCard() {
   );
 }
 
+// A valid token that hit a server hiccup (500/502/429) is NOT an expired
+// link — telling the customer their link is invalid during an outage sends
+// them to the phone line for nothing. Offer a retry instead.
+function TransientErrorCard({ onRetry }) {
+  return (
+    <Card>
+      <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
+        We couldn&rsquo;t load your tracker
+      </div>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
+        Something went wrong on our end — your tracking link is still good.
+        Try again in a moment, or call us at{' '}
+        <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>.
+      </div>
+      <div style={{ textAlign: 'center', marginTop: 16 }}>
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            minHeight: 44, padding: '0 24px', borderRadius: 10, border: 'none',
+            background: TRACK_SURFACE.text, color: '#fff',
+            fontSize: 15, fontWeight: 700, cursor: 'pointer',
+          }}
+        >
+          Try again
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
+  useGlassSurface(true, 'full');
+
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // React reuses this page instance across /track/:token navigations —
+  // responses for a previous token must never land in the new token's state.
+  const tokenRef = useRef(token);
+  // fetchTrack fires concurrently from the 30s en-route poll AND the socket
+  // job_update handler. Only the latest-issued request may write state — a
+  // pre-transition poll response that resolves AFTER the broadcast-triggered
+  // refetch would otherwise revert a completed visit to "arrives in N min"
+  // until the next tick (F-037).
+  const fetchSeqRef = useRef(0);
 
   // Refetch the public track endpoint. Used both for the initial mount
   // and as the wake-up handler when a customer:job_update broadcast
@@ -680,29 +703,43 @@ export default function TrackPage() {
   // cancellation, etc.). Refetching gives us the full state without
   // having to merge a narrow payload into a rich UI.
   const fetchTrack = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
+    const stale = () => tokenRef.current !== token || fetchSeqRef.current !== seq;
     try {
       const r = await fetch(`${API_BASE}/public/track/${token}`);
+      if (stale()) return; // superseded by a newer request or a token change
       if (r.status === 404) {
         setNotFound(true);
         return;
       }
+      // Non-OK bodies (500s, expired-token JSON errors) must never become
+      // tracker state — that blanked the page and could clobber a live
+      // en-route render. Only accept payloads with a recognized state.
+      if (!r.ok) return;
       const body = await r.json();
-      if (body) setData(body);
+      if (stale()) return;
+      if (body?.state) setData(body);
     } catch {
       // Don't clobber an existing render on a transient network blip;
       // the next broadcast (or page refresh) will recover.
     }
   }, [token]);
 
-  // Initial fetch on mount.
+  // Initial fetch on mount and on every token change — the previous
+  // token's data/notFound must not render (or suppress the retry card)
+  // under the new URL.
   useEffect(() => {
     let cancelled = false;
+    tokenRef.current = token;
+    setData(null);
+    setNotFound(false);
+    setLoading(true);
     (async () => {
       await fetchTrack();
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [fetchTrack]);
+  }, [token, fetchTrack]);
 
   // Live socket subscription. Authenticates with the public track
   // token (PR adding socket auth's trackToken path); server resolves
@@ -749,7 +786,22 @@ export default function TrackPage() {
   }, [data?.meta?.pollIntervalSeconds, fetchTrack, notFound]);
 
   if (loading) return <Page><SkeletonCard /></Page>;
-  if (notFound || !data) return <Page><NotFoundCard /></Page>;
+  if (notFound) return <Page><NotFoundCard /></Page>;
+  if (!data) {
+    // No 404 and no data: either a transient failure (retryable) or an
+    // unrecognized payload — only a real 404 earns the "expired" card.
+    return (
+      <Page>
+        <TransientErrorCard
+          onRetry={async () => {
+            setLoading(true);
+            await fetchTrack();
+            setLoading(false);
+          }}
+        />
+      </Page>
+    );
+  }
 
   return (
     <Page>

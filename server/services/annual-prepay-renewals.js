@@ -9,6 +9,9 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 const COVERED_STATUSES = [...ACTIVE_STATUSES, 'renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
+// Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
+// granularity: 3 days out and the day before the first visit).
+const PAYMENT_REMINDER_DAYS = [3, 1];
 const DEFAULT_ALERT_DAYS = 30;
 const LAST_SERVICE_GRACE_DAYS = 14;
 const LAST_SERVICE_TERM_END_LOOKBACK_DAYS = 120;
@@ -260,10 +263,6 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null) {
   return dates;
 }
 
-function defaultCoverageDurationMinutes(serviceType) {
-  return /pest/i.test(String(serviceType || '')) ? 45 : 30;
-}
-
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -357,7 +356,8 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   }
 
   const createdRows = [];
-  const baseDuration = defaultCoverageDurationMinutes(coverageServiceType);
+  // Owner directive (2026-07-03): every service call defaults to 60 minutes.
+  const baseDuration = 60;
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
   let createdParentId = recurringParentId;
 
@@ -638,6 +638,257 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   };
 }
 
+// A covered-window visit that COMPLETED before the prepay invoice was paid
+// billed per application (owner ruling: the pending window bills normally) —
+// but the paid annual still prices that visit's slice, and
+// applyPrepaidCoverageForTerm deliberately skips completed rows, so without
+// reconciliation the customer pays that visit twice: once per-visit, once
+// inside the annual. Runs on payment sync for every live term (idempotent —
+// the settle no-ops on already-covered invoices and the credit is
+// ledger-deduped per term+visit):
+//   - completion invoice still OPEN → settle it as coverage (the paid annual
+//     IS that visit's payment; settleInvoiceAsAnnualPrepayCovered runs the
+//     full PI triage and refuses money-in-flight / paid shapes).
+//   - completion invoice PAID / money in flight / settle refused → the annual
+//     over-collected exactly that visit's slice: return the slice as account
+//     credit.
+//   - never invoiced, or invoice voided/refunded → nothing was collected for
+//     the visit, so the annual slice IS its payment — no action.
+// Best-effort: a failure here must never block the payment sync itself.
+const PENDING_COMPLETION_CREDIT_BY = 'system:annual_prepay_pending_completion';
+
+async function reconcilePendingWindowCompletions(term, conn = db) {
+  const summary = { settled: 0, credited: 0 };
+  try {
+    const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+    const totalAmount = Number(term?.prepay_amount);
+    if (!term?.id || !term.customer_id || !coverageVisitCount || !(totalAmount > 0)) return summary;
+    const rows = await coverageRowsForTerm(term, conn);
+    const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      if (String(row.status || '').toLowerCase() !== 'completed') continue;
+      // Slice already delivered as coverage (stamped while scheduled, or
+      // settled at completion by the active-term dispatch path).
+      if (row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+        && String(row.annual_prepay_term_id || '') === String(term.id)) continue;
+      const invoice = await conn('invoices')
+        .where({ scheduled_service_id: row.id })
+        .whereNotIn('status', ['void', 'canceled', 'cancelled', 'refunded'])
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!invoice) continue;
+      const invoiceStatus = String(invoice.status || '').toLowerCase();
+      // Coverage-settled by a prepay term (this or another) — delivered; the
+      // refund reopen path owns any reversal. A bare 'prepaid' WITHOUT the
+      // coverage marker is different: the account-credit seam flips fully
+      // credit-covered invoices to 'prepaid', which CONSUMED the customer's
+      // real credit for the visit — that collects money and the annual's
+      // slice must still come back below.
+      if (invoice.annual_prepay_covered_term_id) continue;
+      let settledHere = false;
+      const paidForVisit = invoiceStatus === 'paid' || invoiceStatus === 'prepaid';
+      // A recorded payment on a still-OPEN invoice is a PARTIAL collection:
+      // the in-person prepay application (admin-schedule) reduces the total
+      // and stamps payment_recorded_at while leaving the remainder
+      // collectible. That's neither fully collected (crediting the whole
+      // slice would over-credit a partly-paid visit) nor settleable (the
+      // settle helper refuses invoices with payments applied) — leave it
+      // unresolved like the other in-flight shapes; when the remainder
+      // resolves, the invoice flips 'paid' and the payment webhook re-enters
+      // this reconcile.
+      const partiallyCollected = !paidForVisit && !!invoice.payment_recorded_at;
+      if (!paidForVisit && !partiallyCollected && invoiceStatus !== 'processing') {
+        try {
+          const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
+          if (res?.settled) { summary.settled += 1; settledHere = true; }
+        } catch (err) {
+          logger.warn(`[annual-prepay] pending-completion settle failed for invoice ${invoice.id}: ${err.message}`);
+        }
+      }
+      if (settledHere) continue;
+      // Only money actually COLLECTED for the visit justifies returning the
+      // annual's slice: a 'processing' ACH/card can still fail, and a
+      // settle-refused open invoice (add-ons / deposit credit / payer) may
+      // yet be voided — crediting now could hand back a slice for a visit
+      // the customer never pays. Leave those rows alone; the payment
+      // webhook re-enters this reconcile when the invoice resolves.
+      if (!paidForVisit) {
+        logger.warn(`[annual-prepay] pending-completion slice unresolved for visit ${row.id} (invoice ${invoice.id} status=${invoiceStatus}) — will reconcile when the invoice resolves`);
+        continue;
+      }
+      // Stripe PARTIAL refunds leave the invoice 'paid' — the refund state
+      // lives on the payment rows (refund_status/refund_amount; the webhook
+      // only flips invoices.status on FULL refunds, which the reversal hook
+      // owns). Any refund signal on the visit's payments means the amount
+      // actually collected is less than the invoice says: crediting the full
+      // slice would over-credit, and the right partial amount is an operator
+      // judgment — leave it for follow-up. Fail-closed: if the check itself
+      // errors, don't credit on uncertain money.
+      try {
+        const refundActivity = await conn('payments')
+          .where(function linkedToInvoice() {
+            this.whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [invoice.id]);
+            if (invoice.stripe_payment_intent_id) this.orWhere('stripe_payment_intent_id', invoice.stripe_payment_intent_id);
+            if (invoice.stripe_charge_id) this.orWhere('stripe_charge_id', invoice.stripe_charge_id);
+          })
+          .where(function refundSignal() {
+            this.where('status', 'refunded')
+              .orWhereNotNull('refund_status')
+              .orWhere('refund_amount', '>', 0);
+          })
+          .first('id');
+        if (refundActivity) {
+          logger.warn(`[annual-prepay] pending-completion slice for visit ${row.id} skipped — invoice ${invoice.id} has refund activity on its payments; operator follow-up needed`);
+          continue;
+        }
+      } catch (err) {
+        logger.warn(`[annual-prepay] pending-completion refund check failed for invoice ${invoice.id}: ${err.message} — slice left unresolved`);
+        continue;
+      }
+      const visitSlice = slices[index] ?? slices[0] ?? 0;
+      if (!(visitSlice > 0)) continue;
+      const marker = `term ${term.id}, visit ${row.id}`;
+      try {
+        // Atomic once-only credit: take the SAME customer row lock
+        // postCreditMovement writes under BEFORE the marker lookup, so two
+        // concurrent payment syncs serialize here — the second waits on the
+        // lock, then sees the first's ledger row and skips. A dedupe check
+        // outside the lock could pass on both and double-credit.
+        const creditOnce = async (t) => {
+          await t('customers').where({ id: term.customer_id }).forUpdate().first('id');
+          const dup = await t('customer_credit_ledger')
+            .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+            .where('note', 'like', `%${marker}%`)
+            .first('id');
+          if (dup) return false;
+          const { postCreditMovement } = require('./customer-credit');
+          await postCreditMovement({
+            customerId: term.customer_id,
+            delta: visitSlice,
+            source: 'adjustment',
+            invoiceId: invoice.id,
+            note: `Annual prepay paid after this visit already billed — the visit's prepay share returned as account credit (${marker})`,
+            createdBy: PENDING_COMPLETION_CREDIT_BY,
+          }, t);
+          return true;
+        };
+        const credited = conn === db ? await db.transaction(creditOnce) : await creditOnce(conn);
+        if (credited) summary.credited += 1;
+      } catch (err) {
+        logger.warn(`[annual-prepay] pending-completion credit skipped for visit ${row.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] pending-window completion reconcile skipped for term ${term?.id}: ${err.message}`);
+  }
+  return summary;
+}
+
+// Runs the pending-window reconcile for a term that is ACTIVE at
+// creation/refresh time (born already paid). The reconcile's settle leg
+// (settleInvoiceAsAnnualPrepayCovered) opens its own global-pool transaction
+// and Stripe PI triage, so INSIDE a caller transaction it would stamp
+// annual_prepay_covered_term_id against a term row that transaction hasn't
+// committed yet — the FK check blocks/fails, the error is swallowed, and the
+// covered visit invoice stays collectible. Defer to after the caller's commit
+// (trx.executionPromise, the dispatch-alerts pattern); a rollback drops the
+// work along with the term. On the global pool it runs inline.
+function reconcileBornPaidTerm(term, conn) {
+  if (conn === db) return reconcilePendingWindowCompletions(term, db);
+  if (conn?.executionPromise) {
+    conn.executionPromise
+      .then(() => reconcilePendingWindowCompletions(term, db))
+      .catch(() => {}); // rolled back — the term never existed
+    return Promise.resolve({ settled: 0, credited: 0, deferred: true });
+  }
+  // No commit hook on this connection (test harness?). The reconcile is
+  // idempotent and re-validates every row live, so run it on the pool.
+  logger.warn(`[annual-prepay] caller trx has no executionPromise — running born-paid reconcile inline for term ${term?.id}`);
+  return reconcilePendingWindowCompletions(term, db);
+}
+
+// Refunding/voiding the annual prepay invoice must also claw back any
+// pending-window completion credits it issued — the refund returns the FULL
+// annual, so a kept visit-slice credit would refund that slice twice.
+// Ledger-deduped per original credit's term+visit marker, under the same
+// customer row lock the grants use. Reversal is capped at the balance still
+// available: credit the customer already SPENT can't be pulled from a
+// non-negative balance — reverse what remains and warn the shortfall for
+// operator follow-up (a partial reversal still writes its dedupe row, so a
+// later retry never claws back more).
+const PENDING_COMPLETION_REVERSAL_BY = 'system:annual_prepay_pending_completion_reversal';
+
+async function reversePendingWindowCompletionCredits(term, conn = db, { visitId = null } = {}) {
+  let reversedCount = 0;
+  try {
+    if (!term?.id || !term.customer_id) return reversedCount;
+    const work = async (t) => {
+      const customer = await t('customers')
+        .where({ id: term.customer_id })
+        .forUpdate()
+        .first('id', 'account_credits');
+      if (!customer) return;
+      let balance = Number(customer.account_credits) || 0;
+      const credits = await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+        // visitId narrows to ONE visit's credit (visit-invoice refund path);
+        // without it, every credit the term issued reverses (prepay refund).
+        .where('note', 'like', visitId ? `%term ${term.id}, visit ${visitId})%` : `%term ${term.id},%`)
+        .where('delta', '>', 0)
+        .select('*');
+      if (!credits.length) return;
+      const reversalNotes = (await t('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_REVERSAL_BY })
+        .select('note')).map((r) => String(r.note || ''));
+      const { postCreditMovement } = require('./customer-credit');
+      for (const credit of credits) {
+        const markerMatch = String(credit.note || '').match(/\(term [^)]*\)/);
+        const marker = markerMatch ? markerMatch[0] : `(term ${term.id}, ledger ${credit.id})`;
+        if (reversalNotes.some((note) => note.includes(marker))) continue;
+        const creditAmount = Number(credit.delta) || 0;
+        const reverseAmount = Math.min(balance, creditAmount);
+        if (!(reverseAmount > 0)) {
+          logger.warn(`[annual-prepay] pending-completion credit ${marker} not reversible — balance exhausted (customer ${term.customer_id}); operator follow-up needed`);
+          // The dedupe row must still be written: refund syncs replay (Stripe
+          // webhook retries, admin re-records), and without a marker a later
+          // retry that runs AFTER unrelated credit lands would claw this
+          // already-spent slice out of that new balance. postCreditMovement
+          // rejects zero deltas, so write the audit row directly — same trx,
+          // customer row already locked above, balance unchanged.
+          await t('customer_credit_ledger').insert({
+            customer_id: term.customer_id,
+            delta: 0,
+            balance_after: balance,
+            source: 'adjustment',
+            invoice_id: credit.invoice_id || null,
+            note: `Annual prepay refunded — the visit's pending-completion credit was already spent; nothing reversed, operator follow-up needed ${marker}`,
+            created_by: PENDING_COMPLETION_REVERSAL_BY,
+          });
+          continue;
+        }
+        if (reverseAmount < creditAmount) {
+          logger.warn(`[annual-prepay] pending-completion credit ${marker} only partially reversible ($${reverseAmount.toFixed(2)} of $${creditAmount.toFixed(2)}) — balance exhausted; operator follow-up needed`);
+        }
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: -reverseAmount,
+          source: 'adjustment',
+          invoiceId: credit.invoice_id || null,
+          note: `Annual prepay refunded — reversing the visit's pending-completion credit ${marker}`,
+          createdBy: PENDING_COMPLETION_REVERSAL_BY,
+        }, t);
+        balance -= reverseAmount;
+        reversedCount += 1;
+      }
+    };
+    if (conn === db) await db.transaction(work); else await work(conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] pending-completion credit reversal skipped for term ${term?.id}: ${err.message}`);
+  }
+  return reversedCount;
+}
+
 // When a paid prepay invoice is voided/refunded the term flips to 'cancelled',
 // but its not-yet-completed covered visits keep the per-visit prepaid_amount
 // stamp that suppresses completion billing — so they'd be serviced free even
@@ -911,12 +1162,30 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         } catch (err) {
           logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${term.id}: ${err.message}`);
         }
+        // And claw back the pending-window completion credits this term
+        // issued — the full-annual refund would otherwise refund those
+        // slices twice (once inside the refund, once as kept credit).
+        await reversePendingWindowCompletionCredits(updated, conn);
+        // Coverage is gone — return the customer to a billable mode (the
+        // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
+        await resetBillingModeAfterTermCancel(updated, conn);
       }
     }
 
     if (ACTIVE_STATUSES.includes(current.status)) {
       await syncCustomerRenewalDate(current.customer_id, dateOnly(current.term_end), conn);
       const refreshed = await refreshTermSnapshot(current, conn);
+      // After attach+stamp: covered-window visits that completed (and billed
+      // per application) BEFORE this payment would otherwise be paid twice —
+      // settle their open invoices as coverage / credit back their slice.
+      // Idempotent, so retried webhooks and later syncs are safe.
+      await reconcilePendingWindowCompletions(refreshed || current, conn);
+      // Payment confirmed → the customer is now genuinely annual-prepay.
+      // Term creation deliberately does NOT stamp payment_pending terms
+      // (pre-payment completions bill per application), so this transition
+      // is where the pending case picks up its stamp. Idempotent re-stamp
+      // for already-active terms; best-effort + column-guarded inside.
+      await stampAnnualPrepayBillingMode(current.customer_id, conn, current.id);
       results.push(refreshed || current);
     } else {
       results.push(current);
@@ -938,7 +1207,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             this.where('status', 'cancelled').whereNotNull('renewal_decision');
           });
       })
-      .select('id');
+      .select('id', 'customer_id', 'source_estimate_id');
     for (const decided of decidedCoveredTerms) {
       await clearPrepaidStampsForTerm(decided.id, conn);
       // Same as the active loop: reopen any visit invoices this term settled as
@@ -948,6 +1217,68 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       } catch (err) {
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for decided term ${decided.id}: ${err.message}`);
       }
+      await reversePendingWindowCompletionCredits(decided, conn);
+      // A decided-lapse term (status 'cancelled' + renewal_decision) whose
+      // invoice refunds never passes through the active loop's reset — the
+      // customer would stay 'annual_prepay' with the cron skipping them and
+      // completion refusing to bill: unbilled forever (Codex round-6 P1).
+      // The helper self-checks for replacement coverage, so a renewed
+      // customer (live follow-on term) keeps their mode.
+      await resetBillingModeAfterTermCancel(decided, conn);
+    }
+  }
+
+  // A VISIT invoice resolving can move a pending-window completion slice in
+  // either direction — its own payment/refund never matches
+  // prepay_invoice_id, so nothing above selects a term for it. Find the
+  // covering term through the visit row's attach link:
+  //   - resolves PAID → the activation reconcile may have left this slice
+  //     unresolved (processing / in-flight / settle-refused) — re-run it.
+  //   - resolves REFUNDED/VOID → the customer got the visit payment back, so
+  //     the slice credit issued for that paid visit reverses: the annual's
+  //     slice becomes the visit's payment again (matching the never-billed
+  //     branch). Without this the customer keeps the credit AND the refund.
+  // The account-credit seam resolves a fully credit-covered visit invoice as
+  // 'prepaid' with NO paid_at — invoiceTermStatus maps that to payment_pending,
+  // but consumed account credit IS money collected for the visit (the same rule
+  // reconcilePendingWindowCompletions applies via paidForVisit), so it takes
+  // the PAID direction here. Coverage-settled 'prepaid' invoices are harmless
+  // re-entries: the reconcile skips rows carrying a covered-term marker.
+  const visitCollected = nextStatus === 'active'
+    || String(invoice.status || '').toLowerCase() === 'prepaid';
+  if (!terms.length && (visitCollected || nextStatus === 'cancelled')) {
+    try {
+      const withLink = invoice.scheduled_service_id !== undefined
+        ? invoice
+        : await conn('invoices').where({ id: invoice.id }).first('id', 'scheduled_service_id');
+      const visitId = withLink?.scheduled_service_id;
+      if (visitId) {
+        const visitRow = await conn('scheduled_services')
+          .where({ id: visitId })
+          .first('id', 'annual_prepay_term_id');
+        if (visitRow?.annual_prepay_term_id) {
+          if (visitCollected) {
+            // Covered-coverage semantics, not just ACTIVE_STATUSES: a term
+            // whose renewal was already decided (renewed / switch_plan, or a
+            // lapse still inside its paid window) stays covered through
+            // term_end, and a visit invoice paid late — after the decision —
+            // still owes its slice back. coveredTermsAsOf also revalidates
+            // the prepay invoice/payment isn't void/refunded, so a refunded
+            // term that kept its decided status can never mint a credit here.
+            const coveringTerm = await coveredTermsAsOf(conn, null)
+              .where('t.id', visitRow.annual_prepay_term_id)
+              .first('t.*');
+            if (coveringTerm) await reconcilePendingWindowCompletions(coveringTerm, conn);
+          } else {
+            const coveringTerm = await conn('annual_prepay_terms')
+              .where({ id: visitRow.annual_prepay_term_id })
+              .first('*');
+            if (coveringTerm) await reversePendingWindowCompletionCredits(coveringTerm, conn, { visitId });
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] visit-invoice reconcile hook skipped for invoice ${invoice.id}: ${err.message}`);
     }
   }
 
@@ -1036,6 +1367,127 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
     .whereNull('i.paid_at')
     .distinct('t.customer_id');
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
+}
+
+// Owner ruling 2026-07-09: annual-prepay customers carry billing_mode
+// 'annual_prepay' as their classification — it drives autopay enrollment at
+// signup (stripe-webhook save-card mirror) and marks them NOT
+// per-application for completion billing. Deliberately NOT a billing
+// suppressor: the monthly cron keeps trusting its coverage-dated term
+// guards, so a later term cancel/refund returns the customer to normal
+// billing without this stamp needing cleanup. The estimate converter stamps
+// every recurring accept 'per_application'; the term choke point
+// (portal accept, prepay-on-book, Customer 360 record-prepay all run through
+// createTermForAnnualPrepay) re-stamps the prepay ones — but ONLY once the
+// term is ACTIVE (paid). payment_pending terms stay 'per_application' so
+// pre-payment completions keep billing per application; the payment sync
+// stamps on the pending→active transition. Best-effort + column-guarded:
+// term creation must never fail on this stamp.
+async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
+  try {
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    // Record what the customer was BEFORE prepay so a later void/refund can
+    // restore it EXACTLY (Codex round-7: a per_application customer buying a
+    // MANUAL prepay has no source_estimate_id on the term, and the heuristic
+    // alone would wrongly return them to legacy monthly). 'none' = prior
+    // mode was NULL; a NULL column value means "not recorded" (pre-column
+    // terms) and falls back to the heuristic. First stamp wins — renewal
+    // syncs / duplicate webhooks re-stamp the customer but never overwrite
+    // the recorded prior with 'annual_prepay'.
+    if (termId && (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode'))) {
+      const current = await conn('customers').where({ id: customerId }).first('billing_mode');
+      if (current && current.billing_mode !== 'annual_prepay') {
+        await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .whereNull('prior_billing_mode')
+          .update({ prior_billing_mode: current.billing_mode || 'none' });
+      } else if (current) {
+        // Already annual_prepay (a renewal or a second manual term) — carry
+        // the ORIGINAL prior forward from the earlier term, or a later
+        // refund of this new term would fall back to the heuristic and
+        // restore the wrong mode (Codex round-8: a manual renewal term has
+        // no source estimate, so a per_application-origin customer would
+        // land on legacy monthly).
+        const prev = await conn('annual_prepay_terms')
+          .where({ customer_id: customerId })
+          .whereNot({ id: termId })
+          .whereNotNull('prior_billing_mode')
+          .orderBy('created_at', 'desc')
+          .first('prior_billing_mode');
+        if (prev?.prior_billing_mode) {
+          await conn('annual_prepay_terms')
+            .where({ id: termId })
+            .whereNull('prior_billing_mode')
+            .update({ prior_billing_mode: prev.prior_billing_mode });
+        }
+      }
+    }
+    await conn('customers')
+      .where({ id: customerId })
+      .update({ billing_mode: 'annual_prepay', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[annual-prepay] billing_mode stamp skipped for customer ${customerId}: ${err.message}`);
+  }
+}
+
+// A true void/refund cancels the prepay coverage — the customer must return
+// to a billable mode, or the monthly cron's 'annual_prepay' skip (GUARD 3b,
+// Codex round-5) leaves them unbilled forever. Estimate-flow terms
+// (source_estimate_id set) return to per-visit billing; Customer 360 /
+// manual prepays (no source estimate — often legacy monthly members who
+// prepaid a year) return to legacy monthly semantics (NULL). Guarded on the
+// current mode so a customer who already switched models isn't clobbered.
+// Best-effort + column-guarded, same contract as the stamp.
+async function resetBillingModeAfterTermCancel(term, conn) {
+  try {
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    // Replacement coverage keeps the mode — but only a PAID (genuinely
+    // covering) term counts: a payment_pending replacement is deliberately
+    // NOT stamped (pre-payment completions bill per application/monthly),
+    // so keeping 'annual_prepay' for it would strand the customer in a
+    // nothing-bills limbo — cron skips the mode, completion refuses it,
+    // and the pending invoice may never be paid (Codex round-8 P1). When
+    // the pending term DOES pay, syncTermForInvoicePayment re-stamps.
+    // Same for a row whose window does not contain TODAY: coveredTermsAsOf
+    // only covers dates inside [term_start, term_end], so an EXPIRED
+    // active/renewal_pending row (lapsed renewal never decided — Codex
+    // round-11) or a paid FUTURE term that hasn't started yet (Codex
+    // round-12) is not coverage right now — keeping the stamp for either is
+    // the same nothing-bills limbo during the gap. Resetting under a future
+    // term is safe: once its window opens, coveredTermsAsOf / prepaidCovered
+    // protect covered visits regardless of billing_mode. Live window only,
+    // ET date convention.
+    const today = etDateString();
+    const replacement = await conn('annual_prepay_terms')
+      .where({ customer_id: term.customer_id })
+      .whereNot({ id: term.id })
+      .whereIn('status', ACTIVE_STATUSES)
+      .where('term_start', '<=', today)
+      .where('term_end', '>=', today)
+      .first('id');
+    if (replacement) return;
+    // Restore the EXACT prior mode when the stamp recorded it ('none' =
+    // legacy NULL); pre-column terms fall back to the source heuristic
+    // (estimate-flow term → per-visit, manual prepay → legacy monthly).
+    let restored;
+    if (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode')) {
+      const trow = await conn('annual_prepay_terms').where({ id: term.id }).first('prior_billing_mode');
+      if (trow?.prior_billing_mode) {
+        restored = trow.prior_billing_mode === 'none' ? null : trow.prior_billing_mode;
+      }
+    }
+    if (restored === undefined) {
+      restored = term.source_estimate_id ? 'per_application' : null;
+    }
+    await conn('customers')
+      .where({ id: term.customer_id, billing_mode: 'annual_prepay' })
+      .update({
+        billing_mode: restored,
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[annual-prepay] billing_mode reset skipped for customer ${term.customer_id}: ${err.message}`);
+  }
 }
 
 async function createTermForAnnualPrepay({
@@ -1221,6 +1673,21 @@ async function createTermForAnnualPrepay({
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
       await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
+      // A term that is ACTIVE here was born (or re-anchored) already paid —
+      // the Customer 360 flow records the invoice payment BEFORE creating the
+      // term, so syncTermForInvoicePayment never fires for it and its
+      // pending-window completed visits would stay double-billed. Run the
+      // same reconcile the payment sync runs (post-commit when inside a
+      // caller trx); idempotent, so terms that DID arrive through the
+      // payment sync are unaffected.
+      await reconcileBornPaidTerm(refreshed, conn);
+      // Stamp only once the term is genuinely ACTIVE (paid). A
+      // payment_pending term must leave the customer 'per_application':
+      // pending-window completions bill per application until the annual
+      // invoice is paid, and the annual_prepay stamp would divert them to
+      // the monthly-membership dispatch path (Codex round-2). The payment
+      // sync (syncTermForInvoicePayment) stamps on pending→active.
+      await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
     }
     return refreshed;
   }
@@ -1252,6 +1719,15 @@ async function createTermForAnnualPrepay({
   const refreshed = await refreshTermSnapshot(term.id, conn);
   if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
     await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
+    // Born already paid (Customer 360 records the payment before creating the
+    // term), so the payment sync's reconcile never fires for this term — run
+    // it here (post-commit when inside a caller trx) or its pending-window
+    // completed visits stay double-billed.
+    await reconcileBornPaidTerm(refreshed, conn);
+    // ACTIVE (born-paid) only — a payment_pending term keeps the customer
+    // 'per_application' so pre-payment completions bill per application; the
+    // payment sync stamps when the invoice pays (Codex round-2).
+    await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
   }
   return refreshed;
 }
@@ -1534,6 +2010,336 @@ async function checkAndSend({ today = etDateString() } = {}) {
   return { sent };
 }
 
+// ── Pre-visit payment reminders for UNPAID accept-time prepay terms ─────────
+//
+// A prepay-annual accept mints the full-year invoice and a payment_pending
+// term, but nothing visit-anchored nudged the customer before the first visit:
+// the estimate follow-up cadence stops at accept, and the invoice follow-up
+// sequence (d3/d7/d14/d30) is SEND-anchored, so a short accept-to-visit gap
+// can ride into service week untouched. These reminders anchor on term_start
+// (3 days / 1 day before, matching the daily 10 AM renewal cron's day
+// granularity) and set the expectation that an unpaid prepay simply bills the
+// visit per-application. Same durable sent/claim column pattern as the
+// renewal notices above.
+
+function paymentReminderColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === 3) return 'payment_reminder_3d_sent_at';
+  if (n === 1) return 'payment_reminder_1d_sent_at';
+  return null;
+}
+
+function paymentReminderClaimColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === 3) return 'payment_reminder_3d_claimed_at';
+  if (n === 1) return 'payment_reminder_1d_claimed_at';
+  return null;
+}
+
+// The invoice follow-up engine (send-anchored dunning) and this visit-anchored
+// reminder both text the same pay link, and both crons fire at 10 AM ET — so
+// suppress a pre-visit reminder when that invoice's sequence either touched
+// the customer in the last ~20h or is DUE to touch them today (deterministic
+// regardless of which cron runs first in the shared hour). The 20h window
+// (not 24h) keeps yesterday's 10 AM dunning from suppressing today's 10 AM
+// reminder on the boundary.
+const PAYMENT_REMINDER_DUNNING_SUPPRESS_MS = 20 * 60 * 60 * 1000;
+async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd = null } = {}) {
+  try {
+    const row = await db('invoice_followup_sequences')
+      .where({ invoice_id: invoiceId })
+      .first('status', 'last_touch_at', 'next_touch_at');
+    if (!row) return false;
+    // A REAL recent send suppresses regardless of status — the FINAL step of
+    // a sequence stamps last_touch_at and flips the row to 'completed' in the
+    // same shared 10 AM hour (invoice followups are registered ahead of the
+    // renewal cron), so an active-only check would double-text that morning.
+    if (row.last_touch_at && (now - new Date(row.last_touch_at)) < PAYMENT_REMINDER_DUNNING_SUPPRESS_MS) return true;
+    // Deliberate dunning controls: a paused / autopay-held / stopped sequence
+    // means "no automated payment texts right now" (owner pause, autopay in
+    // flight, stop/waive) — the pre-visit reminder honors them too.
+    if (['paused', 'autopay_hold', 'stopped'].includes(row.status)) return true;
+    // 'completed' (sequence exhausted) falls through: the visit-anchored
+    // reminder is the only nudge left, so only the recent-touch window above
+    // suppresses it.
+    if (row.status !== 'active') return false;
+    if (row.next_touch_at) {
+      // A due touch only suppresses on a day the follow-up cron can actually
+      // fire (Tue–Fri per config.sendWindow). A touch that came due over the
+      // weekend would otherwise suppress the Sat 3d AND Mon 1d reminders while
+      // no dunning ran either day — the customer would reach the visit with no
+      // pre-visit contact at all.
+      const followupConfig = require('../config/invoice-followups');
+      const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
+      const today = todayYmd || etDateString();
+      const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();
+      if (sendDays.has(todayEtDow)) {
+        const endOfTodayEt = parseETDateTime(`${today} 23:59:59`);
+        if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
+      }
+    }
+    return false;
+  } catch (err) {
+    // Fail open (send the reminder): a read miss must not silence the only
+    // visit-anchored nudge; worst case the customer gets dunning + reminder.
+    logger.warn(`[annual-prepay] dunning suppression check failed for invoice ${invoiceId}: ${err.message}`);
+    return false;
+  }
+}
+
+async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
+  if (!(await annualPrepayTableExists())) return { sent: false, reason: 'table_missing' };
+  const sentCol = paymentReminderColumnForDaysOut(daysOut);
+  const claimCol = paymentReminderClaimColumnForDaysOut(daysOut);
+  if (!sentCol || !claimCol) return { sent: false, reason: 'unsupported_days_out' };
+  const cols = await annualPrepayColumns();
+  if (!cols[sentCol] || !cols[claimCol]) return { sent: false, reason: 'columns_missing' };
+
+  // The status/sent checks on this row are advisory (the caller's candidate
+  // read may be moments old) — the conditional claim UPDATE below re-checks
+  // both atomically, and the fresh invoice read below catches a payment the
+  // webhook hasn't flipped onto the term yet.
+  const term = typeof termOrId === 'object' && termOrId?.id
+    ? termOrId
+    : await db('annual_prepay_terms').where({ id: termOrId }).first();
+  if (!term) return { sent: false, reason: 'term_not_found' };
+  if (term.status !== PAYMENT_PENDING_STATUS) return { sent: false, reason: 'not_payment_pending' };
+  if (term[sentCol]) return { sent: false, reason: 'already_sent' };
+  if (!term.prepay_invoice_id) return { sent: false, reason: 'no_invoice' };
+
+  let invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
+  if (!invoice) return { sent: false, reason: 'invoice_missing' };
+  // Canonical collectibility (invoice-helpers): paid/prepaid/PROCESSING/void/
+  // refunded/cancelled all skip — an in-flight ACH must not be asked to pay
+  // again, and the pay page would refuse these states anyway.
+  const { isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+  if (!isInvoiceCollectibleStatus(invoice.status)) {
+    return { sent: false, reason: 'invoice_not_collectible' };
+  }
+  // Never text the homeowner a pay link for a payer-billed invoice — the
+  // pay link + AR route to the payer (mirrors InvoiceService.sendViaSMS).
+  if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
+
+  if (await invoiceDunningActiveToday(invoice.id)) {
+    return { sent: false, reason: 'dunning_active_today' };
+  }
+
+  // Credit already applied to the invoice may fully cover it — nothing to
+  // remind (the auto-apply seam itself runs post-claim, see below).
+  if (!(invoiceAmountDue(invoice) > 0)) return { sent: false, reason: 'fully_credited' };
+
+  const now = new Date();
+  const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
+  const [claimedTerm] = await db('annual_prepay_terms')
+    .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
+    .whereNull(sentCol)
+    .where(function paymentClaimAvailable() {
+      this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
+    })
+    .update({ [claimCol]: now, updated_at: now })
+    .returning('*');
+  if (!claimedTerm) return { sent: false, reason: 'already_claimed' };
+
+  const releaseClaim = async () => {
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull(sentCol)
+      .update({ [claimCol]: null, updated_at: new Date() })
+      .catch((err) => logger.warn(`[annual-prepay] payment reminder claim release failed for term ${claimedTerm.id}: ${err.message}`));
+  };
+
+  // Credit this reminder draws down must not stay consumed if no touch goes
+  // out — mirror the dunning engine: reverse exactly THIS call's increment on
+  // any no-channel exit (missing customer/template, blocked SMS, throw). A
+  // seam apply that FULLY covers the invoice is a settle event, not a touch —
+  // the credit stays (and reverseAppliedCredit refuses 'prepaid' anyway).
+  let reminderAppliedCredit = 0;
+  const reverseReminderCredit = async () => {
+    if (!(reminderAppliedCredit > 0)) return;
+    try {
+      const { reverseAppliedCredit } = require('./customer-credit');
+      await reverseAppliedCredit({ invoiceId: invoice.id, amount: reminderAppliedCredit, createdBy: 'system:prepay_reminder_undelivered' });
+    } catch (err) {
+      logger.warn(`[annual-prepay] credit reversal after undelivered payment reminder skipped for invoice ${invoice.id}: ${err.message}`);
+    }
+    reminderAppliedCredit = 0;
+  };
+
+  try {
+    // Run the same account-credit seam the regular invoice send paths run
+    // before asking for money (feature-gated + fail-soft inside), then
+    // re-read: available credit may shrink or fully cover the balance, and
+    // the reminder must quote the amount Stripe will actually collect, not
+    // the gross total. Post-claim so the undelivered-touch reversal above
+    // covers every failure exit that follows.
+    try {
+      const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
+      const creditResult = await autoApplyAccountCreditIfEnabled(invoice.id, { createdBy: 'system:annual_prepay_payment_reminder' });
+      reminderAppliedCredit = Number(creditResult?.applied) || 0;
+      const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
+      if (freshInvoice) invoice = freshInvoice;
+    } catch (err) {
+      logger.warn(`[annual-prepay] credit seam skipped for invoice ${invoice.id}: ${err.message}`);
+    }
+    if (!isInvoiceCollectibleStatus(invoice.status)) {
+      // Seam flipped the invoice to prepaid/paid (full coverage side effects
+      // also activate the term) — settled, keep the credit, free the claim.
+      await releaseClaim();
+      return { sent: false, reason: 'invoice_not_collectible' };
+    }
+    const amountDue = invoiceAmountDue(invoice);
+    if (!(amountDue > 0)) {
+      await releaseClaim();
+      return { sent: false, reason: 'fully_credited' };
+    }
+
+    // whereNull(deleted_at): a soft-deleted account must not get a pay-link
+    // text (mirrors the renewal scan's deleted-customer exclusion).
+    const customer = await db('customers')
+      .where({ id: claimedTerm.customer_id })
+      .whereNull('deleted_at')
+      .first();
+    if (!customer) {
+      await reverseReminderCredit();
+      await releaseClaim();
+      return { sent: false, reason: 'customer_missing_or_deleted' };
+    }
+    if (!customer.phone) {
+      // The invoice email already carries the pay link (sent at accept, plus
+      // the follow-up sequence's email legs) — with no phone there is no SMS
+      // nudge to add. Mark sent so the daily cron doesn't re-claim forever;
+      // reverse the seam credit (no touch went out to consume it).
+      await reverseReminderCredit();
+      await db('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .whereNull(sentCol)
+        .update({ [sentCol]: new Date(), [claimCol]: null, updated_at: new Date() });
+      return { sent: false, reason: 'no_phone' };
+    }
+
+    const { publicPortalUrl } = require('../utils/portal-url');
+    const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+    const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: 'invoice',
+      entityType: 'invoices',
+      entityId: invoice.id,
+      customerId: customer.id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+    const amountText = Number.isFinite(amountDue) && amountDue > 0
+      ? ` for $${amountDue.toFixed(2)}`
+      : '';
+
+    const body = await renderSmsTemplate(
+      'annual_prepay_payment_reminder',
+      {
+        first_name: customer.first_name || 'there',
+        amount_text: amountText,
+        first_visit_date: formatDateLabel(claimedTerm.term_start),
+        pay_link: payUrl,
+      },
+      { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
+    );
+    if (!body) {
+      logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
+      await reverseReminderCredit();
+      await releaseClaim();
+      return { sent: false, reason: 'missing_sms_template' };
+    }
+
+    const smsResult = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: customer.id,
+      invoiceId: invoice.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'annual_prepay_payment_reminder',
+      metadata: {
+        original_message_type: 'annual_prepay_payment_reminder',
+        annual_prepay_term_id: claimedTerm.id,
+        days_out: daysOut,
+        ...(opts.metadata || {}),
+      },
+    });
+    if (!smsResult.sent) {
+      logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      await reverseReminderCredit();
+      await releaseClaim();
+      return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
+    }
+
+    // Touch DELIVERED — everything past this point is bookkeeping and must
+    // never undo the customer-visible send: the text already quoted the
+    // post-credit balance, so reversing would make the link charge more than
+    // the reminder said, and re-claiming would re-text. Stamp failures log
+    // loudly and still report sent; the claim stays held (stale-claim TTL
+    // owns the rare retry).
+    try {
+      const sentAt = new Date();
+      await db('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .whereNull(sentCol)
+        .update({ [sentCol]: sentAt, [claimCol]: null, updated_at: sentAt });
+
+      await db('customer_interactions').insert({
+        customer_id: customer.id,
+        interaction_type: 'sms_outbound',
+        channel: 'sms',
+        subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
+        body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start)`,
+      }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
+    } catch (bookkeepingErr) {
+      logger.error(`[annual-prepay] payment reminder SENT but sent-stamp failed for term ${claimedTerm.id} — credit kept, claim held: ${bookkeepingErr.message}`);
+    }
+
+    return { sent: true, termId: claimedTerm.id };
+  } catch (err) {
+    // Only failures BEFORE any channel delivered reach here (the delivered
+    // path swallows its bookkeeping errors above).
+    await reverseReminderCredit();
+    await releaseClaim();
+    throw err;
+  }
+}
+
+async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
+  if (!(await annualPrepayTableExists())) return { sent: 0 };
+  // Flip any paid-but-pending terms first so they never remind.
+  await activatePaidPendingTerms();
+  let sent = 0;
+
+  for (const daysOut of PAYMENT_REMINDER_DAYS) {
+    const sentCol = paymentReminderColumnForDaysOut(daysOut);
+    const claimCol = paymentReminderClaimColumnForDaysOut(daysOut);
+    const cols = await annualPrepayColumns();
+    if (!cols[sentCol] || !cols[claimCol]) continue; // migration not run yet
+    const target = addDaysYmd(today, daysOut);
+    const terms = await db('annual_prepay_terms')
+      .where({ status: PAYMENT_PENDING_STATUS })
+      .whereNotNull('prepay_invoice_id')
+      .whereNull(sentCol)
+      .where(function paymentClaimAvailable() {
+        this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
+      })
+      .where('term_start', target)
+      .select('*');
+
+    for (const term of terms) {
+      try {
+        const result = await sendPaymentPendingReminder(term, daysOut);
+        if (result.sent) sent++;
+      } catch (err) {
+        logger.error(`[annual-prepay] payment reminder failed for term ${term.id}: ${err.message}`);
+      }
+    }
+  }
+
+  return { sent };
+}
+
 async function hasAnnualPrepayRenewal(customerId, termEnd) {
   if (!(await annualPrepayTableExists())) return false;
   const row = await db('annual_prepay_terms')
@@ -1585,6 +2391,12 @@ module.exports = {
   createTermForAnnualPrepay,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
+  // Public: the one-step-prepay booking preflight (admin-schedule) matches the
+  // booked service against the quoted coverage with the SAME matcher that
+  // stamps/gates coverage — destructuring it from the module root must work
+  // (it used to live only under _private, which left the route's destructure
+  // undefined and 500'd the booking).
+  serviceMatchesCoverage,
   syncTermForInvoicePayment,
   syncTermForRefundedPayment,
   activatePaidPendingTerms,
@@ -1593,8 +2405,12 @@ module.exports = {
   getOpenRenewalAlerts,
   sendCustomerTermNotice,
   checkAndSend,
+  sendPaymentPendingReminder,
+  checkAndSendPaymentReminders,
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
+  reconcilePendingWindowCompletions,
+  reversePendingWindowCompletionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,
@@ -1607,6 +2423,9 @@ module.exports = {
     daysUntil,
     noticeColumnForDaysOut,
     noticeClaimColumnForDaysOut,
+    paymentReminderColumnForDaysOut,
+    paymentReminderClaimColumnForDaysOut,
+    invoiceDunningActiveToday,
     shouldAlertTerm,
     isLastServiceNearTermEnd,
     invoiceTermStatus,
@@ -1623,7 +2442,6 @@ module.exports = {
     inferCoverageCadence,
     normalizeCoverageServiceType,
     normalizeCoverageVisitCount,
-    defaultCoverageDurationMinutes,
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
     resetCachesForTests,

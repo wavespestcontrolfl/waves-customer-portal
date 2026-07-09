@@ -32,6 +32,11 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../utils/datetime-et', () => ({ etDateString: jest.fn(() => '2026-06-25'), addETDays: jest.fn() }));
+// cardHoldCancelPreview resolves the appointment start via the shared helper
+// when not supplied; the cancel-path tests pass serviceStart explicitly and
+// never hit this mock.
+const mockApptTime = jest.fn();
+jest.mock('../services/appointment-reminders', () => ({ scheduledServiceApptTime: (...a) => mockApptTime(...a) }));
 
 const mockRetrievePaymentIntent = jest.fn(async () => ({ latest_charge: { refunded: false, amount_refunded: 0 } }));
 const mockRetrieveSetupIntent = jest.fn();
@@ -55,6 +60,8 @@ const {
   resolveCardHoldPolicy,
   verifyCardHoldIntent,
   isWithinCancelWindow,
+  handleCardHoldCancellation,
+  cardHoldCancelPreview,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -173,6 +180,81 @@ describe('isWithinCancelWindow', () => {
   });
   it('false on an unparseable start (fail toward free release)', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: 'not-a-date', now })).toBe(false);
+  });
+  it('true just after start — the tech may still arrive (2h arrival window), so a post-start cancel is still a late cancel', () => {
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T12:00:00Z'), now })).toBe(true); // exactly at start
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T11:55:00Z'), now })).toBe(true); // the 10:05 cancel of a 10–12 appointment
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T10:00:01Z'), now })).toBe(true); // 1s inside the grace
+  });
+  it('false past the arrival-window grace — missed dispatch / stale-row cleanup is never a late cancel', () => {
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T10:00:00Z'), now })).toBe(false); // exactly grace boundary (start + 2h == now)
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T08:00:00Z'), now })).toBe(false); // same-day morning visit never delivered
+    expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-20T12:00:00Z'), now })).toBe(false); // days-stale (churn-sweep rescheduled phantom)
+  });
+});
+
+describe('cardHoldCancelPreview — cancel-UI preview', () => {
+  const now = new Date('2026-07-06T12:00:00Z');
+  const holdRow = { id: 'h1', cancel_window_hours: 24, no_show_fee_amount: 49 };
+  it('no hold → nothing to ask', async () => {
+    stubDb(null);
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: false, feeApplies: false });
+  });
+  it('held + in-window start → fee applies with the hold\'s own fee amount', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: true, feeAmount: 49 });
+  });
+  it('held but start past the arrival-window grace → no fee, no prompt', async () => {
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-01T12:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+  });
+  it('feature flag off → fee never applies (chargeNoShowFee would no-op)', async () => {
+    process.env.ONE_TIME_CARD_HOLD = 'false';
+    stubDb(holdRow);
+    mockApptTime.mockResolvedValue(new Date('2026-07-06T18:00:00Z'));
+    expect(await cardHoldCancelPreview('svc1', now)).toEqual({ held: true, feeApplies: false, feeAmount: 49 });
+  });
+});
+
+describe('handleCardHoldCancellation — fee guardrails', () => {
+  const now = new Date('2026-07-06T12:00:00Z');
+  const holdRow = { id: 'h1', cancel_window_hours: 24 };
+  it('releases free (never charges) when the visit start passed beyond the arrival-window grace', async () => {
+    stubDb(holdRow);
+    const r = await handleCardHoldCancellation({
+      scheduledServiceId: 'svc1',
+      serviceStart: new Date('2026-07-01T12:00:00Z'),
+      now,
+    });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+  it('still charges a same-day post-start cancel — the tech may still arrive inside the 2h arrival window', async () => {
+    stubDb([
+      { ...holdRow },                                                     // handleCardHoldCancellation hold lookup
+      { ...holdRow, customer_id: 'c1', stripe_payment_method_id: 'pm1', no_show_fee_amount: 49, estimate_id: 'e1' }, // chargeNoShowFee's own lookup
+      { id: 'pmrow1' },                                                   // attach self-heal: card already on file
+    ]);
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    await handleCardHoldCancellation({
+      scheduledServiceId: 'svc1',
+      serviceStart: new Date('2026-07-06T11:55:00Z'), // started 5 min ago
+      now,
+    });
+    expect(mockChargeOffSession).toHaveBeenCalledTimes(1);
+  });
+  it('waiveFee releases free even inside the window (business-initiated cancel)', async () => {
+    stubDb(holdRow);
+    const r = await handleCardHoldCancellation({
+      scheduledServiceId: 'svc1',
+      serviceStart: new Date('2026-07-06T18:00:00Z'),
+      now,
+      waiveFee: true,
+    });
+    expect(r).toEqual(expect.objectContaining({ released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 });
 
@@ -371,6 +453,56 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     await settleNoShowFee(pi());
     expect(mockSendReceipt).not.toHaveBeenCalled();
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+  });
+
+  it('receipt-texts opt-out on the sms channel: the SMS leg is doomed at the consent gate, so the email carries the fee receipt', async () => {
+    // payment_confirmation_sms=false (or a STOP sms_enabled=false) blocks the
+    // receipt SMS at the messaging policy — NOT the full kill switch, so the
+    // charged fee must still leave a receipt via the email leg (Codex P2 on
+    // 4263af95; estimate-deposits twin).
+    stubDb([null, { payment_receipt_channel: 'sms', payment_confirmation_sms: false, email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceipt.mockResolvedValueOnce({ sent: false, reason: 'receipt_texts_opted_out' });
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+  });
+
+  it("channel 'both' delivers BOTH legs — the email stamp must not make sendReceipt read already-sent", async () => {
+    // Stamping receipt_sent_at before the SMS attempt made the unforced
+    // sendReceipt skip the requested text (codex P2 on 6b73a479).
+    stubDb([null, { payment_receipt_channel: 'both', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+  });
+
+  it('email-only channel with email messages opted out falls back to the SMS receipt', async () => {
+    // The fee was charged — a receipt has to land somewhere (codex P1 on
+    // d040aa76; deposit twin).
+    stubDb([null, { payment_receipt_channel: 'email', email_enabled: false }, { first_name: 'Sam' }]);
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceiptEmail).not.toHaveBeenCalled();
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+  });
+
+  it('email-only channel with NO recipient email falls back to the SMS receipt; a transient email error does NOT', async () => {
+    stubDb([null, { payment_receipt_channel: 'email', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
+    const r = await settleNoShowFee(pi());
+    expect(r.settled).toBe(true);
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+
+    // Transient provider failure: stays email-preferring, invoice unstamped
+    // for the admin needs-receipt path — no surprise text.
+    mockSendReceipt.mockClear();
+    stubDb([null, { payment_receipt_channel: 'email', email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'provider 500' });
+    const r2 = await settleNoShowFee(pi());
+    expect(r2.settled).toBe(true);
+    expect(mockSendReceipt).not.toHaveBeenCalled();
   });
 
   it('honors a payment_receipt opt-out — neither channel, just the office notify', async () => {

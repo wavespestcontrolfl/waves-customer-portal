@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v1';
+const PROMPT_VERSION = 'v2';
 
 function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}) {
   const bookableServiceNames = Array.isArray(opts.bookableServiceNames)
@@ -10,12 +10,21 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
   const bookableCatalogBlock = bookableServiceNames.length
     ? `\nBOOKABLE SERVICE CATALOG — service_request.specific_service_name must be one of these names VERBATIM, or null:\n${bookableServiceNames.map((n) => `- ${n}`).join('\n')}\n`
     : '';
-  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties).
+  // Known-caller context (existing customer matched by ANI before extraction).
+  // Per-call variable like the transcript/phone/date — deliberately NOT part
+  // of the version hash, which hashes the empty-render template.
+  const knownCallerBlock = opts.knownCaller
+    ? (opts.knownCaller.accountType === 'established_customer'
+      ? `\nKNOWN CALLER: this number matches existing customer ${opts.knownCaller.name || '(name on file)'}${opts.knownCaller.hasUpcomingAppointment ? ' who has an UPCOMING appointment already on the schedule' : ''}. Calls from existing customers are often coordination about service they already have — apply the EXISTING APPOINTMENT rule below strictly.\n`
+      : `\nKNOWN CALLER: this number matches ${opts.knownCaller.name || 'a contact'} already in our pipeline as a PROSPECT (not yet a customer). A booking on this call is likely their FIRST visit — treat an agreed date+time as a real "confirmed" booking, NOT existing-appointment coordination.\n`)
+    : '';
+  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
 
-Analyze this phone call transcript and extract structured data matching the JSON schema provided via response_schema. Every field must conform to the schema's type and enum constraints.
+Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
 Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
+${knownCallerBlock}
 
 Transcript:
 ${transcription}
@@ -24,10 +33,11 @@ ${transcription}
 
 SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
+  - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
+  - EXISTING APPOINTMENT: a caller who is re-confirming, double-checking, or coordinating an appointment that ALREADY EXISTS ("just checking — are we still on for Tuesday at 10?") is NOT booking. Status is "none" (or "reschedule_requested"/"canceled" if they change it) and you set the existing_appointment_coordination triage flag. "confirmed" is ONLY for a NEW visit agreed on this call.
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.
-- "confirmed": When confirmed, set confirmed_start_at to ISO 8601 with Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
-- "reschedule_requested": Caller wants to change an existing appointment.
+- "reschedule_requested": Caller wants to change an existing appointment. A reschedule that ENDS with a new agreed date+time stays "reschedule_requested" with confirmed_start_at set to the new slot — never plain "confirmed" (the office must move the existing visit, not add a second one).
 - "canceled": Caller wants to cancel an existing appointment or service.
 - "ambiguous": Scheduling was discussed but the outcome is unclear.
 - "none": No scheduling discussion occurred.
@@ -47,6 +57,8 @@ CALLER NAME:
 SPELLED-OUT INPUT IS AUTHORITATIVE (names + emails):
 - When the caller spells a name or email letter-by-letter, or with phonetic markers ("B as in boy", "V as in Victor", "N as in Nancy"), the SPELLED letters are the source of truth — use them, not the word as it was transcribed phonetically. Callers spell precisely because the spoken form is easy to mishear (e.g. caller says "Smyth" but spells S-M-I-T-H -> use "Smith", and the email is jane.smith@example.com, NOT smyth). These are illustrative only — never copy this example name or email into the output.
 - When an email is described relative to the name ("first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
+- Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" -> bv42@gmail.com). Decode the letters even when the words are jammed together.
+- The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. When you had to decode garbled tokens, lower caller_identity confidence to 0.6 or below.
 
 PHONE:
 - phone_e164: Set to the callback number the caller states, in E.164 format (+1XXXXXXXXXX).
@@ -57,10 +69,12 @@ PHONE:
 EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.
 - Uncertain, partial, or malformed emails must be null.
+- A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, set null.
 
 ADDRESS:
 - raw_text: Verbatim address as spoken by caller.
 - Parse into street_line_1, city, state, postal_code when clearly stated.
+- If the transcribed street name is not a plausible street name (real words or a proper name — "C Phone Trail" is not), it is likely a phonetic mis-transcription: still parse it as heard (the server re-validates and recovers), but lower service_address confidence to 0.6 or below.
 - state must be "FL" or null. Do not set for non-Florida addresses.
 - county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only.
 - normalization_status: Always set to "not_attempted" (server handles normalization).
@@ -69,13 +83,40 @@ PROPERTY:
 - hoa_community_flag: true if property is IN an HOA community (e.g. Lakewood Ranch, Heritage Harbor).
 - hoa_common_area_service: true ONLY if service is FOR HOA-owned common areas (clubhouse, retention ponds, entry beds). A single-family home inside an HOA is hoa_community_flag=true but hoa_common_area_service=false.
 
+MULTIPLE PROPERTIES (service_address vs additional_properties):
+- When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), service_address holds the PRIMARY property and EVERY other property goes into property.additional_properties — never drop one, never merge two addresses into one.
+- Primary = the property the caller treats as their main one (owner-occupied beats rental; the booked-visit property beats an unbooked one; else the first address given).
+- When the caller says a second property shares the first one's city/ZIP/community ("same zip and everything", "both in Calusa Country Club"), RESOLVE it: copy the stated city/postal_code/subdivision onto that entry.
+- occupancy: "rental_investment" when the caller says a property is a rental, investment property, tenant-occupied, or short-term rental; "owner_occupied" when they live there; else "unknown".
+- additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home. Set the multi_property_call triage flag whenever additional_properties is non-empty.
+
+SECONDARY CONTACT (a SECOND person who is a party to the service):
+- Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent. Otherwise secondary_contact is null.
+- The CALLER's own identity always stays in the "caller" object. Never duplicate the caller into secondary_contact, and never put the other person's phone/email into the caller's fields.
+- role is this person's relationship to the TRANSACTION: the buyer a realtor is booking for is home_buyer (not real_estate_agent).
+- wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — is false.
+- When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
+- other_parties_mentioned: true when the call named MORE people as parties to the service than the one secondary_contact you extracted (buyer + co-buyer + agent; tenant + owner + manager) — this tells the office to re-listen for the others. false/null when the secondary_contact (or nobody) was the only other party.
+- The SPELLED-OUT INPUT, TRANSCRIPT RELIABILITY, and EMAIL rules above apply to this person's fields exactly as they do to the caller's.
+
 SERVICE REQUEST:
 - primary_service_category: Map caller's request to the best enum value.
 - specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Control Service"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
 - quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.
+- ASSESSMENT vs FORMAL INSPECTION: a caller who SUSPECTS a pest problem or wants someone to come look, diagnose, or check ("I think I have termites", "something is eating my lawn", "can someone come take a look") maps to the "Waves Assessment" catalog service — NOT a formal inspection. "WDO Inspection Service" is ONLY for an explicitly requested wood-destroying-organism REPORT: real-estate sale/closing/refinance, lender or VA requirement, "termite letter"/"clearance letter", or the caller literally asking for a WDO inspection. The pre-slab/soil-treatment rule above still wins for pre-construction requests.
+- quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
+- quote_promised: true ONLY when the AGENT commits to send a quote/estimate AFTER the call ("we'll send you a quote this afternoon", "I'll email you an estimate", "we'll text you pricing"). A price merely spoken on the call is NOT a promised quote. This field means WORK IS STILL OWED to the caller after hangup — set it even when an appointment was also booked, and set the quote_promised triage flag with it.
 - pests_observed_status: "observed" when caller mentions seeing specific pests, "not_observed_preventative" when they want prevention without active pests, "not_observed_inquiry" for quote/info calls, "not_discussed" for non-pest topics (billing, cancellation).
 - waveguard_tier_mentioned: Only set if the caller explicitly names a WaveGuard tier they saw on the site or an ad. Do NOT infer.
+
+TRANSCRIPT RELIABILITY — the transcript is evidence, not truth:
+- CORRECTIONS: when the caller corrects themselves ("it's 555-2091 — sorry, no, 555-2901"), the LAST clearly confirmed value wins. Apply to every field: phone, address, date, time, email, service.
+- FINAL OUTCOME WINS: in a long call the plan can change ("Tuesday... actually let's do Wednesday", cancel → reschedule). Extract the FINAL agreed state at hangup, not an earlier abandoned one.
+- NEGATION: read carefully around "not/don't/never" — "I do NOT want to cancel" is not a cancellation_request. A missed negation reverses the meaning; when a negation makes intent unclear, choose the conservative value and lower the relevant confidence.
+- WHO SAID IT: only the CALLER's words establish agreement, consent, or a request. An agent reading a script ("you can cancel any time"), suggesting, or summarizing is not the caller agreeing. "Yeah, that sounds fine" only confirms what the caller was directly responding to — pin the evidence quote accordingly.
+- SIMILAR-SOUNDING VALUES: fifteen/fifty, "two oh five"/"205", B/D/P/T/V letters — when a number or spelled letter is genuinely ambiguous and not confirmed elsewhere in the call, return null rather than guess, and lower the relevant confidence to 0.6 or below.
+- MENTIONED ≠ AGREED: something discussed hypothetically ("if it comes back you could do quarterly") was not requested, booked, or purchased.
 
 CONSENT:
 - sms_consent_given: true only if the caller explicitly agrees to receive text messages. Implied consent (giving a phone number) does NOT count.
@@ -89,7 +130,7 @@ VOICEMAIL & SPAM:
 
 SENTIMENT & LEAD:
 - sentiment: Match caller's emotional state.
-- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte counties.
+- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte/DeSoto counties.
 
 EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fields:
 - property.service_address (any component)
@@ -98,6 +139,10 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - property.hoa_common_area_service (when true)
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
+- scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
+- scheduling.follow_up_start_at (when set)
+- secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
+- service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).
 
 CONFIDENCE SCORES — Per-section scores in [0, 1]:
@@ -105,10 +150,10 @@ CONFIDENCE SCORES — Per-section scores in [0, 1]:
 - 0.7-0.9 = inferred with reasonable confidence
 - 0.5-0.7 = partial information, some guessing
 - <0.5 = very uncertain
-- overall = weighted average reflecting routing reliability
+- overall = the MINIMUM of the routing-critical section scores (service_address, scheduling_window, caller_identity) — the gate must reflect the weakest link, not an average that hides it.
 
 TRIAGE FLAGS — Set flags for situations requiring human review:
-- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte counties.
+- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte/DeSoto counties.
 - hoa_common_area_requires_approval: hoa_common_area_service is true.
 - commercial_requires_quote: Commercial property needing custom quote.
 - caller_not_authorized: Caller relationship != owner AND on_site_authorization is false.
@@ -120,6 +165,9 @@ TRIAGE FLAGS — Set flags for situations requiring human review:
 - cancellation_request: Caller wants to cancel service.
 - ambiguous_scheduling: Scheduling was discussed but outcome is unclear.
 - reschedule_or_cancel: Caller wants to reschedule or cancel.
+- existing_appointment_coordination: The caller was confirming, checking on, or coordinating an appointment that already exists (see the EXISTING APPOINTMENT rule). Holds any auto-booking for human review so the existing visit is never duplicated.
+- multi_property_call: The caller discussed service at more than one property (additional_properties is non-empty). Advisory — never blocks routing.
+- quote_promised: The agent committed to send a quote/estimate after the call (quote_promised is true). Advisory — never blocks routing.
 
 Waves services: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, Palm Injection, Exclusion. Calls about unrelated work (SEO, marketing, advertising, construction advice) are not Waves services.
 ${bookableCatalogBlock}`;

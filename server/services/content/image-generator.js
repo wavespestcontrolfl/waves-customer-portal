@@ -26,6 +26,7 @@
  */
 
 const logger = require('../logger');
+const { GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('../../config/models');
 
 const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1,gemini';
 
@@ -33,12 +34,24 @@ const MODEL_MAP = {
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
   'gpt-image-1.5': { api: 'openai', model: 'gpt-image-1.5', quality: 'high' },
   'gpt-image-1':   { api: 'openai', model: 'gpt-image-1',   quality: 'high' },
+  // Image-native Gemini models (Nano Banana line, config/models.js). These
+  // accept generationConfig.imageConfig.aspectRatio; the legacy 'gemini' slug
+  // below is a text model with image modality and 400s on imageConfig, so
+  // aspect stays prompt-only there (imageAspect flag gates the field).
+  'gemini-image-best': { api: 'gemini', model: GEMINI_IMAGE_BEST, imageAspect: true },
+  'gemini-image':      { api: 'gemini', model: GEMINI_IMAGE_STABLE, imageAspect: true },
   'gemini':        { api: 'gemini', model: 'gemini-2.5-flash' },
 };
 
 const MODE_SIZES = {
   'blog-hero':     { openai: '1536x1024', gemini: '1536x1024' },
   'social-square': { openai: '1024x1024', gemini: '1024x1024' },
+};
+
+// aspectRatio for image-native Gemini models, per mode (must match MODE_SIZES).
+const MODE_ASPECTS = {
+  'blog-hero': '3:2',
+  'social-square': '1:1',
 };
 
 const RETRYABLE_OPENAI_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
@@ -77,7 +90,9 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   const composition = mode === 'social-square'
     ? `Composition: square 1:1 aspect ratio, 1024x1024.`
     : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
-  const style = `Style: bright, clean, professional. Teal/ocean-blue accent (#0ea5e9). No text, words, watermarks, or logos in the image.`;
+  // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
+  // brand brief explicitly forbids teal, so steer the grade, don't paint it.
+  const style = `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, watermarks, or logos in the image.`;
   return [base, focus, local, composition, style].join(' ');
 }
 
@@ -115,11 +130,15 @@ async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch } 
   }
 }
 
-async function callGemini({ model, prompt }, { fetchFn = fetch } = {}) {
+async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch } = {}) {
   if (!process.env.GEMINI_API_KEY) {
     return { skipped: true, reason: 'GEMINI_API_KEY not set' };
   }
   try {
+    const generationConfig = { responseModalities: ['TEXT', 'IMAGE'] };
+    // Only image-native models accept imageConfig (callers gate on cfg.imageAspect);
+    // sending it to the legacy text-model slug would 400 the whole attempt.
+    if (aspectRatio) generationConfig.imageConfig = { aspectRatio };
     const res = await fetchFn(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -127,7 +146,7 @@ async function callGemini({ model, prompt }, { fetchFn = fetch } = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+          generationConfig,
         }),
       }
     );
@@ -183,7 +202,8 @@ class ImageGenerator {
       if (cfg.api === 'openai') {
         result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn });
       } else if (cfg.api === 'gemini') {
-        result = await callGemini({ model: cfg.model, prompt }, { fetchFn: this._fetchFn });
+        const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
+        result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn });
       } else {
         result = { fatal: true, status: 'unknown_api' };
       }
@@ -270,6 +290,7 @@ module.exports._internals = {
   DEFAULT_CHAIN,
   MODEL_MAP,
   MODE_SIZES,
+  MODE_ASPECTS,
   parseChain,
   isFatalOpenAIError,
   sizeFor,

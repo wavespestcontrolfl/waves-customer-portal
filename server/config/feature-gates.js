@@ -22,10 +22,14 @@
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
+ *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
+ *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
+ *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
+ *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -41,6 +45,14 @@ const gates = {
   // AP), so it must never turn on silently in tests/dev. due_on_receipt payers
   // — i.e. everyone today — are unaffected at any setting.
   payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
+
+  // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
+  // /pest-identifier). Public, unauthenticated, and every accepted upload is a
+  // paid dual-model vision call — explicit opt-in in EVERY environment, and the
+  // whole /api/public/lawn-assessment / /api/public/pest-identifier surface
+  // 404s while off (same unobservable-when-dark contract as payerStatements).
+  lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
+  pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
@@ -76,6 +88,14 @@ const gates = {
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
+
+  // Ask Waves — public conversational intake on the marketing site (hub). The
+  // brain answers pest questions and steers visitors to the instant quote; it
+  // can NEVER state a price (pricing only comes from the existing contact-gated
+  // /api/public/quote/calculate path). Replies only when a visitor asks — not
+  // an auto-send — so dev is open like aiAssistantAutoReply; prod ships dark
+  // until Adam sets GATE_ASK_WAVES=true.
+  askWaves: isProd ? process.env.GATE_ASK_WAVES === 'true' : true,
 
   // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
   // alerts from inbound customer SMS. Off by default in prod until the
@@ -151,6 +171,15 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
+  // Estimate accept — widen existing-appointment detection to ANY upcoming
+  // pending/confirmed appointment belonging to the estimate's customer (not
+  // just rows already linked to the estimate). A match swaps the accept
+  // wizard's slot picker for payment options and the accept stamps
+  // source_estimate_id onto that visit. Changes which visit an acceptance
+  // attaches to, so it FAILS CLOSED (explicit opt-in in every environment)
+  // until the owner verifies the first customer-wide match end-to-end.
+  estimateExistingApptCustomerWide: process.env.GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE === 'true',
+
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
@@ -218,6 +247,18 @@ const gates = {
   // after a delay. Requires leadEstimateAutomation in the scheduler too.
   leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
 
+  // Lead Webhook Turnstile — enforce Cloudflare Turnstile on the public,
+  // unauthenticated lead webhook (POST /api/leads). Closes the direct-POST spam
+  // vector: without it any bot can mint a lead + customer + draft estimate and
+  // page the owner's cell. Explicit opt-in in EVERY environment (off in dev/test
+  // too) so the Jest suite + local forms that issue no token keep working, and so
+  // prod stays on today's behavior until (a) TURNSTILE_SECRET_KEY is set on
+  // Railway and (b) the Astro forms shipping the widget have fully propagated on
+  // Cloudflare Pages. While OFF, tokens are still verified-and-logged (shadow)
+  // but never block; a missing secret or a Cloudflare error always fails OPEN so
+  // real leads never break. Flip GATE_LEAD_TURNSTILE=true to begin blocking.
+  leadTurnstile: process.env.GATE_LEAD_TURNSTILE === 'true',
+
   // AutoPay Customer SMS — customer-facing autopay/pre-charge/payment-retry
   // texts are opt-in everywhere until the WaveGuard autopay rollout is
   // verified. This does not affect internal admin alerts.
@@ -238,6 +279,28 @@ const gates = {
   // GATE_BOOKING_ABANDON_RECOVERY=true on prod at merge to go live (effectively
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
+
+  // Click-followup action queue — turns human short-link clicks on estimate /
+  // booking links that DIDN'T convert into PENDING message_drafts (intent
+  // 'click_followup') for owner review in /admin/drafts. This lane NEVER
+  // sends anything itself — the draft is the terminal artifact and only the
+  // owner's approval in /admin/drafts puts a message on the wire. The gate
+  // covers the queue writes (action rows + drafts): off → the cron only
+  // shadow-logs candidate counts so volume can be judged first. Flip
+  // GATE_CLICK_FOLLOWUP=true to start queueing drafts.
+  clickFollowup: process.env.GATE_CLICK_FOLLOWUP === 'true',
+
+  // Ads Budget Live Push — allow the 2-hourly capacity-based budget cron
+  // (BudgetManager.adjustBudgets) to push its budget changes to the Google
+  // Ads API. Off until the owner verifies campaign links + base budgets in
+  // /admin/ads: with it off the cron records intended budgets locally only
+  // (dashboard/advisor state, no real spend change). Manual budget/mode
+  // controls in /admin/ads push live regardless of this gate — it covers
+  // only the autonomous loop. Controls real ad spend, so like the auto-send
+  // gates it FAILS CLOSED (explicit opt-in in EVERY environment): a dev or
+  // preview env with copied Google Ads creds + cronJobs open must never
+  // mutate live campaign budgets by default.
+  adsBudgetLivePush: process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true',
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for
@@ -275,6 +338,29 @@ const gates = {
   // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
   // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
+
+  // GrowthBook experimentation — master gate for A/B experiment assignment on
+  // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
+  // eligible requests consult GrowthBook (server SDK; LOCAL eval against a
+  // cached feature payload — no network in the request path) to assign a
+  // variation and log one exposure row to experiment_exposures. When OFF,
+  // NOTHING calls GrowthBook and every code path is byte-identical to
+  // pre-experiment behavior. It changes which page a real customer sees (e.g.
+  // the estimate view v1/v2 holdback), so like the customer-facing gates it
+  // FAILS CLOSED — explicit opt-in in EVERY environment. Requires
+  // GROWTHBOOK_CLIENT_KEY (an sdk-… SDK Connection key — NOT the secret_admin_…
+  // management key) and GROWTHBOOK_API_HOST; with the gate ON but the key
+  // missing/unreachable, assignment fails OPEN to control (current behavior).
+  growthbookExperiments: process.env.GATE_GROWTHBOOK === 'true',
+
+  // Universal links / Android App Links — serves the /.well-known association
+  // files that let the installed native app claim portal.wavespestcontrol.com
+  // URLs (routes/well-known.js). Explicit opt-in in EVERY environment: it
+  // changes how links behave on customers' phones (open in app vs browser)
+  // and should flip only alongside binaries carrying the Associated Domains
+  // entitlement / autoVerify intent-filter. Kill = unset; both OSes fall back
+  // to the browser on their next association re-validation.
+  universalLinks: process.env.GATE_UNIVERSAL_LINKS === 'true',
 
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
@@ -353,6 +439,23 @@ const gates = {
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
 
+  // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
+  // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
+  // 100% of customers. Glass is now the unconditional theme on every customer
+  // surface — estimate, service/lawn report, portal shell, login, booking,
+  // receipts, pay, statements, and emails — so the flags and their pre-glass
+  // code paths have been removed. (The estimate glass COPY packs still roll out
+  // per service category; that is a content flag carried in the /data payload,
+  // not a theme gate.)
+
+  // Waves AI schedule search on the wavespestcontrol.com /book page (astro
+  // island). Exposed to the marketing site via GET /api/booking/config as
+  // `ai_search`, so the island fails closed: the search bar only renders when
+  // the portal affirms the flag. The portal's own /book page and the estimate
+  // page are NOT behind this gate — their bars are already live.
+  // Kill switch: unset GATE_BOOK_AI_SEARCH.
+  bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in
@@ -404,6 +507,17 @@ const gates = {
   // creds + cronJobs on must NOT email real customers. Until the gate is on,
   // the Monday sweep only shadow-logs candidate counts and never sends.
   irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
+
+  // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
+  // the daily upsell generator write message_drafts status='pending' rows
+  // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
+  // This lane NEVER auto-sends: the only send path is the operator's explicit
+  // approve/revise click on /api/admin/drafts, which runs the full messaging
+  // policy chain (marketing consent, seasonal_tips/sms_enabled prefs).
+  // With the gate OFF the generators only shadow-log candidate counts —
+  // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
+  // too) so campaign drafts never accumulate silently in a preview/dev queue.
+  campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',
 
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"

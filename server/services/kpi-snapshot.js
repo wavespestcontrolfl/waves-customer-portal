@@ -82,4 +82,45 @@ async function recordKpiSnapshot(snapshotDate, conn) {
   return { snapshot_date: snapshotDate, metrics: written };
 }
 
-module.exports = { recordKpiSnapshot, SNAPSHOT_METRICS };
+/**
+ * Sparkline series for the dashboard KPI tiles: per-metric daily values from
+ * kpi_snapshots over the trailing `days` ET window. Values are the cron's
+ * month-to-date captures — the same basis the tiles' live numbers use.
+ *
+ * @param {number|string} [days=90]  Trailing window, clamped to [7, 365].
+ * @param {import('knex')} [conn]
+ * @returns {Promise<{days:number, series:Object<string, Array<{date:string, value:number|null}>>}>}
+ *          Dates ascending; value null when the metric was unavailable that
+ *          day (kept so a gap reads as a gap, not a zero).
+ */
+async function getKpiHistory(days = 90, conn) {
+  conn = conn || require('../models/db');
+  const clamped = Math.min(365, Math.max(7, parseInt(days, 10) || 90));
+  const rows = await conn('kpi_snapshots')
+    .where(
+      'snapshot_date', '>=',
+      // date - int = date in Postgres; ET-anchored "today" matches the cron's
+      // etDateString snapshot dates. days-1 back keeps the INCLUSIVE bound to
+      // exactly `days` calendar days counting today — subtracting the full
+      // count would return days+1 snapshots once today's row exists.
+      conn.raw("(NOW() AT TIME ZONE 'America/New_York')::date - ?::int", [clamped - 1]),
+    )
+    .select(
+      conn.raw("to_char(snapshot_date, 'YYYY-MM-DD') as date"),
+      'metric',
+      'value',
+    )
+    .orderBy('snapshot_date', 'asc');
+
+  const series = {};
+  for (const r of rows) {
+    if (!series[r.metric]) series[r.metric] = [];
+    series[r.metric].push({
+      date: r.date,
+      value: r.value == null ? null : parseFloat(r.value),
+    });
+  }
+  return { days: clamped, series };
+}
+
+module.exports = { recordKpiSnapshot, getKpiHistory, SNAPSHOT_METRICS };

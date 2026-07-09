@@ -96,6 +96,50 @@ export function formatETDateTime(date, options = {}) {
   return d.toLocaleString('en-US', { timeZone: TIMEZONE, ...options });
 }
 
+// ── <datetime-local> inputs, ET-anchored ───────────────────────────
+//
+// A `type="datetime-local"` input holds a naive 'YYYY-MM-DDTHH:mm'
+// wall-clock string with no zone. These two helpers pin that wall clock
+// to ET so an editor anywhere sees and enters ET, and the stored instant
+// round-trips exactly. Never populate such an input from toISOString()
+// (that shows UTC wall-clock, hours off the ET the rest of the UI shows).
+
+// Instant → 'YYYY-MM-DDTHH:mm' ET wall-clock, for an input's `value`.
+export function etDatetimeLocalValue(date) {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  const { year, month, day, hour, minute } = etParts(d);
+  const p = (v) => String(v).padStart(2, '0');
+  return `${year}-${p(month)}-${p(day)}T${p(hour)}:${p(minute)}`;
+}
+
+// 'YYYY-MM-DDTHH:mm' ET wall-clock → ISO instant string. Interprets the
+// value as ET: guess the instant as if the wall clock were UTC, then correct
+// by the actual ET offset (Intl handles DST). Correct twice — a single pass
+// samples the offset at the as-if-UTC guess, which for early-morning times on
+// a DST-change day sits on the wrong side of the transition (e.g. 2026-03-08
+// 03:30 would resolve an hour off); the second pass samples at the corrected
+// instant and lands on the right offset. The one irreducible case is the
+// fall-back repeated hour, where a wall clock maps to two instants and this
+// deterministically picks one.
+function etOffsetAt(instant) {
+  const p = etParts(new Date(instant));
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - instant;
+}
+export function etDatetimeLocalToISO(value) {
+  if (!value) return null;
+  const [datePart, timePart] = String(value).split('T');
+  if (!datePart || !timePart) return null;
+  const [y, mo, d] = datePart.split('-').map(Number);
+  const [h, mi] = timePart.split(':').map(Number);
+  if ([y, mo, d, h, mi].some(Number.isNaN)) return null;
+  const targetWall = Date.UTC(y, mo - 1, d, h, mi);
+  let utc = targetWall - etOffsetAt(targetWall);
+  utc = targetWall - etOffsetAt(utc);
+  return new Date(utc).toISOString();
+}
+
 // ── Day arithmetic anchored to ET ──────────────────────────────────
 //
 // Returns a Date N ET-calendar-days away from `date`. Anchors at

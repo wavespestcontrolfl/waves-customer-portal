@@ -193,7 +193,7 @@ export default function MobileManualCardSheet({
       {/* Header */}
       <div
         className="sticky top-0 bg-white flex items-center px-3"
-        style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"
@@ -211,7 +211,7 @@ export default function MobileManualCardSheet({
         {/* Amount */}
         <div
           className="text-zinc-900"
-          style={{ fontSize: 56, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.05 }}
+          style={{ fontSize: 56, fontWeight: 500, letterSpacing: '-0.02em', lineHeight: 1.05 }}
         >
           ${displayedTotal.toFixed(2)}
         </div>
@@ -249,7 +249,7 @@ export default function MobileManualCardSheet({
             marginTop: 20,
             padding: '18px 24px',
             fontSize: 17,
-            fontWeight: 600,
+            fontWeight: 500,
             background: canCharge ? '#111111' : '#E5E5E5',
             color: canCharge ? '#FFFFFF' : '#A3A3A3',
             border: 'none',

@@ -128,7 +128,10 @@ describe('invoice follow-up email sidecar', () => {
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: customer() })],
-      invoices: [chain({ first: invoice() })],
+      // fireStep re-reads the invoice after the account-credit draw-down
+      // (total/credit_applied/status), THEN sendFollowupEmail fetches it
+      // again for the eligibility check — two reads per fired step.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       invoice_followup_sequences: [sequenceUpdate],
@@ -218,7 +221,8 @@ describe('invoice follow-up email sidecar', () => {
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: customer({ phone: null }) })],
-      invoices: [chain({ first: invoice() })],
+      // Two invoice reads per fired step: credit re-read + email eligibility.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       invoice_followup_sequences: [sequenceUpdate],

@@ -153,6 +153,12 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
+  // Before the month-based buckets: an every-6-weeks plan (9 visits/year) has
+  // no month-based cadence — without this it fell to the quarterly fallback,
+  // so a 6-week quote pre-filled the modal as quarterly and the prepay
+  // cadence-match preflight downgraded the booking (codex P2). The caller
+  // translates this to the scheduler's custom/42-day representation.
+  if (frequencyKey.includes('every6week')) return 'every_6_weeks';
   if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';
   if (frequencyKey.includes('triannual') || frequencyKey.includes('every4month')) return 'triannual';
   if (frequencyKey.includes('semiannual') || frequencyKey.includes('biannual') || frequencyKey.includes('every6month')) return 'semiannual';
@@ -160,6 +166,7 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   if (frequencyKey.includes('monthly') || frequencyKey === 'month') return 'monthly';
   if (frequencyKey.includes('annual') || frequencyKey.includes('year')) return 'annual';
   if (visits === 12) return 'monthly';
+  if (visits === 9) return 'every_6_weeks';
   if (visits === 6) return 'bimonthly';
   if (visits === 4) return 'quarterly';
   if (visits === 3) return 'triannual';
@@ -205,7 +212,11 @@ function serviceCatalogMatch(line, serviceIndex) {
   if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
   if (/mosquito/.test(text)) return pick('mosquito_monthly');
   if (/lawn|turf|weed|fertil/.test(text)) return pick('lawn_care_recurring');
-  if (/flea|tick/.test(text)) return pick('flea_tick');
+  // flea_tick is flea-only ("Flea Control Service") since the 2026-07 rebrand;
+  // tick-only lines go to the separate tick_control service. Flea is tested
+  // first so a combined "flea and tick" line keeps resolving to flea_tick.
+  if (/flea/.test(text)) return pick('flea_tick');
+  if (/tick/.test(text)) return pick('tick_control') || pick('flea_tick');
   if (/fire\s*ant/.test(text)) return pick('fire_ant');
   if (/bee|wasp|hornet|yellow/.test(text)) return pick('bee_wasp_removal');
   if (/pest|roach|ant|spider/.test(text)) {
@@ -263,6 +274,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
 
   const matched = serviceCatalogMatch({ ...line, name }, serviceIndex);
   const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // The scheduler (and Schedule modal) have no native every_6_weeks cadence —
+  // they represent it as a custom 42-day interval. Translate here so the
+  // modal pre-fill books the series the quote actually sold; intervalDays is
+  // carried on the line because the modal's own inference can't recover it
+  // once the catalog match rewrites `frequency`.
+  const schedulerCadence = cadence === 'every_6_weeks' ? 'custom' : cadence;
   return {
     serviceId: matched?.id || null,
     serviceKey: matched?.service_key || line?.service || null,
@@ -274,7 +291,8 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     visitsPerYear: matched?.visits_per_year || line?.visitsPerYear || null,
     duration: matched?.default_duration_minutes || null,
     price,
-    cadence,
+    cadence: schedulerCadence,
+    intervalDays: cadence === 'every_6_weeks' ? 42 : null,
     source: kind,
     estimateId: estimate.id,
   };
@@ -1624,7 +1642,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
         .where({ is_active: true })
@@ -1689,6 +1707,15 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         const { buildEstimatePaymentContext } = require('../services/estimate-payment-context');
         payment = await buildEstimatePaymentContext(estimate, {});
       } catch { payment = null; }
+      // Whether the Schedule modal may offer one-step annual prepay for this
+      // quote + the exact amount the prepay invoice would bill (discount +
+      // floor applied). Server-derived so the modal never offers a billing
+      // term the accept would reject. Fail-soft: no prepay offer on error.
+      let prepay = { eligible: false, invoiceTotal: null };
+      try {
+        const e = await require('../services/estimate-manual-acceptance').prepayBookingEligibility(estimate);
+        prepay = { eligible: !!e.eligible, invoiceTotal: e.invoiceTotal != null ? Number(e.invoiceTotal) : null };
+      } catch { prepay = { eligible: false, invoiceTotal: null }; }
       return {
         id: estimate.id,
         token: estimate.token,
@@ -1704,6 +1731,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         lines,
         deposit,
         payment,
+        prepay,
         linkedAppointment: linked ? {
           id: linked.id,
           scheduledDate: linked.scheduled_date,
@@ -2289,7 +2317,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'payer_id'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
-      const addressChanged = changed.some((f) => ['address_line1', 'address_line2', 'city', 'state', 'zip'].includes(f));
+      // PRESENCE-triggered, not diff-triggered — matching the IB update path
+      // (and the geocode block below): resaving an unchanged address must
+      // still self-heal a primary-property mirror or lead/estimate snapshot
+      // left stale by a pre-fix edit; both sync helpers are idempotent.
+      const addressChanged = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+        .some((f) => updates[f] !== undefined);
       // Phase 1 multi-property: an admin address edit must reach the primary
       // customer_properties row too — ATOMICALLY, so a unique address-index
       // collision rolls back the customer edit (and surfaces a 409) instead of
@@ -2299,9 +2332,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // row exists.
       try {
         await db.transaction(async (trx) => {
+          // Serialize overlapping address edits on the same customer: the row
+          // lock makes a second editor WAIT, and before/after are re-derived
+          // from the locked row — a pre-transaction 'before' from the losing
+          // editor would no longer match snapshots the first edit already
+          // moved, stranding them.
+          const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
+          const lockedAfter = { ...lockedBefore, ...updates };
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
-            await require('../services/customer-properties').syncPrimaryAddress(after, trx);
+            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
+            // Open leads/estimates snapshot the address at creation and never
+            // re-read customers.* — sync the copies that still match the old
+            // address (matching rules in the fan-out service header).
+            await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedAfter }, trx);
           }
         });
       } catch (e) {
@@ -3132,6 +3176,7 @@ router._private = {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  lockAndAssertNoAnnualPrepayOverlap,
   stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,

@@ -82,6 +82,7 @@ function autopayActivePredicate() {
 
 module.exports = {
   customerOnAutopay,
+  getChargeableAutopayMethod,
   isChargeableAutopayMethod,
   isPaused,
   autopayActivePredicate,

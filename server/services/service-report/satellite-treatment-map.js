@@ -129,7 +129,16 @@ async function buildSatelliteTreatmentMapContext({
   });
   if (!liveConfig?.imageUrl) return { available: false, fallbackReason: 'provider_config_unavailable' };
 
-  const overlayZones = zones.map(overlayZone);
+  // Once ANY zone carries a technician-marked image shape, only marked zones
+  // overlay the photo: schematic rects live in house-diagram space and would
+  // paint meaningless boxes over the satellite image next to the real marks
+  // (mirrors the client coverage map's all-or-nothing image gate). With no
+  // marks at all, the legacy approximate-projection behavior is unchanged.
+  const anyImageGeometry = zones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
+  const overlayCandidates = anyImageGeometry
+    ? zones.filter((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0)
+    : zones;
+  const overlayZones = overlayCandidates.map(overlayZone);
   const overlayZoneById = new Map(overlayZones.map((zone) => [String(zone.id), zone]));
   const renderableApplications = applications.map((app) => {
     const zoneIds = applicationZoneIds(app).filter((zoneId) => overlayZoneById.has(String(zoneId)));

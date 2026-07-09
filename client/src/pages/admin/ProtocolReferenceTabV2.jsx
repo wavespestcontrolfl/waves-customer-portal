@@ -314,6 +314,55 @@ function groupText(groups = {}) {
     .join(" · ");
 }
 
+// Distributor forms carry a third segment (e.g. 432-1507-59144); junk values
+// like "N/A" or "Not EPA-registered fertilizer" fail the pattern on purpose.
+const EPA_REG_PATTERN = /^\d+-\d+(-\d+)?$/;
+
+function productLabelLink(product) {
+  if (!product) return null;
+  if (product.labelUrl) {
+    return { href: product.labelUrl, text: "Label", source: "on_file" };
+  }
+  const reg = String(product.epaRegNumber || "").trim();
+  if (EPA_REG_PATTERN.test(reg)) {
+    return {
+      href: `https://ordspub.epa.gov/ords/pesticides/f?p=PPLS:102::::::P102_REG_NUM:${reg}`,
+      text: "EPA label (PPLS)",
+      source: "ppls",
+    };
+  }
+  return null;
+}
+
+function LabelLinks({ product, className }) {
+  const labelLink = productLabelLink(product);
+  if (!labelLink && !product?.sdsUrl) return null;
+  return (
+    <div className={cn("flex gap-2 flex-wrap", className)}>
+      {labelLink && (
+        <a
+          href={labelLink.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-11 underline text-ink-primary hover:text-zinc-900"
+        >
+          {labelLink.text} ↗
+        </a>
+      )}
+      {product?.sdsUrl && (
+        <a
+          href={product.sdsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-11 underline text-ink-primary hover:text-zinc-900"
+        >
+          SDS ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
 function ProtocolMixCard({
   plan,
   selectedConditionalIds,
@@ -443,6 +492,12 @@ function ProtocolMixCard({
                         String(item.product?.id),
                       ) || item.selected
                     : true;
+                  const areaMix = item.jobMix || item.plannedMix;
+                  const tankMix = item.fullTankMix || item.plannedFullTankMix;
+                  const plannedOnly = !item.jobMix && !!item.plannedMix;
+                  const numClass = plannedOnly
+                    ? "u-nums text-13 text-ink-tertiary"
+                    : "u-nums text-13 font-medium text-zinc-900";
                   return (
                     <tr
                       key={`${idx}-${item.raw}`}
@@ -477,9 +532,12 @@ function ProtocolMixCard({
                                   {checked ? "Selected" : "Optional"}
                                 </Badge>
                               )}
-                              {!item.matched && (
-                                <Badge tone="alert">Unmatched</Badge>
-                              )}
+                              {!item.matched &&
+                                (item.taskLine ? (
+                                  <Badge tone="neutral">Task / Scout</Badge>
+                                ) : (
+                                  <Badge tone="alert">Unmatched</Badge>
+                                ))}
                               {item.product?.requiresSurfactant && (
                                 <Badge tone="neutral">
                                   Surfactant Required
@@ -520,42 +578,48 @@ function ProtocolMixCard({
                             {item.product.excludedTurfSpecies.join(", ")}
                           </div>
                         )}
+                        <LabelLinks product={item.product} className="mt-1" />
                       </td>{" "}
                       <td className="px-3 py-3 text-right whitespace-nowrap">
-                        {item.jobMix ? (
+                        {areaMix ? (
                           <>
-                            <div className="u-nums text-13 font-medium text-zinc-900">
-                              {fmtNumber(item.jobMix.amount)}{" "}
-                              {item.jobMix.amountUnit || ""}
+                            <div className={numClass}>
+                              {fmtNumber(areaMix.amount)}{" "}
+                              {areaMix.amountUnit || ""}
                             </div>
                             <div className="text-11 text-ink-secondary">
-                              {fmtNumber(item.jobMix.ratePer1000)}{" "}
-                              {item.jobMix.rateUnit || ""}/1K
+                              {fmtNumber(areaMix.ratePer1000)}{" "}
+                              {areaMix.rateUnit || ""}/1K
                             </div>
+                            {plannedOnly && (
+                              <div className="text-10 text-ink-tertiary">
+                                if triggered
+                              </div>
+                            )}
                           </>
                         ) : (
                           <div className="u-nums text-13 font-medium text-zinc-900">—</div>
                         )}
                       </td>{" "}
                       <td className="px-3 py-3 text-right whitespace-nowrap">
-                        <div className="u-nums text-13 font-medium text-zinc-900">
-                          {fmtMoney(item.jobMix?.materialCost)}
+                        <div className={numClass}>
+                          {fmtMoney(areaMix?.materialCost)}
                         </div>
-                        {item.jobMix?.materialCostSource && (
+                        {areaMix?.materialCostSource && (
                           <div className="text-10 text-ink-tertiary">
                             inventory
                           </div>
                         )}
                       </td>{" "}
                       <td className="px-3 py-3 text-right whitespace-nowrap">
-                        {item.fullTankMix ? (
+                        {tankMix ? (
                           <>
-                            <div className="u-nums text-13 font-medium text-zinc-900">
-                              {fmtNumber(item.fullTankMix.amount)}{" "}
-                              {item.fullTankMix.amountUnit || ""}
+                            <div className={numClass}>
+                              {fmtNumber(tankMix.amount)}{" "}
+                              {tankMix.amountUnit || ""}
                             </div>
                             <div className="text-11 text-ink-secondary">
-                              {fmtNumber(item.fullTankMix.carrierGallons, " gal carrier")}
+                              {fmtNumber(tankMix.carrierGallons, " gal carrier")}
                             </div>
                           </>
                         ) : (
@@ -607,7 +671,81 @@ function ProtocolMixCard({
           )}
         </div>{" "}
       </Card>{" "}
+      <ProductLabelsCard items={plan.items} />{" "}
     </div>
+  );
+}
+
+function ProductLabelsCard({ items }) {
+  const seen = new Set();
+  const products = (items || [])
+    .map((item) => item.product)
+    .filter((product) => {
+      if (!product?.id || seen.has(String(product.id))) return false;
+      seen.add(String(product.id));
+      return true;
+    });
+  if (!products.length) return null;
+
+  return (
+    <Card className="overflow-hidden">
+      {" "}
+      <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50">
+        {" "}
+        <div className="text-13 font-medium text-zinc-900">
+          Product Labels
+        </div>{" "}
+        <div className="text-11 text-ink-tertiary mt-0.5">
+          Label and SDS documents for every product in this visit
+        </div>{" "}
+      </div>{" "}
+      <div className="p-4 space-y-2">
+        {products.map((product) => {
+          const labelLink = productLabelLink(product);
+          return (
+            <div
+              key={product.id}
+              className="rounded-sm border-hairline border-zinc-200 p-3 flex flex-col md:flex-row md:items-start gap-2 md:gap-4"
+            >
+              {" "}
+              <div className="flex-1 min-w-0">
+                {" "}
+                <div className="text-13 font-medium text-zinc-900">
+                  {product.name}
+                </div>{" "}
+                <div className="text-11 text-ink-secondary mt-0.5">
+                  {[
+                    product.manufacturer,
+                    product.activeIngredient,
+                    EPA_REG_PATTERN.test(
+                      String(product.epaRegNumber || "").trim(),
+                    )
+                      ? `EPA Reg. No. ${String(product.epaRegNumber).trim()}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "—"}
+                </div>
+                {product.labelSourceNote && (
+                  <div className="text-11 text-ink-tertiary mt-1 leading-normal">
+                    {product.labelSourceNote}
+                  </div>
+                )}
+              </div>{" "}
+              <div className="flex gap-2 flex-wrap flex-shrink-0 md:pt-0.5">
+                {labelLink || product.sdsUrl ? (
+                  <LabelLinks product={product} />
+                ) : (
+                  <span className="text-11 text-ink-tertiary">
+                    No label document on file
+                  </span>
+                )}
+              </div>{" "}
+            </div>
+          );
+        })}
+      </div>{" "}
+    </Card>
   );
 }
 

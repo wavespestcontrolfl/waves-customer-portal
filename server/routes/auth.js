@@ -338,7 +338,16 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
     const newRefreshToken = generateRefreshToken(customer.id, accountId);
     res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err) {
-    return res.status(401).json({ error: 'Invalid refresh token' });
+    // Every invalid-token case returns an explicit 401 above — anything
+    // landing here is an infrastructure failure (DB hiccup, etc). Answering
+    // 401 made clients treat a still-valid 30-day session as rejected and
+    // wipe it; a 5xx tells them to keep the token and retry.
+    // The error middleware logs req.body — redact the live 30-day bearer
+    // credential before it reaches the logs.
+    if (req.body && req.body.refreshToken) {
+      req.body = { ...req.body, refreshToken: '[redacted]' };
+    }
+    return next(err);
   }
 });
 

@@ -22,6 +22,30 @@ html {
   text-size-adjust: 100%;
 }
 
+/* iOS Safari/WKWebView auto-zooms the whole page in whenever a focused form
+   control has a font smaller than 16px, then leaves the customer stranded
+   zoomed-in (pinch-out is fiddly). The portal's inline styles size inputs at
+   14px, so force >=16px on touch devices to suppress the involuntary zoom.
+   Pinch-zoom itself stays enabled (no user-scalable=no in the viewport tag).
+
+   !important is required: the fields set font-size inline (style={{ fontSize:
+   14 }}), and author CSS without it loses to inline styles. Scoped to two
+   customer-only hooks so admin/tech surfaces are untouched:
+   - .portal-root  — the in-page customer portal tree
+   - [data-glass]  — glass-themed modals portaled to <body> (e.g. AutopayCard's
+     Modal via createPortal), which sit outside .portal-root. data-glass is
+     never used on admin surfaces (they're monochrome). */
+@media (pointer: coarse) {
+  .portal-root input,
+  .portal-root textarea,
+  .portal-root select,
+  [data-glass] input,
+  [data-glass] textarea,
+  [data-glass] select {
+    font-size: 16px !important;
+  }
+}
+
 /* preflight is disabled, so border-width utilities have no effect without
    an explicit border-style. Force solid on hairline so it actually renders. */
 .border-hairline {
@@ -112,6 +136,75 @@ html {
 .admin-shell-v2 pre,
 .admin-shell-v2 pre * {
   font-family: "Roboto", system-ui, sans-serif !important;
+}
+
+/* /admin/* scroll feel — scoped to .admin-shell-v2. The admin window never
+   scrolls; .admin-main (AdminLayoutV2) is the real scroll container, with
+   nested overflow panes inside pages (thread lists, dropdowns, detail
+   panels). Three fixes for clunky scrolling:
+   1. overscroll-behavior: contain stops scroll chaining — hitting the end
+      of a nested pane no longer spills the wheel/swipe into the page
+      behind it (and stops iOS pull-to-refresh tugging on the shell).
+   2. scroll-behavior: smooth animates programmatic jumps (back-to-top,
+      jump-nav anchors) instead of teleporting. Wheel/trackpad input is
+      NOT affected — native scroll speed is never hijacked. Guarded by
+      prefers-reduced-motion; intentional snaps opt out per-call with
+      behavior: "instant".
+   3. Thin stone-toned scrollbars + a stable gutter replace the chunky UA
+      default, so layout doesn't shift between short and long pages.
+      :where() keeps specificity at zero so the scrollbar-hiding rules
+      above (.horizontal-scroll, .tab-pill-scroll) and inline styles
+      still win. */
+.admin-shell-v2 .admin-main {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  /* scrollIntoView targets get breathing room below the viewport top; on
+     mobile they clear the fixed 52px top bar instead of sliding under it. */
+  scroll-padding-top: 12px;
+}
+@media (max-width: 767px) {
+  .admin-shell-v2 .admin-main {
+    scroll-padding-top: calc(52px + env(safe-area-inset-top) + 12px);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .admin-shell-v2 .admin-main {
+    scroll-behavior: smooth;
+  }
+}
+.admin-shell-v2 > aside,
+.admin-shell-v2 [class*="overflow-y-auto"],
+.admin-shell-v2 [class*="overflow-auto"] {
+  overscroll-behavior: contain;
+}
+.admin-shell-v2 [class*="overflow-x-auto"],
+.admin-shell-v2 .horizontal-scroll,
+.admin-shell-v2 .tab-pill-scroll {
+  overscroll-behavior-x: contain;
+}
+@supports (scrollbar-color: auto) {
+  :where(.admin-shell-v2) :where(*) {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+}
+@supports selector(::-webkit-scrollbar) {
+  :where(.admin-shell-v2) ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  :where(.admin-shell-v2) ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  :where(.admin-shell-v2) ::-webkit-scrollbar-thumb {
+    background-color: var(--border-strong);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  :where(.admin-shell-v2) ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-quaternary);
+  }
 }
 
 /* Form controls don't inherit font-family by default — every browser's UA
@@ -241,9 +334,6 @@ button, input, select, textarea, optgroup {
   column-gap: 18px;
 }
 
-.help-phone-compact {
-  display: none;
-}
 
 @media (max-width: 820px) {
   :root {
@@ -294,9 +384,5 @@ button, input, select, textarea, optgroup {
 
   .help-phone-full {
     display: none;
-  }
-
-  .help-phone-compact {
-    display: inline;
   }
 }

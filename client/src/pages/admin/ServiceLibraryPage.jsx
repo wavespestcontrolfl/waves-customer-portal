@@ -1104,7 +1104,9 @@ function DetailPane({
           <span style={{ color: D.border }}>·</span>{" "}
           <span>
             <b style={{ color: D.text, fontWeight: 500 }}>{priceLabel(svc)}</b>
-            {svc.pricing_type === "variable" ? " · variable" : ""}
+            {svc.pricing_type === "variable" && Number(svc.base_price) > 0
+              ? " · variable"
+              : ""}
           </span>
           {svc.default_duration_minutes > 0 && (
             <>

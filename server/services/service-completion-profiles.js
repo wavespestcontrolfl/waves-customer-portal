@@ -19,6 +19,15 @@ const V1_EXCLUDED_PROJECT_TYPES = new Set(['wdo_inspection']);
 // V1 exclusions: pre-treat certificates never had a service_report profile
 // to coerce, but the companion JSON path must still refuse them.
 const COMPANION_EXCLUDED_TYPES = new Set([...V1_EXCLUDED_PROJECT_TYPES, 'pre_treatment_termite_certificate']);
+// Types that stay CREATABLE as standalone documentation projects even though
+// their routine appointment completions have fully cut over to the typed
+// service-report flow (owner directive 2026-07-04: flea + rodent belong in
+// the Create Project Report picker). UNLIKE V1_EXCLUDED_PROJECT_TYPES this
+// carries no completion-safety semantics: serializeProfile does NOT coerce
+// these profiles, so appointments keep completing through service reports —
+// the exemption only keeps the Projects creation path (picker + create
+// gate) open for inspection/documentation-heavy one-off jobs.
+const PROJECT_CREATION_KEPT_TYPES = new Set(['flea', 'rodent_trapping']);
 
 const DEFAULT_SERVICE_REPORT_PROFILE = {
   serviceKey: null,
@@ -299,7 +308,10 @@ async function appointmentManagedProjectTypes(knex = db) {
         // Code-enforced V1 exclusions (see V1_EXCLUDED_PROJECT_TYPES) — a
         // flipped profile row must not retire the Projects creation path for
         // a type whose completion the V1 flow cannot legally perform.
-        .filter((type) => !V1_EXCLUDED_PROJECT_TYPES.has(type)),
+        .filter((type) => !V1_EXCLUDED_PROJECT_TYPES.has(type))
+        // Owner-kept documentation types (see PROJECT_CREATION_KEPT_TYPES) —
+        // creatable as standalone projects; completion routing untouched.
+        .filter((type) => !PROJECT_CREATION_KEPT_TYPES.has(type)),
     );
   } catch {
     return new Set();
@@ -349,4 +361,5 @@ module.exports = {
   appointmentManagedProjectTypes,
   DEFAULT_SERVICE_REPORT_PROFILE,
   V1_EXCLUDED_PROJECT_TYPES,
+  PROJECT_CREATION_KEPT_TYPES,
 };

@@ -15,6 +15,7 @@ jest.mock('../services/customer-contact', () => ({
     email: c.email !== undefined ? c.email : 'x@y.com',
     name: c.first_name || 'Stan',
   }),
+  firstNameFrom: (v) => String(v == null ? '' : v).trim().split(/\s+/)[0] || '',
 }));
 
 const db = require('../models/db');

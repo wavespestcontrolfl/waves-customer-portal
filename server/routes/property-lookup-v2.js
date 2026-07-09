@@ -16,13 +16,14 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
+  attachAddressAuditToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -58,6 +59,49 @@ const TURF_REVIEW_THRESHOLD_SQFT = 15000;
 const TURF_MANUAL_CONFIRMATION_SQFT = 20000;
 const TURF_HIGH_LOT_RATIO = 0.55;
 const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH', 'PLUGGING']);
+// County-facts turf prior (2026-07-09 shadow-delta judgment, 95 paired prod
+// lookups): the vision estimate sits at ~half the deterministic county-facts
+// ceiling (lot − building footprint − assessed impervious) — vision/ceiling
+// median 0.54, IQR 0.45–0.66; vision exceeded the ceiling on only 4/95.
+// When vision produced NO turf number, seeding at this ratio beats the
+// pricing engine's lot-based fallback, which lands near the ceiling itself
+// (~2× what real lawns measure). Applied positively-eligible only —
+// residential, non-shared-turf type, ceiling big enough to be a real yard —
+// and always paired with a HIGH-priority verify flag.
+// Kill switch: TURF_COUNTY_PRIOR_DISABLED=1 (no deploy).
+const TURF_COUNTY_PRIOR_RATIO = 0.5;
+const TURF_COUNTY_PRIOR_MIN_CEILING_SF = 500;
+const turfCountyPriorDisabled = () => ['1', 'true'].includes(String(process.env.TURF_COUNTY_PRIOR_DISABLED || '').toLowerCase());
+// Shared-turf residential types whose treatable lawn legitimately spans
+// beyond their own parcel — one pattern for the parcel turf cap and the
+// county prior so the exemptions can't drift apart.
+const SHARED_TURF_TYPE_RE = /CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/;
+
+// The county-facts ceiling, trusted for prior/review use only when it is
+// COUNTY-COMPLETE: the extra-features roll was actually parsed
+// (imperviousKnown — an unparsed table reads as 0 hardscape and inflates
+// the ceiling), the story count is real (a missing count defaults the
+// footprint to the full living area and shrinks it), and the lot/building
+// dimensions themselves won from county/cadastral/verified evidence — a
+// hybrid merge can carry listing-sourced dims with only the GIS impervious
+// backfilled (codex P2). Anything weaker returns null and callers stay on
+// the existing fallback/verify paths. The raw computeFootprintTurf value
+// still rides the profile as the untrusted SHADOW fields.
+const COUNTY_DIM_SOURCES = new Set(['county', 'cadastral', 'verified']);
+function trustedCountyTurfCeiling(rc) {
+  const ceiling = computeFootprintTurf(rc);
+  if (!ceiling || !ceiling.parts.imperviousKnown) return null;
+  if (!(firstNonNegativeNumber(rc?.stories) >= 1)) return null;
+  // Merged records carry { field: { sourceType } }; a raw single-source
+  // record carries { field: [items] } — accept either shape.
+  const dimSourced = (field) => {
+    const entry = rc?._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return COUNTY_DIM_SOURCES.has(String(sourceType || '').toLowerCase());
+  };
+  if (!dimSourced('lotSize') || !dimSourced('squareFootage')) return null;
+  return ceiling;
+}
 
 function positiveIntEnv(name, fallback) {
   const n = Number(process.env[name]);
@@ -158,6 +202,34 @@ async function performPropertyLookup(address, options = {}) {
           await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
+      // House-number-audit backfill, same pattern: record-bearing rows cached
+      // before the audit shipped have no _addressAudit key, so the panel's
+      // typo hint would stay dark until the 180-day TTL. Audit once on hit
+      // (county gates resolve from the raw address zip/city — no geocode on
+      // this path), attach, persist. A null audit (GIS failure) is NOT
+      // persisted — it simply retries next hit. Like the fresh path, county
+      // evidence does not skip the audit when the record's own house number
+      // disagrees with the typed one — a cached SNAPPED record must not keep
+      // serving the unflagged neighbor parcel until expiry.
+      const cachedSnapped = cached.property_record
+        ? typedNumberDisagreesWithRecord(address, cached.property_record)
+        : null;
+      if (
+        cached.property_record
+        && cached.property_record._addressAudit === undefined
+        && (!hasCountyEvidence(cached.property_record) || cachedSnapped)
+      ) {
+        const audit = await auditAddressHouseNumber(address, null).catch(() => null);
+        const marker = audit
+          || (cachedSnapped
+            ? { county: null, houseNumber: cachedSnapped.typed, streetLabel: null, streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [] }
+            : null);
+        if (marker) {
+          if (cachedSnapped) marker.snappedRecord = cachedSnapped;
+          cached.property_record._addressAudit = marker;
+          await attachAddressAuditToCachedLookup(address, marker);
+        }
+      }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
@@ -234,6 +306,43 @@ async function performPropertyLookup(address, options = {}) {
         parcelId: parcelMeta.paoParcelId,
       }).catch(() => null);
       if (permits) result.propertyRecord._poolPermits = permits;
+    }
+  }
+
+  // ── STEP 1b: house-number audit ──
+  // Only when no provider produced county evidence: checks the typed house
+  // number against the county roll's situs addresses for the same street, so
+  // the data-quality panel can say "house number not on the county roll —
+  // nearest existing: N" (typo / misheard call transcription) instead of the
+  // unexplained all-zeros panel. Fail-open: a null audit is "no signal". On a
+  // record-bearing lookup it rides the cached property_record like _floodZone;
+  // record-less lookups are never cached, so they re-audit live each time.
+  // County evidence normally means the roll vouched for the address — but if
+  // Google snapped a mistyped house number to a nearby premise, the parcel/
+  // county record describes the SNAPPED address, not the typed one. When the
+  // record's own house number disagrees with the typed one, run the audit
+  // anyway so the panel flags the customer's number instead of silently
+  // pricing the neighbor's parcel.
+  const snappedRecord = typedNumberDisagreesWithRecord(address, result.propertyRecord);
+  if (!hasCountyEvidence(result.propertyRecord) || snappedRecord) {
+    // Canonical address for the street (typo-fixed names make the roll
+    // findable); typedAddress so the audit checks the CUSTOMER'S house number
+    // even when Google snapped a nonexistent number to the nearest premise.
+    const audit = await auditAddressHouseNumber(canonicalLookupAddress(address, geo), geo, { typedAddress: address })
+      .catch(() => null);
+    // A typed-vs-record number disagreement is a finding in ITSELF — even
+    // when the typed number also exists on the roll (audit exact match), the
+    // record below still describes the SNAPPED premise, so the mismatch must
+    // reach the panel rather than be swallowed by the audit's verdict. A
+    // failed audit still carries the marker.
+    const marker = audit
+      || (snappedRecord
+        ? { county: null, houseNumber: snappedRecord.typed, streetLabel: null, streetExists: null, hasExactMatch: false, parcelCount: 0, nearestNumbers: [] }
+        : null);
+    if (marker) {
+      if (snappedRecord) marker.snappedRecord = snappedRecord;
+      result.addressAudit = marker;
+      if (result.propertyRecord) result.propertyRecord._addressAudit = marker;
     }
   }
 
@@ -523,7 +632,7 @@ async function performPropertyLookup(address, options = {}) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
-  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm);
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
@@ -1179,7 +1288,11 @@ function applySatelliteAttachmentType(rc, ai) {
   return candidate;
 }
 
-function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
+function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+  // Record-bearing lookups carry the audit on the cached record (_addressAudit,
+  // like _floodZone); record-less lookups pass it alongside since there is no
+  // record to ride.
+  const addressAudit = addressAuditParam || rc?._addressAudit || null;
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
@@ -1201,6 +1314,51 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     || (!rc && !commercialProfile && satelliteAttachmentIsConfident(ai)
       ? propertyTypeFromAttachment(ai)
       : null);
+
+  // On a RESIDENTIAL profile, never surface a record propertyType that
+  // normalizes to commercial (an untrusted "Multifamily"/"Commercial" alias the
+  // guard already refused to classify on). Left in place it would
+  // re-commercialize the profile at pricing time — isCommercialProfile runs
+  // normalizePricingPropertyType(profile.propertyType) and treats a commercial
+  // string as authoritative — undoing detectCategory's guard (codex P1). The
+  // raw value stays visible for the operator via profile.fieldEvidence
+  // .propertyType (which already carries the field-verify flag).
+  const residentialDisplayType =
+    (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
+      ? rc.propertyType
+      : (visionPropertyType || 'Single Family');
+
+  // County-facts turf prior: vision produced no turf number (satellite miss,
+  // obstructed imagery, brand-new construction) but the county roll gave
+  // lot + building + assessed impervious. Seed the estimate at
+  // TURF_COUNTY_PRIOR_RATIO × that ceiling instead of leaving 0 — the
+  // pricing engine's lot-based fallback otherwise prices near the ceiling
+  // itself. Never silent: a HIGH-priority verify flag rides with it below.
+  // An EXPLICIT vision 0 (paved / artificial / no-lawn property) is a real
+  // measurement, not a miss — it must never be overwritten (codex P2).
+  const visionTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf);
+  const visionTurfKnown = visionTurfSf !== undefined;
+  // Trusted = county-complete AND county-sourced dimensions — see
+  // trustedCountyTurfCeiling. Anything weaker stays on the existing
+  // fallback/verify path (codex P2s).
+  const countyCeiling = trustedCountyTurfCeiling(rc);
+  const countyTurfPriorSf = (
+    !visionTurfKnown
+    && !commercialProfile
+    && !turfCountyPriorDisabled()
+    && countyCeiling
+    && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
+    && !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase())
+  ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
+
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
+  if (countyTurfPriorSf) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `No AI turf estimate — seeded ${countyTurfPriorSf.toLocaleString()} sq ft from county records (${Math.round(TURF_COUNTY_PRIOR_RATIO * 100)}% of lot − building − assessed hardscape). Verify treatable lawn area.`,
+      priority: 'HIGH',
+    });
+  }
 
   const landscapeComplexity = ai?.landscapeComplexity || 'MODERATE';
   const footprintSf = rc?.squareFootage
@@ -1226,7 +1384,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
 
     // ── CATEGORY / TYPE ──
     category,
-    propertyType: commercialProfile ? 'Commercial' : (rc?.propertyType || visionPropertyType || 'Single Family'),
+    propertyType: commercialProfile ? 'Commercial' : residentialDisplayType,
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
@@ -1305,7 +1463,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     // ── TURF ──
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
-    estimatedTurfSf: ai?.estimatedTurfSf || 0,
+    estimatedTurfSf: (visionTurfKnown ? visionTurfSf : countyTurfPriorSf) || 0,
+    // 'vision' = satellite estimate (including an explicit 0 — a measured
+    // no-lawn property); 'county_prior' = seeded from the county ceiling
+    // (see countyTurfPriorSf above); 'none' = no basis — pricing falls back
+    // to its lot-based estimate.
+    turfSource: visionTurfKnown ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
+    countyTurfPriorSf,
+    // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
+    // exceeds-ceiling review reason; null when the facts are too weak to
+    // judge against (codex P3).
+    countyTurfCeilingSf: countyCeiling ? countyCeiling.turfSf : null,
     // Shadow comparison fields — see computeFootprintTurf. Not a pricing
     // input; estimatedTurfSf above remains the engine's turf source.
     footprintTurfSf: footprintTurf ? footprintTurf.turfSf : null,
@@ -1430,7 +1598,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     propertySources: rc?._aiSources || [],
     propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
-    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai),
+    addressAudit,
+    fieldVerifyFlags,
 
     // ── DATA SOURCE TRACKING ──
     dataSources: {
@@ -1442,16 +1611,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     }
   };
 
-  // Shadow signal for the footprint-turf rollout decision: how far the
-  // vision estimate sits from the deterministic county-facts ceiling.
+  // Shadow signal comparing the VISION estimate against the deterministic
+  // county-facts ceiling (a county-prior seed would compare the ceiling with
+  // itself and pollute the series). Judged 2026-07-09 across 95 lookups
+  // (median −46%) — kept running so the ratio can be re-checked over time.
   // Coarse fields only (no address/parcel values — PII rule).
-  if (footprintTurf && !commercialProfile && profile.estimatedTurfSf > 0) {
+  if (footprintTurf && !commercialProfile && visionTurfSf > 0) {
     const deltaPct = Math.round(
-      ((profile.estimatedTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
+      ((visionTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
     ) / 10;
     logger.info('[turf-footprint] shadow comparison', {
       footprintTurfSf: footprintTurf.turfSf,
-      estimatedTurfSf: profile.estimatedTurfSf,
+      estimatedTurfSf: visionTurfSf,
       deltaPct,
       imperviousKnown: footprintTurf.parts.imperviousKnown,
       county: profile.county || null,
@@ -1475,6 +1646,19 @@ function buildProviderStatus() {
     },
     maps: !!(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY),
   };
+}
+
+// Leading house number of the typed address vs the county/parcel record's
+// own situs line — a disagreement means the geocoder snapped the typed
+// number to a different premise and the "county evidence" describes the
+// wrong building.
+function typedNumberDisagreesWithRecord(address, rc) {
+  const typed = (String(address || '').match(/^\s*(\d+)\s/) || [])[1] || null;
+  const recordLine = rc?.addressLine1 || rc?._parcel?.situsAddress || '';
+  const record = (String(recordLine).match(/^\s*(\d+)\s/) || [])[1] || null;
+  return typed && record && typed !== record
+    ? { typed: parseInt(typed, 10), record: parseInt(record, 10) }
+    : null;
 }
 
 const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
@@ -1614,8 +1798,17 @@ function applyParcelTurfBound(aiAnalysis, propertyRecord) {
       && !['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'].includes(commercialUseType)) {
     return aiAnalysis;
   }
-  const propertyType = String(propertyRecord.propertyType || '').toUpperCase();
-  if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
+  // The attached/shared-turf exemption may only key off a TRUSTED type. An
+  // unverified web-search "Multifamily" (the Gateway Ave shape) must not leave
+  // the AI turf estimate unbounded on a parcel that will be priced residential
+  // (codex rd2 P1) — distrusted types get the cap, the conservative direction.
+  // Satellite-applied types stay exempt-eligible by design: the vision pass
+  // reclassifies attached units BEFORE this cap runs precisely so it can skip.
+  const typeEvidence = propertyRecord._fieldEvidence?.propertyType;
+  const typeTrusted = String(typeEvidence?.sourceType || '').toLowerCase() === 'satellite'
+    || recordCommercialSignalTrusted(propertyRecord);
+  const propertyType = typeTrusted ? String(propertyRecord.propertyType || '').toUpperCase() : '';
+  if (SHARED_TURF_TYPE_RE.test(propertyType)) return aiAnalysis;
 
   const bound = parcelTurfBoundSqft(propertyRecord);
   if (!bound) return aiAnalysis;
@@ -1652,6 +1845,15 @@ function turfRiskReasons(source = {}) {
 
   if (lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO) {
     reasons.push(`estimated turf is ${Math.round((estimatedTurfSf / lotSqFt) * 100)}% of lot`);
+  }
+  // Above the TRUSTED county-facts ceiling (county-complete + county-sourced
+  // dims only — trustedCountyTurfCeiling; an incomplete ceiling would flag
+  // spuriously). Observed on only 4/95 prod lookups, always an
+  // obstructed-imagery overshoot. Pricing already caps at its own plausible
+  // max; this surfaces the disagreement to the operator.
+  const countyCeilingSf = firstNonNegativeNumber(source.countyTurfCeilingSf);
+  if (countyCeilingSf > 0 && estimatedTurfSf && estimatedTurfSf > countyCeilingSf) {
+    reasons.push(`exceeds the county-facts ceiling of ${Math.round(countyCeilingSf).toLocaleString()} sq ft (lot − building − assessed hardscape)`);
   }
   if (aiConfidence !== undefined && aiConfidence < 60) reasons.push(`AI confidence ${aiConfidence}%`);
   if (treeDensity === 'HEAVY') reasons.push('heavy tree canopy');
@@ -1741,13 +1943,89 @@ function hasStructuredCommercialAiSignal(ai = {}) {
   return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
 }
 
+// propertyType sourceTypes that describe THIS parcel authoritatively (a county
+// roll, cadastral FDOR roll, permit, builder floorplan, or a tech-verified
+// read) — as opposed to a web/listing hit that can describe a NEIGHBORING
+// parcel. Keyed off the merged field evidence's winning sourceType (see
+// SOURCE_TYPE_LABELS in services/property-lookup/ai-property-lookup.js).
+const AUTHORITATIVE_PROPERTY_TYPE_SOURCES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder']);
+
+// A record's type/zoning/land-use strings (and unit count) may only vote
+// COMMERCIAL when the record itself is trustworthy. Pure county / cadastral
+// merges always are, as are records with no evidence metadata (verified
+// overrides, legacy cache rows). But on an AI-web-search OR a HYBRID
+// (county+AI) merge, the winning propertyType may have come from an unverified
+// web hit even though other fields came from the county — mergePropertyRecords
+// keeps the WINNING source on the field evidence. So trust the commercial
+// signal only when that winning propertyType is itself from an authoritative
+// parcel source, or (for a web/listing source) it passed field verification.
+// Note fieldVerify alone can't gate this: the merge also raises it on mere
+// source *disagreement* even when authoritative county data won the field
+// (see recordPropertyTypeIsWeak), so a real county "Multifamily" that an AI
+// source contradicts must still classify COMMERCIAL — hence the sourceType
+// check. Real miss (2026-07-03): 6314 Gateway Ave isn't on the Sarasota roll,
+// so the only source was a grounded web search that landed on a LoopNet
+// listing for a DIFFERENT Gateway Ave parcel — propertyType "Multifamily" at
+// 0/100 data quality commercial-classified a residential lead.
+function recordCommercialSignalTrusted(rc) {
+  if (!rc) return true;
+  // Pure county / cadastral merges are authoritative parcel data — trust even
+  // when a disagreement-driven verify flag is set on the field.
+  if (rc._source === 'county' || rc._source === 'cadastral') return true;
+  const evidence = rc._fieldEvidence?.propertyType;
+  // No per-field evidence: verified overrides / legacy cache rows.
+  if (!evidence) return true;
+  // AI or hybrid merge: trust only an authoritative-sourced propertyType, or a
+  // web/listing one that passed field verification (the AI-only bar). Closes
+  // the hybrid hole where a sparse county record + an unverified AI
+  // "Multifamily" listing still priced commercial (codex P1).
+  const sourceType = String(evidence.sourceType || '').toLowerCase();
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(sourceType)) return true;
+  return !evidence.fieldVerify;
+}
+
+// A hybrid merge's unitCount may itself have been won by the same unverified
+// web source as the type — only an authoritative or field-verified count may
+// keep voting; otherwise fall back to the neutral 1.
+function trustedUnitCount(rc) {
+  const evidence = rc?._fieldEvidence?.unitCount;
+  if (!evidence) return rc?.unitCount;
+  const sourceType = String(evidence.sourceType || '').toLowerCase();
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(sourceType)) return rc.unitCount;
+  return evidence.fieldVerify ? 1 : rc.unitCount;
+}
+
+// Sanitize an untrusted record for commercial-signal reads. Structured
+// satellite AI signals (propertyUse / commercialUseType) keep voting — vision
+// looked at THIS parcel, unlike a web-search hit on a neighboring listing.
+//
+// A HYBRID merge still carries authoritative county GIS strings in _raw (the
+// top-ranked county/cadastral record donates _raw, and buildCadastralRecord
+// deliberately preserves land-use it can't normalize into a propertyType —
+// municipal, common area, co-op). Nulling the whole record would let those
+// county-backed commercial parcels fall through to residential pricing (codex
+// rd2 P1) — so strip ONLY the untrusted type strings and web-sourced unit
+// count, and keep the county signals. An AI-only merge has nothing
+// authoritative to keep.
+function commercialSignalRecord(rc) {
+  if (recordCommercialSignalTrusted(rc)) return rc;
+  if (rc?._source !== 'hybrid') return null;
+  return {
+    ...rc,
+    propertyType: '',
+    unitCount: trustedUnitCount(rc),
+    _raw: { ...(rc._raw || {}), propertyType: '' },
+  };
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
-  const text = commercialSignalText(rc, ai);
+  const signalRc = commercialSignalRecord(rc);
+  const text = commercialSignalText(signalRc, ai);
   if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
   if (/(apartment|apartments|multi\s*family|multifamily|hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
   if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
-  if (rc?.unitCount && rc.unitCount > 4)
+  if (signalRc?.unitCount && signalRc.unitCount > 4)
     return 'COMMERCIAL';
   return 'RESIDENTIAL';
 }
@@ -1760,7 +2038,7 @@ function hasCommercialSignalText(rc = {}, ai = {}) {
 }
 
 function resolveCommercialSubtype(rc = {}, ai = {}) {
-  const text = commercialSignalText(rc, ai);
+  const text = commercialSignalText(commercialSignalRecord(rc), ai);
   if (/warehouse|light\s*industrial/.test(text)) return 'warehouse_light';
   if (/restaurant|food\s*service|commercial\s*kitchen/.test(text)) return 'restaurant_food_service';
   if (/medical|clinic/.test(text)) return 'medical_office';
@@ -1775,9 +2053,10 @@ function resolveCommercialSubtype(rc = {}, ai = {}) {
 }
 
 function resolveCommercialDetectionSource(rc = {}, ai = {}) {
-  if (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) === 'commercial') return 'property_record_property_type';
-  if (rc?.unitCount && rc.unitCount > 4) return 'property_record_unit_count';
-  if (hasCommercialSignalText(rc, {})) return 'property_record_commercial_signal';
+  const signalRc = commercialSignalRecord(rc);
+  if (signalRc?.propertyType && normalizePricingPropertyType(signalRc.propertyType) === 'commercial') return 'property_record_property_type';
+  if (signalRc?.unitCount && signalRc.unitCount > 4) return 'property_record_unit_count';
+  if (hasCommercialSignalText(signalRc || {}, {})) return 'property_record_commercial_signal';
   if (hasStructuredCommercialAiSignal(ai)) return 'satellite_ai_property_use';
   return 'commercial_signal';
 }
@@ -2068,8 +2347,45 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   const flags = [];
+
+  // Geocoder snapped the typed house number to a different premise — this
+  // outranks (and replaces) the ordinary audit flags: even a roll-confirmed
+  // typed number doesn't change the fact that the record below describes the
+  // SNAPPED building, not the one the customer gave.
+  if (addressAudit && addressAudit.snappedRecord) {
+    const { typed, record } = addressAudit.snappedRecord;
+    const rollNote = addressAudit.hasExactMatch
+      ? `Both numbers exist on the ${addressAudit.county} county roll — confirm which property is the customer's before pricing`
+      : addressAudit.streetExists
+        ? `The county roll has no ${typed}${addressAudit.nearestNumbers.length ? ` (nearest existing: ${addressAudit.nearestNumbers.join(', ')})` : ''} — verify the address before pricing`
+        : 'Verify the address before pricing';
+    flags.push({
+      field: 'address',
+      reason: `Typed house number ${typed}, but the property record below describes ${record} — the geocoder snapped to a nearby premise. ${rollNote}`,
+      priority: 'HIGH',
+    });
+  } else
+  // Address itself is suspect — first, because it explains every other
+  // missing-data line on the panel. Only set when the county roll ANSWERED
+  // (a GIS outage yields no audit at all, see auditAddressHouseNumber).
+  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
+    const nearest = addressAudit.nearestNumbers.length
+      ? ` — nearest existing: ${addressAudit.nearestNumbers.join(', ')}`
+      : '';
+    flags.push({
+      field: 'address',
+      reason: `House number ${addressAudit.houseNumber} is not on the ${addressAudit.county} county roll, but ${addressAudit.streetLabel} exists (${addressAudit.parcelCount} parcels)${nearest}. Likely a typo or misheard digits — verify the address before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (addressAudit && !addressAudit.streetExists) {
+    flags.push({
+      field: 'address',
+      reason: `${addressAudit.streetLabel} not found on the ${addressAudit.county} county roll — possible misspelling or brand-new plat; verify the address before pricing`,
+      priority: 'HIGH',
+    });
+  }
 
   // Foundation unknown on older homes, or in a FEMA flood zone where slab is
   // an unsafe default. else-if keeps this to a SINGLE foundationType flag
@@ -2240,6 +2556,10 @@ function buildFieldVerifyFlags(rc, ai) {
     ...ai,
     lotSqFt: rc?.lotSize,
     aiConfidence: ai?.confidenceScore,
+    // TRUSTED county ceiling only (county-complete + county-sourced dims) —
+    // ai carries no county figures; the profile path passes its own
+    // countyTurfCeilingSf.
+    countyTurfCeilingSf: trustedCountyTurfCeiling(rc)?.turfSf,
   });
   if (estimatedTurfSf > 0 && turfReviewReasons.length > 0) {
     flags.push({
@@ -2818,6 +3138,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
+    // Turf provenance — a county-prior seed or a parcel-clamped vision number
+    // must stay distinguishable from a real satellite measurement all the way
+    // into the engine, so computeTurfArea can grade it (LOW + field-verify)
+    // instead of treating every estimatedTurfSf as vision-measured.
+    turfSource: p.turfSource || null,
+    countyTurfPriorSf: p.countyTurfPriorSf ?? null,
+    countyTurfCeilingSf: p.countyTurfCeilingSf ?? null,
+    turfCappedToParcel: p.turfCappedToParcel === true,
     imperviousSurfacePercent: p.imperviousSurfacePercent,
     imperviosSurfacePercent: p.imperviosSurfacePercent,
     estimatedBedAreaSf: p.estimatedBedAreaSf,
@@ -3188,6 +3516,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyParcelTurfBound,
+  typedNumberDisagreesWithRecord,
   applySatelliteAttachmentType,
   applyVisionPropertyTypeEvidence,
   buildFallbackPropertyDataQuality,
@@ -3206,6 +3535,11 @@ module.exports._private = {
   poolSource,
   propertyTypeFromAttachment,
   recordPropertyTypeIsWeak,
+  recordCommercialSignalTrusted,
+  detectCategory,
+  resolveCommercialSubtype,
+  resolveCommercialDetectionSource,
+  isCommercialProfile,
   turfRiskReasons,
   visionContextPromptBlock,
 };

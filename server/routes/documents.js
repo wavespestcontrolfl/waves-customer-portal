@@ -612,6 +612,39 @@ router.get('/', authenticate, async (req, res, next) => {
       for (const delivery of deliveries) deliveryByServiceId.set(delivery.service_record_id, delivery);
     }
 
+    // First service photo per visit — the Documents tab renders service
+    // reports as a visual slider (owner 2026-07-09), so each entry carries a
+    // preview image when the tech captured photos. Fail-open: any error just
+    // means no image, never a broken documents list.
+    const previewPhotoByServiceId = new Map();
+    if (serviceIds.length) {
+      try {
+        const photoRows = await db('service_photos')
+          .whereIn('service_record_id', serviceIds)
+          .orderBy('sort_order')
+          .orderBy('created_at');
+        for (const photo of photoRows) {
+          if (!previewPhotoByServiceId.has(photo.service_record_id)) {
+            previewPhotoByServiceId.set(photo.service_record_id, photo);
+          }
+        }
+      } catch (err) {
+        if (err?.code !== '42P01') logger.warn(`[documents] preview photo lookup failed: ${err.message}`);
+      }
+    }
+    const previewImageFor = async (serviceRecordId) => {
+      const photo = previewPhotoByServiceId.get(serviceRecordId);
+      if (!photo) return null;
+      if (photo.s3_url) return photo.s3_url;
+      if (!photo.s3_key) return null;
+      try {
+        const PhotoService = require('../services/photos');
+        return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
+      } catch {
+        return null;
+      }
+    };
+
     const autoGenDocs = [];
     for (const svc of services) {
       // internal_only typed completions (Phase-1b shadow) store a report for
@@ -631,6 +664,7 @@ router.get('/', authenticate, async (req, res, next) => {
         autoGenDocs.push({
           id: `auto_report_${svc.id}`,
           documentType: 'service_report',
+          previewImage: await previewImageFor(svc.id),
           title: `Visit Report — ${svc.service_type}`,
           description: isServiceReportV1
             ? `Infographic service report for ${formatDate(svc.service_date)}`

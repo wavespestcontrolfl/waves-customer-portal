@@ -123,6 +123,9 @@ function buildPersistedShape({ index, intake, readiness, draft }) {
     },
     estimate: {
       id: `smoke-estimate-${index + 1}`,
+      // The real lead-webhook persistence mints a share token on insert; the
+      // send gate now refuses token-less rows, so the fixture must carry one.
+      token: `smoke-token-${index + 1}`,
       status: 'draft',
       source: 'lead_webhook',
       customer_name: `${intake.firstName} ${intake.lastName}`.trim(),

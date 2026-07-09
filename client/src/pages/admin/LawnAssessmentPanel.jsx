@@ -38,64 +38,6 @@ function adminFetch(path, options = {}) {
 const scoreColor = (v) => (v >= 75 ? D.green : v >= 50 ? D.amber : D.red);
 const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 
-function formatPerformanceRate(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : "—";
-}
-
-function RecommendationPerformanceSummary({ performance }) {
-  if (!performance) return null;
-  const counts = performance.counts || {};
-  const shown = counts.recommendation_shown || counts.shown || 0;
-  const clicked = counts.recommendation_clicked || counts.clicked || 0;
-  const followUp = counts.follow_up_requested || 0;
-  const latest = performance.latestEventAt
-    ? new Date(performance.latestEventAt).toLocaleDateString()
-    : null;
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-        gap: 6,
-        marginTop: 8,
-      }}
-    >
-      {[
-        ["Shown", shown],
-        ["Clicked", clicked],
-        ["CTR", formatPerformanceRate(performance.clickThroughRate)],
-        ["Follow-up", followUp],
-      ].map(([label, value]) => (
-        <div
-          key={label}
-          style={{
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: "7px 8px",
-            background: "#FAFAFA",
-          }}
-        >
-          <div style={{ fontSize: 10, color: D.muted, fontWeight: 800, textTransform: "uppercase" }}>
-            {label}
-          </div>
-          <div style={{ fontSize: 14, color: D.heading, fontWeight: 850, marginTop: 2 }}>
-            {value}
-          </div>
-        </div>
-      ))}
-      {latest && (
-        <div style={{ gridColumn: "1 / -1", fontSize: 11, color: D.muted }}>
-          Latest customer event: {latest}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Resize phone photos before base64 upload — caps the long edge so a 4-8MB camera shot
-// becomes ~200-400KB. Opus 4.7 vision works on the smaller image without loss for turf
-// assessment, and the upload doesn't choke on slow LTE.
 function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -154,190 +96,6 @@ const EMPTY_TURF_PROFILE = {
   active: true,
 };
 
-function SnapshotReviewPanel({
-  review,
-  loading,
-  onSnapshotAction,
-  onRecommendationAction,
-}) {
-  const snapshot = review?.snapshot;
-  const cards = review?.recommendationCards || [];
-  const [summary, setSummary] = useState("");
-  const [cardCopy, setCardCopy] = useState({});
-
-  useEffect(() => {
-    setSummary(snapshot?.summary_customer || "");
-    setCardCopy(
-      Object.fromEntries(cards.map((card) => [card.id, card.customer_copy || ""])),
-    );
-  }, [snapshot?.id, cards.length]);
-
-  if (loading && !snapshot) {
-    return (
-      <div style={{ ...cardStyle, marginTop: 14 }}>
-        <div style={{ fontSize: 13, color: D.muted }}>Loading snapshot review...</div>
-      </div>
-    );
-  }
-
-  if (!snapshot) {
-    return (
-      <div style={{ ...cardStyle, marginTop: 14 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-          Customer Snapshot
-        </div>
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-          No snapshot has been generated for this assessment yet.
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ ...cardStyle, marginTop: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-        <div>
-          <div style={{ fontSize: 15, fontWeight: 800, color: D.heading }}>
-            Customer Snapshot
-          </div>
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-            {snapshot.status} · {snapshot.customer_visible ? "Customer visible" : "Internal only"}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button
-            type="button"
-            onClick={() => onSnapshotAction(snapshot.id, { approve: true })}
-            style={{ ...btnOutline, padding: "7px 9px", color: D.green }}
-          >
-            Approve
-          </button>
-          <button
-            type="button"
-            onClick={() => onSnapshotAction(snapshot.id, { customer_visible: true })}
-            style={{ ...btnOutline, padding: "7px 9px", color: D.teal }}
-          >
-            Show
-          </button>
-          <button
-            type="button"
-            onClick={() => onSnapshotAction(snapshot.id, { hide: true })}
-            style={{ ...btnOutline, padding: "7px 9px", color: D.red }}
-          >
-            Hide
-          </button>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 12 }}>
-        <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 4 }}>
-          Customer summary
-        </div>
-        <textarea
-          value={summary}
-          onChange={(event) => setSummary(event.target.value)}
-          rows={4}
-          style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }}
-        />
-        <button
-          type="button"
-          onClick={() => onSnapshotAction(snapshot.id, { summary_customer: summary })}
-          style={{ ...btnOutline, marginTop: 8, padding: "7px 10px" }}
-        >
-          Save summary
-        </button>
-      </div>
-
-      {!!snapshot.findings?.length && (
-        <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
-          {snapshot.findings.slice(0, 3).map((finding) => (
-            <div
-              key={finding.key}
-              style={{
-                padding: 8,
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.input,
-                fontSize: 12,
-                color: D.text,
-              }}
-            >
-              <strong>{finding.label}</strong> · Severity {finding.severity}
-              <div style={{ color: D.muted, marginTop: 3 }}>{finding.customer_copy}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ marginTop: 16, fontSize: 13, fontWeight: 800, color: D.heading }}>
-        Recommendation Cards
-      </div>
-      {cards.length === 0 ? (
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-          No recommendation cards generated.
-        </div>
-      ) : (
-        <div style={{ marginTop: 8, display: "grid", gap: 10 }}>
-          {cards.map((card) => (
-            <div key={card.id} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>{card.title}</div>
-                  <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                    {card.type} · {card.priority} · {card.status} · {card.customer_visible ? "Customer visible" : "Internal only"}
-                  </div>
-                </div>
-                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                  <button
-                    type="button"
-                    onClick={() => onRecommendationAction(card.id, { approve: true })}
-                    style={{ ...btnOutline, padding: "6px 8px", color: D.green }}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onRecommendationAction(card.id, { customer_visible: true })}
-                    style={{ ...btnOutline, padding: "6px 8px", color: D.teal }}
-                  >
-                    Show
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onRecommendationAction(card.id, { dismiss: true })}
-                    style={{ ...btnOutline, padding: "6px 8px", color: D.red }}
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              </div>
-              <textarea
-                value={cardCopy[card.id] || ""}
-                onChange={(event) => setCardCopy((prev) => ({ ...prev, [card.id]: event.target.value }))}
-                rows={3}
-                style={{ ...inputStyle, marginTop: 8, resize: "vertical", lineHeight: 1.5 }}
-              />
-              <RecommendationPerformanceSummary performance={card.performance} />
-              <button
-                type="button"
-                onClick={() => onRecommendationAction(card.id, { customer_copy: cardCopy[card.id] || "" })}
-                style={{ ...btnOutline, marginTop: 7, padding: "6px 9px" }}
-              >
-                Save copy
-              </button>
-              {card.internal_reason && (
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 7 }}>
-                  Internal: {card.internal_reason}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function LawnAssessmentPanel() {
   // 'profile' step lets the tech edit a customer's turf profile from
   // the lawn-care surface — feeds the WaveGuard plan engine later.
@@ -363,8 +121,6 @@ export default function LawnAssessmentPanel() {
   });
   const [confirming, setConfirming] = useState(false);
   const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
-  const [snapshotReview, setSnapshotReview] = useState(null);
-  const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [showGuide, setShowGuide] = useState(
     () => !localStorage.getItem("lawn_guide_seen"),
@@ -453,7 +209,6 @@ export default function LawnAssessmentPanel() {
       if (r.detectedGrassType) {
         setTurfProfile((prev) => (prev.grass_type ? prev : { ...prev, grass_type: r.detectedGrassType }));
       }
-      setSnapshotReview(null);
       setAssessmentConfirmed(false);
       // Seed from the server's season-adjusted scores so the review
       // tiles match what will be persisted if the tech makes no changes.
@@ -477,7 +232,12 @@ export default function LawnAssessmentPanel() {
     try {
       // Send the tech-confirmed scores. Falls back to the server-adjusted
       // scores when the tech didn't change anything.
-      const adjustedScores = techScores || result.adjustedScores || result.displayScores;
+      const adjustedScores = { ...(techScores || result.adjustedScores || result.displayScores || {}) };
+      // This panel still edits Fungus/Thatch directly (no consolidated Stress chip),
+      // so never post a stale stress_damage — /confirm would treat it as an explicit
+      // override and ignore the Fungus/Thatch correction. Drop it so the server
+      // re-derives Stress from the corrected fungus/thatch.
+      delete adjustedScores.stress_damage;
       const protocol_field_checks = Object.fromEntries(
         Object.entries(protocolChecks).filter(([, value]) => value !== "" && value !== null),
       );
@@ -494,8 +254,7 @@ export default function LawnAssessmentPanel() {
         assessment: response.assessment || prev.assessment,
       }));
       setAssessmentConfirmed(true);
-      await loadSnapshotReview(response?.assessment?.id || result.assessment.id);
-      alert("Assessment confirmed. Snapshot is ready for admin review.");
+      alert("Assessment confirmed.");
     } catch (e) {
       alert("Confirm failed: " + e.message);
     }
@@ -511,59 +270,8 @@ export default function LawnAssessmentPanel() {
       irrigation_inches_per_week: "",
       protocol_field_notes: "",
     });
-    setSnapshotReview(null);
     setAssessmentConfirmed(false);
     setSelectedCustomer(null);
-  };
-
-  const loadSnapshotReview = async (assessmentId) => {
-    if (!assessmentId) return null;
-    setSnapshotLoading(true);
-    try {
-      const review = await adminFetch(
-        `/admin/lawn-assessment/${assessmentId}/snapshot`,
-      );
-      setSnapshotReview(review);
-      return review;
-    } catch {
-      setSnapshotReview(null);
-      return null;
-    } finally {
-      setSnapshotLoading(false);
-    }
-  };
-
-  const patchSnapshot = async (snapshotId, body) => {
-    if (!snapshotId || !result?.assessment?.id) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(`/admin/lawn-assessment/snapshots/${snapshotId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      await loadSnapshotReview(result.assessment.id);
-    } catch (e) {
-      alert("Snapshot update failed: " + e.message);
-      setSnapshotLoading(false);
-    }
-  };
-
-  const patchRecommendation = async (recommendationId, body) => {
-    if (!recommendationId || !result?.assessment?.id) return;
-    setSnapshotLoading(true);
-    try {
-      await adminFetch(
-        `/admin/lawn-assessment/recommendations/${recommendationId}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify(body),
-        },
-      );
-      await loadSnapshotReview(result.assessment.id);
-    } catch (e) {
-      alert("Recommendation update failed: " + e.message);
-      setSnapshotLoading(false);
-    }
   };
 
   // Clamp + step the tech-edited score. Range matches the AI display
@@ -732,7 +440,6 @@ export default function LawnAssessmentPanel() {
                   setStep("select");
                   setPhotos([]);
                   setResult(null);
-                  setSnapshotReview(null);
                   setAssessmentConfirmed(false);
                 },
               }
@@ -1054,9 +761,9 @@ export default function LawnAssessmentPanel() {
             >
               {[
                 // Tech review stays granular so the tech can correct the
-                // underlying signals that still drive snapshot findings
-                // (disease/thatch) and tech calibration. Customers see the
-                // four consolidated categories on the report/portal.
+                // underlying signals (disease/thatch) that drive Stress
+                // derivation and tech calibration. Customers see the four
+                // consolidated categories on the report.
                 { key: "turf_density", label: "Turf Density" },
                 { key: "weed_suppression", label: "Weed Suppression" },
                 { key: "color_health", label: "Color Health" },
@@ -1353,14 +1060,6 @@ export default function LawnAssessmentPanel() {
               Retake
             </button>{" "}
           </div>{" "}
-          {(snapshotLoading || snapshotReview?.snapshot) && (
-            <SnapshotReviewPanel
-              review={snapshotReview}
-              loading={snapshotLoading}
-              onSnapshotAction={patchSnapshot}
-              onRecommendationAction={patchRecommendation}
-            />
-          )}
         </div>
       )}
       {/* HISTORY VIEW */}

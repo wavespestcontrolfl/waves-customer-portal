@@ -8,10 +8,31 @@ jest.mock('../models/db', () => {
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
   return mock;
 });
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(async () => null),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+}));
+// Email leg of the deposit receipt: SendGrid configured so the leg runs;
+// sendTemplate captured; recipient resolution mocked to the customer's own
+// email (the real helper's contact-slot logic is unit-tested elsewhere).
+const mockSendTemplate = jest.fn(async () => ({ message: { provider_message_id: 'sg-1' } }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => true),
+}));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: (...args) => mockSendTemplate(...args),
+}));
+jest.mock('../services/customer-contact', () => ({
+  getReceiptEmailRecipients: jest.fn((customer) => (customer?.email
+    ? [{ email: customer.email, name: customer.first_name || null }]
+    : [])),
 }));
 const mockRefundPaymentIntent = jest.fn();
 const mockIsEstimateAcceptActive = jest.fn(() => true);
@@ -99,17 +120,16 @@ describe('computeDepositAmount — flat per service class, never a percentage', 
 describe('resolveDepositPolicy', () => {
   const estimate = { id: 'est-1', onetime_total: 280 };
 
-  it('requires the deposit for new customers on any non-prepay acceptance', () => {
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'pay_at_visit', membership: {} });
+  it('requires the deposit for new customers on any acceptance', () => {
+    const policy = resolveDepositPolicy({ estimate, membership: {} });
     expect(policy).toEqual({ enforced: true, required: true, slotRequired: false, exemptReason: null, amount: 49 });
     // No preference chosen yet (data fetch) — still the required path.
-    expect(resolveDepositPolicy({ estimate, paymentMethodPreference: null, membership: {} }).required).toBe(true);
+    expect(resolveDepositPolicy({ estimate, membership: {} }).required).toBe(true);
   });
 
   it('one-time accepts are REQUIRED at the heavier flat amount — not exempt', () => {
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: {},
       oneTime: true,
     });
@@ -120,7 +140,6 @@ describe('resolveDepositPolicy', () => {
   it('one-time UNINVOICED accepts must book — no invoice at accept means the roll-forward needs source_estimate_id (P1)', () => {
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: {},
       oneTime: true,
       oneTimeUninvoiced: true,
@@ -131,14 +150,20 @@ describe('resolveDepositPolicy', () => {
     // accept transaction — no booking needed for the money to come back.
     expect(resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: {},
       oneTime: true,
     }).slotRequired).toBe(false);
   });
 
-  it('prepay-annual is exempt (paying in full)', () => {
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'prepay_annual', membership: {} });
+  it('choosing prepay-annual is REQUIRED at the recurring amount — no longer exempt (owner decision 2026-07-05)', () => {
+    const policy = resolveDepositPolicy({ estimate, membership: {} });
+    expect(policy.required).toBe(true);
+    expect(policy.amount).toBe(49);
+    expect(policy.exemptReason).toBe(null);
+  });
+
+  it('a COMMITTED prepay term is exempt (post-accept summaries: legacy accepts predate the deposit)', () => {
+    const policy = resolveDepositPolicy({ estimate, committedPrepayTerm: true, membership: {} });
     expect(policy.required).toBe(false);
     expect(policy.exemptReason).toBe('prepay_annual');
     expect(policy.slotRequired).toBe(false);
@@ -147,7 +172,6 @@ describe('resolveDepositPolicy', () => {
   it('existing plan customers skip the deposit but must book an appointment', () => {
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: { isExistingCustomer: true },
     });
     expect(policy.required).toBe(false);
@@ -157,7 +181,7 @@ describe('resolveDepositPolicy', () => {
 
   it('feature dark = nothing enforced', () => {
     delete process.env.ESTIMATE_DEPOSIT_REQUIRED;
-    const policy = resolveDepositPolicy({ estimate, paymentMethodPreference: 'pay_at_visit', membership: {} });
+    const policy = resolveDepositPolicy({ estimate, membership: {} });
     expect(policy.enforced).toBe(false);
     expect(policy.required).toBe(false);
     expect(policy.slotRequired).toBe(false);
@@ -171,7 +195,6 @@ describe('resolveDepositPolicyForEstimate — live plan-customer fallback (P2)',
     mockLoadExistingRecurringQualifyingRows.mockResolvedValueOnce([{ id: 'svc-1' }]);
     const policy = await resolveDepositPolicyForEstimate({
       estimate: linkedEstimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: { isExistingCustomer: false },
     });
     expect(mockLoadExistingRecurringQualifyingRows).toHaveBeenCalledWith(expect.anything(), 'cust-9');
@@ -214,7 +237,6 @@ describe('resolveDepositPolicyForEstimate — third-party payer exemption', () =
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
     const policy = await resolveDepositPolicyForEstimate({
       estimate: linkedEstimate,
-      paymentMethodPreference: 'pay_at_visit',
       membership: { isExistingCustomer: false },
     });
     expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null });
@@ -359,7 +381,17 @@ describe('ensureDepositSatisfied', () => {
         return total > 0 ? [{ amount: total, refunded_amount: 0 }] : [];
       },
       insert(payload) {
-        return { onConflict: () => ({ ignore: async () => { upserts.push(payload); } }) };
+        // ignore() is awaited directly by the claim path and chained with
+        // .returning() by markDepositReceived — support both shapes.
+        return {
+          onConflict: () => ({
+            ignore: () => {
+              const promise = (async () => { upserts.push(payload); return [{ id: 'dep-new' }]; })();
+              promise.returning = () => promise;
+              return promise;
+            },
+          }),
+        };
       },
     };
   }
@@ -567,7 +599,7 @@ describe('webhook + invoice credit', () => {
   // and writes the SAME row across several queries, so the mock must carry
   // state. Conditional updates (status / whereIn) only land when the live
   // row matches — mirroring knex affected-row semantics.
-  function statefulWebhookDb({ estimateRow, initialDepositRow = null, onEstimateRead = null }) {
+  function statefulWebhookDb({ estimateRow, customerRow = null, prefsRow = null, initialDepositRow = null, onEstimateRead = null }) {
     const state = {
       row: initialDepositRow ? { credited_amount: 0, refunded_amount: 0, ...initialDepositRow } : null,
       inserts: [],
@@ -576,6 +608,15 @@ describe('webhook + invoice credit', () => {
     const handler = (table) => {
       if (table === 'estimates') {
         return { where: () => ({ first: async () => { if (onEstimateRead) onEstimateRead(state); return estimateRow; } }) };
+      }
+      if (table === 'customers') {
+        return { where: () => ({ first: async () => customerRow } ) };
+      }
+      if (table === 'notification_prefs') {
+        return { where: () => ({ first: async () => prefsRow }) };
+      }
+      if (table === 'sms_log') {
+        return { insert: async (row) => { state.smsLogInserts = (state.smsLogInserts || []).concat(row); return [row]; } };
       }
       if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
       const q = { criteria: {}, inStatuses: null };
@@ -594,8 +635,19 @@ describe('webhook + invoice credit', () => {
         insert(payload) {
           return {
             onConflict: () => ({
-              ignore: async () => {
-                if (!state.row) { state.row = { credited_amount: 0, refunded_amount: 0, ...payload }; state.inserts.push(payload); }
+              // Awaited directly by the claim path, chained with .returning()
+              // by markDepositReceived — support both shapes.
+              ignore: () => {
+                const promise = (async () => {
+                  if (!state.row) {
+                    state.row = { credited_amount: 0, refunded_amount: 0, ...payload };
+                    state.inserts.push(payload);
+                    return [{ id: 'dep-new' }];
+                  }
+                  return [];
+                })();
+                promise.returning = () => promise;
+                return promise;
               },
               merge: async () => {
                 if (!state.row) { state.row = { credited_amount: 0, refunded_amount: 0, ...payload }; state.inserts.push(payload); }
@@ -625,6 +677,376 @@ describe('webhook + invoice credit', () => {
     expect(result.refunded).toBeUndefined();
     expect(state.row).toMatchObject({ estimate_id: 'est-1', amount: 70, status: 'received' });
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  it('texts the deposit receipt exactly once — first record only, never on replay', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received — applied toward your first visit.');
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      // The receipt must go to the CUSTOMER's verified phone, not the
+      // estimate's stored one.
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(renderSmsTemplate).toHaveBeenCalledWith('deposit_receipt', expect.objectContaining({
+      first_name: 'Sam',
+      amount: '70',
+    }), expect.any(Object));
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '(941) 555-0100',
+      purpose: 'payment_receipt',
+      identityTrustLevel: 'phone_matches_customer',
+    }));
+
+    // Webhook replay — the row is already received; no second text.
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '(941) 555-0100', customer_name: 'Sam Customer' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({
+      status: 'scheduled',
+      message_type: 'deposit_receipt',
+      to_phone: '(941) 555-0100',
+    });
+    expect(state.smsLogInserts[0].scheduled_for.toISOString()).toBe(nextAllowedAt);
+    // sms_log.from_phone is NOT NULL — the row must carry a real outbound
+    // number (location default) or the insert throws and the receipt is lost.
+    expect(state.smsLogInserts[0].from_phone).toEqual(expect.stringMatching(/^\+1\d{10}$/));
+    // Lead-only estimate — the replay consent basis must ride the metadata,
+    // and there is no customer row to refresh the recipient from.
+    const leadMeta = JSON.parse(state.smsLogInserts[0].metadata);
+    expect(leadMeta.consent_basis).toMatchObject({ status: 'transactional_allowed' });
+    expect(leadMeta.refresh_customer_phone).toBeUndefined();
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('customer-linked receipt retries carry the location from-number and flag recipient refresh', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({
+      customer_id: 'cust-1',
+      to_phone: '(941) 555-0100', // customer's verified phone, not the estimate's
+      from_phone: expect.stringMatching(/^\+1\d{10}$/), // Venice location line
+    });
+    // The cron re-reads customers.phone at nextAllowedAt so the
+    // phone_matches_customer trust it asserts is still true then.
+    expect(JSON.parse(state.smsLogInserts[0].metadata).refresh_customer_phone).toBe(true);
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('email-only receipt channel: no SMS, sends the deposit.receipt email instead', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', customer_email: 'stale@estimate.example', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice', email: 'sam@customer.example' },
+      // The policy layer enforces the payment_receipt TOGGLE but not the
+      // channel column — this path must honor the channel itself.
+      prefsRow: { payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.smsLogInserts).toBeUndefined();
+    // Email goes to the CUSTOMER's verified email (recipient helper), not
+    // the estimate's stored one; idempotency keys on the PaymentIntent so a
+    // post-refund second deposit still receipts.
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'deposit.receipt',
+      to: 'sam@customer.example',
+      recipientType: 'customer',
+      recipientId: 'cust-1',
+      idempotencyKey: 'deposit_receipt:pi_1',
+      triggerEventId: 'deposit_receipt:pi_1',
+      // Provider rejection bodies can echo the address — never log raw.
+      suppressProviderErrorLog: true,
+      payload: expect.objectContaining({
+        first_name: 'Sam',
+        amount: '$70',
+        estimate_url: expect.stringContaining('/estimate/tok-1'),
+        // The template's "call us" line renders this — an empty payload
+        // value would produce "call  — a real person answers".
+        company_phone: '(941) 297-5749',
+      }),
+    }));
+  });
+
+  it('portal-wide email opt-out (email_enabled=false) suppresses the receipt email', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      // transactional_required bypasses suppression groups, so the sender
+      // itself must honor the portal-wide opt-out.
+      prefsRow: { payment_receipt_channel: 'email', email_enabled: false },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('receipt channel "both" sends the SMS and the email', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice', email: 'sam@customer.example' },
+      prefsRow: { payment_receipt_channel: 'both' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '(941) 555-0100' }));
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('default sms channel sends NO email; phoneless sms-channel customer falls back to email', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    // Default channel with a phone: SMS only.
+    let ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+
+    // sms channel but the customer row has NO usable phone: a receipt is the
+    // only proof of payment — email gap-fill fires.
+    sendCustomerMessage.mockClear();
+    ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '', first_name: 'Sam', email: 'sam@customer.example' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('receipt-texts opt-out on the default sms channel falls back to the email receipt', async () => {
+    // payment_confirmation_sms=false blocks the SMS leg at the consent gate
+    // (PURPOSE_OPTED_OUT since the policy added it as a prefsColumn) — a
+    // default-channel customer would otherwise get NO record of the paid
+    // deposit (Codex P2 on 4263af95). Same fallback as the no-phone case;
+    // payment_receipt=false stays the full kill switch (covered above).
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'PURPOSE_OPTED_OUT' });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      prefsRow: { payment_confirmation_sms: false },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'deposit.receipt' }));
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
+  it('email-only channel whose email leg is undeliverable falls back to the TEXT', async () => {
+    // Stale email-only rows (email removed / email messages opted out after
+    // choosing Email) must not leave a paid deposit with no receipt on any
+    // channel (codex P1 on d040aa76) — mirrors the consent gate fallback.
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    // Portal-wide email opt-out
+    let ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      prefsRow: { payment_receipt_channel: 'email', email_enabled: false },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    // No recipient email on file at all
+    sendCustomerMessage.mockClear();
+    ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: '' },
+      prefsRow: { payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('leads: SMS when the estimate has a phone; email gap-fill when it only has an email', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    // Lead with a phone (and an email): SMS only — unchanged behavior.
+    let ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '(941) 555-0100', customer_name: 'Lead Person', customer_email: 'lead@example.com', token: 'tok-1' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+
+    // Email-only lead: previously got NOTHING — the email leg is the fix.
+    sendCustomerMessage.mockClear();
+    ctx = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_phone: '', customer_name: 'Lead Person', customer_email: 'lead@example.com', token: 'tok-1' },
+    });
+    mockDbHandler = ctx.handler;
+    await handleDepositIntentSucceeded(succeededPi);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'lead@example.com',
+      recipientType: 'lead',
+      recipientId: null,
+    }));
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('payment_receipt opt-out suppresses the email leg too', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    mockSendTemplate.mockClear();
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
+      // Opted out of payment receipts entirely — the messaging policy blocks
+      // the SMS; the email leg must check the toggle explicitly.
+      prefsRow: { payment_receipt: false, payment_receipt_channel: 'email' },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('requeues on CONSENT_LOOKUP_FAILED with a default delay — a DB blip must not eat the only receipt', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    // CONSENT_LOOKUP_FAILED is retry-advised by contract but carries no
+    // retryable/nextAllowedAt metadata.
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'CONSENT_LOOKUP_FAILED' });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+      customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: 'Venice' },
+    });
+    mockDbHandler = handler;
+
+    const before = Date.now();
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    expect(state.smsLogInserts[0]).toMatchObject({ message_type: 'deposit_receipt', status: 'scheduled' });
+    const scheduledFor = state.smsLogInserts[0].scheduled_for.getTime();
+    expect(scheduledFor).toBeGreaterThanOrEqual(before + 14 * 60 * 1000);
+    expect(scheduledFor).toBeLessThanOrEqual(Date.now() + 16 * 60 * 1000);
+    expect(JSON.parse(state.smsLogInserts[0].metadata).original_failure_code).toBe('CONSENT_LOOKUP_FAILED');
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
   it('converts the originating lead to won when an eligible deposit is recorded', async () => {
@@ -1458,5 +1880,100 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
     mockDbHandler = followUpDb({ estimate: liveEstimate });
     const result = await assessDepositFollowUpEligibility('est-1', NOW);
     expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
+  });
+});
+
+describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the email leg', () => {
+  const { sendDepositReceiptEmailFallback } = require('../services/estimate-deposits');
+
+  const ledgerCalls = { where: [], orderBy: 0 };
+  const fallbackDb = ({ estimate, customer, prefs, ledger, prefsLookupThrows = false }) => (table) => {
+    const rows = {
+      estimates: estimate,
+      customers: customer,
+      notification_prefs: prefs,
+      estimate_deposits: ledger,
+    };
+    const q = {
+      where: (...args) => { if (table === 'estimate_deposits') ledgerCalls.where.push(args[0]); return q; },
+      whereIn: () => q,
+      orderBy: () => { if (table === 'estimate_deposits') ledgerCalls.orderBy += 1; return q; },
+      first: () => (table === 'notification_prefs' && prefsLookupThrows
+        ? Promise.reject(new Error('db blip'))
+        : Promise.resolve(rows[table] ?? null)),
+    };
+    return q;
+  };
+
+  const baseEstimate = { id: 'est-1', customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', customer_email: 'stale@estimate.example', token: 'tok-1' };
+  const baseCustomer = { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' };
+  const baseLedger = { amount: 70, stripe_payment_intent_id: 'pi_replay' };
+
+  beforeEach(() => { mockSendTemplate.mockClear(); ledgerCalls.where.length = 0; ledgerCalls.orderBy = 0; });
+
+  it('re-derives amount + PaymentIntent from the deposit ledger and sends the email', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { payment_confirmation_sms: false }, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: true });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'deposit.receipt',
+      to: 'sam@customer.example',
+      idempotencyKey: 'deposit_receipt:pi_replay',
+      payload: expect.objectContaining({ amount: '$70' }),
+    }));
+  });
+
+  it('payment_receipt=false stays the full kill switch — PURPOSE_OPTED_OUT replays must not email', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { payment_receipt: false }, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'receipt_opted_out' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('portal-wide email opt-out is honored', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { email_enabled: false }, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'email_opted_out' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('no received/credited ledger row → nothing to receipt', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: {}, ledger: null });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'no_received_deposit' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('propagates a non-send from the email leg — a recipient-less fallback must not read as receipted', async () => {
+    // The scheduler logs this result; { sent: true } over a skipped email
+    // would make the missing receipt invisible (codex round 7).
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: { ...baseCustomer, email: '' }, prefs: {}, ledger: baseLedger });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'no_recipient_email' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('fails CLOSED when the prefs lookup errors — a DB blip must not bypass the kill switch', async () => {
+    // The fallback often runs right after a PURPOSE_OPTED_OUT block that may
+    // BE the payment_receipt=false kill switch (codex round 6).
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, ledger: baseLedger, prefsLookupThrows: true });
+    const r = await sendDepositReceiptEmailFallback('est-1');
+    expect(r).toEqual({ sent: false, reason: 'prefs_lookup_failed' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('targets the QUEUED deposit by PaymentIntent on multi-deposit estimates — never latest-row', async () => {
+    // A queued older receipt must not email the newest top-up's amount/PI
+    // (wrong idempotency key = wrong dedupe; codex round 6).
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: {}, ledger: { amount: 35, stripe_payment_intent_id: 'pi_queued' } });
+    const r = await sendDepositReceiptEmailFallback('est-1', { paymentIntentId: 'pi_queued' });
+    expect(r).toEqual({ sent: true });
+    expect(ledgerCalls.where).toContainEqual({ stripe_payment_intent_id: 'pi_queued' });
+    expect(ledgerCalls.orderBy).toBe(0);
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'deposit_receipt:pi_queued',
+      payload: expect.objectContaining({ amount: '$35' }),
+    }));
   });
 });

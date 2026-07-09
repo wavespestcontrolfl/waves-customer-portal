@@ -27,7 +27,7 @@ function tierDaysForOverdue(daysSince) {
 
 // A blocked/failed SMS that should be retried on a later run rather than burning
 // the reminder tier (and rather than firing the email fallback, which would
-// double up once the SMS lands). Covers quiet-hours / retryable-provider holds
+// double up once the SMS lands). Covers retryable-provider holds
 // (flagged on the result) plus CONSENT_LOOKUP_FAILED — a transient consent-prefs
 // DB blip that review-request.js and admin-dispatch.js also treat as retryable.
 function isTransientSmsResult(result) {
@@ -257,7 +257,7 @@ const LatePaymentService = {
         const smsSent = sendResult.sent === true;
         const smsWillRetry = !smsSent && isTransientSmsResult(sendResult);
 
-        // A transient hold (quiet hours, retryable carrier error, consent-lookup
+        // A transient hold (retryable carrier error, consent-lookup
         // DB blip) re-sends on a later run — don't email now or the customer gets
         // both when it lands, and don't burn the tier.
         if (smsWillRetry) {

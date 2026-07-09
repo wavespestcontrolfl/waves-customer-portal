@@ -106,7 +106,7 @@ Use for: "text Henderson that we're running late", "send a reminder to Smith abo
         customer_id: { type: 'string' },
         phone: { type: 'string', description: 'Direct phone number' },
         message: { type: 'string', description: 'The SMS body' },
-        message_type: { type: 'string', enum: ['manual', 'reminder', 'follow_up'], description: 'Default: manual' },
+        message_type: { type: 'string', enum: ['manual', 'reminder', 'follow_up', 'billing_reminder'], description: 'Default: manual. Use billing_reminder for billing/overdue-balance nudges — it honors the customer\'s billing_reminder toggle and their Billing Reminder Delivery channel (an email-preferring customer returns a blocked "prefers email" result instead of texting against their choice).' },
       },
       required: ['message'],
     },
@@ -553,6 +553,15 @@ async function sendSms(input) {
     purpose: mapCommsMessageTypeToPurpose(message_type),
     customerId: custId || null,
     entryPoint: 'intelligence_bar_comms_send_sms',
+    // billing_reminder honors the portal's Billing Reminder Delivery
+    // dropdown: declaring the email leg makes the consent gate return
+    // CHANNEL_EMAIL_ONLY for an email-preferring customer instead of
+    // texting against their choice. The block is surfaced to the operator
+    // (error/reason below), who IS the email fallback on this manual path —
+    // unlike the automated flows, a block here is a prompt, not silence.
+    // Customers with no billing/account email still fall back to SMS at
+    // the gate itself.
+    hasEmailLeg: message_type === 'billing_reminder' ? true : undefined,
     // metadata.original_message_type preserves the legacy messageType for
     // the admin-sms-templates kill switch + twilio.js manual-vs-MMS
     // logic. metadata.adminUserId populates sms_log.admin_user_id so
@@ -580,9 +589,16 @@ async function sendSms(input) {
   // failure) and /execute success is `!result.error`. Without an explicit
   // error field, blocked sends would be reported as successful tool
   // executions at the API layer.
+  // CHANNEL_EMAIL_ONLY on a billing reminder is a REDIRECT, not a dead end:
+  // the operator is the email fallback on this manual path (DECISIONS
+  // round-4 ruling) — spell out the next step so the model relays it as an
+  // instruction rather than a generic failure.
+  const actionableError = result.code === 'CHANNEL_EMAIL_ONLY' && message_type === 'billing_reminder'
+    ? 'This customer has Billing Reminder Delivery set to EMAIL — the text was not sent. Send this reminder to their billing/account email instead.'
+    : null;
   return {
     success: false,
-    error: result.reason || result.code || 'send blocked',
+    error: actionableError || result.reason || result.code || 'send blocked',
     blocked: !!result.blocked,
     code: result.code,
     reason: result.reason,

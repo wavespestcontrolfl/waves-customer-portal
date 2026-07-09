@@ -394,7 +394,9 @@ function CategoryDetail({ group }) {
               >
                 {s.pricing_type === "fixed" && s.base_price
                   ? `$${Number(s.base_price).toFixed(0)}`
-                  : "—"}
+                  : s.pricing_type === "variable" || s.pricing_type === "quoted"
+                    ? "Variable"
+                    : "—"}
               </span>{" "}
             </div>
           ))}

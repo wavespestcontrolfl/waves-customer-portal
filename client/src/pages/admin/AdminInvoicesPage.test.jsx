@@ -5,6 +5,7 @@ import {
   attachmentTotalBytes,
   canAddInvoiceAttachments,
   invoiceAttachmentLimitLabel,
+  invoiceDepositCreditTotal,
   invoiceListRowDate,
   isAllowedAttachmentFile,
   validateAttachmentFiles,
@@ -78,5 +79,37 @@ describe("AdminInvoicesPage invoice attachment helpers", () => {
     expect(canAddInvoiceAttachments(existing)).toBe(true);
     expect(canAddInvoiceAttachments(Array.from({ length: 10 }, (_, idx) => file(`doc-${idx}.pdf`, 1)))).toBe(false);
     expect(canAddInvoiceAttachments([file("max.pdf", 25 * 1024 * 1024)])).toBe(false);
+  });
+});
+
+describe("AdminInvoicesPage deposit credit chip", () => {
+  it("totals only deposit_credit lines, as positive dollars", () => {
+    expect(
+      invoiceDepositCreditTotal([
+        { description: "WaveGuard Membership", amount: 376, quantity: 1 },
+        {
+          description: "Deposit credit (paid at acceptance)",
+          category: "deposit_credit",
+          amount: -49,
+        },
+      ]),
+    ).toBe(49);
+  });
+
+  it("ignores other negative lines (discounts) and junk entries", () => {
+    expect(
+      invoiceDepositCreditTotal([
+        { description: "Service", amount: 100 },
+        { description: "Referral discount", category: "discount", amount: -20 },
+        null,
+        { category: "deposit_credit", amount: "nope" },
+      ]),
+    ).toBe(0);
+  });
+
+  it("returns 0 for missing or non-array line items", () => {
+    expect(invoiceDepositCreditTotal(undefined)).toBe(0);
+    expect(invoiceDepositCreditTotal("[]")).toBe(0);
+    expect(invoiceDepositCreditTotal([])).toBe(0);
   });
 });

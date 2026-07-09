@@ -219,3 +219,120 @@ describe('internals', () => {
     expect(looksLikeFalsePositiveName('Tracy', 'Smith')).toBe(false);
   });
 });
+
+describe('lowercase transcripts (regression — the heuristics were capitalization-blind)', () => {
+  test('lowercase address and self-introduced name are redacted', () => {
+    const r = redact('my name is john smith and i live at 4867 maple street in bradenton');
+    expect(r.text).toContain('[name]');
+    expect(r.text).toContain('[address]');
+    expect(r.text).not.toContain('john');
+    expect(r.text).not.toContain('4867');
+  });
+  test('lowercase FL ZIP is redacted', () => {
+    const r = redact('we are in venice florida 34285 near the beach');
+    expect(r.text).toContain('[zip]');
+    expect(r.text).not.toContain('34285');
+  });
+  test('an effectively all-lowercase text can never report high confidence', () => {
+    // Pre-fix, this exact shape returned the text UNCHANGED with confidence
+    // 'high', so the downstream "never quote low confidence" guard never fired.
+    const r = redact('my name is john smith and i live at 4867 maple street in bradenton');
+    expect(r.confidence).toBe('low');
+    const noHit = redact('please just have somebody call me back about the ants in the kitchen whenever you get a chance');
+    expect(noHit.confidence).toBe('low');
+  });
+  test('short lowercase fragments keep high confidence (no PII surface)', () => {
+    expect(redact('ok thanks').confidence).toBe('high');
+  });
+  test('measure words do not false-positive as lowercase addresses', () => {
+    const r = redact('its about a 10 minute drive from the office and takes 3 easy steps to set up');
+    expect(r.text).not.toContain('[address]');
+  });
+  test('capitalized signal + lowercase name is still redacted (Codex round 2)', () => {
+    // Sentence-initial signals are the norm at message start; pre-fix the
+    // lowercase pass required an all-lowercase signal, so these returned raw
+    // names — short enough to keep the effectively-lowercase cap from firing.
+    const a = redact('My name is john smith please call');
+    expect(a.text).toContain('[name]');
+    expect(a.text).not.toContain('john');
+    expect(a.confidence).not.toBe('high');
+    const b = redact('Name: john smith, needs a quote for rodents');
+    expect(b.text).toContain('[name]');
+    expect(b.text).not.toContain('smith');
+  });
+  test('numbered streets are addresses too (Codex round 8 — "123 5th Ave" was invisible)', () => {
+    for (const t of ['John lives at 123 5th Ave in Venice.', 'She is at 4867 1st Street near downtown.']) {
+      const r = redact(t);
+      expect(r.findings.some((f) => f.type === 'address')).toBe(true);
+      expect(r.text).toContain('[address]');
+    }
+  });
+  test('multi-word service areas are place PAIRS, not per-word allowlist (Codex round 8)', () => {
+    // The pair form is furniture...
+    expect(redact('Waves Pest Control serves Punta Gorda and Sun City Center.').findings).toEqual([]);
+    // ...but a person sharing a single-word city name still redacts.
+    const laurel = redact('Hi, this is Laurel Smith calling about ants.');
+    expect(laurel.findings.some((f) => f.type === 'name')).toBe(true);
+    expect(laurel.text).not.toContain('Laurel Smith');
+  });
+  test('title-cased lawn/pest domain terms are page furniture, not names (Codex round 15)', () => {
+    // The vocabulary city-service/customer-question copy is built from.
+    expect(redact('Brown Patch spreads fast; Chinch Bug and Sod Webworm damage looks similar, and Take All Root Rot thrives in wet soil.').findings).toEqual([]);
+    // The body pass pairs NON-overlapping, so 3-word species names surface
+    // their QUALIFIER bigram ("Southern Chinch", "Tropical Sod"), and the
+    // period in "St." leaves "Augustine Grass" as the matched pair.
+    expect(redact('Southern Chinch Bug and Tropical Sod Webworm both attack St. Augustine Grass in summer.').findings).toEqual([]);
+    // Pair-form allowlisting must not weaken real-name redaction.
+    const brown = redact('Hi, this is James Brown calling about my lawn.');
+    expect(brown.findings.some((f) => f.type === 'name')).toBe(true);
+    expect(brown.text).not.toContain('James Brown');
+  });
+  test('short lowercase self-intro snippets can never report high confidence (Codex round 16)', () => {
+    // 26 letters, zero caps — under the old 40-letter floor this reported
+    // 'high' with zero findings, so the name published.
+    expect(redact('this is john smith ants are back').confidence).toBe('low');
+    // The autocapped variant: 1 cap defeats a zero-caps rule, but the
+    // lowercase intro signal ("this is" + lowercase name) still marks the
+    // heuristics blind.
+    expect(redact('This is john smith ants are back').confidence).toBe('low');
+    // Properly-cased short furniture keeps its confidence — a blanket
+    // low-caps rule at this length would swallow it.
+    expect(redact('Email info@wavespestcontrol.com to book.').confidence).toBe('high');
+    expect(redact('ok thanks').confidence).toBe('high');
+  });
+  test('phones with attached extensions still redact (Codex round 16 — x99 blocked the trailing boundary)', () => {
+    const attached = redact('call me back at 212-555-1234x99 tomorrow');
+    expect(attached.findings.some((f) => f.type === 'phone')).toBe(true);
+    expect(attached.text).not.toContain('555-1234');
+    const spaced = redact('The office line is (941) 555-8899 ext. 4 for scheduling.');
+    expect(spaced.text).toContain('[phone]');
+    expect(spaced.text).not.toContain('8899');
+  });
+  test('lowercase name signal ignores non-name continuations and allowlisted tokens', () => {
+    expect(redact('my name is not on the account but my husband handles it').text).not.toContain('[name]');
+    // staff/owner names stay (allowlist, case-insensitive)
+    expect(redact('my name is adam by the way').text).toContain('adam');
+  });
+  test('capitalized behavior is unchanged', () => {
+    const r = redact('Hi, this is John Smith at 4867 Maple Street');
+    expect(r.text).toContain('[name]');
+    expect(r.text).toContain('[address]');
+    expect(r.confidence).toBe('medium');
+  });
+});
+
+describe('effectivelyLowercase: absolute cap on incidental capitals (Codex round 13)', () => {
+  const { redact } = require('../services/content/pii-redactor');
+
+  test('a one-cap autocapitalized transcript is LOW confidence even above the 2% ratio', () => {
+    // "This is john smith and i had ants…" — 1 cap over ~45 letters is just
+    // over 2%, but the name heuristics were blind to the lowercase name.
+    const r = redact('This is john smith and i had ants in my kitchen last week');
+    expect(r.confidence).toBe('low');
+  });
+
+  test('properly-cased prose with several capitals stays high confidence', () => {
+    const r = redact('Termite swarmers show up after rain in Bradenton and Sarasota. Check your baseboards and lanai for mud tubes.');
+    expect(r.confidence).not.toBe('low');
+  });
+});

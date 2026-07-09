@@ -131,8 +131,12 @@ const FIXTURES = {
   },
   "/admin/dashboard/core-kpis": CORE_KPIS,
   "/admin/dashboard/funnel": {
-    funnel: { sent: 4, viewed: 4, accepted: 0, declined: 0 },
-    rates: {},
+    funnel: { sent: 4, viewed: 4, accepted: 1, declined: 1, pending: 2 },
+    rates: { view_rate: 100, close_rate: 25, decline_rate: 25 },
+    by_service: [
+      { service: "Pest Control", sent: 2, won: 1, lost: 0, open: 1, wonValue: 248 },
+      { service: "Termite", sent: 2, won: 0, lost: 1, open: 1, wonValue: 0 },
+    ],
     period: { from: "2026-07-01", to: "2026-07-01" },
   },
   "/admin/dashboard/aging": {
@@ -142,6 +146,60 @@ const FIXTURES = {
     total_overdue: 2410,
   },
   "/admin/dashboard/mrr-trend": { trend: [], avg_growth_pct: 7 },
+  "/admin/dashboard/churn-reasons": {
+    period: { from: "2025-08-01", months: 12 },
+    reasons: [
+      { code: "price", label: "Price", customers: 4, mrr: 380, mrrShare: 54.3, cumulativePct: 54.3 },
+      { code: "unclassified", label: "Unclassified", customers: 3, mrr: 320, mrrShare: 45.7, cumulativePct: 100 },
+    ],
+    totals: { customers: 7, mrr: 700 },
+    unclassifiedShare: 42.9,
+  },
+  "/admin/dashboard/mrr-bridge": {
+    months: [
+      {
+        month: "2026-06-01", label: "Jun \u201926", degraded: true, inProgress: false,
+        startMrr: null, endMrr: null, net: 75,
+        new: { mrr: 120, count: 2 }, reactivated: { mrr: 0, count: 0 },
+        expansion: { mrr: 0, count: 0 }, contraction: { mrr: 0, count: 0 },
+        churned: { mrr: 45, count: 1 },
+      },
+      {
+        month: "2026-07-01", label: "Jul \u201926", degraded: false, inProgress: true,
+        startMrr: 9804.69, endMrr: 9749.69, net: -55,
+        new: { mrr: 0, count: 0 }, reactivated: { mrr: 0, count: 0 },
+        expansion: { mrr: 0, count: 0 }, contraction: { mrr: 0, count: 0 },
+        churned: { mrr: 55, count: 1 },
+      },
+    ],
+    snapshotStart: "2026-06-01",
+    today: "2026-07-04",
+  },
+  "/admin/dashboard/ebitda-bridge": {
+    rows: [
+      { key: "revenue", label: "Revenue", amount: 497, kind: "start" },
+      { key: "cogs", label: "COGS (labor · materials · drive)", amount: -114, kind: "minus" },
+      { key: "gross_profit", label: "Gross profit", amount: 383, kind: "subtotal", marginPct: 77 },
+      { key: "marketing", label: "Marketing (ads · retainers · referral rewards)", amount: -50, kind: "minus" },
+      { key: "contribution", label: "Contribution", amount: 333, kind: "subtotal", marginPct: 67 },
+      { key: "overhead", label: "Overhead (vehicle · insurance · software · admin)", amount: -160, kind: "minus" },
+      { key: "ebitda", label: "Adjusted EBITDA", amount: 173, kind: "result", marginPct: 34.8 },
+    ],
+    revenue: 497,
+    cogs: 114,
+    grossProfit: 383,
+    grossMarginPct: 77,
+    marketing: { adSpend: 50, fixedCosts: 0, referralRewards: 0, total: 50 },
+    contribution: 333,
+    contributionMarginPct: 67,
+    overhead: { vehicle: 28, insurance: 13, software: 12, admin: 107, total: 160 },
+    overheadEntered: true,
+    ebitda: 173,
+    ebitdaMarginPct: 34.8,
+    monthFraction: 0.033,
+    period: { from: "2026-07-01", to: "2026-07-01", label: "Month to date", elapsedDays: 1, daysInMonth: 31 },
+    uncostedRevenue: 0,
+  },
   "/admin/dashboard/service-mix": { mix: [], total_services: 3 },
   "/admin/dashboard/revenue-by-city": { cities: [], total: 331 },
   "/admin/dashboard/review-trend": { trend: [], total: 180, avgRating: 5 },
@@ -150,6 +208,33 @@ const FIXTURES = {
   "/admin/dashboard/calls-by-source": { sources: [], period: { label: "Month to Date" } },
   "/admin/dashboard/leads-by-source": { sources: [], period: {} },
   "/admin/dashboard/channel-mix": { channels: [] },
+  "/admin/dashboard/channel-roi": {
+    period: { from: "2026-07-01", to: "2026-07-04", label: "Month to Date" },
+    sources: [
+      { sourceKey: "google_ads", source: "Google Ads", revenue: 1200, grossProfit: 700, lifetimeValue: 2400, adSpend: 400, fixedCost: 100, allInSpend: 500, customers: 6, jobs: 8, roas: 2.4, ltvCac: 4.8, cac: 83, costPerJob: 63 },
+      { sourceKey: "organic", source: "Organic", revenue: 800, grossProfit: 500, lifetimeValue: 900, adSpend: 0, fixedCost: 300, allInSpend: 300, customers: 2, jobs: 2, roas: 2.7, ltvCac: 3, cac: 150, costPerJob: 150 },
+    ],
+    totalRevenue: 2000,
+    totalGrossProfit: 1200,
+    totalLifetimeValue: 3300,
+    totalAdSpend: 400,
+    totalFixedCost: 400,
+    totalAllInSpend: 800,
+    totalJobs: 10,
+    blendedROAS: 2.5,
+    blendedLtvCac: 4.1,
+  },
+  "/admin/dashboard/lead-funnel": {
+    period: { label: "Month to Date" },
+    sources: [
+      { sourceKey: "google_ads", source: "Google Ads", isPaid: true, leads: 8, contacted: 7, estimate: 5, booked: 4, completed: 3, lost: 1, rates: { contactRate: 88, estimateRate: 63, bookRate: 50, completeRate: 38 } },
+      { sourceKey: "organic", source: "Organic", isPaid: false, leads: 3, contacted: 2, estimate: 1, booked: 1, completed: 1, lost: 0, rates: { contactRate: 67, estimateRate: 33, bookRate: 33, completeRate: 33 } },
+    ],
+    stagesPresent: { contacted: true, estimate: true, booked: true },
+    totals: { leads: 11, contacted: 9, estimate: 6, booked: 5, completed: 4, lost: 1, bookRate: 45, completeRate: 36 },
+    paid: { leads: 8, contacted: 7, estimate: 5, booked: 4, completed: 3, lost: 1, bookRate: 50 },
+    organic: { leads: 3, contacted: 2, estimate: 1, booked: 1, completed: 1, lost: 0, bookRate: 33 },
+  },
 };
 
 function mockFetchWithFixtures() {
@@ -232,13 +317,62 @@ describe("DashboardPageV2 sections", () => {
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Marketing Attribution"),
     );
-    // PROFIT
+    // Estimate funnel: pending row + per-requested-service outcomes
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Pending"),
+    );
+    // Lead funnel by source: card + a source row with visible low-sample pill
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Lead Funnel by Source"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Low sample · n=3"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("What leads asked for"),
+    );
+    // Channel ROI: the ad-dollars card's tabular twin — table renders with the
+    // ad/fixed spend split visible on the row (never tooltip-only).
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Channel ROI"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("$400 ad + $100 fixed"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Termite"),
+    );
+    // PROFIT — the adjusted-EBITDA bridge is its own card NEXT TO the margin
+    // tiles (company-level vs job-level; never combined).
     expect(document.getElementById("profit")).toContainElement(
       screen.getByText("Service Mix"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("Adjusted EBITDA Bridge"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("Adjusted EBITDA"),
     );
     // RETENTION
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("MRR Trend"),
+    );
+    // Net-MRR bridge: month strip + waterfall rows + in-progress flag
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("MRR Bridge"),
+    );
+    // Churn Pareto card + always-visible unclassified share
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("Why Customers Leave"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("42.9% unclassified"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("Churned"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("in progress"),
     );
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("Retention by Cohort"),

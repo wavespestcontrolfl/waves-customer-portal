@@ -8,12 +8,14 @@
  *
  * This module covers the page-policy gaps the audit found ABSENT or
  * blog-only:
- *   P0 HARDCODED_PRICE      — dollar figures in body (must link to calculator)
- *   P0 BRAND_TOKEN_LEAK     — literal "Waves Pest Control" on a multi-domain
- *                             page instead of the {{brandName}} token
- *   P0 FAQ_BLOCKED_SERVICE  — an FAQ section on a service whose FAQs are
- *                             policy-blocked (bed bug, cockroach, rodent, …)
- *   P2 KEYWORD_STUFFING     — primary keyword density above threshold
+ *   P0 HARDCODED_PRICE          — dollar figures in body (must link to calculator)
+ *   P0 BRAND_TOKEN_LEAK         — literal "Waves Pest Control" on a multi-domain
+ *                                 page instead of the {{brandName}} token
+ *   P0 FAQ_BLOCKED_SERVICE      — an FAQ section on a service whose FAQs are
+ *                                 policy-blocked (bed bug, cockroach, rodent, …)
+ *   P0 DISALLOWED_EXTERNAL_LINK — a link/URL pointing off the hub/spoke fleet
+ *                                 (spam/injection guard — drafts link internally)
+ *   P2 KEYWORD_STUFFING         — primary keyword density above threshold
  *
  * Phone-number injection is NOT re-checked here — content-quality-gate's
  * redaction hard check already rejects any non-Waves phone in the body.
@@ -39,21 +41,42 @@ function finding(severity, code, message) {
   return { severity, code, message };
 }
 
-function priceFinding(body) {
-  const text = String(body || '');
-  const priceRe = /(^|[\s(])\$\s?\d{2,5}\b|\b\d{2,5}\s+(?:dollars|bucks)\b/gi;
+// Dollar amounts: "$95", "$9", "$1,200", "$12500", "95 dollars", "1,200 bucks".
+// Comma-grouped thousands MUST be covered — a bare \d{2,5} stops at the comma,
+// so "$1,200 per year" (exactly the fabricated-price shape for termite bonds /
+// annual plans) produced no finding at all.
+// Prefix admits quotes (straight and curly) — generated copy routinely
+// QUOTES the amount ("$1,200"), and a start/whitespace/paren-only prefix
+// let exactly the fabricated-price shapes this covers slip both gates.
+const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
+
+/**
+ * findHardcodedPrice(text) → the offending price string, or null. Applies the
+ * calculator/quote-framing and regulatory-fine exemptions, so callers share
+ * ONE price policy. Exported for seo-completion-gate (its previous private
+ * copy had drifted: no comma support, no regulatory exemption).
+ */
+function findHardcodedPrice(text) {
+  const s = String(text || '');
+  const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
-  while ((match = priceRe.exec(text)) !== null) {
-    const window = text.slice(Math.max(0, match.index - 80), Math.min(text.length, match.index + 120));
+  while ((match = priceRe.exec(s)) !== null) {
+    const window = s.slice(Math.max(0, match.index - 80), Math.min(s.length, match.index + 120));
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price.
     if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
     // contexts while still blocking customer-facing service price claims.
     if (isRegulatoryPenaltyAmount(match[0].trim(), window)) continue;
-    return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${match[0].trim()}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
+    return match[0].trim();
   }
   return null;
+}
+
+function priceFinding(body) {
+  const hit = findHardcodedPrice(body);
+  if (!hit) return null;
+  return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
 }
 
 function isRegulatoryPenaltyAmount(amount, context) {
@@ -108,9 +131,11 @@ function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
     .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
   const body = String(text || '');
-  if (!/\bWaves\s+Pest\s+Control\b/.test(body)) return null;
+  // Case-insensitive: "WAVES PEST CONTROL" / "waves pest control" leak the
+  // brand across spoke domains exactly like the canonical casing does.
+  if (!/\bWaves\s+Pest\s+Control\b/i.test(body)) return null;
   const allowed = allowHubAnchor ? hubLinkAnchorRanges(body) : [];
-  const brandRe = /\bWaves\s+Pest\s+Control\b/g;
+  const brandRe = /\bWaves\s+Pest\s+Control\b/gi;
   let match;
   while ((match = brandRe.exec(body)) !== null) {
     const start = match.index;
@@ -119,6 +144,351 @@ function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
     if (!insideHubAnchor) {
       return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" outside a hub-link anchor instead of the {{brandName}} token — brand leaks across spoke domains.');
     }
+  }
+  return null;
+}
+
+// ── outbound-link gate ──────────────────────────────────────────────
+// Generated drafts link INTERNALLY only: the writer prompts mandate "never
+// invent URLs" / internal targets, and the audited live corpus is 100%
+// relative links. Any absolute URL pointing off the hub/spoke fleet is
+// therefore either a hallucinated citation or an injected spam/malicious
+// backlink (untrusted SERP/PAA text reaches the writer prompt), so it fails
+// CLOSED as a P0. If a citation domain is ever editorially approved, extend
+// the allowlist via CONTENT_ALLOWED_LINK_DOMAINS (comma-separated hostnames)
+// without a deploy.
+const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+
+function normalizeHost(host) {
+  return String(host || '').trim().toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
+}
+
+// Curated citation hosts for OPERATOR-directed sourcing. Intercept-brief
+// `source_notes` direct the writer to LOCATE sources of exactly these kinds
+// ("UF/IFAS for agronomic claims", regulators, consumer-protection outlets,
+// "Orkin published terms/plan pages") — their hosts can't be known per-URL at
+// gate time, so this curated set (plus the curated competitors' own sites,
+// below) is what "located source" may resolve to. Operator-provenance only:
+// mined drafts never get these.
+const OPERATOR_CITATION_HOSTS = [
+  'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
+  'consumeraffairs.com', 'bbb.org', 'archive.org', 'web.archive.org',
+];
+
+// Hosts of the curated competitor-facts `source` URLs — the exact pages an
+// operator directive like "Orkin published terms/plan pages" resolves to.
+function curatedCompetitorSourceHosts() {
+  const hosts = new Set();
+  try {
+    const { COMPETITORS } = require('./competitor-facts');
+    for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
+      for (const attr of Object.values(c?.attributes || {})) {
+        const src = attr?.source;
+        if (!src) continue;
+        try { hosts.add(normalizeHost(new URL(src).hostname)); } catch { /* not a URL */ }
+      }
+    }
+  } catch { /* competitor-facts unavailable — fall through to the base allowlist */ }
+  return hosts;
+}
+
+function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
+  const hosts = new Set();
+  for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
+  for (const d of SPOKE_SITE_KEYS) hosts.add(normalizeHost(d));
+  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
+    const h = normalizeHost(d);
+    if (h) hosts.add(h);
+  }
+  // Operator-mandated must-link citations: the brief's own required_sources
+  // URLs are binding writer instructions ("every source below must be linked
+  // in the body"), so their hosts are allowed for that draft.
+  for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
+    try { hosts.add(normalizeHost(new URL(String(u)).hostname)); } catch { /* skip non-URLs */ }
+  }
+  if (operatorCitations) {
+    for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
+    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
+  }
+  return hosts;
+}
+
+// Exact host or subdomain of an allowed host ("entnemdept.ufl.edu" is allowed
+// by "ufl.edu"; "evil-ufl.edu" is not — the dot prefix prevents suffix abuse).
+function hostAllowed(host, allowed) {
+  if (!host) return false;
+  if (allowed.has(host)) return true;
+  for (const a of allowed) {
+    if (a && host.endsWith(`.${a}`)) return true;
+  }
+  return false;
+}
+
+// ANY absolute-scheme URL anywhere in the text — markdown links/images, raw
+// HTML attributes, and bare prose URLs all contain this shape. Group 1 is the
+// scheme: http(s) goes through the host allowlist; every other scheme
+// (ftp:, gopher:, …) is rejected outright — the gate fails closed on any
+// external reference, not just web links.
+const ABSOLUTE_URL_RE = /\b([a-z][a-z0-9+.-]*):\/\/[^\s<>()"'\]]+/gi;
+// ANY scheme in a link DESTINATION — schemes without '://' (ftp:host,
+// webcal:, tel:, javascript:) never match the URL scan above, so the
+// destination positions must be scanned for arbitrary schemes, not just the
+// executable set. Three destination shapes carry a scheme:
+//   - Markdown/MDX links and images: `[x](scheme:…)`, incl. the angle-
+//     bracketed form `[x](<scheme:…>)`,
+//   - href/src attributes: `href="scheme:…"`,
+//   - CommonMark autolinks: `<scheme:…>` (no whitespace inside by spec).
+// Policy: http(s) must be a proper `scheme://` form (group 2) — a no-slash
+// `[spam](http:evil.com)` still NAVIGATES externally in browsers but never
+// reaches the `://` host-allowlist scan, so it is rejected here; mailto is
+// recipient-validated below; tel is Waves-number-validated below (the
+// writer prompt MANDATES tap-to-call [(941) 297-5749](tel:+19412975749)
+// links, so tel can't be blanket-blocked). Everything else is P0.
+const MD_DEST_SCHEME_RE = /\]\(\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+// `\{?\s*` after `=`: these posts publish as MDX, so a JSX string-
+// expression prop (href={"javascript:alert(1)"}) is a real link
+// destination React will render — the quote-anchored form alone missed it.
+// Backtick included: href={`javascript:...`} template literals render the
+// same way and were invisible to the single/double-quote class.
+const ATTR_SCHEME_RE = /\b(?:href|src)\s*=\s*\{?\s*["'`]?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gi;
+// A JSX expression prop whose value is NOT a plain string literal —
+// template interpolation (`...${x}...`), concatenation ('java'+'script:'),
+// an identifier — is a DYNAMIC link destination this static gate cannot
+// verify at all, so it fails closed rather than hoping the scheme regexes
+// see a contiguous literal. The literal test's backtick arm excludes `$`
+// entirely: a template with no interpolation is a plain string; one with
+// `${` is dynamic (and `[^}]*` cutting at the interpolation's inner `}`
+// also fails the literal test — closed either way).
+const ATTR_EXPR_PROP_RE = /\b(?:href|src)\s*=\s*\{([^}]*)\}/gi;
+const PLAIN_STRING_LITERAL_RE = /^\s*(?:"[^"]*"|'[^']*'|`[^`$]*`)\s*$/;
+// A JSX SPREAD attribute (<a {...{href:'javascript:...'}}>) delivers props
+// without a literal `href=` token, so EVERY href/src scanner above and
+// below is blind to it while React renders whatever destination it
+// smuggles. Generated drafts have no legitimate use for spread syntax —
+// the writer emits markdown links and plain-prop JSX — so ANY `{...` in
+// publishable text fails closed rather than trying to statically evaluate
+// the spread expression. Not anchored to a detectable tag context: a `>`
+// inside a quoted prop defeats "inside a tag" matching, and a stray
+// `{...` in prose costs only a parked draft.
+const JSX_SPREAD_RE = /\{\s*\.\.\./;
+const AUTOLINK_SCHEME_RE = /<([a-z][a-z0-9+.-]*):(\/\/)?[^>\s]*>/gi;
+// Reference-style Markdown definitions — `[bad]: javascript:alert(1)` on
+// its own line becomes the destination of every `[click][bad]` use, and
+// none of the three inline shapes above see it.
+const REF_DEF_SCHEME_RE = /^ {0,3}\[[^\]]+\]:\s*<?\s*([a-z][a-z0-9+.-]*):(\/\/)?/gim;
+const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
+// Protocol-relative URL (//host/path) — scheme-less external reference that
+// bypasses an https?:// scan. Host shapes: dotted-TLD name, IPv4 literal,
+// bracketed IPv6 literal, or localhost — an IP/single-label host is just as
+// browser-navigable as a named one, so requiring an alphabetic TLD alone
+// left `//127.0.0.1/x` and `//localhost/x` clean. The dotted-TLD arm keeps
+// prose slashes ("and//or", path fragments) from tripping; `<` in the
+// prefix class covers Markdown's angle-bracketed destination form and `>`
+// in the terminator lookahead closes it.
+const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|localhost\b|[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/:\s"')\]>]|$)/i;
+const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
+// tel: destinations — validated against the Waves phone allowlist, exactly
+// like mailto recipients are validated against the business domain. The
+// capture is deliberately CATCH-ALL (anything up to a delimiter, even
+// empty): tel is whitelisted in the scheme pre-scan, so any tel: use whose
+// number portion this didn't match would fall through UNVALIDATED —
+// `tel:911` and `tel:abc` must reach isWavesPhone and fail there.
+const TEL_RE = /\btel:([^\s"'<>)\]]*)/gi;
+
+// Single-pass HTML-entity decode (ASCII range) for the link scan: a browser
+// decodes `href="javascript&#58;alert(1)"` (or &colon;/&#x3a;) into a live
+// javascript: link, so the scanner must see what the browser sees. &amp; is
+// decoded LAST, mirroring a single browser decode — `&amp;#58;` renders as
+// literal "&#58;" text, not a colon, and must stay that way here too.
+// Scanning a decoded COPY can only find more, never less (fail-closed).
+// Sentinel standing in for an ENTITY-DECODED tab/LF/CR (see the decoder
+// below). \u0001 is itself a C0 control, so range checks like the mailto
+// recipient scan treat it exactly like the control it stands for; a
+// LITERAL \u0001 in a draft matches the same fail-closed arms, which is
+// the right direction. The regex arms below hardcode \u0001 — keep them
+// in sync with this constant.
+const CTRL_SENTINEL = '\u0001';
+function decodeEntitiesForScan(s) {
+  // The `;` is OPTIONAL on the numeric forms: HTML treats a semicolonless
+  // numeric character reference as a parse error but still decodes it in
+  // attribute values, so `href="javascript&#58alert(1)"` is a live
+  // javascript: link and the scanner must decode it identically. Named
+  // references keep the mandatory `;` (they are NOT legacy-decoded without
+  // it when followed by alphanumerics).
+  // Entity-produced CONTROL characters (tab/LF/CR — the three browsers
+  // strip while parsing URLs) decode to the CTRL_SENTINEL instead of the
+  // real control. This preserves the distinction the tokenizer makes and a
+  // plain decode erases: a char-reference control is PART of an attribute
+  // value (href=java&#9;script: is a live javascript: link), while a
+  // literal control in the source TERMINATES an unquoted value (a newline
+  // between props is just formatting).
+  const ctl = (c) => (c === 9 || c === 10 || c === 13 ? CTRL_SENTINEL : String.fromCharCode(c));
+  return String(s)
+    .replace(/&#x([0-9a-f]{1,6});?/gi, (m0, h) => {
+      const c = parseInt(h, 16);
+      return c > 0 && c < 128 ? ctl(c) : m0;
+    })
+    .replace(/&#(\d{1,7});?/g, (m0, d) => {
+      const c = parseInt(d, 10);
+      return c > 0 && c < 128 ? ctl(c) : m0;
+    })
+    // Browser-recognized NAMED control references — &Tab;/&NewLine; decode
+    // in attribute values just like the numeric forms (there is no named CR).
+    .replace(/&Tab;/gi, CTRL_SENTINEL)
+    .replace(/&NewLine;/gi, CTRL_SENTINEL)
+    .replace(/&colon;/gi, ':')
+    .replace(/&sol;/gi, '/')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, '&');
+}
+
+// A link DESTINATION carrying embedded tab/CR/newline: browsers STRIP these
+// while parsing hrefs, so "java&#x09;script:" is a live javascript: link
+// whose scheme no regex sees contiguously. Entity-produced controls arrive
+// as CTRL_SENTINEL (see decodeEntitiesForScan); LITERAL controls typed in
+// the source only count where the tokenizer keeps them in the value —
+// inside QUOTED/template/markdown destinations. In an UNQUOTED value a
+// literal control is a terminator (plain formatting between props), so that
+// arm matches the sentinel alone: any entity-decoded control in or adjacent
+// to the value (including a LEADING one — href=&#9;javascript: keeps its
+// tab and URL parsing strips it) fails closed, while a real newline before
+// the next prop — even one whose value happens to contain a colon, like
+// aria-label="Pest: control" — never can.
+const DEST_CONTROL_RE = new RegExp([
+  /\]\(\s*<?[^)]*[\t\r\n\u0001][^)]*\)/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*"[^"]*[\t\r\n\u0001][^"]*"/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*'[^']*[\t\r\n\u0001][^']*'/.source,
+  /\b(?:href|src)\s*=\s*\{?\s*`[^`]*[\t\r\n\u0001][^`]*`/.source,
+  /\b(?:href|src)\s*=\s*[^\s>]*\u0001/.source,
+  // 'i': browsers treat attribute names case-insensitively, so HREF=/Src=
+  // must hit every arm above — the sibling scheme regexes already carry it.
+].join('|'), 'i');
+
+function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
+  const body = decodeEntitiesForScan(String(text || ''));
+  if (!body) return null;
+  if (DEST_CONTROL_RE.test(body)) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');
+  }
+  if (JSX_SPREAD_RE.test(body)) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a JSX spread attribute ("{...") — spread props deliver link destinations no href/src scanner can see and cannot be statically validated. Write explicit literal props.');
+  }
+  const exprPropRe = new RegExp(ATTR_EXPR_PROP_RE.source, ATTR_EXPR_PROP_RE.flags);
+  let ep;
+  while ((ep = exprPropRe.exec(body)) !== null) {
+    if (!PLAIN_STRING_LITERAL_RE.test(ep[1])) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a link/image prop with a dynamic (non-literal) JSX expression ("${ep[0].slice(0, 60)}") — a computed destination cannot be statically validated. Use a plain quoted string.`);
+    }
+  }
+  for (const src of [MD_DEST_SCHEME_RE, ATTR_SCHEME_RE, AUTOLINK_SCHEME_RE, REF_DEF_SCHEME_RE]) {
+    const destRe = new RegExp(src.source, src.flags);
+    let dm;
+    while ((dm = destRe.exec(body)) !== null) {
+      const scheme = dm[1].toLowerCase();
+      if (!ALLOWED_DEST_SCHEMES.has(scheme)) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a link destination with the "${scheme}:" scheme ("${dm[0].slice(0, 60)}") — only http(s) links to allowlisted hosts, @wavespestcontrol.com mailto links, Waves tel: links, or relative internal paths are permitted.`);
+      }
+      if ((scheme === 'http' || scheme === 'https') && dm[2] !== '//') {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a no-slash "${scheme}:" destination ("${dm[0].slice(0, 60)}") — browsers still navigate these externally but the host can't be allowlist-checked. Use a full ${scheme}:// URL or a relative internal path.`);
+      }
+    }
+  }
+  const telRe = new RegExp(TEL_RE.source, 'gi');
+  let t;
+  while ((t = telRe.exec(body)) !== null) {
+    // The dialer places the WHOLE digit string, so length is validated
+    // BEFORE the allowlist: isWavesPhone keys on the last 10 digits (right
+    // for finding a Waves number inside prose), but a padded
+    // tel:9999412975749 would dial a non-Waves number that merely ENDS in
+    // an owned line. Exactly 10 digits, or 11 with a leading 1, only.
+    const digits = String(t[1] || '').replace(/\D/g, '');
+    const dialableShape = digits.length === 10 || (digits.length === 11 && digits[0] === '1');
+    const { isWavesPhone } = require('./waves-phones');
+    if (!dialableShape || !isWavesPhone(digits)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a tel: link to "${t[1].trim() || '(empty)'}", which is not a Waves phone number — tap-to-call links may only dial the business's own lines.`);
+    }
+  }
+  const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
+  const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
+  let m;
+  while ((m = urlRe.exec(body)) !== null) {
+    // Trim trailing sentence punctuation: the bare-URL charset admits , ; .
+    // ! ? so prose like "see https://wavespestcontrol.com, then call" would
+    // otherwise parse hostname "wavespestcontrol.com," and P0 a legit link.
+    const rawUrl = m[0].replace(/[.,;:!?]+$/, '');
+    const scheme = m[1].toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a "${scheme}:" URL ("${rawUrl.slice(0, 60)}") — only http(s) links to allowlisted hosts (or relative internal paths) are permitted.`);
+    }
+    let host = null;
+    try { host = new URL(rawUrl).hostname; } catch { host = null; }
+    const norm = normalizeHost(host);
+    if (!hostAllowed(norm, allowed)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
+    }
+  }
+  const mailtoRe = new RegExp(MAILTO_RE.source, 'gi');
+  while ((m = mailtoRe.exec(body)) !== null) {
+    // The address portion before `?` never inherits trust from the query
+    // ("mailto:attacker@x?subject=info@wavespestcontrol.com" must fail an
+    // endsWith check), and every comma-separated recipient must be on the
+    // company domain. Percent-DECODE before splitting: the mail client
+    // decodes "attacker@gmail.com%2Cinfo@wavespestcontrol.com" into two
+    // recipients, so the guard must split on what the client sees; an
+    // undecodable address fails closed.
+    const [rawAddressPart, queryPart] = m[1].split('?');
+    let addressPart;
+    try { addressPart = decodeURIComponent(String(rawAddressPart || '')); } catch {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable address ("${String(rawAddressPart || '').slice(0, 60)}") — remove it.`);
+    }
+    // Decoded control characters (%0A/%0D) act as separators/header breaks
+    // in mail clients — an address that contains any is smuggling, and no
+    // legitimate recipient carries one. Fail closed before splitting.
+    if (/[\u0000-\u001F]/.test(addressPart)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a mailto link whose address decodes to control characters — remove it.');
+    }
+    // Split on semicolons as well as commas — common mail clients accept
+    // both as recipient separators, so "attacker@x;info@waves…" must not
+    // pass as one string that happens to END on the company domain.
+    const recipients = addressPart.split(/[,;]/).map((r) => r.trim().toLowerCase()).filter(Boolean);
+    if (recipients.length === 0 || recipients.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link to "${addressPart.slice(0, 80)}" — only @wavespestcontrol.com addresses are allowed.`);
+    }
+    // Query headers can ADD recipients (to/cc/bcc) — those are subject to
+    // the same allowlist; a malformed/undecodable value fails closed.
+    for (const kv of String(queryPart || '').split('&')) {
+      if (!kv) continue;
+      const eq = kv.indexOf('=');
+      // Decode the header NAME like the value below — mail clients decode
+      // "?b%63c=" to bcc, so a raw-key compare would skip the recipient
+      // check entirely. Undecodable fails closed.
+      let key = (eq === -1 ? kv : kv.slice(0, eq)).trim();
+      try { key = decodeURIComponent(key); } catch {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable query header ("${key.slice(0, 40)}") — remove it.`);
+      }
+      key = key.trim().toLowerCase();
+      let value = eq === -1 ? '' : kv.slice(eq + 1);
+      try { value = decodeURIComponent(value); } catch {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link with an undecodable "${key}" header — remove it.`);
+      }
+      // EVERY header value is decoded and control-checked BEFORE the
+      // recipient-key filter below: mail clients can treat decoded CR/LF
+      // as header separators, so ?subject=Hi%0Abcc:attacker@... smuggles a
+      // recipient through a "harmless" field the old order never decoded.
+      if (/[\u0000-\u001F]/.test(value)) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header decodes to control characters — remove it.`);
+      }
+      if (key !== 'to' && key !== 'cc' && key !== 'bcc') continue; // subject/body etc. add no recipients (control-clean ones are fine)
+      const extra = value.split(/[,;]/).map((r) => r.trim().toLowerCase()).filter(Boolean);
+      if (extra.length === 0 || extra.some((r) => !r.endsWith('@wavespestcontrol.com'))) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a mailto link whose "${key}" header adds a non-Waves recipient — only @wavespestcontrol.com addresses are allowed.`);
+      }
+    }
+  }
+  const proto = body.match(PROTOCOL_RELATIVE_RE);
+  if (proto) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a protocol-relative URL ("${proto[0].trim()}") — use a relative internal path or an allowlisted absolute URL.`);
   }
   return null;
 }
@@ -221,8 +591,13 @@ function keywordStuffingFinding(body, primaryKeyword) {
  * operatorFaqException: narrow opt-in skip of the FAQ-blocked-service P0 for
  *   operator-authored intercept briefs whose manifest mandates an FAQ (see
  *   the inline note at the call below). Default false — full enforcement.
+ * requiredSourceUrls: operator-brief must-link citation URLs — their hosts are
+ *   allowed for this draft (the brief BINDS the writer to link them in-body).
+ * operatorCitations: operator brief carries source_notes directives (writer
+ *   locates the sources itself) — additionally allow the curated citation +
+ *   competitor-source hosts. Both default off: mined drafts stay internal-only.
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -242,6 +617,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   const findings = [
     // Price must cover everything that ships: body AND meta.
     priceFinding(publishableText),
+    // Outbound links are scanned across body AND meta too — an injected spam
+    // URL hiding in a meta description ships exactly like one in the body.
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -270,5 +648,8 @@ module.exports = {
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES },
+  // single source of truth for the hardcoded-price policy — consumed by
+  // seo-completion-gate so the two price P0s can never drift again.
+  findHardcodedPrice,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS },
 };

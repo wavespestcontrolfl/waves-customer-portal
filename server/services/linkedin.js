@@ -32,7 +32,11 @@ const TOKEN_KEY = 'linkedin.oauth_tokens';
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2/authorization';
 const TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
 const POSTS_URL = 'https://api.linkedin.com/rest/posts';
+const IMAGES_URL = 'https://api.linkedin.com/rest/images';
 const ORG_ACLS_URL = 'https://api.linkedin.com/rest/organizationAcls';
+// Article thumbnails are our own CDN-rehosted heroes (~100-300 KB); anything
+// bigger is a misconfiguration, not a legitimate thumbnail.
+const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024;
 
 // LinkedIn-API specifics — confirmed against Microsoft Learn Posts API docs
 // (defaultMoniker li-lms-2026-06) on 2026-06. LinkedIn sunsets monthly versions,
@@ -332,11 +336,169 @@ class LinkedInService {
     return { adminedOrganizations: orgs, raw: data.elements || [] };
   }
 
+  // The thumbnail fetch is a server-side request driven by caller-supplied
+  // data (admin publish routes accept imageUrl in the request body), so only
+  // fetch HTTPS URLs from hosts we control — otherwise a portal user could
+  // point the fetch at localhost/private-network/metadata endpoints (SSRF)
+  // and have the response uploaded to LinkedIn.
+  _isTrustedImageUrl(imageUrl) {
+    try {
+      const u = new URL(String(imageUrl));
+      if (u.protocol !== 'https:') return false;
+      const host = u.hostname.toLowerCase();
+      const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '').toLowerCase();
+      return (!!cdn && host === cdn)
+        || host === 'wavespestcontrol.com'
+        || host.endsWith('.wavespestcontrol.com');
+    } catch {
+      return false;
+    }
+  }
+
+  // The formats LinkedIn's Images API ingests, sniffed by magic bytes.
+  _isLinkedinAcceptedImage(bytes) {
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true; // JPEG
+    if (bytes.length >= 8 && bytes[0] === 0x89 && bytes.toString('ascii', 1, 4) === 'PNG') return true; // PNG
+    if (bytes.length >= 4 && bytes.toString('ascii', 0, 4) === 'GIF8') return true; // GIF
+    return false;
+  }
+
+  // ── Images API: rehost a public image as a LinkedIn image URN ─────────────
+  // initializeUpload → PUT the binary → poll until AVAILABLE → urn:li:image:….
+  // LinkedIn does NOT scrape article URLs, so without this the article card
+  // renders with no picture at all. Throws on any failure — the createPost
+  // call site treats the thumbnail as best-effort and never lets it block the
+  // post.
+  async _uploadImageFromUrl(imageUrl, token) {
+    if (!this._isTrustedImageUrl(imageUrl)) {
+      throw new Error(`untrusted thumbnail URL host: ${String(imageUrl).slice(0, 120)}`);
+    }
+    const owner = `urn:li:organization:${this.companyId}`;
+    const initRes = await fetch(`${IMAGES_URL}?action=initializeUpload`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'LinkedIn-Version': API_VERSION,
+        'X-Restli-Protocol-Version': '2.0.0',
+      },
+      body: JSON.stringify({ initializeUploadRequest: { owner } }),
+    });
+    if (!initRes.ok) {
+      throw new Error(`LinkedIn images initializeUpload ${initRes.status}: ${(await initRes.text()).slice(0, 300)}`);
+    }
+    const { value } = await initRes.json();
+    if (!value?.uploadUrl || !value?.image) {
+      throw new Error('LinkedIn initializeUpload returned no uploadUrl/image URN');
+    }
+
+    // Fetch the hosted image (our CDN-rehosted JPEG hero) with a bounded wait
+    // that stays armed THROUGH the body read — a slow drip-fed body would
+    // otherwise buffer forever after the header timer cleared. redirect:
+    // 'error' closes the redirect hole in the host allowlist (a trusted host
+    // 302-ing to a private/metadata address would otherwise be followed);
+    // our CDN and hub serve images directly. Size-capped both by declared
+    // Content-Length and by the actual bytes read.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let bytes;
+    try {
+      const imgRes = await fetch(imageUrl, { signal: controller.signal, redirect: 'error' });
+      if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status} for ${imageUrl}`);
+      const declared = Number(imgRes.headers?.get?.('content-length') || 0);
+      if (declared > MAX_THUMBNAIL_BYTES) {
+        throw new Error(`thumbnail too large (${declared} bytes declared) for ${imageUrl}`);
+      }
+      // Enforce the byte cap DURING the read — a body that omits or
+      // underreports Content-Length must not buffer past the cap before the
+      // check fires. Abort the connection the moment the cap is crossed.
+      if (imgRes.body?.getReader) {
+        const reader = imgRes.body.getReader();
+        const chunks = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.length;
+          if (total > MAX_THUMBNAIL_BYTES) {
+            controller.abort();
+            throw new Error(`thumbnail exceeds ${MAX_THUMBNAIL_BYTES} bytes mid-read for ${imageUrl}`);
+          }
+          chunks.push(Buffer.from(value));
+        }
+        bytes = Buffer.concat(chunks);
+      } else {
+        // No readable stream (empty bodies / non-stream responses): buffered
+        // read, still capped below.
+        bytes = Buffer.from(await imgRes.arrayBuffer());
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!bytes.length) throw new Error(`thumbnail image fetch returned empty body for ${imageUrl}`);
+    if (bytes.length > MAX_THUMBNAIL_BYTES) {
+      throw new Error(`thumbnail too large (${bytes.length} bytes) for ${imageUrl}`);
+    }
+
+    // LinkedIn's Images API accepts JPG/PNG/GIF only, but the admin BlogPage
+    // share passes the published hero URL straight through — and those heroes
+    // are .webp (publicBlogImageUrl) — so PUTting the fetched bytes unchanged
+    // gets rejected and the post silently ships without its thumbnail. Sniff
+    // the real format from the magic bytes (never the URL extension) and
+    // convert anything unaccepted to JPEG, matching the uploadImageToS3
+    // rehost the autonomous blog lane already goes through. A conversion
+    // failure throws — createPost then posts without the thumbnail.
+    if (!this._isLinkedinAcceptedImage(bytes)) {
+      const sharp = require('sharp');
+      bytes = await sharp(bytes).jpeg({ quality: 85 }).toBuffer();
+    }
+
+    const putRes = await fetch(value.uploadUrl, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      body: bytes,
+    });
+    if (!putRes.ok) {
+      throw new Error(`LinkedIn image upload ${putRes.status}: ${(await putRes.text()).slice(0, 300)}`);
+    }
+
+    // Ingestion is asynchronous: a post created while the image is still
+    // PROCESSING can fail or publish without the thumbnail. Poll (bounded)
+    // until AVAILABLE; on FAILED or budget exhaustion, throw — the caller
+    // then posts without a thumbnail rather than risking the whole share.
+    await this._waitForImageAvailable(value.image, token);
+    return value.image;
+  }
+
+  async _waitForImageAvailable(imageUrn, token, { attempts = 6, delayMs = 2500 } = {}) {
+    let lastStatus = null;
+    for (let i = 0; i < attempts; i++) {
+      const res = await fetch(`${IMAGES_URL}/${encodeURIComponent(imageUrn)}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'LinkedIn-Version': API_VERSION,
+          'X-Restli-Protocol-Version': '2.0.0',
+        },
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        lastStatus = data?.status || null;
+        if (lastStatus === 'AVAILABLE') return;
+        if (lastStatus && /FAILED/i.test(lastStatus)) {
+          throw new Error(`LinkedIn image processing failed: ${lastStatus}`);
+        }
+      }
+      // Non-200 status reads are transient-retryable within the same budget.
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    throw new Error(`LinkedIn image not AVAILABLE after ${attempts} checks (last: ${lastStatus || 'unknown'})`);
+  }
+
   // ── Publish a post to the company page (Posts API) ────────────────────────
-  // Image/thumbnail upload is deferred (needs the Images API → image URN); text +
-  // optional article link only. LinkedIn does NOT scrape article URLs, so we must
-  // set title/description on the article ourselves (per the Posts API docs).
-  async createPost({ text, link, title, description } = {}) {
+  // LinkedIn does NOT scrape article URLs, so we must set title/description on
+  // the article ourselves (per the Posts API docs) — and upload the image as
+  // the article thumbnail via the Images API, or the share has no picture.
+  async createPost({ text, link, title, description, imageUrl } = {}) {
     if (!this.companyId) throw new Error('LINKEDIN_COMPANY_ID not configured');
     const commentary = String(text || '').trim();
     if (!commentary) throw new Error('LinkedIn post requires text');
@@ -354,6 +516,15 @@ class LinkedInService {
       const article = { source: link, title: String(title || '').slice(0, 200) || link };
       const desc = String(description || '').trim();
       if (desc) article.description = desc.slice(0, 300);
+      // Best-effort thumbnail: a failed upload logs and posts without a
+      // picture rather than dropping the share entirely.
+      if (imageUrl) {
+        try {
+          article.thumbnail = await this._uploadImageFromUrl(imageUrl, token);
+        } catch (err) {
+          logger.warn(`[linkedin] article thumbnail upload failed (posting without image): ${err.message}`);
+        }
+      }
       body.content = { article };
     }
 

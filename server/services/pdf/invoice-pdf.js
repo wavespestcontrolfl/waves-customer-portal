@@ -15,7 +15,9 @@ const RED = '#C8102E';        // overdue / alert
 const GREEN = '#047857';      // paid badge
 const INK = NAVY;
 const BODY = '#3F4A65';
-const MUTED = '#6B7280';
+// Mirrors client/src/theme-customer.js CUSTOMER_SURFACE.muted (server code
+// can't import the client ES module) — was drifted gray-500 #6B7280.
+const MUTED = '#475569';
 const RULE = '#E7E2D7';
 const SOFT = '#FAF8F3';
 

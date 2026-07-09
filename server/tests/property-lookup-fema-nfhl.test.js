@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   attachFloodZoneToCachedLookup: jest.fn(async () => {}),
+  attachAddressAuditToCachedLookup: jest.fn(async () => {}),
   applyVerifiedOverrides: jest.fn((record) => record),
   getCachedLookup: jest.fn(async () => null),
   getVerifiedOverrides: jest.fn(async () => null),
@@ -30,6 +31,7 @@ const {
 } = require('../routes/property-lookup-v2');
 const {
   attachFloodZoneToCachedLookup,
+  attachAddressAuditToCachedLookup,
   getCachedLookup,
 } = require('../services/property-lookup/lookup-cache');
 
@@ -193,6 +195,10 @@ describe('cache-hit backfill (#1698 review P2)', () => {
   const cachedRow = (recordOverrides = {}) => ({
     property_record: {
       formattedAddress: '123 Test St, Bradenton, FL',
+      // Pin the audit key so the house-number-audit backfill (its own suite:
+      // property-lookup-address-audit.test.js) never fires inside these
+      // FEMA-focused fixtures.
+      _addressAudit: null,
       squareFootage: 1800,
       lotSize: 9000,
       stories: 1,
@@ -219,6 +225,33 @@ describe('cache-hit backfill (#1698 review P2)', () => {
       '123 Test St, Bradenton, FL',
       { floodZone: 'AE', floodZoneSubtype: null, sfha: true },
     );
+  });
+
+  test('a cached SNAPPED county record gets the audit despite county evidence', async () => {
+    // Typed 4867 but the cached county-backed record describes 4857 — the
+    // backfill must run, flag the mismatch, and persist the marker.
+    const row = cachedRow({
+      _floodZone: { floodZone: 'X', floodZoneSubtype: null, sfha: false },
+      _source: 'county',
+      addressLine1: '4857 TOBERMORY WAY',
+    });
+    delete row.property_record._addressAudit;
+    getCachedLookup.mockResolvedValue(row);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '4857 TOBERMORY WAY' } }] }),
+    });
+
+    const result = await performPropertyLookup('4867 Tobermory Way, Bradenton, FL 34211');
+
+    const audit = result.propertyRecord._addressAudit;
+    expect(audit.snappedRecord).toEqual({ typed: 4867, record: 4857 });
+    expect(attachAddressAuditToCachedLookup).toHaveBeenCalledWith(
+      '4867 Tobermory Way, Bradenton, FL 34211',
+      expect.objectContaining({ snappedRecord: { typed: 4867, record: 4857 } }),
+    );
+    const flag = result.enriched.fieldVerifyFlags.find((f) => f.field === 'address');
+    expect(flag.reason).toContain('snapped');
   });
 
   test('row that already carries _floodZone is served as-is — no FEMA query', async () => {

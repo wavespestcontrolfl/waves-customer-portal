@@ -75,11 +75,15 @@ describe('remove new lead SMS template migration', () => {
   test('keeps retired SMS row out of the runtime default seed list', () => {
     const retiredKey = ['auto', 'new', 'lead'].join('_');
     const defaultKeys = cleanTemplateSeed.TEMPLATES.map((template) => template.template_key);
-    const billingReminder = cleanTemplateSeed.TEMPLATES.find((template) => (
-      template.template_key === 'billing_reminder'
-    ));
 
     expect(defaultKeys).not.toContain(retiredKey);
-    expect(billingReminder.name).toBe('Billing Reminder (WaveGuard Monthly)');
+    // billing_reminder (the row this migration renamed) survives as an
+    // isTemplateActive KILL SWITCH for manual Comms/IB billing texts
+    // (20260706000010_sms_template_cleanup.js) — a missing row reads as
+    // ACTIVE. It must be seeded DISABLED so fresh environments match prod's
+    // safe posture.
+    const billingSeed = cleanTemplateSeed.TEMPLATES.find((t) => t.template_key === 'billing_reminder');
+    expect(billingSeed).toBeTruthy();
+    expect(billingSeed.is_active).toBe(false);
   });
 });

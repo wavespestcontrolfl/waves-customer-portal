@@ -155,12 +155,7 @@ function summarizeEstimateSend(data) {
   return parts.join(" / ");
 }
 
-function isQuietHoursEstimateSend(data) {
-  const message = String(data?.channels?.sms?.error || data?.error || "");
-  return /quiet-hours|quiet hours|federal holidays/i.test(message);
-}
-
-async function sendEstimateFromPipeline(id, sendMethod = "both", options = {}) {
+async function sendEstimateFromPipeline(id, sendMethod = "both") {
   const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
     method: "POST",
     headers: {
@@ -169,7 +164,6 @@ async function sendEstimateFromPipeline(id, sendMethod = "both", options = {}) {
     },
     body: JSON.stringify({
       sendMethod,
-      quietHoursOverride: options.quietHoursOverride === true,
       idempotencyKey:
         globalThis.crypto?.randomUUID?.() ||
         `estimate-send-${Date.now()}-${Math.random()}`,
@@ -177,12 +171,6 @@ async function sendEstimateFromPipeline(id, sendMethod = "both", options = {}) {
   });
   const data = await r.json().catch(() => ({}));
   const summary = summarizeEstimateSend(data);
-  if (!options.quietHoursOverride && isQuietHoursEstimateSend(data)) {
-    const retry = window.confirm(`${summary}\n\nSend the SMS now anyway?`);
-    if (retry) {
-      return sendEstimateFromPipeline(id, "sms", { quietHoursOverride: true });
-    }
-  }
   if (!r.ok) throw new Error(summary || `HTTP ${r.status}`);
   if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
   return data;
@@ -796,6 +784,11 @@ function estimateAmountDisplay(estimate) {
 }
 
 function canSendEstimate(estimate) {
+  // Rows without a share token (quote-wizard mirrors, legacy imports) have no
+  // customer link to send — the SMS/email would carry a literal /estimate/null.
+  // The server now refuses these too (assertEstimateSendable); hiding the
+  // affordance keeps the operator from hitting that error blind.
+  if (!String(estimate?.token || "").trim()) return false;
   return estimateAmountDisplay(estimate).value > 0;
 }
 
@@ -1417,7 +1410,14 @@ function fmtDate(d) {
 
 function estimatePreviewHref(estimate) {
   if (!estimate?.token) return null;
-  return `/estimate/${encodeURIComponent(estimate.token)}`;
+  const base = `/estimate/${encodeURIComponent(estimate.token)}`;
+  // Unpublished rows render the legacy SSR page on the bare URL. The param
+  // routes staff to the REAL React customer page instead — the /data endpoint
+  // verifies the staff JWT before serving a draft, so the link stays inert
+  // for anyone else.
+  return ["draft", "scheduled"].includes(String(estimate?.status))
+    ? `${base}?adminPreview=1`
+    : base;
 }
 
 // Formats an appointment row from /admin/estimates as a short label like
@@ -2553,15 +2553,19 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               onClick: () => markEstimateAnnualPrepayAccepted(e),
                             },
                             (e.status === "sent" ||
-                              e.status === "viewed") && {
-                              key: "copy-link",
-                              label: "Copy estimate link",
-                              icon: <LinkIcon size={16} strokeWidth={1.75} />,
-                              onClick: () => {
-                                const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                                navigator.clipboard?.writeText(link);
+                              e.status === "viewed") &&
+                              // Rows without a share token have no customer
+                              // link — /estimate/<id> 404s for customers, so
+                              // never offer that as a copyable fallback.
+                              Boolean(e.token) && {
+                                key: "copy-link",
+                                label: "Copy estimate link",
+                                icon: <LinkIcon size={16} strokeWidth={1.75} />,
+                                onClick: () => {
+                                  const link = `${window.location.origin}/estimate/${e.token}`;
+                                  navigator.clipboard?.writeText(link);
+                                },
                               },
-                            },
                             estimateHasLawnLine(e) && {
                               key: "lawn-outline",
                               label: "Lawn service outline",
@@ -3257,12 +3261,14 @@ function MobileEstimateRow({
             icon: <DollarSign size={16} strokeWidth={1.75} />,
             onClick: () => onMarkAnnualPrepayAccepted?.(estimate),
           },
-          (estimate.status === "sent" || estimate.status === "viewed") && {
-            key: "copy-link",
-            label: "Copy estimate link",
-            icon: <LinkIcon size={16} strokeWidth={1.75} />,
-            onClick: () => onCopyLink?.(estimate),
-          },
+          (estimate.status === "sent" || estimate.status === "viewed") &&
+            // Same token gate as the desktop menu — no token, no customer link.
+            Boolean(estimate.token) && {
+              key: "copy-link",
+              label: "Copy estimate link",
+              icon: <LinkIcon size={16} strokeWidth={1.75} />,
+              onClick: () => onCopyLink?.(estimate),
+            },
           estimateHasLawnLine(estimate) && {
             key: "lawn-outline",
             label: "Lawn service outline",
@@ -3522,7 +3528,10 @@ function EstimatesMobileListView({
   );
 
   const copyEstimateLinkMobile = useCallback((e) => {
-    const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+    // The menu item is token-gated, but keep the guard here too — an id-based
+    // /estimate/<id> URL 404s for customers and must never reach a clipboard.
+    if (!e.token) return;
+    const link = `${window.location.origin}/estimate/${e.token}`;
     navigator.clipboard?.writeText(link);
   }, []);
 

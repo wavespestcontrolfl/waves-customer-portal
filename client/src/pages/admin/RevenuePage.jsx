@@ -69,6 +69,28 @@ const D = {
 };
 const MONO = "'JetBrains Mono', monospace";
 
+// Table cell styles live at module scope because the module-scope
+// AdAttributionSection component references them too — when they were declared
+// inside RevenuePage's body, the first row of ad-attribution data threw
+// "thStyle is not defined" and took down the entire Revenue dashboard.
+const thStyle = {
+  padding: "10px 14px",
+  textAlign: "left",
+  fontSize: 12,
+  fontWeight: 600,
+  color: D.muted,
+  borderBottom: `1px solid ${D.border}`,
+  textTransform: "uppercase",
+  letterSpacing: "0.5px",
+};
+const tdStyle = {
+  padding: "10px 14px",
+  fontSize: 14,
+  color: D.text,
+  borderBottom: `1px solid ${D.border}`,
+  fontFamily: MONO,
+};
+
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -417,23 +439,6 @@ export default function RevenuePage() {
     }),
   }));
 
-  const thStyle = {
-    padding: "10px 14px",
-    textAlign: "left",
-    fontSize: 12,
-    fontWeight: 600,
-    color: D.muted,
-    borderBottom: `1px solid ${D.border}`,
-    textTransform: "uppercase",
-    letterSpacing: "0.5px",
-  };
-  const tdStyle = {
-    padding: "10px 14px",
-    fontSize: 14,
-    color: D.text,
-    borderBottom: `1px solid ${D.border}`,
-    fontFamily: MONO,
-  };
   const tdTextStyle = { ...tdStyle, fontFamily: "inherit" };
 
   return (

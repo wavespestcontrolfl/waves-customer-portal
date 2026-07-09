@@ -21,6 +21,19 @@ class RenewalReminder {
       logger.error(`Annual prepay renewal reminder failed: ${err.message}`);
     }
 
+    // Pre-visit payment reminders for UNPAID accept-time prepay terms
+    // (3d / 1d before term_start). Independent of the renewal notices —
+    // a failure in one must not silence the other.
+    try {
+      const prepay = annualPrepay || require('../annual-prepay-renewals');
+      if (prepay.checkAndSendPaymentReminders) {
+        const result = await prepay.checkAndSendPaymentReminders();
+        annualPrepaySent += Number(result?.sent || 0);
+      }
+    } catch (err) {
+      logger.error(`Annual prepay payment reminder failed: ${err.message}`);
+    }
+
     const renewalFields = [
       { column: 'termite_renewal_date', label: 'Termite Bond Renewal' },
       { column: 'mosquito_season_start', label: 'Mosquito Season' },

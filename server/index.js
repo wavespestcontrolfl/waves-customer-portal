@@ -18,8 +18,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const jwt = require('jsonwebtoken');
-const { isIP } = require('node:net');
 const path = require('path');
 
 const config = require('./config');
@@ -144,12 +142,19 @@ const cspDirectives = {
   // PostHog (*.posthog.com) is loaded only on the public funnel pages
   // (/book, /estimate, /pay) and only after consent — see the client's
   // PublicFunnelTracking. Listing the host here is harmless when no key is set.
-  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com"],
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com"],
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
-  frameSrc: ["'self'", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com"],
+  // GrowthBook feature-definition host for the client SDK (harmless while
+  // VITE_GROWTHBOOK_CLIENT_KEY is unset). Follows GROWTHBOOK_API_HOST so a
+  // self-hosted/proxy deployment stays CSP-allowed — keep it in lockstep with
+  // the VITE_GROWTHBOOK_API_HOST baked into the client build.
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", (process.env.GROWTHBOOK_API_HOST || 'https://cdn.growthbook.io').replace(/\/+$/, '')],
+  // blob: — the customer portal's in-app document viewer renders Bearer-only
+  // report PDFs through an iframe on a blob URL (Capacitor shell has no
+  // download pipeline); blob frames are same-origin script-created only.
+  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
   mediaSrc: ["'self'", "https:"],
   // PostHog session replay records via a web worker created from a blob URL.
   workerSrc: ["'self'", "blob:"],
@@ -195,43 +200,9 @@ app.use(cors({
   credentials: true,
 }));
 
-// Rate limiting
-// Key authenticated requests by JWT subject so each admin/tech/customer gets
-// their own bucket. Falls back to a /64-collapsed client IP for
-// unauthenticated traffic — keying by raw req.ip would let an IPv6 client
-// rotate addresses within their subnet to evade the limit. Without per-user
-// keying, a single busy admin session (dispatch page + grid + per-action
-// refreshes) can exhaust the per-IP allowance and lock everyone behind the
-// same NAT out of the API.
-function ipFallbackKey(ip) {
-  if (!ip) return ip;
-  const v = ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
-  if (isIP(v) !== 6) return v;
-  // Canonicalize before slicing the /64 — equivalent textual forms
-  // (uppercase, leading zeros, "::" placement) must yield the same bucket
-  // key, otherwise a single client could rotate notation to evade the limit.
-  const lower = v.toLowerCase();
-  const [head, tail] = lower.split('::');
-  const headParts = head ? head.split(':') : [];
-  const tailParts = tail !== undefined ? (tail ? tail.split(':') : []) : [];
-  const missing = lower.includes('::') ? Math.max(0, 8 - headParts.length - tailParts.length) : 0;
-  const fillers = Array(missing).fill('0');
-  const groups = lower.includes('::') ? [...headParts, ...fillers, ...tailParts] : lower.split(':');
-  const prefix = groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':');
-  return `${prefix}::/64`;
-}
-
-function rateLimitKey(req) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
-    try {
-      const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
-      if (decoded.technicianId) return `tech:${decoded.technicianId}`;
-      if (decoded.customerId) return `cust:${decoded.customerId}`;
-    } catch (_err) { /* fall through to IP */ }
-  }
-  return ipFallbackKey(req.ip);
-}
+// Rate limiting — key generator shared with route-level limiters (JWT subject
+// when authenticated, /64-collapsed IP otherwise; full rationale in the module).
+const { rateLimitKey } = require('./middleware/rate-limit-key');
 
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -248,6 +219,28 @@ const limiter = rateLimit({
 app.use('/api/pay/statement', (req, res, next) => {
   // eslint-disable-next-line global-require
   if (!require('./config/feature-gates').isEnabled('payerStatements')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+// Dark photo-assessment funnels carry the same unobservable-when-dark
+// contract: while the gate is off the surface must read 404 even for an IP
+// that already exhausted the global /api/ limiter (a 429 would reveal it).
+app.use('/api/public/lawn-assessment', (req, res, next) => {
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+app.use('/api/public/pest-identifier', (req, res, next) => {
+  // Tokenized report READS stay available while the funnel is dark — sent
+  // reports are owner-initiated communications (admin manual send), and an
+  // invalid token 404s exactly like the dark surface (see the matching
+  // carve-out in routes/public-pest-identifier.js).
+  if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();
@@ -283,6 +276,51 @@ const paidEstimatorDailyLimiter = rateLimit({
   message: { error: 'Daily limit reached, please try again tomorrow.' },
   keyGenerator: rateLimitKey,
   skip: () => process.env.NODE_ENV !== 'production',
+});
+// Ask Waves chat: every accepted /message turn is a paid LLM call (OpenAI,
+// then Anthropic fallback), so the 30/15min in-route limiter gets a daily
+// ceiling on top — same spend rationale as paidEstimatorDailyLimiter, higher
+// cap because a real quote conversation is many turns while an estimator
+// session is one lookup. Counts ONLY requests that can actually reach the
+// model: a plausible POST /message body with the gate on. GET /status
+// (page-view gate check), non-POST scanner probes, dark-launch probes while
+// GATE_ASK_WAVES is off, and empty/oversized bodies (the route 400s them
+// before any model call — shared isPlausibleMessageBody check) all resolve
+// without an LLM call, so none of them may burn the paid budget for a
+// shared/NAT'd IP and 429 later real turns.
+const askWavesDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 120,
+  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
+  keyGenerator: rateLimitKey,
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || req.method !== 'POST'
+    || !/^\/message\/?$/.test(req.path)
+    || !require('./config/feature-gates').isEnabled('askWaves')
+    || !require('./routes/public-ai-intake').isPlausibleMessageBody(req.body),
+});
+// Photo-assessment lead magnets (lawn-assessment + pest-identifier): each
+// accepted /analyze is a paid dual-model vision call, so both funnels share one
+// daily ceiling on top of their 5/hr in-route limiters — same spend rationale
+// as paidEstimatorDailyLimiter. Counts ONLY POSTs to /analyze with the owning
+// feature gate on; claim submits, tokenized report reads, and dark-launch
+// probes while the gate is off resolve without a model call and never burn the
+// paid budget for a shared/NAT'd IP.
+const photoAssessmentDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 40,
+  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
+  keyGenerator: rateLimitKey,
+  skip: (req) => process.env.NODE_ENV !== 'production'
+    || req.method !== 'POST'
+    || !/^\/analyze\/?$/.test(req.path)
+    || !require('./config/feature-gates').isEnabled(
+      String(req.baseUrl || '').includes('pest-identifier') ? 'pestIdentifier' : 'lawnAssessmentMagnet',
+    )
+    // Only requests that could reach a paid vision call burn the budget —
+    // malformed/empty floods and honeypot trips are rejected without a model
+    // call and must not 429 real prospects behind a shared IP.
+    || !require('./routes/public-lawn-assessment').isPlausibleAnalyzeBody(req.body),
 });
 
 // Body parsing
@@ -332,6 +370,9 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Universal-link association files (apple-app-site-association / assetlinks.json).
+// Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
+app.use('/.well-known', require('./routes/well-known'));
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
@@ -348,6 +389,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/dashboard', adminDashboardRoutes);
+app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/turf-height', require('./routes/admin-turf-height'));
@@ -387,16 +429,24 @@ app.use('/api/admin/email-templates', require('./routes/admin-email-templates'))
 app.use('/api/admin/notification-events', require('./routes/admin-notification-events'));
 app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
+app.use('/api/public/ui-flags', require('./routes/public-ui-flags'));
 app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
+// Client-side GrowthBook exposure intake (experimentation Phase 2) — gated by
+// GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
+app.use('/api/public/experiments', require('./routes/experiments-public'));
+app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
+app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
+app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
+app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // Twilio webhook signature validation. Runs before BOTH Twilio routers
@@ -480,6 +530,8 @@ app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
+// Photo-assessment lead magnets (lawn + pest) — admin list/detail/send surface.
+app.use('/api/admin/photo-assessments', require('./routes/admin-photo-assessments'));
 app.use('/api/admin/knowledge-bridge', require('./routes/admin-knowledge-bridge'));
 app.use('/api/admin/assessment-analytics', require('./routes/admin-assessment-analytics'));
 app.use('/api/admin/treatment-plans', require('./routes/admin-treatment-plans'));
@@ -848,6 +900,22 @@ httpServer.listen(PORT, () => {
             });
           } catch (err) {
             logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+
+        // Daily lifecycle email sweeps (termite bond renewals) — 10:05 AM
+        // ET so renewal notices land during the day. Self-healing: each
+        // run syncs termite_bonds rows from newly completed bond visits
+        // before checking the 30-day pre-renewal window.
+        cron.schedule('5 10 * * *', async () => {
+          try {
+            await runExclusive('lifecycle-email-sweeps-daily', async () => {
+              const sweeps = require('./services/lifecycle-email-sweeps');
+              const results = await sweeps.runDailySweeps();
+              logger.info(`[cron] Lifecycle email sweeps complete: ${JSON.stringify(results)}`);
+            });
+          } catch (err) {
+            logger.error(`[cron] Lifecycle email sweeps failed: ${err.message}`);
           }
         }, { timezone: 'America/New_York' });
       }

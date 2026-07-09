@@ -1,12 +1,15 @@
 /**
  * Required estimate-acceptance deposits.
  *
- * Policy (owner decision 2026-06-12, revised same day to FLAT amounts):
- * every estimate acceptance requires a deposit — recurring, one-time, with
- * or without a booked slot — EXCEPT:
- *   - prepay-annual acceptances (paying in full at accept), and
+ * Policy (owner decision 2026-06-12, revised same day to FLAT amounts;
+ * prepay-annual exemption removed 2026-07-05 by owner decision):
+ * every estimate acceptance requires a deposit — recurring, one-time,
+ * prepay-annual, with or without a booked slot — EXCEPT:
  *   - existing plan customers (WaveGuard Bronze and up), who skip the
- *     deposit but MUST book an appointment to accept.
+ *     deposit but MUST book an appointment to accept, and
+ *   - estimates whose prepay-annual term is ALREADY committed (post-accept
+ *     summaries only — choosing prepay at accept no longer exempts; the $49
+ *     credits against the annual invoice minted in the same transaction).
  * The deposit is a flat per-service-class amount — $49 for recurring plans,
  * $99 for one-time / intensive jobs (pricing_config-authoritative via
  * constants.DEPOSIT) — NEVER a percentage: the deposit's job is commitment,
@@ -55,26 +58,31 @@ function computeDepositAmount({ oneTime = false } = {}) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : (oneTime ? 99 : 49);
 }
 
-// Resolve what acceptance requires for this estimate + chosen payment
-// preference. membership comes from buildEstimateMembershipContext —
-// isExistingCustomer means the customer already has qualifying recurring
-// plan services (WaveGuard Bronze+). oneTime selects the service class for
-// the AMOUNT — one-time accepts are NOT exempt: a one-time pay-at-visit
-// deposit credits against the completed-visit invoice via the
-// createFromService roll-forward. oneTimeUninvoiced (one-time accept on a
-// non-invoice-mode estimate) additionally REQUIRES a booking: no invoice is
-// created at accept, so the credit's only path back to the customer is the
-// roll-forward, which traces scheduled_services.source_estimate_id — an
-// unbooked accept would orphan the paid deposit (accepted estimates are
-// deliberately outside the terminal sweep). noVisit marks the payment-only
-// accept (guarantee-only renewal): there is NO appointment to book, so the
-// plan-customer booking commitment gate cannot apply — the invoice minted at
-// accept is the commitment.
-function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, oneTime = false, oneTimeUninvoiced = false, noVisit = false }) {
+// Resolve what acceptance requires for this estimate. membership comes from
+// buildEstimateMembershipContext — isExistingCustomer means the customer
+// already has qualifying recurring plan services (WaveGuard Bronze+). oneTime
+// selects the service class for the AMOUNT — one-time accepts are NOT exempt:
+// a one-time pay-at-visit deposit credits against the completed-visit invoice
+// via the createFromService roll-forward. Choosing prepay-annual is NOT
+// exempt either (owner decision 2026-07-05): it was the only zero-money
+// accept path for a new customer, so the $49 recurring deposit applies and
+// credits against the annual invoice minted in the same accept transaction.
+// committedPrepayTerm IS exempt: it marks a post-accept summary for an
+// estimate whose prepay term already exists (legacy accepts predate the
+// deposit; the year is the commitment), never an accept-time choice.
+// oneTimeUninvoiced (one-time accept on a non-invoice-mode estimate)
+// additionally REQUIRES a booking: no invoice is created at accept, so the
+// credit's only path back to the customer is the roll-forward, which traces
+// scheduled_services.source_estimate_id — an unbooked accept would orphan
+// the paid deposit (accepted estimates are deliberately outside the terminal
+// sweep). noVisit marks the payment-only accept (guarantee-only renewal):
+// there is NO appointment to book, so the plan-customer booking commitment
+// gate cannot apply — the invoice minted at accept is the commitment.
+function resolveDepositPolicy({ estimate, committedPrepayTerm = false, membership, oneTime = false, oneTimeUninvoiced = false, noVisit = false }) {
   if (!isDepositEnforced()) {
     return { enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' };
   }
-  if (paymentMethodPreference === 'prepay_annual') {
+  if (committedPrepayTerm) {
     return { enforced: true, required: false, slotRequired: false, exemptReason: 'prepay_annual' };
   }
   if (membership?.isExistingCustomer) {
@@ -135,7 +143,7 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
 // CURRENT qualifying recurring services. A failed live check falls back to
 // requiring the deposit — wrongly charged money still credits forward,
 // while a wrongly granted exemption silently loses the commitment gate.
-async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
+async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm = false, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
   if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
     try {
@@ -148,7 +156,7 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
       logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
     }
   }
-  const policy = resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced, noVisit });
+  const policy = resolveDepositPolicy({ estimate, committedPrepayTerm, membership: member, oneTime, oneTimeUninvoiced, noVisit });
   // Third-party Bill-To: a payer-billed customer's invoices route to the payer's
   // AP inbox, and payer invoices reject homeowner deposit credit (invoice.create
   // skips depositCredit when a payer resolves) — so an acceptance deposit
@@ -229,22 +237,24 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   summary.oneTime = oneTime;
   summary.policyAmount = computeDepositAmount({ oneTime });
 
-  // Recover the customer's accept-time payment choice from the scoped/linked
-  // scheduled service (the accept flow persists payment_method_preference on
-  // commit) so the resolver can honor the prepay_annual exemption — otherwise
-  // the summary shows "Deposit due" once enforcement is live for a visit an
-  // annual prepay already covers. Pre-accept callers (recordable/nudge) keep
-  // passing null because no committed service exists yet, so this load lives
-  // here on the post-accept scheduling summary rather than inside the resolver.
-  // Fail-soft: a read miss leaves the preference null (the safe direction — a
-  // wrongly-charged deposit still credits forward).
+  // Recover the customer's COMMITTED accept-time prepay choice from the
+  // scoped/linked scheduled service (the accept flow persists
+  // payment_method_preference on commit) so the resolver can honor the
+  // committed-term exemption — otherwise the summary shows "Deposit due" for a
+  // visit an annual prepay already covers (legacy accepts predate the deposit;
+  // new prepay accepts had theirs credited at accept). Pre-accept callers
+  // (recordable/nudge) keep passing nothing because no committed service exists
+  // yet — choosing prepay no longer exempts, only a committed term does — so
+  // this load lives here on the post-accept scheduling summary rather than
+  // inside the resolver. Fail-soft: a read miss leaves the flag false (the safe
+  // direction — a wrongly-charged deposit still credits forward).
   let linkedSsId = null;
-  let paymentMethodPreference = null;
+  let committedPrepayTerm = false;
   try {
     linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
     if (linkedSsId) {
       const ss = await db('scheduled_services').where({ id: linkedSsId }).first('payment_method_preference');
-      paymentMethodPreference = ss?.payment_method_preference || null;
+      committedPrepayTerm = ss?.payment_method_preference === 'prepay_annual';
     }
   } catch (err) {
     logger.warn('[estimate-deposits] schedule summary payment-preference read failed', { error: err.message });
@@ -255,17 +265,17 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   // annual_prepay_terms.source_estimate_id — NOT on a scheduled service — so the
   // read above finds no preference and, once enforcement is live, the resolver
   // would report "Deposit due" for an estimate the annual prepay already
-  // exempts. Recognize a live (non-cancelled) prepay term for this estimate as
-  // the prepay_annual signal so the resolver honors the exemption. Fail-soft: a
-  // missing table or read error leaves the preference as-is (the safe direction
+  // covers. Recognize a live (non-cancelled) prepay term for this estimate as
+  // the committed-term signal so the resolver honors the exemption. Fail-soft: a
+  // missing table or read error leaves the flag as-is (the safe direction
   // — a wrongly-charged deposit still credits forward).
-  if (paymentMethodPreference == null && estimate?.id) {
+  if (!committedPrepayTerm && estimate?.id) {
     try {
       const term = await db('annual_prepay_terms')
         .where({ source_estimate_id: estimate.id })
         .whereNotIn('status', ['cancelled', 'canceled'])
         .first('id');
-      if (term) paymentMethodPreference = 'prepay_annual';
+      if (term) committedPrepayTerm = true;
     } catch (err) {
       logger.warn('[estimate-deposits] schedule summary annual-prepay term read failed', { error: err.message });
     }
@@ -274,7 +284,7 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   try {
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference,
+      committedPrepayTerm,
       oneTime,
       oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
       // When the caller answers for a specific appointment (the estimate-source
@@ -345,7 +355,7 @@ async function receivedDepositTotal(estimateId) {
 // never downgrade credited (or refunded/failed) back to received, which
 // would make the same money eligible for a second credit.
 async function markDepositReceived({ paymentIntentId, estimateId, amountDollars }) {
-  await db('estimate_deposits')
+  const inserted = await db('estimate_deposits')
     .insert({
       estimate_id: estimateId,
       amount: amountDollars,
@@ -355,14 +365,290 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
       updated_at: db.fn.now(),
     })
     .onConflict('stripe_payment_intent_id')
-    .ignore();
-  await db('estimate_deposits')
+    .ignore()
+    .returning('id');
+  const updated = await db('estimate_deposits')
     .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
     .update({
       status: 'received',
       received_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
+
+  // Exactly one caller wins the not-yet-received → received transition
+  // (webhook vs the accept flow's live verification) — that winner sends the
+  // single receipt text. Best-effort: a receipt failure must never fail
+  // deposit recording.
+  if ((Array.isArray(inserted) && inserted.length > 0) || updated > 0) {
+    await sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt failed for estimate ${estimateId}: ${err.message}`);
+    });
+  }
+}
+
+// One receipt per received deposit — the deposit intent is customerless and
+// carries no receipt_email (the idempotency key pins the create params), so
+// without this the customer's only proof of payment is the on-screen
+// success state. Channel dispatch (same rules as the no-show fee receipt):
+//   customer-linked: notification_prefs.payment_receipt_channel —
+//     sms → text, email → email, both → both. payment_receipt === false
+//     opts out entirely (the messaging policy enforces it for the SMS leg;
+//     the email leg checks it explicitly). A channel-sms customer with no
+//     usable phone falls back to email — a receipt is the only proof of
+//     payment, so delivery beats channel pedantry (same gap-fill as leads).
+//   lead: text when the estimate has a phone (unchanged); email is the
+//     no-phone gap-fill (they paid through the tokened estimate page).
+// Kill switches: deposit_receipt SMS template row / deposit.receipt email
+// template row — each leg gates independently.
+async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }) {
+  const estimate = await db('estimates')
+    .where({ id: estimateId })
+    .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
+  if (!estimate) return;
+
+  // For customer-linked estimates, contact the CUSTOMER's verified
+  // phone/email — the estimate's stored contact info can be stale or edited,
+  // and phone_matches_customer trust must only ride a number that actually
+  // comes from the customer row. Full row: the receipt-recipient helper
+  // resolves billing contact slots from it.
+  const customer = estimate.customer_id
+    ? await db('customers').where({ id: estimate.customer_id }).first()
+    : null;
+  const prefs = estimate.customer_id
+    ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first().catch(() => null)
+    : null;
+  const receiptOptOut = prefs?.payment_receipt === false;
+  const channel = estimate.customer_id ? (prefs?.payment_receipt_channel || 'sms') : 'sms';
+  const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
+  const leadEmail = String(estimate.customer_email || '').trim();
+
+  // email_enabled === false is the portal-wide email opt-out — the
+  // transactional_required stream bypasses suppression-group filtering, so
+  // it must be honored here (same check the no-show fee receipt does).
+  const emailOptOut = prefs?.email_enabled === false;
+  // Deliverability of the email leg, resolved up-front with the SAME
+  // recipient sources the email sender uses — an email-only channel whose
+  // email can never deliver (portal-wide opt-out / no address on file) must
+  // fall back to the text, mirroring the consent gate's undeliverable-email
+  // SMS fallback. Stale email-only rows reach this path even though the
+  // portal UI now locks the dropdowns (direct writes, removed emails).
+  const emailRecipient = customer
+    ? (require('./customer-contact').getReceiptEmailRecipients(customer, prefs || {})[0]?.email || '')
+    : leadEmail;
+  const emailUsable = !emailOptOut && !!emailRecipient;
+  const wantSms = estimate.customer_id
+    ? (channel === 'sms' || channel === 'both' || (channel === 'email' && !emailUsable))
+    : true;
+  // The receipt-texts opt-outs (the portal "Payment confirmation texts"
+  // toggle, and the STOP/sms_enabled master switch) block the SMS leg at the
+  // consent gate — for a Text-channel customer the email is then the only
+  // receipt left, so it must fall back like the no-phone case or the paid
+  // deposit produces no record at all. payment_receipt=false stays the full
+  // every-channel kill switch.
+  const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
+  const wantEmail = estimate.customer_id
+    ? (!receiptOptOut && emailUsable && (channel === 'email' || channel === 'both' || (!phone || smsOptedOut)))
+    : (!phone && !!leadEmail);
+
+  if (wantSms && phone) {
+    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
+    });
+  } else if (!wantSms) {
+    logger.info(`[estimate-deposits] deposit receipt SMS skipped for estimate ${estimateId} — customer receipt channel is "${channel}"`);
+  }
+
+  if (wantEmail) {
+    await sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }).catch((err) => {
+      logger.warn(`[estimate-deposits] deposit receipt email failed for estimate ${estimateId}: ${err.message}`);
+    });
+  }
+}
+
+// SMS leg. Kill switch = the deposit_receipt SMS template row.
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }) {
+  const estimateId = estimate.id;
+  const { renderSmsTemplate } = require('./sms-template-renderer');
+  const firstName = String(customer?.first_name || '').trim()
+    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
+    || 'there';
+  const amount = Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '');
+  const body = await renderSmsTemplate('deposit_receipt', {
+    first_name: firstName,
+    amount,
+  }, {
+    workflow: 'deposit_receipt',
+    entity_type: 'estimate',
+    entity_id: estimateId,
+  });
+  if (!body) return; // template missing or toggled off — deliberate silence
+
+  const { sendCustomerMessage } = require('./messaging/send-customer-message');
+  // Lead-only estimates (no customer row yet) can't satisfy the
+  // payment_receipt policy (requires customerId + phone_matches_customer) —
+  // mirror the estimate-accept lead send instead: estimate-scoped purpose,
+  // token-verified trust (they paid through the tokened estimate page), and
+  // an explicit transactional consent basis.
+  const result = await sendCustomerMessage({
+    to: phone,
+    body,
+    channel: 'sms',
+    audience: estimate.customer_id ? 'customer' : 'lead',
+    purpose: estimate.customer_id ? 'payment_receipt' : 'estimate_followup',
+    customerId: estimate.customer_id || undefined,
+    estimateId,
+    identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'estimate_token_verified',
+    consentBasis: estimate.customer_id ? undefined : {
+      status: 'transactional_allowed',
+      source: 'estimate_deposit_payment',
+      capturedAt: new Date().toISOString(),
+    },
+    entryPoint: 'estimate_deposit_receipt',
+    metadata: { original_message_type: 'deposit_receipt' },
+  });
+  if (!result.sent) {
+    // Deposits are commonly paid in the evening — a quiet-hours hold (or a
+    // transient provider failure) must not eat the only payment receipt.
+    // Re-queue onto the scheduled-SMS rail; the cron replays it at
+    // nextAllowedAt under the same policy the immediate send enforced —
+    // payment_receipt for customer-linked rows, conversational + forwarded
+    // consent basis for lead rows (see purposeForScheduledMessageType).
+    // original_message_type keeps the deposit_receipt row as the kill
+    // switch. Mirrors the twilio-webhook AI-reply requeue.
+    // CONSENT_LOOKUP_FAILED is a transient DB blip during the consent
+    // lookup — retry-advised by contract but carries no retry metadata, so
+    // give it a default delay instead of dropping the only receipt.
+    const isRetryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
+    const retryAt = result.nextAllowedAt
+      ? new Date(result.nextAllowedAt)
+      : (result.code === 'CONSENT_LOOKUP_FAILED' ? new Date(Date.now() + 15 * 60 * 1000) : null);
+    if (isRetryable && retryAt) {
+      try {
+        // sms_log.from_phone is NOT NULL — resolve the same location number
+        // the immediate send would have used (twilio.js falls back to the
+        // bradenton line when no location can be derived). The cron forwards
+        // this as the sending number on replay.
+        const { resolveLocation } = require('../config/locations');
+        const TWILIO_NUMBERS = require('../config/twilio-numbers');
+        const locationId = customer?.city ? resolveLocation(customer.city).id : null;
+        const fromPhone = TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton');
+        await db('sms_log').insert({
+          customer_id: estimate.customer_id || null,
+          direction: 'outbound',
+          from_phone: fromPhone,
+          to_phone: phone,
+          message_body: body,
+          status: 'scheduled',
+          scheduled_for: retryAt,
+          message_type: 'deposit_receipt',
+          metadata: JSON.stringify({
+            entry_point: 'estimate_deposit_receipt_requeue',
+            original_failure_code: result.code || null,
+            estimate_id: estimateId,
+            // The exact deposit this queued text was receipting — the email
+            // fallback must target THIS ledger row on multi-deposit
+            // estimates, not the newest one.
+            payment_intent_id: paymentIntentId || null,
+            // The customer can change their phone between the hold and
+            // nextAllowedAt — the cron re-reads customers.phone at send time
+            // so the phone_matches_customer trust it asserts stays true.
+            ...(estimate.customer_id ? { refresh_customer_phone: true } : {}),
+            ...(estimate.customer_id ? {} : {
+              consent_basis: {
+                status: 'transactional_allowed',
+                source: 'estimate_deposit_payment',
+                capturedAt: new Date().toISOString(),
+              },
+            }),
+          }),
+        });
+        logger.info(`[estimate-deposits] deposit receipt re-queued for estimate ${estimateId} (retry at ${retryAt.toISOString()})`);
+        return;
+      } catch (requeueErr) {
+        logger.error(`[estimate-deposits] deposit receipt re-queue failed for estimate ${estimateId}: ${requeueErr.message}`);
+      }
+    }
+    logger.warn(`[estimate-deposits] deposit receipt SMS blocked/failed for estimate ${estimateId}: ${result.code || result.reason || 'unknown'}`);
+  }
+}
+
+// Email leg. Kill switch = the deposit.receipt email template row (archiving
+// or pausing it makes sendTemplate throw 'active template not found', which
+// lands in the catch below). Exactly-once: markDepositReceived's transition
+// already guarantees a single dispatch per deposit; the per-PaymentIntent
+// idempotency key is belt-and-suspenders AND deliberately NOT per-estimate —
+// a refunded deposit replaced by a new PaymentIntent must still receipt.
+async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }) {
+  const estimateId = estimate.id;
+  const sendgrid = require('./sendgrid-mail');
+  if (!sendgrid.isConfigured()) {
+    logger.warn(`[estimate-deposits] deposit receipt email skipped for estimate ${estimateId} — SendGrid not configured`);
+    return { sent: false, reason: 'sendgrid_not_configured' };
+  }
+
+  // Customer-linked receipts resolve recipients the same way invoice
+  // receipts do (billing contact slots, primary fallback); leads paid
+  // through the tokened estimate page, so the estimate's stored email is
+  // the verified-enough recipient (same trust shape as the lead SMS leg).
+  let recipient;
+  if (customer) {
+    const { getReceiptEmailRecipients } = require('./customer-contact');
+    recipient = getReceiptEmailRecipients(customer, prefs || {})[0] || null;
+  } else {
+    const leadEmail = String(estimate.customer_email || '').trim();
+    recipient = leadEmail ? { email: leadEmail, name: String(estimate.customer_name || '').trim() || null } : null;
+  }
+  if (!recipient?.email) {
+    logger.info(`[estimate-deposits] deposit receipt email skipped for estimate ${estimateId} — no receipt email recipient`);
+    return { sent: false, reason: 'no_recipient_email' };
+  }
+
+  const firstName = String(customer?.first_name || '').trim()
+    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
+    || 'there';
+  // Amount comes straight from the verified deposit ledger amount — never
+  // recomputed here (waves-billing rule 1).
+  const amount = `$${Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '')}`;
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const estimateUrl = `${publicPortalUrl()}/estimate/${estimate.token}`;
+
+  const EmailTemplateLibrary = require('./email-template-library');
+  const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+  try {
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'deposit.receipt',
+      to: recipient.email,
+      payload: {
+        first_name: firstName,
+        amount,
+        estimate_url: estimateUrl,
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+      },
+      recipientType: customer ? 'customer' : 'lead',
+      recipientId: estimate.customer_id || null,
+      triggerEventId: `deposit_receipt:${paymentIntentId}`,
+      idempotencyKey: `deposit_receipt:${paymentIntentId}`,
+      categories: ['deposit_receipt'],
+      // SendGrid rejection bodies can echo the recipient address — keep them
+      // out of the provider log (redaction below covers this catch).
+      suppressProviderErrorLog: true,
+    });
+    if (result?.blocked) {
+      logger.warn(`[estimate-deposits] deposit receipt email suppressed for estimate ${estimateId}: ${result.reason || 'suppressed'}`);
+      return { sent: false, reason: result.reason || 'suppressed' };
+    }
+    if (result?.deduped) {
+      logger.info(`[estimate-deposits] deposit receipt email deduped for estimate ${estimateId} (pi=${paymentIntentId})`);
+      // The receipt already went out under this idempotency key — delivered.
+      return { sent: true, deduped: true };
+    }
+    logger.info(`[estimate-deposits] deposit receipt email sent for estimate ${estimateId}`);
+    return { sent: true };
+  } catch (err) {
+    const redacted = EmailTemplateLibrary.redactEmailAddresses(err.message);
+    logger.error(`[estimate-deposits] deposit receipt email send failed for estimate ${estimateId}: ${redacted}`);
+    return { sent: false, reason: redacted };
+  }
 }
 
 // A live-retrieved PaymentIntent counts only when Stripe says it succeeded
@@ -537,7 +823,6 @@ async function depositStillRecordable(estimateId) {
       && gates.isStructuralOneTimeOnlyEstimate(estData, estimate);
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: structuralOneTime,
       oneTimeUninvoiced: structuralOneTime && estimate.bill_by_invoice !== true,
@@ -624,7 +909,6 @@ async function assessDepositFollowUpEligibility(estimateId, now = new Date()) {
     }
     const policy = resolveDepositPolicy({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: structuralOneTime,
       oneTimeUninvoiced: structuralOneTime && estimate.bill_by_invoice !== true,
@@ -741,7 +1025,7 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 }
 
 // Exempt-path sweep (post-accept): when an acceptance completes through a
-// path that owes no deposit (prepay-annual, existing plan customer) — or
+// path that owes no deposit (existing plan customer, payer-billed) — or
 // after the first-invoice credit left a remainder nothing will consume —
 // refund whatever 'received' money was never applied. Partial rows refund
 // only their unapplied remainder; the credited slice stays credited.
@@ -1245,6 +1529,76 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
   return totalRestoredCents / 100;
 }
 
+// Email fallback for a SCHEDULED deposit-receipt replay the cron suppressed
+// on the customer's own choice (channel flipped to email, receipt texts or
+// SMS toggled off while the text sat on the quiet-hours/retry rail). The
+// immediate path already treats those opt-outs as "the email carries the
+// receipt" — without this twin, a preference change while queued left the
+// paid deposit with no receipt on any channel (codex round 5). Re-derives
+// amount + PaymentIntent from the deposit ledger (never trusts the queued
+// row's rendered body); the deposit_receipt:<pi> idempotency key inside
+// sendDepositReceiptEmail dedupes against any email that already went out.
+// Best-effort by contract: returns { sent, reason } and never throws.
+async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = null } = {}) {
+  try {
+    const estimate = await db('estimates')
+      .where({ id: estimateId })
+      .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
+    if (!estimate) return { sent: false, reason: 'estimate_not_found' };
+
+    const customer = estimate.customer_id
+      ? await db('customers').where({ id: estimate.customer_id }).first()
+      : null;
+    // FAIL CLOSED on a prefs lookup failure: this fallback often runs right
+    // after a PURPOSE_OPTED_OUT block, which may have been the
+    // payment_receipt=false kill switch — treating a DB blip as "no opt-out"
+    // would email a kill-switch customer the receipt their SMS block just
+    // suppressed (same rule as the receipt-delivery queue's lookup).
+    let prefs = null;
+    if (estimate.customer_id) {
+      try {
+        prefs = await db('notification_prefs').where({ customer_id: estimate.customer_id }).first();
+      } catch (lookupErr) {
+        logger.warn(`[estimate-deposits] deposit receipt email fallback prefs lookup failed for estimate ${estimateId}: ${lookupErr.message}`);
+        return { sent: false, reason: 'prefs_lookup_failed' };
+      }
+    }
+    // payment_receipt=false is the full every-channel kill switch; the
+    // portal-wide email opt-out is honored the same way the immediate email
+    // leg honors it.
+    if (prefs?.payment_receipt === false) return { sent: false, reason: 'receipt_opted_out' };
+    if (prefs?.email_enabled === false) return { sent: false, reason: 'email_opted_out' };
+
+    // The queued row names the exact deposit it was receipting — a multi-
+    // deposit estimate (top-ups) must not have its OLDER queued receipt
+    // fall back to the NEWEST ledger row's amount/PI (wrong idempotency key
+    // = wrong dedupe, and the queued deposit stays unreceipted). Legacy
+    // queued rows without the PI keep the latest-row behavior.
+    const ledgerQuery = db('estimate_deposits')
+      .where({ estimate_id: estimateId })
+      .whereIn('status', ['received', 'credited']);
+    const ledgerRow = paymentIntentId
+      ? await ledgerQuery.where({ stripe_payment_intent_id: paymentIntentId }).first('amount', 'stripe_payment_intent_id')
+      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'stripe_payment_intent_id');
+    if (!ledgerRow) return { sent: false, reason: 'no_received_deposit' };
+
+    // Propagate the leg's real outcome — a no-recipient / suppression /
+    // provider miss must not read as "receipted" in the scheduler log while
+    // the paid deposit still has no receipt anywhere (codex round 7).
+    const emailResult = await sendDepositReceiptEmail({
+      estimate,
+      customer,
+      prefs,
+      amountDollars: Number(ledgerRow.amount || 0),
+      paymentIntentId: ledgerRow.stripe_payment_intent_id,
+    });
+    return emailResult?.sent ? { sent: true } : { sent: false, reason: emailResult?.reason || 'email_not_sent' };
+  } catch (err) {
+    logger.warn(`[estimate-deposits] deposit receipt email fallback failed for estimate ${estimateId}: ${err.message}`);
+    return { sent: false, reason: err.message };
+  }
+}
+
 module.exports = {
   assessDepositFollowUpEligibility,
   computeDepositAmount,
@@ -1262,6 +1616,7 @@ module.exports = {
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
   summarizeEstimateDeposit,
+  sendDepositReceiptEmailFallback,
   linkedScheduledServiceId,
   restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,

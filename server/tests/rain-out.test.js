@@ -76,12 +76,13 @@ describe('rain-out service', () => {
   });
 
   describe('sameDayOptions', () => {
-    test('mid-morning offers +2h and +4h half-hour-rounded windows', () => {
-      // 14:10Z = 10:10 ET → +2h = 12:10 → ceil 12:30; +4h = 14:10 → 14:30
+    test('mid-morning offers +2h and +4h on-the-hour 1-hour windows', () => {
+      // 14:10Z = 10:10 ET → +2h = 12:10 → nearest hour 12:00; +4h = 14:10 → 14:00.
+      // Windows are 1 hour, on the hour (matches how appointments are booked).
       const options = RainOut._test.sameDayOptions(new Date('2026-06-11T14:10:00Z'));
       expect(options).toHaveLength(2);
-      expect(options[0].window).toEqual({ start: '12:30', end: '14:30' });
-      expect(options[1].window).toEqual({ start: '14:30', end: '16:30' });
+      expect(options[0].window).toEqual({ start: '12:00', end: '13:00' });
+      expect(options[1].window).toEqual({ start: '14:00', end: '15:00' });
       expect(options[0].date).toBe('2026-06-11');
     });
 
@@ -103,7 +104,7 @@ describe('rain-out service', () => {
       return { logUpdate };
     }
 
-    test('same-day move books exactly the displayed window, passes allowLive, texts with alt + forecast link', async () => {
+    test('books the tight 1-hour slot but texts the 2-hour arrival window, passes allowLive, alt + forecast link', async () => {
       const { logUpdate } = wireSingle();
 
       const result = await RainOut.commit({
@@ -111,38 +112,44 @@ describe('rain-out service', () => {
         technicianId: 'tech-1',
         reasonCode: 'weather_rain',
         scope: 'job',
-        target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' } },
-        alt: { date: '2026-06-12', window: { start: '08:00', end: '10:00' } },
+        // On-the-hour 1-hour internal slots (what the dispatcher picked).
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        alt: { date: '2026-06-12', window: { start: '08:00', end: '09:00' } },
         notifyCustomer: true,
       });
 
       expect(result.ok).toBe(true);
       expect(result.movedCount).toBe(1);
 
-      // The anchor books the window the tech saw in the sheet — verbatim.
+      // The appointment is BOOKED as the tight 1-hour slot the dispatcher saw.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
-        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         { allowLive: true },
       );
 
+      // ...but the CUSTOMER is quoted the usual 2-hour arrival window from the
+      // start (13:00 → 1:00-3:00 PM), never the internal 1-hour end.
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_phrase).toBe('heavy rain');
-      expect(vars.new_option).toContain('1:00 PM-3:00 PM');
+      expect(vars.new_option).toContain('1:00 PM - 3:00 PM');
       expect(vars.alt_clause).toContain('Reply 1 to confirm, or 2 to switch');
+      expect(vars.alt_clause).toContain('8:00 AM - 10:00 AM');
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 
-      // Reply options written into the rebooker's reschedule_log row —
-      // windows carry `display` because handleRescheduleReply renders
-      // selectedOption.window.display in the confirmation SMS.
+      // Reply options carry the tight 1-hour internal slot in start/end (a reply
+      // re-books or confirms exactly that — never widened), while `display` is
+      // the customer-facing 2-hour arrival window. A late reply inside the quoted
+      // window is kept valid by reschedule-sms's confirm-in-place path, not by
+      // widening the stored booking window.
       const notes = JSON.parse(logUpdate.update.mock.calls[0][0].notes);
       expect(notes.option1).toEqual({
         date: '2026-06-11',
-        window: { start: '13:00', end: '15:00', display: '1:00 PM-3:00 PM' },
+        window: { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
       });
       expect(notes.option2).toEqual({
         date: '2026-06-12',
-        window: { start: '08:00', end: '10:00', display: '8:00 AM-10:00 AM' },
+        window: { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
       });
     });
 
@@ -178,6 +185,41 @@ describe('rain-out service', () => {
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech', { allowLive: true });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
+    });
+
+    test('same-day BACKWARD pull (custom time earlier than anchor) moves head-first', async () => {
+      const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [
+            { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' },
+          ] }),
+        ],
+        customers: [
+          chain({ first: jest.fn().mockResolvedValue({ id: 'cust-2', phone: '+19415550002', first_name: 'Sam', zip: '34203' }) }),
+        ],
+        reschedule_log: [logRow, chain()],
+      });
+
+      // Anchor 09:00 → 07:00 = -2h delta; sibling 11:30-13:30 → 09:30-11:30.
+      // A custom time can pull a route EARLIER (negative delta). Order must flip
+      // to head-first: the anchor vacates 09:00 BEFORE the sibling shifts down,
+      // otherwise the anchor's old slot would SLOT_TAKEN the sibling (the
+      // forward flow's tail-first ordering would break here).
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-11', window: { start: '07:00', end: '08:00' } },
+        notifyCustomer: false,
+      });
+
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
+        'svc-1', '2026-06-11', { start: '07:00', end: '08:00' }, 'weather_rain', 'tech', { allowLive: true });
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-2', '2026-06-11', { start: '09:30', end: '11:30' }, 'weather_rain', 'tech', { allowLive: true });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -420,6 +462,11 @@ describe('rain-out service', () => {
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });
+      // Day options are booked as on-the-hour 1-hour slots, not the rebooker's
+      // wider 2-3h suggestedWindow, and the display is re-derived to match.
+      expect(options.days[0].window).toEqual({ start: '08:00', end: '09:00' });
+      expect(options.days[0].display).toBe('Fri, Jun 12, 8:00 AM-9:00 AM');
+      expect(options.days[1].window).toEqual({ start: '09:00', end: '10:00' });
       expect(options.remainingRouteCount).toBe(2);
       expect(options.service.hasPhone).toBe(true);
     });

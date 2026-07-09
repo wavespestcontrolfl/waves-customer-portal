@@ -73,6 +73,31 @@ function normalizeProperty(property) {
   };
 }
 
+// Secondary contact (realtor's buyer, landlord's tenant): same component
+// normalization as the caller. Collapses to null when nothing identifying
+// survives, so downstream consumers never see an empty shell.
+function normalizeSecondaryContact(contact) {
+  if (!contact || typeof contact !== 'object') return null;
+  // Same transcript-garble rejection as the V1 normalizer: a URL-shaped
+  // "email" ("www.cw63@gmail.com") is a mishearing, never a mailbox — it
+  // must not survive into a service-contact write when V2 is the source.
+  const { looksGarbledTranscriptEmail } = require('./intake-normalize');
+  const validEmail = cleanValidEmail(contact.email);
+  const normalized = {
+    ...contact,
+    name_full: cleanText(contact.name_full),
+    first_name: contact.first_name ? properCaseName(contact.first_name) : null,
+    last_name: contact.last_name ? properCaseName(contact.last_name) : null,
+    phone_e164: normalizePhone(contact.phone_e164),
+    phone_raw_spoken: cleanText(contact.phone_raw_spoken),
+    email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
+    notes: cleanText(contact.notes),
+  };
+  if (!normalized.name_full && !normalized.first_name && !normalized.last_name
+      && !normalized.phone_e164 && !normalized.email) return null;
+  return normalized;
+}
+
 function normalizeExtractionV2(extraction) {
   if (!extraction || typeof extraction !== 'object') return extraction;
 
@@ -80,12 +105,16 @@ function normalizeExtractionV2(extraction) {
     ...extraction,
     caller: normalizeCaller(extraction.caller),
     property: normalizeProperty(extraction.property),
+    ...(extraction.secondary_contact !== undefined
+      ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }
+      : {}),
   };
 }
 
 module.exports = {
   normalizeExtractionV2,
   normalizeCaller,
+  normalizeSecondaryContact,
   normalizeAddress,
   normalizePhone,
   normalizeZip,

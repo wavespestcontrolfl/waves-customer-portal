@@ -2256,7 +2256,11 @@ function SmsTab() {
                     setToSearch("");
                     setSelectedCustomerId(customerId || null);
                     setFromNumber(from);
-                    window.scrollTo({ top: 0, behavior: "smooth" });
+                    // The admin shell scrolls .admin-main, not the window —
+                    // window.scrollTo() is a no-op here.
+                    document
+                      .querySelector(".admin-main")
+                      ?.scrollTo({ top: 0, behavior: "smooth" });
                   }}
                 />
               ))

@@ -142,7 +142,7 @@ const BASE_EST = {
   viewed_at: '2026-06-25T20:11:10.984Z',
 };
 
-// 2pm ET — inside the 9a-5p send window so quiet-hours never trips.
+// Fixed clock so date-window assertions are deterministic.
 const BUSINESS_HOURS = new Date('2026-07-01T14:00:00-04:00');
 
 beforeEach(() => {

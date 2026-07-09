@@ -74,7 +74,7 @@ describe('payment lifecycle email template seeds', () => {
     expect(rendered.missingPayload).toEqual([]);
     expect(rendered.validation.ok).toBe(true);
     expect(rendered.text).not.toMatch(/\{\{|\}\}/);
-    expect(rendered.html).toContain('waves-logo.png');
+    expect(rendered.html).toContain('waves-logo-2026.png');
   });
 
   test('handles missing optional URLs and values without leaking raw placeholders', () => {

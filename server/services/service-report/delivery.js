@@ -33,31 +33,12 @@ function shouldSendServiceReportV1Delivery(record) {
   return status === 'completed' || status === 'complete';
 }
 
-// Progress visits (typed trend types, visit 2+) get the short progress SMS
-// whose lead sentence is the snapshot's generated Today's Result headline —
-// immutable, versioned, banned-words-safe, and identical to the report it
-// links to. No headline (or visit 1) → not progress-eligible.
-function typedProgressContext(record) {
-  let serviceData = record?.service_data;
-  if (typeof serviceData === 'string') {
-    try {
-      serviceData = JSON.parse(serviceData);
-    } catch {
-      serviceData = null;
-    }
-  }
-  const snapshot = serviceData && typeof serviceData === 'object'
-    ? serviceData.typedReportSnapshot
-    : null;
-  if (!snapshot || typeof snapshot !== 'object') return { isProgress: false, headline: '' };
-  const headline = String(snapshot.todaysResult?.headline || '').trim();
-  const isProgress = Number(snapshot.visitSequence) > 1 && !!headline;
-  return { isProgress, headline };
-}
-
-function serviceReportV1SmsType({ hasInvoiceLink = false, isProgress = false } = {}) {
-  if (hasInvoiceLink) return 'service_report_v1_with_invoice';
-  return isProgress ? 'service_report_v1_progress' : 'service_report_v1';
+// The progress-headline SMS variant (service_report_v1_progress) was removed
+// 2026-07-06 (owner call): the completion text is a gateway to the service
+// report, and the report itself carries the Today's Result trend — a special
+// SMS lead-in was overkill. Every visit sends the base report text.
+function serviceReportV1SmsType({ hasInvoiceLink = false } = {}) {
+  return hasInvoiceLink ? 'service_report_v1_with_invoice' : 'service_report_v1';
 }
 
 function buildServiceReportV1Sms({
@@ -143,11 +124,9 @@ function buildServiceReportV1DeliveryContext({
 
   const config = getServiceLineConfig(record.service_line || service?.service_type);
   const hasInvoiceLink = !!String(payUrl || '').trim();
-  const progress = typedProgressContext(record);
-  const smsType = serviceReportV1SmsType({ hasInvoiceLink, isProgress: progress.isProgress });
+  const smsType = serviceReportV1SmsType({ hasInvoiceLink });
   // Frozen V2 synthesis line (write-gate) — keeps the text on-message with the report.
-  // Not used for progress SMS (those lead with the progress headline).
-  const summaryLine = smsType === 'service_report_v1_progress' ? null : (summaryLineParam || frozenSmsSummary(record));
+  const summaryLine = summaryLineParam || frozenSmsSummary(record);
   const vars = buildServiceReportV1SmsVars({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
@@ -156,9 +135,6 @@ function buildServiceReportV1DeliveryContext({
     payUrl,
   });
   if (summaryLine) vars.summary_line = summaryLine;
-  if (smsType === 'service_report_v1_progress') {
-    vars.progress_headline = progress.headline;
-  }
   const body = buildServiceReportV1Sms({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
@@ -184,11 +160,53 @@ function buildServiceReportV1DeliveryContext({
   };
 }
 
+// Fold a lawn assessment score (and optional tip) into an already-composed
+// completion SMS body, right below the "report is ready: <link>" lead line so
+// the customer's score rides in the SAME text as the report — instead of a
+// separate "lawn health report ready" message.
+//
+// The body handed in was already selected/truncated to a segment target, so
+// the fold must not blow past it: prefer score + tip, else drop the (longer)
+// tip for score-only, else skip the fold entirely (the full recommendations
+// still live in the linked report, so the inline tip is not material).
+//
+// Returns { body, folded, truncated }:
+//   folded=false, body=original  → nothing changed (no score, or no room)
+//   truncated=true               → a tip existed but was dropped for budget
+function foldLawnScoreIntoCompletionSms(body, scoreParts = {}, { maxSegments = 2 } = {}) {
+  const { countSegments } = require('../messaging/segment-counter');
+  const base = String(body || '');
+  const scoreLine = String(scoreParts?.scoreLine || '').trim();
+  const tipLine = String(scoreParts?.tipLine || '').trim();
+  if (!base || !scoreLine) return { body: base, folded: false, truncated: false };
+
+  // DB templates separate paragraphs with a blank line; the prebuilt V1 body
+  // uses single newlines — split on whichever this body uses so the score
+  // lands under the lead line either way.
+  const sep = base.includes('\n\n') ? '\n\n' : '\n';
+  const foldIn = (block) => {
+    const parts = base.split(sep);
+    parts.splice(1, 0, block);
+    return parts.join(sep);
+  };
+  const segs = (text) => countSegments(text).segmentCount;
+
+  if (tipLine) {
+    const withTip = foldIn(`${scoreLine}\n${tipLine}`);
+    if (segs(withTip) <= maxSegments) return { body: withTip, folded: true, truncated: false };
+  }
+  const scoreOnly = foldIn(scoreLine);
+  if (segs(scoreOnly) <= maxSegments) {
+    return { body: scoreOnly, folded: true, truncated: !!tipLine };
+  }
+  return { body: base, folded: false, truncated: false };
+}
+
 module.exports = {
   buildServiceReportV1DeliveryContext,
   buildServiceReportV1Sms,
   buildServiceReportV1SmsVars,
+  foldLawnScoreIntoCompletionSms,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,
-  typedProgressContext,
 };

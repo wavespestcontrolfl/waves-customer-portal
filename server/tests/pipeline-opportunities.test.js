@@ -373,3 +373,100 @@ describe('pipeline opportunities read model', () => {
     });
   });
 });
+
+describe('expired estimate actions', () => {
+  test('a swept-expired estimate keeps its sent stage but the action flips to Extend (Follow Up would 400)', () => {
+    const opportunities = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({ id: 'est-exp', status: 'expired', sent_at: '2026-05-01T12:00:00.000Z' })],
+      now: NOW,
+    });
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0]).toMatchObject({
+      stage: PIPELINE_STAGES.ESTIMATE_SENT,
+      nextAction: 'extend_estimate',
+      nextActionLabel: 'Extend expiration',
+      needsAction: true,
+      isStale: true,
+    });
+  });
+
+  test('a past expires_at the sweep has not stamped yet also flips the action', () => {
+    const opportunities = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({
+        id: 'est-past',
+        status: 'viewed',
+        viewed_at: '2026-05-10T12:00:00.000Z',
+        expires_at: '2026-05-12T12:00:00.000Z',
+      })],
+      now: NOW,
+    });
+    expect(opportunities[0]).toMatchObject({
+      stage: PIPELINE_STAGES.ESTIMATE_VIEWED,
+      nextAction: 'extend_estimate',
+      needsAction: true,
+    });
+  });
+
+  test('a live sent estimate with a future expiry keeps the follow-up/wait action', () => {
+    const opportunities = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({
+        id: 'est-live',
+        status: 'sent',
+        sent_at: '2026-05-23T12:00:00.000Z',
+        expires_at: '2026-05-30T12:00:00.000Z',
+      })],
+      now: NOW,
+    });
+    expect(opportunities[0].nextAction).not.toBe('extend_estimate');
+  });
+
+  test('accepted estimates never flip to extend even with a past expiry', () => {
+    const opportunities = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({
+        id: 'est-won',
+        status: 'accepted',
+        expires_at: '2026-05-12T12:00:00.000Z',
+      })],
+      now: NOW,
+    });
+    expect(opportunities[0].stage).toBe(PIPELINE_STAGES.WON);
+    expect(opportunities[0].nextAction).toBe('schedule');
+  });
+});
+
+describe('expired estimate actions — round-2 refinements', () => {
+  const { opportunityMatchesFilter } = require('../services/pipeline-opportunities');
+
+  test('a swept-expired row with no sent/viewed stamp (draft-derived) flips to Extend, not Send', () => {
+    const opportunities = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({ id: 'est-exp-draft', status: 'expired' })],
+      now: NOW,
+    });
+    expect(opportunities[0]).toMatchObject({
+      stage: PIPELINE_STAGES.ESTIMATE_DRAFT,
+      nextAction: 'extend_estimate',
+      needsAction: true,
+    });
+  });
+
+  test('extend-only rows stay out of the Follow Up filter despite needing action', () => {
+    const [expired] = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({ id: 'est-exp2', status: 'expired', sent_at: '2026-05-01T12:00:00.000Z' })],
+      now: NOW,
+    });
+    expect(expired.needsAction).toBe(true);
+    expect(opportunityMatchesFilter(expired, 'follow_up')).toBe(false);
+    const [live] = normalizeOpportunities({
+      leads: [],
+      estimates: [estimate({ id: 'est-live2', status: 'sent', sent_at: '2026-05-01T12:00:00.000Z', expires_at: '2026-05-30T12:00:00.000Z' })],
+      now: NOW,
+    });
+    expect(opportunityMatchesFilter(live, 'follow_up')).toBe(true);
+  });
+});

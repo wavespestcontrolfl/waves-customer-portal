@@ -1,49 +1,117 @@
 const db = require('../../models/db');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const logger = require('../logger');
-const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { isEnabled } = require('../../config/feature-gates');
 const { renderSmsTemplate } = require('../sms-template-renderer');
+const { CAMPAIGN_GATE, toGsm7Safe } = require('../campaign-drafts');
+const { evaluateCampaignSendGate } = require('../campaign-drafts-gate');
 
 const SEASONAL_HOOKS = {
-  // month index (0-based) → hooks
+  // month index (0-based) → hooks (plain hyphens/apostrophes — GSM-7 safe)
   0: { type: 'general', hook: 'Start the new year pest-free!' },
   1: { type: 'general', hook: 'Valentine\'s gift idea: a bug-free home' },
-  2: { type: 'lawn', hook: 'Spring is here — time for pre-emergent lawn treatment' },
-  3: { type: 'mosquito', hook: 'Mosquito season is starting — protect your yard now' },
+  2: { type: 'lawn', hook: 'Spring is here - time for pre-emergent lawn treatment' },
+  3: { type: 'mosquito', hook: 'Mosquito season is starting - protect your yard now' },
   4: { type: 'mosquito', hook: 'Peak mosquito season is here. Don\'t let them take over' },
   5: { type: 'pest', hook: 'Summer bugs are out in force. Let us handle them' },
   6: { type: 'pest', hook: 'Mid-summer pest pressure is at its peak' },
   7: { type: 'pest', hook: 'Back-to-school? Make sure pests don\'t follow the kids inside' },
-  8: { type: 'pest', hook: 'Fall pests are looking for warm places — like your home' },
+  8: { type: 'pest', hook: 'Fall pests are looking for warm places - like your home' },
   9: { type: 'lawn', hook: 'Fall is the perfect time for lawn recovery treatment' },
   10: { type: 'general', hook: 'Holiday prep starts with a pest-free home' },
-  11: { type: 'general', hook: 'End the year right — schedule your winter treatment' },
+  11: { type: 'general', hook: 'End the year right - schedule your winter treatment' },
 };
 
 class SeasonalReactivation {
   /**
-   * Target dormant, at-risk, or churned customers with seasonal messaging.
+   * Seasonal reactivation, campaign-drafts V1: find lapsed customers and write
+   * PENDING campaign drafts for owner approval — this cron no longer sends.
+   *
+   * Audience fix: the old query filtered `customers.status IN ('dormant',
+   * 'at_risk','churned','inactive')`, but no migration ever defined those
+   * values on customers — churn state lives on pipeline_stage / active /
+   * churned_at (customer-stages.js, cancellation-processor.js). The filter was
+   * dead: it matched ~0 lapsed customers, so this cron never actually reached
+   * its audience. The canonical lapsed predicate below is deliberately coupled
+   * with the auto-send → pending-draft conversion: fixing the filter alone
+   * would have unleashed a previously-dead auto-send marketing cron on the
+   * newly-matched audience.
+   *
+   * Gate: GATE_CAMPAIGN_DRAFTS. Off = shadow-log the candidate count only —
+   * no drafts, and never a send via the old path either.
    */
   async run() {
+    const gateOn = isEnabled(CAMPAIGN_GATE);
     const month = new Date().getMonth();
     const seasonal = SEASONAL_HOOKS[month];
 
-    // Find customers not contacted in 30+ days with inactive statuses.
-    // Soft-deleted customers must never get reactivation SMS (same
-    // deleted_at guard the billing/reminder/dunning sweeps use).
+    // Canonical lapsed-customer predicate, branched per how each stage is
+    // actually written:
+    //   churned — cancellation-processor stamps pipeline_stage='churned',
+    //             active=false AND churned_at together, so require all three;
+    //   dormant — the stale-service pipeline (pipeline-manager.js
+    //             no_service_120_days) sets pipeline_stage ONLY: active stays
+    //             true and churned_at is never stamped, so dormant matches on
+    //             the stage alone.
+    // Soft-deleted customers must never get reactivation outreach (same
+    // deleted_at guard the billing/reminder/dunning sweeps use) — applied to
+    // both branches.
     const customers = await db('customers')
-      .whereIn('status', ['dormant', 'at_risk', 'churned', 'inactive'])
+      .where(function () {
+        this.where(function () {
+          this.where('pipeline_stage', 'churned')
+            .where('active', false)
+            .whereNotNull('churned_at');
+        }).orWhere('pipeline_stage', 'dormant');
+      })
       .whereNull('deleted_at')
       .whereNotNull('phone')
       .where(function () {
         this.where('last_contact_date', '<', db.raw("NOW() - INTERVAL '30 days'"))
           .orWhereNull('last_contact_date');
       })
-      .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address_line1 as address');
+      .select(
+        'id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address_line1 as address',
+        // Injected into the shared gate below so it revalidates THIS row
+        // instead of re-reading what the audience query just returned.
+        'active', 'pipeline_stage', 'churned_at', 'deleted_at'
+      );
 
-    let sent = 0;
-
+    // Shared pre-send gate (campaign-drafts-gate.js) — the SAME stack the
+    // approve/revise route re-runs at send time, so draft-time and send-time
+    // guards cannot drift: opted-out prefs and the unified 30-day campaign
+    // cooldown (campaign drafts + campaign-grade sms_log + prepay renewal
+    // notices). The draft cooldown also keeps this weekly cron from
+    // re-drafting the same lapsed customer every Monday — drafting no longer
+    // stamps last_contact_date (nothing was sent yet).
+    const candidates = [];
     for (const customer of customers) {
+      const verdict = await evaluateCampaignSendGate({
+        campaignType: 'reactivation',
+        customerId: customer.id,
+        customer: {
+          id: customer.id,
+          active: customer.active,
+          pipeline_stage: customer.pipeline_stage,
+          deleted_at: customer.deleted_at,
+          churned_at: customer.churned_at,
+        },
+      });
+      if (!verdict.ok) continue;
+      candidates.push(customer);
+    }
+
+    if (!gateOn) {
+      logger.info(
+        `[seasonal-reactivation] shadow: ${candidates.length} reactivation candidate(s) ` +
+        `of ${customers.length} lapsed customer(s) (gate off - no drafts written, no sends)`
+      );
+      return { candidates: candidates.length, drafted: 0, gate: 'off', month, hookType: seasonal.type };
+    }
+
+    let drafted = 0;
+
+    for (const customer of candidates) {
       try {
         // Check if customer has history matching the seasonal hook type
         let hookText = seasonal.hook;
@@ -55,7 +123,7 @@ class SeasonalReactivation {
 
           // Fall back to general if no matching service history
           if (!matchingService) {
-            hookText = 'We haven\'t seen you in a while — let\'s get your home protected';
+            hookText = 'We haven\'t seen you in a while - let\'s get your home protected';
           }
         }
 
@@ -78,51 +146,29 @@ class SeasonalReactivation {
           continue;
         }
 
-        const smsResult = await sendCustomerMessage({
-          to: customer.phone,
-          body,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'marketing',
-          customerId: customer.id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'seasonal_reactivation',
-          consentBasis: {
-            status: 'opted_in',
-            source: 'customer_marketing_preferences',
-            capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
-          },
-          metadata: {
-            original_message_type: 'reactivation',
-            customerLocationId: customer.location_id,
-            hook_type: seasonal.type,
-          },
-        });
-        if (!smsResult.sent) {
-          logger.warn(`Reactivation blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-          continue;
-        }
-
-        await db('customer_interactions').insert({
+        // Pending draft for owner approval — NEVER a send. The approve route
+        // sends under purpose 'marketing' with the full consent chain.
+        await db('message_drafts').insert({
           customer_id: customer.id,
-          interaction_type: 'sms_outbound',
-          channel: 'sms',
-          subject: `Seasonal reactivation — ${seasonal.type}`,
-          body: `Auto reactivation: ${hookText}`,
+          draft_response: toGsm7Safe(body),
+          status: 'pending',
+          campaign_type: 'reactivation',
+          purpose: 'marketing',
+          source_ref: `customers:${customer.id}`,
+          context_summary: `Seasonal reactivation (${seasonal.type}): ${hookText}`,
         });
 
-        // Update last contact date
-        await db('customers').where({ id: customer.id })
-          .update({ last_contact_date: new Date() });
-
-        sent++;
+        drafted++;
       } catch (err) {
-        logger.error(`Reactivation failed for customer ${customer.id}: ${err.message}`);
+        logger.error(`Reactivation draft failed for customer ${customer.id}: ${err.message}`);
       }
     }
 
-    logger.info(`Seasonal reactivation: ${sent} messages sent (month ${month})`);
-    return { sent, month, hookType: seasonal.type };
+    logger.info(
+      `Seasonal reactivation: ${drafted} pending draft(s) written for owner approval ` +
+      `(${candidates.length} candidate(s), month ${month})`
+    );
+    return { candidates: candidates.length, drafted, gate: 'on', month, hookType: seasonal.type };
   }
 }
 

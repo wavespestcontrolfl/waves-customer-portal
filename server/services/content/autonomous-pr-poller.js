@@ -196,6 +196,54 @@ function spokeMergeBlockedByKillSwitch(run) {
  * outlives the run via brief_id). Returns target.url === null when neither
  * source resolves — callers fail closed on that.
  */
+/**
+ * The category-route URL the publisher would stamp for this blog draft TODAY:
+ * /{category}/{leaf-slug}/ derived with astro-publisher's own routing helpers
+ * (slugPathFromFrontmatter + normalizeAutonomousCategory + categoryRouteSlug +
+ * canonicalUrlForSlug — the exact composition publishOrUpdatePage binds), so
+ * this can never drift from the real route. `brief` must be the run's
+ * content_briefs row (or {} when the run has none): the publisher passes the
+ * brief into normalizeAutonomousCategory, whose brief.service /
+ * brief.target_keyword signals decide the category when the frontmatter
+ * omits or uses a non-canonical label — dropping them would derive the
+ * default /pest-control/ route for a post the publisher stamped under
+ * /lawn-care/, /termite/, etc. Origin comes from the stored canonical when
+ * present (spoke self-canonicals keep their spoke origin), hub otherwise.
+ * Returns null when the frontmatter can't produce a safe slug or the
+ * helpers are unavailable — never guess.
+ */
+function deriveBlogRouteUrl(run, brief = {}) {
+  let internals;
+  try { internals = require('../content-astro/astro-publisher')._internals || {}; } catch (_) { return null; }
+  const { categoryRouteSlug, slugPathFromFrontmatter, canonicalUrlForSlug, normalizeAutonomousCategory } = internals;
+  if ([categoryRouteSlug, slugPathFromFrontmatter, canonicalUrlForSlug, normalizeAutonomousCategory].some((f) => typeof f !== 'function')) return null;
+  const draft = parseJsonObject(run.draft_payload);
+  const frontmatter = draft.frontmatter || {};
+  let slugPath;
+  try { slugPath = slugPathFromFrontmatter(frontmatter); } catch (_) { return null; }
+  const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, brief || {}));
+  if (!routeSlug) return null;
+  let origin = null;
+  try { origin = frontmatter.canonical ? new URL(String(frontmatter.canonical)).origin : null; } catch (_) { origin = null; }
+  return origin ? canonicalUrlForSlug(routeSlug, origin) : canonicalUrlForSlug(routeSlug);
+}
+
+/**
+ * The category signals deriveBlogRouteUrl needs from the run's brief
+ * (normalizeAutonomousCategory reads brief.service + brief.target_keyword).
+ * {} when the run has no brief. A lookup blip THROWS — callers inside
+ * finalizeMerged's live-check try ride the existing transient park
+ * (live_check_failed, retried next tick) rather than deriving from partial
+ * signals, which could probe (and adopt) the wrong category route.
+ */
+async function briefCategorySignalsForRun(run) {
+  if (!run.brief_id) return {};
+  const brief = await db('content_briefs')
+    .where('id', run.brief_id)
+    .first('service', 'target_keyword');
+  return brief || {};
+}
+
 async function resolveTargetForRun(run) {
   const target = targetForRun(run);
   if (target.url || !run.brief_id) return target;
@@ -346,6 +394,28 @@ async function supersedeRun(run, queueRow) {
  *     IndexNow never pings a 404.
  */
 async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = null, mergedAt = null } = {}) {
+  // FIRST observation of the merge → persist astro_pr_merged_at before any
+  // pending return. finalize legitimately stays pending for the 30–45 min
+  // production deploy, and without a DB-visible marker the daily publish
+  // cap (which counted only completed_published) couldn't see merges in
+  // flight — a backlog could exceed the cap by one merge per tick until
+  // deploys caught up. whereNull keeps the first-observed time stable
+  // across the many pending re-polls. Covers human merges too (they also
+  // go live and consume the day's publish budget). Fail-soft: the marker
+  // is cap accounting — a write error must never block reconciliation
+  // (the cap just stays conservative-by-omission for that run, as before).
+  try {
+    const mergedAtMsRaw = mergedAt ? Date.parse(mergedAt) : NaN;
+    await db('autonomous_runs')
+      .where('id', run.id)
+      .whereNull('astro_pr_merged_at')
+      .update({
+        astro_pr_merged_at: Number.isFinite(mergedAtMsRaw) ? new Date(mergedAtMsRaw) : new Date(),
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
+  }
   // Fresh queue re-check at finalize time: the tick-start validation is
   // stale by now (GitHub lookup + live-URL gating take seconds), and an
   // operator requeue/dismiss landing in that window must win — never mark a
@@ -356,18 +426,41 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   if (!parked) return { ...(await supersedeRun(run, queueRow)), autoMerged };
 
   const target = await resolveTargetForRun(run);
-  if (!target.url) {
-    logger.warn(`[autonomous-pr-poller] run ${run.id} (PR #${prNumber} merged) has no resolvable target URL (draft + brief blank); leaving parked`);
-    return { pending: true, reason: 'target_url_unresolved', autoMerged };
-  }
+  // Live-URL gate with a derived-route fallback for blog runs. Pre-canonical-
+  // stamping runs (June 2026) stored a canonical WITHOUT the /{category}/
+  // prefix — the live blog route is /{category}/{leaf}/ — so the stored URL
+  // 404s forever on a post that IS live (runs for astro PRs #246/#263/#269
+  // sat merged-but-unfinalized for 3 weeks: no IndexNow, no link planning,
+  // queue rows never completed, poll slots burned every tick). When the
+  // stored URL is absent or not responding on a new_supporting_blog run,
+  // derive the category-route URL with the publisher's own routing helpers
+  // and adopt it ONLY if it actually responds; planLinks is recomputed from
+  // the adopted URL. Non-blog lanes never derive (their target is an
+  // arbitrary existing page, not a blog route), and a thrown HEAD check
+  // keeps the original transient behavior (park, retry next tick).
   try {
     const { liveUrlResponds } = require('../content-astro/pages-poll');
-    if (!(await liveUrlResponds(target.url))) {
+    let liveOk = false;
+    if (target.url) liveOk = !!(await liveUrlResponds(target.url));
+    if (!liveOk && String(run.action_type || '') === 'new_supporting_blog') {
+      const derived = deriveBlogRouteUrl(run, await briefCategorySignalsForRun(run));
+      if (derived && derived !== target.url && (await liveUrlResponds(derived))) {
+        logger.info(`[autonomous-pr-poller] run ${run.id}: stored target ${target.url || '(none)'} not live; adopting derived blog route ${derived}`);
+        target.url = derived;
+        target.planLinks = !canonicalIsOffHub(derived);
+        liveOk = true;
+      }
+    }
+    if (!target.url) {
+      logger.warn(`[autonomous-pr-poller] run ${run.id} (PR #${prNumber} merged) has no resolvable target URL (draft + brief blank); leaving parked`);
+      return { pending: true, reason: 'target_url_unresolved', autoMerged };
+    }
+    if (!liveOk) {
       return { pending: true, reason: 'awaiting_live_deploy', url: target.url, autoMerged };
     }
   } catch (err) {
     // Network blip on the HEAD check — transient, retry next tick.
-    logger.warn(`[autonomous-pr-poller] live check failed for ${target.url} (run ${run.id}): ${err.message}`);
+    logger.warn(`[autonomous-pr-poller] live check failed for ${target.url || '(unresolved)'} (run ${run.id}): ${err.message}`);
     return { pending: true, reason: 'live_check_failed', url: target.url, autoMerged };
   }
 
@@ -384,14 +477,23 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   // closed and the next tick's PR re-fetch supplies merge_commit_sha/
   // merged_at.
   try {
-    const { latestSuccessfulProductionDeployment, deploymentCommitSha, deploymentTimestampMs } = require('../content-astro/pages-poll');
+    const { latestSuccessfulProductionDeployment, deploymentCommitSha, deploymentCreatedAtMs } = require('../content-astro/pages-poll');
     const prodDeploy = await latestSuccessfulProductionDeployment();
     const shaMatch = mergeSha && normalizeSha(deploymentCommitSha(prodDeploy)) === normalizeSha(mergeSha);
     const mergedAtMs = mergedAt ? Date.parse(mergedAt) : NaN;
-    const deployedAtMs = prodDeploy ? deploymentTimestampMs(prodDeploy) : null;
-    const CLOCK_SKEW_MS = 120000;
-    const timeMatch = Number.isFinite(mergedAtMs) && deployedAtMs != null
-      && deployedAtMs >= mergedAtMs - CLOCK_SKEW_MS;
+    // Compare the deploy's CREATION time, not its completion time: hub
+    // production builds take 30–45 min, so a deploy of a PRE-merge commit
+    // routinely FINISHES after the merge — the old completion-time window
+    // matched it and finalized the run (IndexNow + social share) on STALE
+    // content whenever two merges landed within one build window. A deploy
+    // CREATED at/after the merge necessarily clones a tree containing it
+    // (main is linear via squash merges). No negative clock-skew allowance:
+    // a deploy created moments before the merge doesn't contain it, and
+    // losing the merge's own deploy to sub-second skew only means staying
+    // parked until the next deploy (fail closed, self-heals).
+    const createdAtMs = prodDeploy ? deploymentCreatedAtMs(prodDeploy) : null;
+    const timeMatch = Number.isFinite(mergedAtMs) && createdAtMs != null
+      && createdAtMs >= mergedAtMs;
     if (!prodDeploy || (!shaMatch && !timeMatch)) {
       return { pending: true, reason: 'awaiting_production_deploy', url: target.url, autoMerged };
     }
@@ -567,6 +669,42 @@ async function maybeAutoMerge(run, pr) {
     await publisher.assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
   } catch (err) {
     if (err?.code === 'CODEX_REVIEW_REQUIRED') {
+      // Codex left findings → try to auto-fix them on the PR branch so the
+      // post can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
+      // is on; never merges (that still needs a genuine Codex-clean signal).
+      try {
+        const { maybeRemediateAutonomousPr, remediationEnabled } = require('./codex-remediation');
+        if (remediationEnabled()) {
+          // Fresh queue re-check, same as the merge path's last-instant guard
+          // below: remediation MUTATES the PR branch, so an operator requeue/
+          // dismiss that landed after tick-start validation must block it the
+          // same way it blocks the merge. A lookup error lands in the catch
+          // → remediation skipped this tick (fail-safe). Checked only when
+          // the flag is on so the disabled path adds no queue reads.
+          if (!(await queueRowStillParked(run))) {
+            logger.info(`[autonomous-pr-poller] codex remediation skipped for run ${run.id}: opportunity_queue row moved during gating (operator action)`);
+          } else {
+            // Pass the run row: remediation re-runs the runner's publish gates
+            // (claims-ledger/guardrails/comparison/uniqueness/quality/SEO/
+            // visibility) against the re-fetched run + brief before committing
+            // any fix, and parks when it can't prove them.
+            // prePushCheck closes the window DURING the LLM round: the check
+            // above ran before it, and an operator requeue/dismiss landing
+            // mid-round must still block the branch push (same last-instant
+            // posture as the merge below).
+            const rem = await maybeRemediateAutonomousPr(pr, run, {
+              prePushCheck: () => queueRowStillParked(run),
+            });
+            if (rem?.remediated) {
+              logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
+            } else if (rem?.parked) {
+              logger.warn(`[autonomous-pr-poller] codex remediation parked run ${run.id} PR #${pr.number}: ${rem.reason}`);
+            }
+          }
+        }
+      } catch (remErr) {
+        logger.warn(`[autonomous-pr-poller] codex remediation error for PR #${pr.number}: ${remErr.message}`);
+      }
       return { pending: true, reason: `codex_review_pending: ${err.message}` };
     }
     throw err; // lookup outage etc. — transient, retry next tick
@@ -580,6 +718,47 @@ async function maybeAutoMerge(run, pr) {
   if (spokeMergeBlockedByKillSwitch(run)) {
     logger.info(`[autonomous-pr-poller] auto-merge blocked for run ${run.id}: PR #${pr.number} targets a spoke but the spoke blog network is disabled (set SPOKE_BLOG_NETWORK_ENABLED=true to allow)`);
     return { pending: true, reason: 'spoke_blog_network_disabled' };
+  }
+
+  // 2c. Daily publish cap — same env the runner's canary guard enforces at
+  //     PR-open time. The runner bounds how many PRs OPEN per ET day; this
+  //     bounds how many go LIVE per ET day, so a backlog of parked PRs
+  //     (older days, human-cleared Codex findings) can't all auto-merge on
+  //     the same afternoon. Capped runs stay parked for a human merge or
+  //     tomorrow's ticks; count errors fail closed (no merge this tick).
+  //     `>= 0`, matching the runner's zero-inclusive semantics: a cap of 0
+  //     is an ops freeze and must also stop the poller from draining parked
+  //     PRs (a `> 0` guard skipped the cap entirely at 0).
+  const maxPerDay = Number(process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY);
+  if (Number.isFinite(maxPerDay) && maxPerDay >= 0) {
+    const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
+    const startOfEtDay = parseETDateTime(`${etDateString(new Date())}T00:00`);
+    // Two countable shapes, mutually exclusive by outcome:
+    //   - finalized publishes (completed_published stamped today), and
+    //   - merged-but-not-finalized runs: still parked at the pending
+    //     outcome but with astro_pr_merged_at stamped today by
+    //     finalizeMerged. Without these, every merge awaiting its 30–45
+    //     min production deploy was invisible to the cap and a backlog
+    //     could exceed it by one merge per 2-minute tick.
+    const row = await db('autonomous_runs')
+      .where('action_type', run.action_type)
+      .where('shadow_mode', false)
+      .where(function countable() {
+        this.where(function finalized() {
+          this.where('outcome', 'completed_published')
+            .where('completed_at', '>=', startOfEtDay);
+        }).orWhere(function mergedInFlight() {
+          this.where('outcome', PENDING_OUTCOME)
+            .whereIn('skip_reason', PENDING_SKIP_REASONS)
+            .where('astro_pr_merged_at', '>=', startOfEtDay);
+        });
+      })
+      .count('id as count')
+      .first();
+    if (Number(row?.count || 0) >= maxPerDay) {
+      logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: daily publish cap reached (${row.count}/${maxPerDay} ${run.action_type} today)`);
+      return { pending: true, reason: 'daily_publish_cap_reached' };
+    }
   }
 
   // 3. Last-instant queue re-check: the gates above take seconds of network
@@ -680,7 +859,15 @@ async function pollPending() {
       .where('outcome', PENDING_OUTCOME)
       .whereIn('skip_reason', PENDING_SKIP_REASONS)
       .whereNotNull('astro_pr_url')
-      .orderBy('claimed_at', 'asc')
+      // Random order, NOT claimed_at asc: parked runs (Codex-blocked, red
+      // build, awaiting a human) stay in this set indefinitely, so a fixed
+      // oldest-first order starves everything past the limit — once 25 runs
+      // are parked, a newly-merged newer PR would never be polled and never
+      // finalize (no IndexNow, no link planning, queue never completes).
+      // Random rotation guarantees every parked run is visited across ticks
+      // (every 2 min) with no schema change; with ≤25 parked it is identical
+      // coverage to before.
+      .orderByRaw('random()')
       .limit(25)
       .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes', 'created_at');
   } catch (err) {
@@ -748,6 +935,7 @@ module.exports = {
     targetForRun,
     spokeMergeBlockedByKillSwitch,
     resolveTargetForRun,
+    deriveBlogRouteUrl,
     queueRowStillParked,
     finalizeMerged,
     finalizeClosed,

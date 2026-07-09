@@ -182,8 +182,8 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
   });
 
   test('empty input is safe', () => {
-    expect(deriveCallReviewBridge()).toEqual({ normalizedAddress: null, needsConfirmation: [] });
-    expect(deriveCallReviewBridge({})).toEqual({ normalizedAddress: null, needsConfirmation: [] });
+    expect(deriveCallReviewBridge()).toEqual({ normalizedAddress: null, normalizedEmail: null, needsConfirmation: [] });
+    expect(deriveCallReviewBridge({})).toEqual({ normalizedAddress: null, normalizedEmail: null, needsConfirmation: [] });
   });
 
   test.each(['tenant', 'property_manager'])('caller relationship %s → rental_or_tenant_occupied', (rel) => {
@@ -205,5 +205,88 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
       callerRelationship: 'owner',
     });
     expect(out.needsConfirmation).not.toContain('rental_or_tenant_occupied');
+  });
+});
+
+describe('deriveCallReviewBridge — garbled-street recovery (addressRecovery)', () => {
+  const unverifiable = { status: 'missing_component', normalized: { street_line_1: '5039 C Phone Trl', city: 'Lakewood Ranch', state: 'FL', postal_code: '34211' } };
+  const jimenez = { address_line1: '5039 C Phone Trl', city: 'Lakewood Ranch', zip: '34211', first_name: 'William', last_name: 'Jimenez', lead_quality: 'warm' };
+
+  test('recovered premise is adopted and flagged address_recovered (not address_unverified)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: unverifiable,
+      extracted: jimenez,
+      addressRecovery: { attempted: true, recovered: { address_line1: '5039 Seafoam Trail', city: 'Lakewood Ranch', state: 'FL', zip: '34211-1407' }, candidates: ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'], method: 'phonetic' },
+    });
+    expect(out.normalizedAddress).toMatchObject({ address_line1: '5039 Seafoam Trail', city: 'Lakewood Ranch', zip: '34211-1407' });
+    expect(out.needsConfirmation).toContain('address_recovered');
+    expect(out.needsConfirmation).not.toContain('address_unverified');
+  });
+
+  test('recovery attempted but nothing confirmed → address_unverified unchanged', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: unverifiable,
+      extracted: jimenez,
+      addressRecovery: { attempted: true, recovered: null, candidates: ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'], method: null },
+    });
+    expect(out.normalizedAddress).toBeNull();
+    expect(out.needsConfirmation).toContain('address_unverified');
+    expect(out.needsConfirmation).not.toContain('address_recovered');
+  });
+
+  test('no recovery passed (legacy call sites) → identical to before', () => {
+    const out = deriveCallReviewBridge({ addressValidation: unverifiable, extracted: jimenez });
+    expect(out.normalizedAddress).toBeNull();
+    expect(out.needsConfirmation).toContain('address_unverified');
+  });
+
+  test('recovery never applies to a validated/corrected address path', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: { status: 'validated_accept', normalized: { street_line_1: '5039 Seafoam Trail', city: 'Lakewood Ranch', state: 'FL', postal_code: '34211' } },
+      extracted: { ...jimenez, address_line1: '5039 Seafoam Trail' },
+      addressRecovery: { attempted: true, recovered: { address_line1: '9999 Other St' }, candidates: [], method: 'phonetic' },
+    });
+    expect(out.normalizedAddress).toMatchObject({ address_line1: '5039 Seafoam Trail' });
+    expect(out.needsConfirmation).not.toContain('address_recovered');
+  });
+});
+
+describe('deriveEmailReview via bridge — URL-shaped transcription garble', () => {
+  test('"www."-prefixed local part → email_invalid, never unverified/adopted', () => {
+    const out = deriveCallReviewBridge({ extracted: { first_name: 'William', last_name: 'Jimenez', lead_quality: 'warm', email: null, email_raw: 'www.cw63@gmail.com' } });
+    expect(out.normalizedEmail).toBeNull();
+    expect(out.needsConfirmation).toContain('email_invalid');
+    expect(out.needsConfirmation).not.toContain('email_unverified');
+  });
+
+  test('normal spelled email still gets the advisory read-back reason only', () => {
+    const out = deriveCallReviewBridge({ extracted: { first_name: 'Sam', last_name: 'Lee', lead_quality: 'warm', email: 'wcw63@gmail.com' } });
+    expect(out.needsConfirmation).toContain('email_unverified');
+    expect(out.needsConfirmation).not.toContain('email_invalid');
+  });
+});
+
+describe('mergeNeedsConfirmation — reasons persist across calls on a lead', () => {
+  const { mergeNeedsConfirmation } = require('../services/call-triage-flags');
+
+  test('follow-up call with different flags does not erase earlier warnings', () => {
+    expect(mergeNeedsConfirmation(['address_unverified', 'email_unverified'], ['caller_not_authorized']))
+      .toEqual(expect.arrayContaining(['address_unverified', 'email_unverified', 'caller_not_authorized']));
+  });
+
+  test('deduplicates', () => {
+    expect(mergeNeedsConfirmation(['email_unverified'], ['email_unverified'])).toEqual(['email_unverified']);
+  });
+
+  test('address_recovered on the newer call supersedes stale address_unverified', () => {
+    const merged = mergeNeedsConfirmation(['address_unverified', 'email_unverified'], ['address_recovered']);
+    expect(merged).toContain('address_recovered');
+    expect(merged).toContain('email_unverified');
+    expect(merged).not.toContain('address_unverified');
+  });
+
+  test('handles empty/garbage input', () => {
+    expect(mergeNeedsConfirmation(null, undefined)).toEqual([]);
+    expect(mergeNeedsConfirmation(undefined, ['email_invalid'])).toEqual(['email_invalid']);
   });
 });

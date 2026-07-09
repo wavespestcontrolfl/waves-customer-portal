@@ -6,10 +6,11 @@ const config = require('../config');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
-const { formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -33,6 +34,7 @@ const {
   computeDepositAmount,
 } = require('../services/estimate-deposits');
 const CardHolds = require('../services/estimate-card-holds');
+const Experiments = require('../services/experimentation/growthbook');
 const {
   cleanupEstimatePricingCache,
   clearEstimatePricingCache,
@@ -50,6 +52,7 @@ const {
   WAVES_SUPPORT_PHONE_E164,
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
+  WAVES_ADDRESS_LINE,
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -333,6 +336,28 @@ function parseEstimateDataSafe(estimate = {}) {
   return raw || {};
 }
 
+// Customer-facing fallback when scheduled_services.window_display is empty:
+// the 2-hour arrival window from window_start ("3:00 PM - 5:00 PM"), matching
+// the confirmation SMS — never the raw 24h window_start, and never window_end
+// (that's the job-duration block, not the arrival window).
+function customerArrivalWindowDisplay(windowStart) {
+  const range = arrivalWindowRange(windowStart);
+  return range ? formatSmsTimeRange(range) : null;
+}
+
+// SSR existing-appointment title. windowDisplay is a TIME display (stored
+// values are "11:00 AM"-style; the fallback above is the arrival range), so
+// the date must be composed in here — mirrors the React formatAppointmentLabel.
+function existingAppointmentTitle(appointment = {}) {
+  const date = appointment.scheduledDate
+    ? new Date(`${appointment.scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
+    })
+    : '';
+  const time = appointment.windowDisplay || appointment.windowStart || '';
+  return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
 function shapeLinkedAppointment(row) {
   if (!row) return null;
   return {
@@ -340,7 +365,11 @@ function shapeLinkedAppointment(row) {
     scheduledDate: dateOnly(row.scheduled_date),
     windowStart: hhmm(row.window_start),
     windowEnd: hhmm(row.window_end),
-    windowDisplay: row.window_display || null,
+    // Derived 2h arrival range FIRST: prod window_display values are only ever
+    // a bare start time ("9:00 AM" — the phone-booking writer) or NULL, never a
+    // range, so stored text can only lose information vs deriving from
+    // window_start. Stored text is the fallback for rows with no parseable start.
+    windowDisplay: customerArrivalWindowDisplay(row.window_start) || row.window_display || null,
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
   };
@@ -354,7 +383,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const today = etDateString();
   if (!linkedId && !estimate.id) return null;
 
-  const q = conn('scheduled_services')
+  const baseQuery = () => conn('scheduled_services')
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', today)
     .where((builder) => {
@@ -368,15 +397,36 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       builder.whereNull('reservation_expires_at')
         .orWhereRaw('reservation_expires_at > NOW()');
     })
-    .where((builder) => {
-      if (linkedId) builder.where('id', linkedId);
-      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
-    })
     .orderBy('scheduled_date', 'asc')
     .orderBy('window_start', 'asc');
 
+  const q = baseQuery()
+    .where((builder) => {
+      if (linkedId) builder.where('id', linkedId);
+      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
+    });
+
   if (requestedId) q.where('id', requestedId);
-  const row = await q.first();
+  let row = await q.first();
+
+  // Customer-wide fallback (gated): a customer who already has ANY upcoming
+  // appointment shouldn't be pushed through the slot picker again — the
+  // acceptance contract swaps the scheduler for payment options instead.
+  // Estimate-linked rows always take precedence (query above). Restricted to
+  // rows this customer owns that no other estimate has claimed
+  // (source_estimate_id null) and that aren't an in-flight reservation hold,
+  // so an offered row can't 409 at accept time — the accept-path UPDATE
+  // requires these same conditions.
+  if (!row && estimate.customer_id
+    && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
+    const cw = baseQuery()
+      .where('customer_id', estimate.customer_id)
+      .whereNull('source_estimate_id')
+      .whereNull('reservation_expires_at');
+    if (requestedId) cw.where('id', requestedId);
+    row = await cw.first();
+  }
+
   if (!row) return null;
   if (requestedId && String(row.id) !== requestedId) return null;
   return row;
@@ -1593,6 +1643,7 @@ const COMPANY = {
   phone: WAVES_SUPPORT_PHONE_DISPLAY,
   phoneRaw: WAVES_SUPPORT_PHONE_E164,
   email: 'contact@wavespestcontrol.com',
+  address: WAVES_ADDRESS_LINE,
 };
 
 const SOCIAL_LINKS = [
@@ -1760,6 +1811,41 @@ function firstPositiveNumber(...values) {
     if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
+}
+
+// The engine's true annual (result.totals.year2) is NOT 12x the rounded
+// monthly for non-monthly cadences: quarterly $392/yr displays as $32.67/mo,
+// and 32.67 * 12 = 392.04 — so recomputing an annual as round(monthly) * 12
+// drifts the quoted price by cents even when nothing about the plan changed.
+// Anchor to the engine annual shifted by 12x the monthly delta: a recompute
+// that leaves the monthly unchanged returns the quoted annual exactly, and a
+// real discount moves it by its true annualized amount.
+function anchoredAnnualTotal(estData, monthlyTotal) {
+  const monthly = Number(monthlyTotal) || 0;
+  // A comped/fully-discounted plan is $0/yr. Without this, the anchor's
+  // rounding residue (engineAnnual - engineMonthly*12, up to a few cents)
+  // would survive a zeroed monthly and persist a positive annual_total.
+  if (monthly <= 0) return 0;
+  const fallback = Math.max(0, Math.round(monthly * 12 * 100) / 100);
+  const root = estData && typeof estData === 'object'
+    ? (estData.result && typeof estData.result === 'object' ? estData.result : estData)
+    : null;
+  const engineAnnual = firstPositiveNumber(root?.totals?.year2);
+  // grandTotal before monthlyTotal: in v1-mapped blobs grandTotal is the full
+  // monthly counterpart to year2 while monthlyTotal can exclude recurring
+  // supplements (rodent bait, palm injection) — the partial value would trip
+  // the correspondence guard below and forfeit the anchor.
+  const engineMonthly = firstPositiveNumber(
+    root?.totals?.year2mo,
+    root?.recurring?.grandTotal,
+    root?.recurring?.monthlyTotal,
+  );
+  if (!engineAnnual || !engineMonthly) return fallback;
+  // Only trust the anchor when the engine pair actually corresponds (year2 is
+  // year2mo x 12 up to rounding); otherwise the blob carries something else
+  // (e.g. an annual that includes one-time work) and 12x monthly is safer.
+  if (Math.abs(engineMonthly * 12 - engineAnnual) > 0.5) return fallback;
+  return Math.max(0, Math.round((engineAnnual + (monthly - engineMonthly) * 12) * 100) / 100);
 }
 
 function treatmentVisitsForPricingRow(row = {}) {
@@ -2999,7 +3085,12 @@ async function buildShowYourWork(estimate = {}, estData = {}) {
     turfSqFt ? {
       label: 'Treatable turf',
       value: `${Math.round(turfSqFt).toLocaleString()} sq ft${enriched.turfCappedToParcel === true ? ' (bounded by your county parcel area)' : ''}`,
-      source: sourceFor('estimatedTurfSf'),
+      // A county-prior seed (vision-missing lookup) has no fieldEvidence
+      // entry, and the satellite fallback label would misattribute it —
+      // the number came from county lot/building facts, not imagery.
+      source: enriched.turfSource === 'county_prior'
+        ? 'County records (estimated)'
+        : sourceFor('estimatedTurfSf'),
     } : null,
   ].filter(Boolean);
 
@@ -3092,7 +3183,7 @@ function renderMembershipBlockHtml(membership) {
   // independently of this card.
   if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return '';
 
-  const money = (n) => `$${(Math.round((Number(n) || 0) * 100) / 100).toFixed(2)}`;
+  const money = fmtMoney;
   // Only rows with a real, non-zero benefit render — the pricing engine's
   // margin guard can cap the applied discount to 0 even at Silver+, and a
   // bare "Member pricing" row with no figure is the same no-benefit card
@@ -3233,7 +3324,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
-        heroSuffix: "here's your lawn care estimate.",
         recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
         aggregateDayLabel: 'lawn care',
         billingHeading: 'Choose how you want to pay',
@@ -3259,7 +3349,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       }
     : (hasOnlyMosquitoServices
       ? {
-          heroSuffix: "here's your mosquito control estimate.",
           recurringAssurance: 'Your plan targets shaded resting zones, lanai edges, and breeding-source pressure around your property.',
           aggregateDayLabel: 'mosquito control',
           billingHeading: 'Choose how you want to pay',
@@ -3285,7 +3374,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTreeShrubServices
         ? {
-          heroSuffix: "here's your tree & shrub estimate.",
           recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
           aggregateDayLabel: 'tree & shrub care',
           billingHeading: 'Choose how you want to pay',
@@ -3311,7 +3399,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         }
       : (hasOnlyTermiteBaitServices
         ? {
-            heroSuffix: "here's your termite protection estimate.",
             recurringAssurance: 'Your plan includes termite station service and treatment timing matched to your home perimeter.',
             aggregateDayLabel: 'termite protection',
             billingHeading: 'Choose how you want to pay',
@@ -3337,7 +3424,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           }
         : (hasOnlyTermiteTrenchingServices
           ? {
-              heroSuffix: "here's your termite trenching quote.",
               recurringAssurance: 'This trenching quote is based on the measured treatment path and office review.',
               aggregateDayLabel: 'termite trenching',
               billingHeading: 'Choose how you want to pay',
@@ -3363,7 +3449,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             }
           : (hasOnlyBoraCareServices
             ? {
-                heroSuffix: "here's your Bora-Care wood treatment quote.",
                 recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
                 aggregateDayLabel: 'Bora-Care wood treatment',
                 billingHeading: 'Choose how you want to pay',
@@ -3388,7 +3473,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
@@ -3438,7 +3522,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
 
   const monthlyTotal = Math.max(0, Math.round((recurringMonthlyBeforeDiscounts - manualDiscountMonthly - prefMonthlyOff) * 100) / 100);
-  const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+  const annualTotal = anchoredAnnualTotal(estData, monthlyTotal);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   // A wide low-confidence commercial estimate is force-manual: the customer view
   // must show the "site confirmation" state (not an approve button that the
@@ -3634,7 +3718,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
   const recurringDisplayManualDiscount = intervalPriceFromMonthly(manualDiscountMonthly, selectedRecurringFrequencyKey);
   const manualDiscountHtml = manualDiscount && recurringDisplayManualDiscount > 0
-    ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>-${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
+    ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>−${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
     : '';
 
   // WaveGuard Membership setup ($99). Applies only to recurring Pest or Mosquito
@@ -3797,7 +3881,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
     ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
     : (prepayDiscountAmount > 0
-      ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>-${fmtMoney(prepayDiscountAmount)}</strong></div>`
+      ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>−${fmtMoney(prepayDiscountAmount)}</strong></div>`
       : '');
   // Prepay body/button copy is incentive-aware: the per-service pageCopy still
   // says "waive the setup", which is only accurate for the fee services. No-fee
@@ -3855,7 +3939,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${prepayMembershipSummaryHtml}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
+        <p class="billing-small">${est.depositPolicy?.required
+          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
+          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -4029,7 +4115,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
     : 0;
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
-    ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">-${fmtMoney(manualOneTimeDiscount)}</td></tr>`
+    ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
     : '';
   const oneTimeRows = realOneTimeRows;
   const oneTimeRowsTotal = hasRealOneTime
@@ -4083,13 +4169,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${showYourWork.qualityNote ? `<p class="ai-quality-note">${escapeHtml(showYourWork.qualityNote)}</p>` : ''}
     </div>` : '';
   const showYourWorkCss = showYourWork ? `
-  .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#6B7280;line-height:1.45}
+  .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#475569;line-height:1.45}
   .ai-show-work{display:grid;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid #E7E2D7}
-  .ai-show-work-title{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .ai-show-work-title{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .ai-fact-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   @media(max-width:720px){.ai-fact-list{grid-template-columns:1fr}}
   .ai-fact{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
-  .ai-fact-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+  .ai-fact-label{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-fact-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
   .ai-fact-source{flex:none;padding:5px 9px;border-radius:999px;background:#E3F5FD;color:#065A8C;font:800 14px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
   .ai-parcel-line{margin:0;font-size:14px;color:#3F4A65;line-height:1.5}
@@ -4185,6 +4271,27 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>
   </section>` : '';
 
+  // Hero follows the CTA state (estimate audit 2026-07-07, finding #5) —
+  // mirrors TERMINAL_HERO in EstimateViewPage.jsx: a terminal page must not
+  // promise "your estimate is ready!" above a booked / call-us / declined
+  // banner. Status statements only, so they're category-safe. A null eyebrow
+  // keeps the standard "Your estimate · {service}" kicker. Order matters:
+  // terminal statuses (accepted/declined) outrank the generic quoteRequired
+  // flag, and a commercial proposal outranks the generic quote copy — its
+  // banner says the formal proposal is ready, so "in the works" would
+  // contradict it.
+  const stateHero = est.status === 'accepted'
+    ? { h1: `Hello ${firstName}, your plan is booked!`, eyebrow: 'Your Waves plan' }
+    : est.status === 'declined'
+    ? { h1: `Hello ${firstName}, here’s your Waves estimate.`, eyebrow: null }
+    : quoteRequired && commercialProposal
+    ? { h1: `Hello ${firstName}, your formal proposal is ready.`, eyebrow: 'Your commercial proposal' }
+    : quoteRequired
+    ? { h1: `Hello ${firstName}, your custom quote is in the works.`, eyebrow: 'Your custom quote' }
+    : null;
+  const heroH1 = stateHero?.h1 || `Hello ${firstName}, your estimate is ready!`;
+  const heroEyebrow = stateHero?.eyebrow || `Your estimate · ${escapeHtml(quotedServicesLabel)}`;
+
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -4205,28 +4312,28 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   h2{font-size:clamp(22px,3vw,28px);line-height:1.2}
   h3{font-size:18px;font-weight:600}
   p{margin:0 0 12px}
-  .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
+  .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
   .top-phone:hover{color:${BRAND.blueDark}}
   .top-logo{height:28px;display:block}
-  .wrap{flex:1;max-width:1040px;width:100%;margin:0 auto;padding:62px 24px 80px}
+  .wrap{flex:1;max-width:720px;width:100%;margin:0 auto;padding:32px 20px 110px}
   .hero{padding:10px 0 28px;max-width:900px}
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
-  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
+  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
   .service-price-card{padding:18px 20px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06);display:flex;flex-direction:column}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px;min-height:18px}
+  .service-price-detail{font-size:12px;color:#475569;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
   .service-big-price{margin-top:14px;gap:8px 12px;align-content:flex-start}
-  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
-  .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(62px,8vw,84px);line-height:.92;color:#1B2C5B}
-  .service-big-price .anchor{font-size:22px;flex-basis:100%}
-  .service-big-price .num{font-size:clamp(44px,5vw,58px)}
-  .big-price .per{font-size:24px;color:#6B7280}
-  .service-big-price .per{font-size:18px}
+  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:15px;color:#9CA3AF;text-decoration:line-through}
+  .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(24px,10.5vw,40px);line-height:.92;color:#1B2C5B}
+  .service-big-price .anchor{font-size:15px;flex-basis:100%}
+  .service-big-price .num{font-size:clamp(24px,10.5vw,40px)}
+  .big-price .per{font-size:14px;color:#475569}
+  .service-big-price .per{font-size:14px}
   .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
   .save-row{margin-top:10px;min-height:20px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
@@ -4234,20 +4341,20 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .supplemental-service-list{display:grid;gap:8px;max-width:720px;margin:18px auto 0}
   .supplemental-service-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;text-align:left}
   .supplemental-service-name{font-size:14px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .supplemental-service-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .supplemental-service-detail{font-size:12px;color:#475569;line-height:1.45;margin-top:2px}
   .supplemental-service-row strong{font-size:14px;line-height:1.25;color:#1B2C5B;white-space:nowrap}
-  .day-price{margin-top:8px;font-size:14px;color:#6B7280}
+  .day-price{margin-top:8px;font-size:14px;color:#475569}
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
-  .setup-fee-sub{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.45}
+  .setup-fee-sub{font-size:12px;color:#475569;margin-top:2px;line-height:1.45}
   .per-treatment{margin-top:14px;max-width:520px;padding:14px 16px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
   .per-treatment-title{font-size:12px;font-weight:700;color:#1B2C5B;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
   .per-treatment-rows{display:grid;gap:8px}
   .pt-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline}
   .pt-label{font-size:14px;color:#1B2C5B;line-height:1.35}
-  .pt-cadence{font-size:12px;color:#6B7280;margin-left:2px}
+  .pt-cadence{font-size:12px;color:#475569;margin-left:2px}
   .pt-price{font-size:14px;font-weight:700;color:#1B2C5B;white-space:nowrap}
-  .pt-price span,.pt-suffix{font-weight:500;color:#6B7280}
+  .pt-price span,.pt-suffix{font-weight:500;color:#475569}
   .pt-total{border-top:1px solid #E7E2D7;padding-top:8px;margin-top:2px}
   .pt-total .pt-label{font-weight:700}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
@@ -4258,7 +4365,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .choice-treatment{padding:14px 0 8px;max-width:720px}
   .choice-treatment-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .choice-treatment-detail{font-size:13px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .choice-treatment-detail{font-size:13px;color:#475569;line-height:1.45;margin-top:2px}
   .choice-treatment-price{margin-top:14px}
   .choice-treatment .save-row{margin-top:8px}
   .choice-treatment .day-price{margin-top:8px}
@@ -4267,7 +4374,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .card{background:#F2EEE0;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #D9D3C4;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
-  .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
+  .card-sub{color:#475569;font-size:14px;margin:0 0 14px}
   .ai-card{background:#F2EEE0}
   .waveguard-ai-card{display:grid;gap:14px}
   .intelligence-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
@@ -4278,7 +4385,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .ai-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
   @media(max-width:720px){.ai-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .ai-metric{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
-  .ai-metric-label{font-size:14px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+  .ai-metric-label{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-metric-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
   .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
   @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
@@ -4294,7 +4401,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .wg-tier-platinum{background:#EDEFF2;color:#2B3340}
   .wg-upgrade{background:#fff;border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:15px;line-height:1.5}
   .wg-section{display:grid;gap:8px}
-  .wg-section-title{font-size:13px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .wg-section-title{font-size:13px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .wg-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .wg-row-label{color:#1B2C5B;font-weight:600;font-size:15px}
   .wg-row-val{color:#1F7A4D;font-size:14px;font-weight:600;text-align:right}
@@ -4322,12 +4429,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:800;letter-spacing:0;margin:0;color:#1B2C5B}
   .payment-choice-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#F8FCFE;border:1px solid #CFE7F5;color:#1B2C5B;padding:5px 9px;font:800 11px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
   .payment-choice-badge.primary{background:#ECFDF5;border-color:#BBF7D0;color:#166534}
-  .payment-choice p{margin:0;color:#6B7280;font-size:13px;line-height:1.5}
+  .payment-choice p{margin:0;color:#475569;font-size:13px;line-height:1.5}
   .payment-choice-body{min-height:39px}
   .payment-summary-list{display:grid;border-top:1px solid #E7E2D7;border-bottom:1px solid #E7E2D7;margin:2px 0}
   .payment-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;border-top:1px solid #F0ECE2}
   .payment-summary-row:first-child{border-top:0}
-  .payment-summary-row span{font-size:12px;color:#6B7280;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
+  .payment-summary-row span{font-size:12px;color:#475569;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
   .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
   .payment-summary-row strong s{color:#9CA3AF;text-decoration-color:${BRAND.red};text-decoration-thickness:2px;margin-right:6px}
@@ -4350,12 +4457,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .billing-line{padding-top:8px;border-top:1px solid #F0ECE2;color:#1B2C5B;font-size:13px;font-weight:700;line-height:1.45}
   .billing-line.discount{color:${BRAND.green}}
   .billing-total-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:10px;border-top:1px solid #E7E2D7}
-  .billing-total-row span{font-size:13px;color:#6B7280;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+  .billing-total-row span{font-size:13px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
   .billing-total-row strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;white-space:nowrap}
-  .billing-small{font-size:12px!important;color:#6B7280!important;line-height:1.5!important}
+  .billing-small{font-size:12px!important;color:#475569!important;line-height:1.5!important}
   .payment-setup-summary{border:1px solid #D8E7F0;border-radius:12px;background:#F8FCFE;padding:14px 16px;margin:0 0 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
   .payment-setup-summary-main{min-width:0}
-  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#6B7280;margin-bottom:5px}
+  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#475569;margin-bottom:5px}
   .payment-setup-summary-title{font-size:16px;font-weight:800;color:#1B2C5B;line-height:1.25;margin-bottom:4px}
   .payment-setup-summary-body{font-size:13px;color:#3F4A65;line-height:1.5}
   .payment-setup-summary-change{border:1px solid #CFE7F5;background:#fff;color:#1B2C5B;border-radius:8px;padding:8px 10px;font:800 12px/1 Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
@@ -4367,7 +4474,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pref-row.off{background:#F7F5EE;border-color:#D4CBB8}
   .pref-row .pref-label{flex:1;min-width:0}
   .pref-row .pref-title{font-weight:600;font-size:14px;color:#1B2C5B}
-  .pref-row .pref-desc{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.5}
+  .pref-row .pref-desc{font-size:12px;color:#475569;margin-top:2px;line-height:1.5}
   .pref-row .pref-savings{font-size:12px;color:${BRAND.green};font-weight:600;margin-top:4px}
   .pref-row .pref-savings.none{color:#9CA3AF;font-weight:500}
   .switch{position:relative;display:inline-block;width:42px;height:24px;flex-shrink:0;margin-top:2px}
@@ -4378,12 +4485,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .switch input:checked+.slider::before{transform:translateX(18px)}
   .switch input:disabled+.slider{opacity:.5;cursor:not-allowed}
   .booking-card h2{font-family:Inter,system-ui,sans-serif;font-size:22px;font-weight:600;letter-spacing:0;color:#1B2C5B;margin:0 0 8px;line-height:1.2}
-  .booking-card .card-sub{font-size:14px;color:#6B7280;margin:0 0 20px;line-height:1.55}
+  .booking-card .card-sub{font-size:14px;color:#475569;margin:0 0 20px;line-height:1.55}
   .existing-appt-card{border:1px solid #E2E8F0;border-radius:12px;background:#fff;padding:14px 16px;margin-bottom:18px}
-  .existing-appt-kicker{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6B7280;margin-bottom:6px}
+  .existing-appt-kicker{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#475569;margin-bottom:6px}
   .existing-appt-title{font-size:18px;font-weight:800;color:#1B2C5B;line-height:1.3}
   .existing-appt-sub{font-size:14px;color:#3F4A65;margin-top:4px;line-height:1.4}
-  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
+  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#475569;text-align:center}
   .slot-list{display:grid;gap:10px}
   .date-finder{margin:0 0 16px;display:grid;gap:10px;padding:16px;border:1px solid #CFE7F5;border-radius:12px;background:#fff}
   .date-finder-eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
@@ -4399,15 +4506,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .slot-more{margin-top:10px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;overflow:hidden}
   .slot-more summary{list-style:none;cursor:pointer;padding:12px 14px;color:#1B2C5B;font-size:14px;font-weight:700}
   .slot-more summary::-webkit-details-marker{display:none}
-  .slot-more summary::after{content:'+';float:right;font-size:18px;line-height:1;color:#6B7280}
+  .slot-more summary::after{content:'+';float:right;font-size:18px;line-height:1;color:#475569}
   .slot-more[open] summary::after{content:'–'}
   .slot-more-list{display:grid;gap:10px;padding:0 12px 12px}
   .slot-btn{width:100%;padding:14px 16px;border-radius:12px;cursor:pointer;background:#fff;color:#1B2C5B;border:1.5px solid #E2E8F0;text-align:left;transition:background-color .15s,border-color .15s,color .15s;font-family:Inter,system-ui,sans-serif}
   .slot-btn:hover:not([disabled]){border-color:${ESTIMATE_BUTTON_BLUE}}
   .slot-btn.selected{border-color:${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff}
-  .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#6B7280;margin-bottom:5px;line-height:1.25}
+  .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#475569;margin-bottom:5px;line-height:1.25}
   .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
-  .slot-btn .slot-reason{display:block;font-size:14px;color:#6B7280;line-height:1.35}
+  .slot-btn .slot-reason{display:block;font-size:14px;color:#475569;line-height:1.35}
   .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
   .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
@@ -4418,14 +4525,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
   .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
   .pay-pref-btn .pay-pref-title{font-size:14px;font-weight:600;color:#1B2C5B}
-  .pay-pref-note{font-size:13px;color:#6B7280;line-height:1.45;padding:0 2px;text-align:center}
+  .pay-pref-note{font-size:13px;color:#475569;line-height:1.45;padding:0 2px;text-align:center}
   .pay-pref-choice[hidden]{display:none}
   .pay-pref-btn[hidden]+.pay-pref-note{display:none}
   #deposit-overlay{position:fixed;inset:0;background:rgba(27,44,91,.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
   #deposit-overlay .deposit-card{background:#fff;border:1px solid #E7E2D7;border-radius:14px;max-width:440px;width:100%;padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.25);max-height:90vh;overflow:auto}
   #deposit-overlay .deposit-error{color:#C8312F;font-size:14px;line-height:1.45;margin-top:10px}
   .pay-pref-btn[aria-pressed="true"]{box-shadow:0 0 0 3px rgba(27,44,91,.16)}
-  .pay-pref-btn .pay-pref-sub{font-size:12px;color:#6B7280;line-height:1.45}
+  .pay-pref-btn .pay-pref-sub{font-size:12px;color:#475569;line-height:1.45}
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .pay-pref-btn.primary .pay-pref-title{color:#fff}
   .pay-pref-btn.primary .pay-pref-sub{color:rgba(255,255,255,.8)}
@@ -4439,7 +4546,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   td{padding:10px 0;border-bottom:1px solid #E7E2D7;vertical-align:top;font-size:14px}
   tr:last-child td{border-bottom:0}
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
-  .sub{font-size:12px;color:#6B7280;margin-top:2px}
+  .sub{font-size:12px;color:#475569;margin-top:2px}
   .cta{display:block;width:100%;padding:14px 22px;background:#1B2C5B;color:#fff;border:none;border-radius:10px;font-family:Inter,system-ui,sans-serif;font-weight:500;font-size:16px;cursor:pointer;transition:all .15s;text-align:center;text-decoration:none}
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
@@ -4491,7 +4598,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .review-card .stars{color:${BRAND.yellow};font-size:14px;margin-bottom:8px;letter-spacing:1px}
   .review-card p{font-size:13px;margin:0 0 12px;font-style:italic;line-height:1.55;color:#3F4A65;flex:1}
   .review-card.review-profile-card p{font-style:normal}
-  .rev-meta{font-size:12px;color:#6B7280}
+  .rev-meta{font-size:12px;color:#475569}
   .review-link{display:inline-flex;margin-top:10px;color:#1B2C5B;font-size:13px;font-weight:800;text-decoration:none}
   .review-link:hover{text-decoration:underline}
   .review-dots{display:flex;justify-content:center;gap:6px;margin-top:14px}
@@ -4516,15 +4623,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .final p{color:rgba(255,255,255,.8);font-size:14px}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .quote-required-banner{background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
-  .site-footer{text-align:center;padding:40px 20px 32px;color:#6B7280;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
+  .site-footer{text-align:center;padding:40px 20px 32px;color:#475569;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
   .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
   .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
   .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .site-footer-contact{margin-bottom:10px;font-size:13px;color:#3F4A65}
-  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500}
+  .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500;white-space:nowrap}
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
-  .site-footer-legal{font-size:11px;color:#6B7280}
+  .site-footer-legal{font-size:11px;color:#475569}
   #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
   .q-bar{display:none}
@@ -4540,6 +4647,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
   }
   @media(max-width:480px){.q-bar .q-btn{font-size:13px;padding:10px}}
+  /* Tabular digits at the money sites (estimate audit 2026-07-07, finding #8)
+     so amount columns, totals, and discounts align — same sites the React
+     page covers via fontVariantNumeric. */
+  .big-price .num,.big-price .anchor,.pt-price,.payment-summary-row strong,.supplemental-service-row strong,td.val,.wg-row-val,.manual-discount-row strong,.billing-total-row{font-variant-numeric:tabular-nums}
+  /* Print parity with the React estimate (estimate audit 2026-07-07): no
+     fixed chrome over the pages, solid white background, cards kept whole. */
+  @media print{
+    .q-bar,#toast,#deposit-overlay,.top-bar{display:none!important}
+    body{background:#fff;padding-bottom:0}
+    .card,.service-price-card,.supplemental-service-row{break-inside:avoid;box-shadow:none}
+  }
 </style>
 </head><body>
 
@@ -4559,8 +4677,8 @@ ${shellTopBar()}
     : `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>`) : ''}
 
   <div class="hero">
-    <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
+    <div class="eyebrow">${heroEyebrow}</div>
+    <h1>${heroH1}</h1>
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
@@ -4649,7 +4767,7 @@ ${shellTopBar()}
       <p class="card-sub">Your visit is already on the schedule. Choose how you want to pay to approve this estimate.</p>
       <div class="existing-appt-card">
         <div class="existing-appt-kicker">Existing appointment</div>
-        <div class="existing-appt-title">${escapeHtml(existingAppointment.windowDisplay || `${existingAppointment.scheduledDate}${existingAppointment.windowStart ? ` at ${existingAppointment.windowStart}` : ''}`)}</div>
+        <div class="existing-appt-title">${escapeHtml(existingAppointmentTitle(existingAppointment))}</div>
         <div class="existing-appt-sub">${escapeHtml(existingAppointment.serviceType || pageCopy.aggregateDayLabel || 'Service visit')}</div>
       </div>
     ` : `
@@ -4813,6 +4931,7 @@ ${shellTopBar()}
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
     </div>
+    <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
   </footer>
 </div>
@@ -5146,7 +5265,9 @@ ${shellQuestionsBar()}
     if (pref === 'prepay_annual') {
       if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Annual prepay invoice';
-      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
+      if (body) body.textContent = DEPOSIT_POLICY.required
+        ? 'A ' + fmt(DEPOSIT_POLICY.recurringAmount) + ' deposit is due at confirmation and is credited toward your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ', sent automatically after confirmation; choose a service window to continue.'
+        : 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
     } else {
       if (bookingSubhead) bookingSubhead.textContent = 'Pay per application is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Pay per application';
@@ -5844,13 +5965,18 @@ ${shellQuestionsBar()}
   function updateDepositNote() {
     const note = document.getElementById('deposit-due-note');
     if (!note) return;
-    if (!DEPOSIT_POLICY.required || bookingState.pickedPref === 'prepay_annual') {
+    if (!DEPOSIT_POLICY.required) {
       note.style.display = 'none';
       return;
     }
+    // Prepay-annual owes the deposit too — it credits against the annual
+    // invoice minted at accept rather than a later first-visit invoice.
+    const creditTarget = bookingState.pickedPref === 'prepay_annual'
+      ? 'your annual prepay invoice'
+      : 'your first invoice';
     note.textContent = bookingState.depositPaymentIntentId
-      ? 'Deposit received — it will be applied to your first invoice.'
-      : 'A ' + fmt(depositAmountForMode()) + ' deposit is due today to hold your spot — it is applied to your first invoice.';
+      ? 'Deposit received — it will be applied to ' + creditTarget + '.'
+      : 'A ' + fmt(depositAmountForMode()) + ' deposit is due today to hold your spot — it is applied to ' + creditTarget + '.';
     note.style.display = '';
   }
 
@@ -5862,11 +5988,16 @@ ${shellQuestionsBar()}
   function showDepositOverlay(intent) {
     return new Promise(function (resolve) {
       closeDepositOverlay();
+      // Prepay-annual deposits credit the annual invoice minted at accept,
+      // not a later first-visit invoice — keep the modal copy honest.
+      const depositCreditTarget = bookingState.pickedPref === 'prepay_annual'
+        ? 'your annual prepay invoice'
+        : 'your first invoice';
       const overlay = document.createElement('div');
       overlay.id = 'deposit-overlay';
       overlay.innerHTML = '<div class="deposit-card">'
         + '<h3 style="margin:0 0 6px">Reserve your appointment</h3>'
-        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to your first invoice.'
+        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to ' + depositCreditTarget + '.'
         + (Number(intent.receivedTotal) > 0 ? ' (' + fmt(intent.receivedTotal) + ' already received.)' : '')
         + '</p>'
         + '<div id="deposit-payment-element"></div>'
@@ -5945,7 +6076,8 @@ ${shellQuestionsBar()}
 
   async function collectDepositIfNeeded() {
     if (!DEPOSIT_POLICY.required) return { ok: true };
-    if (bookingState.pickedPref === 'prepay_annual') return { ok: true }; // exempt — server re-verifies at accept
+    // Prepay-annual owes the deposit too (credited to the annual invoice at
+    // accept) — no preference skips the modal; the server gate re-verifies.
     if (bookingState.depositPaymentIntentId) return { ok: true }; // collected this session or via 3DS return
     let r;
     let data = {};
@@ -6350,15 +6482,58 @@ async function handleEstimateView(req, res, next) {
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
       && !effectiveInvoiceMode
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
-    const shouldUseReactEstimateView = (estimate.use_v2_view === true
+    // Staff can request the REAL React renderer for an unpublished row via
+    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
+    // list's Preview). The param is NOT authorization — this route only
+    // serves the SPA shell; GET /:token/data does the staff-JWT check and
+    // still 404s the draft for anyone else, so a non-staff hit on the URL
+    // renders the React "link isn't valid" screen (strictly less exposure
+    // than the SSR draft page below).
+    const adminPreviewRequested = req.query.adminPreview === '1';
+    let shouldUseReactEstimateView = (estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
       // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent. The React `/:token/data` gate 404s drafts (security),
-      // so routing them to React would break draft preview; the default flip
-      // only takes effect once the estimate is actually published.
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+      // before it's sent — UNLESS the staff preview param asks for the React
+      // page (the renderer the customer actually gets once it's sent; the
+      // /:token/data staff gate makes that path draft-safe). The use_v2_view
+      // default flip otherwise only takes effect once the estimate is
+      // actually published.
+      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
+
+    // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
+    // v2-by-default population is eligible: published, not an admin preview, not
+    // forced to React by invoice mode / card-hold, and a real customer view
+    // (staff + bots are excluded from both assignment AND exposure). Among those,
+    // GrowthBook may hold a control back to the legacy server-HTML renderer so we
+    // can measure v2's lift on acceptance/deposit/booking. Fails OPEN — a miss
+    // (gate off, no client key, feature absent, not-in-experiment, or any error)
+    // leaves the default v2 decision untouched. Forced-React and explicitly-v1
+    // (use_v2_view=false) estimates are never reassigned. See
+    // services/experimentation/growthbook.js.
+    if (featureGates.isEnabled('growthbookExperiments')
+      // Only assign where treatment can actually be served: this handler backs
+      // both the /estimate/ mount (which hands v2 to the React SPA via next()
+      // below) and /api/estimates/ (which renders legacy HTML regardless), so
+      // assigning on the latter would log v2 for a customer who sees v1.
+      && req.path.startsWith('/estimate/')
+      && estimate.use_v2_view === true
+      && !effectiveInvoiceMode
+      && !cardHoldForcesReactView
+      && !adminPreviewRequested
+      // Only estimates that can still convert: isEstimateAcceptActive excludes
+      // unpublished, terminal (accepted/declined/expired/send_failed), archived,
+      // and date-expired rows — otherwise they'd enter the acceptance
+      // denominator as non-convertible participants.
+      && isEstimateAcceptActive(estimate)
+      && shouldCountView(req, clientIp(req), estimate)) {
+      const assignment = await Experiments.assignEstimateViewExperiment(estimate);
+      if (assignment.inExperiment && typeof assignment.value === 'boolean') {
+        shouldUseReactEstimateView = assignment.value;
+      }
+    }
+
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -6403,9 +6578,18 @@ async function handleEstimateView(req, res, next) {
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at. Any other
       // non-terminal status flips to `viewed` as before.
+      // Snapshot the price the "Estimate viewed" notification quotes:
+      // tier-select and preference toggles rewrite estimates.monthly_total
+      // after this point, so accept-time copy needs the as-viewed value to
+      // reference. jsonb_set patches the one key without clobbering
+      // concurrent estimate_data writers; non-object blobs are left alone.
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
+          [Number(estimate.monthly_total || 0)],
+        ),
       });
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
@@ -6415,7 +6599,7 @@ async function handleEstimateView(req, res, next) {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
@@ -6439,15 +6623,15 @@ async function handleEstimateView(req, res, next) {
     // Existing-customer WaveGuard membership context (null for leads / on error).
     const membership = await buildEstimateMembershipContext(estimate);
 
-    // Deposit policy for the page's accept flow. Resolved without a payment
-    // preference — the prepay-annual exemption applies when the customer
-    // actually picks it, at deposit-intent/accept time. Both class amounts
-    // ride along so the page shows the right figure on the recurring/one-time
-    // toggle. Inert ({enforced:false}) while ESTIMATE_DEPOSIT_REQUIRED is off.
+    // Deposit policy for the page's accept flow. Payment preference plays no
+    // part — every non-exempt accept path owes the deposit, including
+    // prepay-annual (owner decision 2026-07-05: the $49 credits against the
+    // annual invoice minted at accept). Both class amounts ride along so the
+    // page shows the right figure on the recurring/one-time toggle. Inert
+    // ({enforced:false}) while ESTIMATE_DEPOSIT_REQUIRED is off.
     const depositStructuralOneTime = isStructuralOneTimeOnlyEstimate(estData, estimate);
     const depositPolicyForView = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
@@ -6784,15 +6968,17 @@ router.put('/:token/accept', async (req, res, next) => {
 
     // ─────────────────────────────────────────────
     // REQUIRED ACCEPTANCE DEPOSIT (dark until ESTIMATE_DEPOSIT_REQUIRED).
-    // Every acceptance requires a verified deposit except prepay-annual
-    // (paying in full) and existing plan customers — whose commitment gate
-    // is booking the appointment itself. Flat per-service-class amounts:
-    // one-time accepts pay the heavier amount and the credit lands on their
-    // completed-visit invoice (createFromService roll-forward); recurring
-    // accepts credit the first invoice created here. Verification never
-    // trusts the client: webhook-recorded deposit, else live Stripe
-    // retrieval of the named PaymentIntent with metadata pinned to this
-    // estimate.
+    // Every acceptance requires a verified deposit except existing plan
+    // customers — whose commitment gate is booking the appointment itself.
+    // Prepay-annual accepts owe it too (owner decision 2026-07-05: choosing
+    // prepay was the only zero-money accept path for a new customer); their
+    // $49 credits against the annual invoice the converter mints inside this
+    // same transaction. Flat per-service-class amounts: one-time accepts pay
+    // the heavier amount and the credit lands on their completed-visit
+    // invoice (createFromService roll-forward); recurring accepts credit the
+    // first invoice created here. Verification never trusts the client:
+    // webhook-recorded deposit, else live Stripe retrieval of the named
+    // PaymentIntent with metadata pinned to this estimate.
     // ─────────────────────────────────────────────
     const acceptMembership = await buildEstimateMembershipContext(estimate);
     // The scheduled_service whose per-job payer the eventual invoice will resolve.
@@ -6818,7 +7004,6 @@ router.put('/:token/accept', async (req, res, next) => {
     // (already resolved-mode-aware) collected the deposit.
     const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference,
       membership: acceptMembership,
       oneTime: treatAsOneTime,
       oneTimeUninvoiced: treatAsOneTime && !billByInvoice,
@@ -7000,9 +7185,32 @@ router.put('/:token/accept', async (req, res, next) => {
     const effectiveMonthlyTotal = selectedCombo?.monthly != null
       ? Number(selectedCombo.monthly)
       : (selectedFrequency?.monthly != null ? Number(selectedFrequency.monthly) : Number(estimate.monthly_total || 0));
-    const effectiveAnnualTotal = selectedCombo?.annual != null
+    const effectiveAnnualTotalRaw = selectedCombo?.annual != null
       ? Number(selectedCombo.annual)
       : (selectedFrequency?.annual != null ? Number(selectedFrequency.annual) : Number(estimate.annual_total || 0));
+    // v1-shaped frequency rows derive their annual as round(monthly * 12)
+    // (shapeFromV1's totalAnnAfter), which re-imports the cents drift the
+    // anchor removes (392.04 for the quarterly $392 plan) — and from here it
+    // flows into annual_total on accept, the prepay invoice base, and the
+    // billing cadence amount. Re-anchor ONLY when the selection IS the plan
+    // the engine pair describes (selected monthly === engine monthly): then
+    // the anchor returns totals.year2 exactly and never extrapolates. Combo
+    // annuals (summed from exact per-service annuals) and non-default cadence
+    // selections keep their own value — extrapolating the default plan's
+    // rounding residue into a different plan's price would bill an unquoted
+    // figure (e.g. a $1,026.00 combo persisted as $1,025.94).
+    const acceptAnchorRoot = estData?.result && typeof estData.result === 'object' ? estData.result : estData;
+    const acceptEngineMonthly = firstPositiveNumber(
+      acceptAnchorRoot?.totals?.year2mo,
+      acceptAnchorRoot?.recurring?.grandTotal,
+      acceptAnchorRoot?.recurring?.monthlyTotal,
+    );
+    const effectiveAnnualTotal = selectedCombo?.annual == null
+      && effectiveAnnualTotalRaw > 0
+      && effectiveAnnualTotalRaw === Math.round(effectiveMonthlyTotal * 12 * 100) / 100
+      && acceptEngineMonthly === effectiveMonthlyTotal
+      ? anchoredAnnualTotal(estData, effectiveMonthlyTotal)
+      : effectiveAnnualTotalRaw;
     const annualPrepayInvoiceAmount = annualPrepaySelected
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
@@ -7084,6 +7292,7 @@ router.put('/:token/accept', async (req, res, next) => {
     const effectiveBillingCadence = !treatAsOneTime
       ? BillingCadence.resolveBillingCadence({
           monthlyRate: effectiveMonthlyTotal,
+          annualRate: effectiveAnnualTotal,
           frequencyKey: selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey,
           estimateData: acceptedEstDataForPricing,
           fallbackFrequencyKey: 'quarterly',
@@ -7232,6 +7441,12 @@ router.put('/:token/accept', async (req, res, next) => {
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
         .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        // A locked price means money already committed on a prior accept —
+        // even if some path later returns the row to a sendable status
+        // (e.g. a schedule/re-send after acceptance), a second accept must
+        // not run conversion and invoicing again. Nothing ever clears
+        // price_locked_at; its only writers are the two accept flows.
+        .whereNull('price_locked_at')
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update(acceptedUpdates);
       if (!acceptedCount) {
@@ -7585,6 +7800,14 @@ router.put('/:token/accept', async (req, res, next) => {
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
+    // Customer-facing prepay figure for SMS/notifications/success payload: the
+    // ACTUAL invoice total — net of the acceptance-deposit credit the converter
+    // applied — so every quoted amount matches what the pay link collects.
+    // annualPrepayDisplayAmount (pre-credit) only survives as the fallback for
+    // a conversion that produced no amount.
+    const annualPrepayQuotedAmount = annualPrepaySelected && invoiceAmount != null
+      ? invoiceAmount
+      : annualPrepayDisplayAmount;
     let acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
     if (annualPrepaySelected && acceptedAppointmentsToRegister.length) {
       const appointmentIds = acceptedAppointmentsToRegister.map((appt) => appt?.id).filter(Boolean);
@@ -7640,6 +7863,41 @@ router.put('/:token/accept', async (req, res, next) => {
       void sendNewRecurringWelcome(annualPrepayConversion.welcomeSms)
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
     }
+    // "You're booked — here's what happens next" onboarding email
+    // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
+    // idempotent per estimate so an accept retry can't double-send. The
+    // earliest visit the accept flow scheduled (if any) supplies the
+    // appointment line; the template degrades cleanly when none exists.
+    if (customerId) {
+      const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+      // DB-refreshed rows carry scheduled_date as a Date (pg materializes
+      // date columns at local midnight); freshly-built rows carry the
+      // 'YYYY-MM-DD' string. Normalize both to the calendar-date key so the
+      // sort is by date, not by "Tue Jul ..." weekday text.
+      const dateKey = (v) => {
+        if (!v) return '';
+        if (v instanceof Date) {
+          return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+        }
+        return String(v).slice(0, 10);
+      };
+      const firstAcceptedAppointment = [...acceptedAppointmentsToRegister].sort((a, b) => {
+        const ad = dateKey(a?.scheduled_date);
+        const bd = dateKey(b?.scheduled_date);
+        return ad === bd
+          ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
+          : ad.localeCompare(bd);
+      })[0] || null;
+      void sendEstimateAcceptedOnboarding({
+        customerId,
+        estimateId: estimate.id,
+        serviceLabel: firstAcceptedAppointment?.service_type
+          || invoiceServiceLabel
+          || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
+          || 'service',
+        appointment: firstAcceptedAppointment,
+      });
+    }
     if (customerId) {
       try {
         await markLinkedLeadEstimateAccepted({
@@ -7669,6 +7927,12 @@ router.put('/:token/accept', async (req, res, next) => {
         entityType: 'estimates',
         entityId: estimate.id,
         customerId,
+        // Primarily rides the accept-flow SMS below (and doubles as the
+        // accept page's scheduling link). Tagged so the click-followup
+        // candidate scan — scoped to channel='sms' outbound links — keeps
+        // chasing accepted-but-never-booked clicks on this link.
+        channel: 'sms',
+        purpose: 'estimate_accept_booking',
       });
     }
     if (estimate.customer_phone && !billByInvoice && treatAsOneTime) {
@@ -7711,9 +7975,19 @@ router.put('/:token/accept', async (req, res, next) => {
             const serviceDate = scheduledDate
               ? formatETDate(new Date(`${scheduledDate}T12:00:00Z`))
               : 'your selected date';
-            const start = hhmm(confirmedAppointmentRow?.window_start);
-            const end = hhmm(confirmedAppointmentRow?.window_end);
-            const timeWindow = start && end ? formatSmsTimeRange(`${start}-${end}`) : 'your selected window';
+            // {time} quotes the 2-hour arrival promise from the window start.
+            // window_end is the job-duration block that sizes scheduling —
+            // never the customer-facing window (see sms-time-format).
+            const arrivalRange = arrivalWindowRange(confirmedAppointmentRow?.window_start);
+            const timeWindow = arrivalRange ? formatSmsTimeRange(arrivalRange) : 'your selected window';
+            // appointment_confirmation renders {reschedule_line}, and
+            // getTemplate suppresses the whole SMS on an unresolved
+            // placeholder — every render site must pass the clause ('' when
+            // no link could be minted).
+            const { buildRescheduleLink } = require('../services/reschedule-link');
+            const reschedule = confirmedAppointmentRow?.id
+              ? await buildRescheduleLink(confirmedAppointmentRow.id, { customerId: customerId || null })
+              : { url: null, line: '' };
             const customerBody = await renderTemplate(
               'appointment_confirmation',
               {
@@ -7721,6 +7995,7 @@ router.put('/:token/accept', async (req, res, next) => {
                 service_type: confirmedServiceLabel,
                 date: serviceDate,
                 time: timeWindow,
+                reschedule_line: reschedule.line,
               },
               undefined,
               { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
@@ -7757,7 +8032,7 @@ router.put('/:token/accept', async (req, res, next) => {
             });
           }
         } else if (annualPrepaySelected) {
-          const amountText = annualPrepayDisplayAmount != null ? ` for ${fmtMoney(annualPrepayDisplayAmount)}` : '';
+          const amountText = annualPrepayQuotedAmount != null ? ` for ${fmtMoney(annualPrepayQuotedAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
@@ -7955,6 +8230,15 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
 
+    // The "proposed" reference price for accept copy: prefer the amount
+    // snapshotted at first view (what the "Estimate viewed" notification
+    // quoted). Tier-select and preference toggles rewrite
+    // estimates.monthly_total between view and accept, so by accept time the
+    // live column can already equal the accepted price.
+    const proposedMonthlyForNotify = Number(rawEstData?.viewedMonthlyTotal || 0) > 0
+      ? Number(rawEstData.viewedMonthlyTotal)
+      : estimate.monthly_total;
+
     // In-app notifications for estimate accepted. Invoice-mode copy uses
     // invoiceMode, not billByInvoice, so we don't promise a pay link if
     // invoice creation/send failed or was skipped for a zero amount.
@@ -7981,6 +8265,7 @@ router.put('/:token/accept', async (req, res, next) => {
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
         monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
+        proposedMonthlyTotal: proposedMonthlyForNotify,
         serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
         treatAsOneTime,
         billByInvoice,
@@ -7991,7 +8276,7 @@ router.put('/:token/accept', async (req, res, next) => {
         reservationCommitted,
         bookingUrl,
         billingTerm,
-        annualPrepayAmount: annualPrepayDisplayAmount,
+        annualPrepayAmount: annualPrepayQuotedAmount,
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
@@ -8017,6 +8302,7 @@ router.put('/:token/accept', async (req, res, next) => {
           address: estimate.address,
           waveguardTier: estimate.waveguard_tier || 'Bronze',
           monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
+          proposedMonthlyTotal: proposedMonthlyForNotify,
           serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
           treatAsOneTime,
           billByInvoice,
@@ -8025,7 +8311,7 @@ router.put('/:token/accept', async (req, res, next) => {
           invoicePayUrl,
           reservationCommitted,
           billingTerm,
-          annualPrepayAmount: annualPrepayDisplayAmount,
+          annualPrepayAmount: annualPrepayQuotedAmount,
         }),
       });
     } catch (e) {
@@ -8042,7 +8328,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceKind,
       invoiceServiceLabel,
       billingTerm,
-      prepayInvoiceAmount: annualPrepayDisplayAmount,
+      prepayInvoiceAmount: annualPrepayQuotedAmount,
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,
@@ -8096,7 +8382,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
       manualMonthlyOff,
       (tierName) => tierDiscountForEstimate(parsedData, tierName),
     );
-    const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+    const annualTotal = anchoredAnnualTotal(parsedData, monthlyTotal);
 
     // Self-heal estimate_data.baseMonthly when we resolved it from the
     // engine result or summed services. Doesn't write when source is
@@ -8217,7 +8503,7 @@ router.put('/:token/preferences', async (req, res, next) => {
     const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
       ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - manualMonthlyOff - monthlyOff) * 100) / 100)
       : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
-    const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
+    const annualTotal  = anchoredAnnualTotal(parsedData, monthlyTotal);
     const derivedOneTimeChoiceBase = estimate.show_one_time_option
       ? oneTimeChoiceAmountForEstimate(
           { ...estimate, estimate_data: parsedData },
@@ -9508,6 +9794,20 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
 // they are intentionally NOT here.
 const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
 
+// Whether a /:token/data request MAY be upgraded to a staff draft preview —
+// the only bypass of isEstimateCustomerViewable, and deliberately narrow:
+// unpublished (draft/scheduled), non-archived rows only, and only when the
+// caller explicitly asked (?adminPreview=1). Expired/send_failed/archived
+// stay 404 even for staff. This predicate is the cheap half; the caller must
+// ALSO verify a staff Bearer JWT (verifyStaffBearer) before honoring it —
+// the `waves_admin` marker cookie is a view-count signal, never authorization.
+function adminDraftPreviewEligible(estimate, adminPreviewParam) {
+  return adminPreviewParam === '1'
+    && !!estimate
+    && !estimate.archived_at
+    && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
@@ -9638,11 +9938,27 @@ function estimateInvoicePayUrlParams({ billingTerm = 'standard', saveCard = true
   return params;
 }
 
+// Accept-time price can legitimately differ from the as-sent default when the
+// customer picks a different cadence/plan on the estimate page (accept re-prices
+// from the selected frequency/cadence combo). Surface both amounts on admin and
+// office copy so a "viewed at $X/mo" → "accepted at $Y/mo" notification pair
+// reads as a plan change, not a pricing discrepancy. Customer-facing copy never
+// gets the note — customers only ever saw the price they picked.
+function acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal) {
+  const accepted = Number(monthlyTotal || 0);
+  const proposed = Number(proposedMonthlyTotal || 0);
+  const proposedNote = accepted > 0 && proposed > 0 && Math.abs(accepted - proposed) >= 0.01
+    ? ` (proposed at ${fmtMoney(proposed)}/mo)`
+    : '';
+  return { monthlyText: `${fmtMoney(accepted)}/mo`, proposedNote };
+}
+
 function buildAcceptOfficeFallback({
   customerName = '',
   address = '',
   waveguardTier = 'Bronze',
   monthlyTotal = 0,
+  proposedMonthlyTotal = null,
   serviceLabel = 'service',
   treatAsOneTime = false,
   billByInvoice = false,
@@ -9655,11 +9971,12 @@ function buildAcceptOfficeFallback({
 } = {}) {
   const safeCustomerName = String(customerName || '').trim() || 'Unknown customer';
   const safeAddress = String(address || '').trim() || 'address unavailable';
+  const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
 
   if (billByInvoice) {
     const label = treatAsOneTime
       ? `${serviceLabel} one-time service`
-      : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+      : `${waveguardTier} WaveGuard ${monthlyText}${proposedNote}`;
     const invoiceText = invoiceLinkDelivered
       ? 'Invoice pay link sent.'
       : (invoiceMode || invoicePayUrl ? 'Invoice created; optional pay link available.' : 'Invoice mode selected.');
@@ -9680,9 +9997,9 @@ function buildAcceptOfficeFallback({
     const invoiceText = invoiceLinkDelivered
       ? 'Setup + first application invoice pay link sent.'
       : 'Setup + first application invoice created; optional pay link available.';
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. ${invoiceText}`;
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard ${monthlyText}${proposedNote}. ${invoiceText}`;
   }
-  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Invoice follow-up needed.`;
+  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard ${monthlyText}${proposedNote}. Invoice follow-up needed.`;
 }
 
 async function fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled }, triggerFn) {
@@ -9705,6 +10022,7 @@ function buildAcceptNotificationPayload({
   customerName = '',
   waveguardTier = 'Bronze',
   monthlyTotal = 0,
+  proposedMonthlyTotal = null,
   serviceLabel = 'One-time service',
   treatAsOneTime = false,
   billByInvoice = false,
@@ -9725,8 +10043,10 @@ function buildAcceptNotificationPayload({
   // here with billByInvoice unset; its invoicePayUrl is already nulled, but the
   // term branches below would still tell the homeowner to use the pay link.
   // Admin copy still reflects that the invoice was sent.
+  const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
   if (payerBilled) {
-    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard ${monthlyText}`;
+    const adminPlanLabel = treatAsOneTime ? serviceLabel : `${planLabel}${proposedNote}`;
     // Mirror the non-payer invoice-mode paths: only claim the invoice reached the
     // billing contact when delivery actually succeeded. A payer with no usable AP
     // email fails sendViaSMSAndEmail (invoiceLinkDelivered=false) — surface that
@@ -9735,7 +10055,7 @@ function buildAcceptNotificationPayload({
     if (!invoiceLinkDelivered) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${planLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
+        adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${planLabel} is approved. We'll coordinate billing with your billing contact — nothing is due from you.`,
         customerLink: '/?tab=billing',
@@ -9743,7 +10063,7 @@ function buildAcceptNotificationPayload({
     }
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${planLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+      adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
       customerLink: '/?tab=billing',
@@ -9754,10 +10074,10 @@ function buildAcceptNotificationPayload({
   // membership — use service-plan copy instead of the "{tier} WaveGuard"
   // fallback (which would otherwise read "Bronze WaveGuard plan approved").
   if (!treatAsOneTime && String(waveguardTier || '').trim().toLowerCase() === 'commercial') {
-    const planLabel = `Commercial service plan ($${monthlyTotal}/mo)`;
+    const planLabel = `Commercial service plan (${monthlyText})`;
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${planLabel} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
+      adminBody: `${planLabel}${proposedNote} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. A Waves team member will confirm the details and schedule your service.`,
       customerLink: '/?tab=billing',
@@ -9786,7 +10106,7 @@ function buildAcceptNotificationPayload({
     if (!invoiceMode || !invoiceLinkDelivered) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice was not sent automatically; office follow-up needed.`,
+        adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice was not sent automatically; office follow-up needed.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
         customerLink: invoicePayUrl || '/?tab=billing',
@@ -9794,7 +10114,7 @@ function buildAcceptNotificationPayload({
     }
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice pay link is being sent.`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice pay link is being sent.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -9844,7 +10164,7 @@ function buildAcceptNotificationPayload({
     const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; optional pay link available.';
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. ${sentText}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. ${sentText}`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -9853,7 +10173,7 @@ function buildAcceptNotificationPayload({
 
   return {
     adminTitle: `Estimate accepted: ${customerName}`,
-    adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice follow-up needed.`,
+    adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice follow-up needed.`,
     customerTitle: 'Estimate accepted',
     customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Our team will follow up with the invoice details.`,
     customerLink: '/?tab=billing',
@@ -10026,11 +10346,32 @@ function serviceLabelForCategory(category, fallback = null) {
   }
 }
 
-function serviceCategoryForOneTimeItem(item = {}) {
+// Fee/adjustment/discount rows (and blank rows) are not services: they never
+// classify to a category, and a scoped glass release must not treat them as
+// unclassified services either.
+function isNonServiceOneTimeItem(item = {}) {
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
-  if (!name && !service) return null;
-  if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
+  if (!name && !service) return true;
+  // Discount rows (manual_discount, negative adjustments) take money off —
+  // they can't be an out-of-scope service.
+  if (item?.kind === 'discount' || service === 'manual_discount') return true;
+  // Label-based WaveGuard check too: legacy saved rows carry only a
+  // "WaveGuard Setup" label without service: 'waveguard_setup'.
+  if (service === 'waveguard_setup' || service === 'rodent_bundle_discount' || isWaveGuardSetupOneTimeItem(item)) return true;
+  // A POSITIVE one_time_adjustment is the residual "Other one-time services"
+  // charge normalizeOneTimeBreakdown mints when the saved one-time total
+  // exceeds the classified rows — that's real unclassified work, so it stays
+  // a service row and a scoped release fails closed on it. Zero/negative
+  // adjustments are discounts/rounding and never block.
+  if (service === 'one_time_adjustment') return !(Number(item?.amount) > 0);
+  return false;
+}
+
+function serviceCategoryForOneTimeItem(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return null;
+  const name = item?.name || item?.label || item?.service || '';
+  const service = String(item?.service || '').toLowerCase();
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -10040,13 +10381,20 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
+  // One-time lawn specialty rows from the pricing engine (priceTopDressing /
+  // priceDethatching / pricePlugging) carry keys with no 'lawn' substring, so
+  // the generic lawn heuristic below never sees them.
+  if (
+    service.includes('top_dress') || service.includes('dethatch') || service.includes('plugging')
+    || /top[ -_]?dress|dethatch|\bplugging\b/i.test(name)
+  ) return 'lawn_care';
   if (isTreeShrubServiceName(name) || service.includes('tree') || service.includes('shrub') || service.includes('palm')) return 'tree_shrub';
   if (isMosquitoServiceName(name) || service.includes('mosquito')) return 'mosquito';
   if (isLawnServiceName(name) || service.includes('lawn')) return 'lawn_care';
   return null;
 }
 
-function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
   const categories = new Set();
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   recurring.forEach((svc) => {
@@ -10060,14 +10408,79 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     if (category) categories.add(category);
   });
 
+  return categories;
+}
+
+// Optional service-category scope for the glass release: CSV env, e.g.
+// GATE_ESTIMATE_GLASS_CATEGORIES=pest_control,lawn_care. Unset/empty = all
+// categories. An estimate qualifies only when EVERY category on it is in
+// scope, so a pest+lawn bundle releases but pest+mosquito stays on the old
+// page until mosquito's pack ships.
+const GLASS_RELEASE_CATEGORIES = (process.env.GATE_ESTIMATE_GLASS_CATEGORIES || '')
+  .split(',').map((c) => c.trim()).filter(Boolean);
+
+function glassCategoryEligible(estData, recurringServices, oneTimeItems, allowedList = GLASS_RELEASE_CATEGORIES) {
+  if (!allowedList.length) return true;
+  const allowed = new Set(allowedList);
+  const recurring = Array.isArray(recurringServices) ? recurringServices : [];
+  // Rows classify through the scope-aware item classifier, NOT the copy one:
+  // stinging/wasp rows read as pest_control by name for copy purposes, which
+  // must not place them in the pest scope (Codex rd8).
+  const categories = new Set();
+  recurring.forEach((svc) => {
+    const category = categoryForRecurringServiceKey(recurringServiceKey(svc));
+    if (category) categories.add(category);
+  });
+  const items = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  items.forEach((item) => {
+    const category = scopeCategoryForOneTimeItem(item);
+    if (category) categories.add(category);
+  });
+  // Row categories under-count: a generated one-time add-on (e.g.
+  // pest_initial_roach from roach activity) classifies alone while the engine
+  // inputs still carry the other selected services, and recurring rows only
+  // vouch for the recurring services — an out-of-scope one-time flag (e.g.
+  // services.stinging beside a recurring pest row) produces a row whose NAME
+  // classifies in-scope. Engine inputs are therefore ALWAYS unioned in; the
+  // scope inference is fail-closed by construction (Codex rd7).
+  inferScopeCategoriesFromEngineInputs(estData).forEach((c) => categories.add(c));
+  // Fail closed on service rows the classifiers DROP, not just on estimates
+  // that classify to nothing: a recurring key or real one-time service line
+  // that maps to no category (e.g. a WDO inspection alongside recurring pest)
+  // is an out-of-scope service, not an absent one. Fee/adjustment rows
+  // (waveguard_setup, one_time_adjustment, rodent_bundle_discount) are not
+  // services and never block.
+  const hasUnclassifiedService = recurring.some((svc) => !categoryForRecurringServiceKey(recurringServiceKey(svc)))
+    || items.some((item) => !isNonServiceOneTimeItem(item) && !scopeCategoryForOneTimeItem(item));
+  if (hasUnclassifiedService) return false;
+  return categories.size > 0 && [...categories].every((c) => allowed.has(c));
+}
+
+function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+  const categories = collectServiceCategories(recurringServices, oneTimeItems);
+
   if (categories.size > 1) return 'bundle';
   if (categories.size === 1) return Array.from(categories)[0];
 
+  const inferred = inferCategoriesFromEngineInputs(estData);
+  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
+}
+
+// Mirrors the pricing engine's serviceSelected(): commercial engine-input
+// flags are OBJECTS ({selected, commercialSubtype, ...}), so plain truthiness
+// would read a deselected {selected:false} as an active service.
+function engineCommercialServiceSelected(value) {
+  if (value === true) return true;
+  if (!value || typeof value !== 'object') return false;
+  return value.selected === true || value.enabled === true || value.value === true;
+}
+
+function inferCategoriesFromEngineInputs(estData = {}) {
   const inputs = estData?.inputs || estData?.engineInputs || {};
   const services = inputs.services || {};
-  const inferred = [
-    services.pest || inputs.svcPest ? 'pest_control' : null,
-    services.lawn || services.lawnCare || inputs.svcLawn ? 'lawn_care' : null,
+  return [
+    services.pest || inputs.svcPest || engineCommercialServiceSelected(services.commercialPest) ? 'pest_control' : null,
+    services.lawn || services.lawnCare || inputs.svcLawn || engineCommercialServiceSelected(services.commercialLawn) ? 'lawn_care' : null,
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
@@ -10080,7 +10493,126 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     // the 'pest_control' default and the public page mislabels it as Pest Control.
     services.foamRecurring || inputs.svcFoamRecurring ? 'foam_recurring' : null,
   ].filter(Boolean);
-  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
+}
+
+// Scope-only superset of inferCategoriesFromEngineInputs, used ONLY by
+// glassCategoryEligible. deriveServiceCategory keeps the narrow list above so
+// page copy is unchanged; the scope check must instead see EVERY selectable
+// engine service flag, because recurring-capable lanes persist no one-time
+// rows for the fail-closed row check to catch (Codex rd6: services.rodentBait
+// made a pest+rodent-bait estimate look pest-only). Categories here only need
+// to be right about in-scope-vs-not — specialty lanes map to keys that are
+// never in a release CSV, which fails closed.
+//
+// Predicate asymmetry is deliberate and fail-closed on both sides:
+// in-scope flags (pest/lawn pairs in the base list + the specialty pest/lawn
+// flags below) use STRICT selected semantics — under-detecting one just keeps
+// the old page. Out-of-scope flags use LOOSE truthiness — a vestigial
+// {selected:false} object blocks glass, which is the safe direction.
+const SCOPE_IN_SCOPE_ENGINE_FLAGS = [
+  ['oneTimePest', 'pest_control'], ['pestInitialRoach', 'pest_control'],
+  ['germanRoach', 'pest_control'], ['germanRoachInitial', 'pest_control'],
+  ['bedBug', 'pest_control'], ['flea', 'pest_control'], ['fleaExterior', 'pest_control'],
+  // Quote-wizard flag; its priced rows key as lawn_pest_* which
+  // recurringServiceKey resolves to pest_control (the 'pest' substring wins),
+  // so the flag maps consistently with the rows it generates.
+  ['lawnPestControl', 'pest_control'],
+  ['oneTimeLawn', 'lawn_care'], ['topDressing', 'lawn_care'],
+  ['dethatching', 'lawn_care'], ['plugging', 'lawn_care'],
+];
+const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
+  ['palm', 'tree_shrub'], ['palmInjection', 'tree_shrub'],
+  ['rodentBait', 'rodent'], ['rodentBaitSetupForce', 'rodent'], ['rodentTrapping', 'rodent'],
+  ['rodentTrappingFollowups', 'rodent'], ['rodentGuarantee', 'rodent'],
+  ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
+  ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
+  ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV2', 'rodent'],
+  ['sanitation', 'rodent'],
+  ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
+  ['termiteFoam', 'termite_foam'],
+  ['termite_bait', 'termite_bait'],
+  ['preSlabTermidor', 'pre_slab_termiticide'], ['pre_slab_termidor', 'pre_slab_termiticide'],
+  ['stinging', 'stinging'], ['stingingV2', 'stinging'],
+  ['wdo', 'wdo'],
+];
+// Legacy admin estimates persist the selection as TOP-LEVEL inputs.svc* form
+// flags (see selectedServiceKeysFromInputs in estimate-service-lines.js), not
+// under inputs.services. The base inference reads the recurring-capable ones
+// (svcPest/svcLawn/...); these cover the rest of the form with the same
+// strict-in / loose-out asymmetry (Codex rd7: standalone svcWasp quotes
+// classified pest_control off the row name alone).
+const SCOPE_IN_SCOPE_LEGACY_FLAGS = [
+  ['svcOnetimePest', 'pest_control'], ['svcRoach', 'pest_control'],
+  ['svcBedbug', 'pest_control'], ['svcFlea', 'pest_control'],
+  ['svcFleaExterior', 'pest_control'],
+  ['svcOnetimeLawn', 'lawn_care'], ['svcTopdress', 'lawn_care'],
+  ['svcDethatch', 'lawn_care'], ['svcPlugging', 'lawn_care'],
+  ['svcOverseed', 'lawn_care'],
+];
+const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
+  ['svcWasp', 'stinging'],
+  ['svcTs', 'tree_shrub'], ['svcInjection', 'tree_shrub'],
+  ['svcRodentBait', 'rodent'], ['svcRodentTrap', 'rodent'],
+  ['svcRodentSanitation', 'rodent'], ['svcRodentGuarantee', 'rodent'],
+  ['svcRodentWireMesh', 'rodent'], ['svcRodentBirdBox', 'rodent'],
+  ['svcTrapOnlyRetainer', 'rodent'], ['svcExclusion', 'rodent'],
+  ['svcFoam', 'termite_foam'],
+  ['svcWdo', 'wdo'],
+];
+
+// Scope classification for one-time rows. Stinging/wasp rows classify as
+// pest_control by NAME through oneTimeItemLooksPestSpecialty — right for page
+// copy (the pest sections render them), wrong for the release scope: a
+// row-only wasp quote with no surviving source flags walked into the pest
+// scope (Codex rd8). serviceCategoryForOneTimeItem (copy) is untouched.
+function scopeCategoryForOneTimeItem(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return null;
+  const service = String(item?.service || '').toLowerCase();
+  const text = oneTimeItemSearchText(item);
+  if (service.includes('stinging') || /\b(wasp|bee|hornet|stinging)\b/.test(text)) return 'stinging';
+  return serviceCategoryForOneTimeItem(item);
+}
+
+function inferScopeCategoriesFromEngineInputs(estData = {}) {
+  // The input shapes COEXIST (Codex rd8): admin persistence can carry
+  // engineInputs beside an empty legacy inputs {} (the rest of the route
+  // treats engineInputs as authoritative — see extractEngineInputs), and
+  // quote-wizard estimates persist the selection at TOP-LEVEL
+  // estimate_data.services. `inputs || engineInputs` hid whole sources, so
+  // every present source is scanned and unioned instead.
+  const inputSources = [estData?.inputs, estData?.engineInputs]
+    .filter((source) => source && typeof source === 'object');
+  const serviceSources = [
+    ...inputSources.map((source) => source.services),
+    estData?.services,
+  ].filter((source) => source && typeof source === 'object');
+  const categories = new Set();
+  inputSources.forEach((source) => {
+    inferCategoriesFromEngineInputs({ inputs: source }).forEach((c) => categories.add(c));
+  });
+  if (estData?.services && typeof estData.services === 'object') {
+    inferCategoriesFromEngineInputs({ inputs: { services: estData.services } })
+      .forEach((c) => categories.add(c));
+  }
+  serviceSources.forEach((services) => {
+    SCOPE_IN_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+      const value = services[flag];
+      if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+    });
+    SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS.forEach(([flag, category]) => {
+      if (services[flag]) categories.add(category);
+    });
+  });
+  inputSources.forEach((source) => {
+    SCOPE_IN_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+      const value = source[flag];
+      if (value === true || engineCommercialServiceSelected(value)) categories.add(category);
+    });
+    SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS.forEach(([flag, category]) => {
+      if (source[flag]) categories.add(category);
+    });
+  });
+  return [...categories];
 }
 
 function chipsForServiceCategory(category) {
@@ -12336,12 +12868,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // server-HTML page short-circuited these to the expired/not-found shell
     // before building any payload; the data endpoint owns that guard for the
     // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen). No admin bypass: this fetch carries no
-    // current-session credential (the public page sends no admin Bearer token),
-    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
-    // view-count signal — not authorization — so previewing a draft/expired
-    // estimate goes through an authenticated admin surface, never this endpoint.
-    if (!isEstimateCustomerViewable(estimate)) {
+    // expired or isn't valid" screen).
+    //
+    // ONE bypass: the staff draft preview. When the page URL carries
+    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
+    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
+    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
+    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
+    // signal, never authorization, and still grants nothing here). This is
+    // what lets "Customer View" show a draft through the RENDERER the customer
+    // actually gets, instead of the diverging legacy SSR page. Expired /
+    // send_failed / archived rows stay 404 even for staff, and every view
+    // side effect below is skipped — a preview must not count views or flip
+    // a draft's status.
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && Boolean(await verifyStaffBearer(req));
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -12356,7 +12898,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
+    if (!adminDraftPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -12378,13 +12920,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — keep admin preview clicks from making the
     // estimate look customer-opened. Internal React refreshes (?refresh=1) are
     // never the first view, so they must not flip status or notify admin twice.
-    if (!isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // The staff draft preview is hard-excluded above IP/UA heuristics: the
+    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
+    // effect) if a staff preview ever slipped through shouldApplyFirstView.
+    if (!adminDraftPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
+      // Snapshot the as-viewed price for accept-time copy — see the matching
+      // first-view block in handleEstimateView for why jsonb_set.
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
+          [Number(estimate.monthly_total || 0)],
+        ),
       }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
@@ -12397,7 +12948,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         await NotificationService.notifyAdmin(
           'estimate',
           `Estimate viewed: ${estimate.customer_name}`,
-          `${estimate.address || 'no address'} — $${estimate.monthly_total || 0}/mo`,
+          `${estimate.address || 'no address'} — ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`,
           { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
@@ -12508,7 +13059,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const depositStructuralOneTime = isStructuralOneTimeOnlyEstimate(depositEstData, estimate);
     const depositPolicy = await resolveDepositPolicyForEstimate({
       estimate,
-      paymentMethodPreference: null,
       membership,
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && !effectiveInvoiceMode,
@@ -12553,7 +13103,27 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       : null;
 
     res.json({
+      // Only present on a verified staff draft preview — the React page keys
+      // its "draft preview, not sent" banner + accept guards off this. Absent
+      // (not false) otherwise so customer responses stay byte-identical.
+      ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
+      // Estimate glass COPY release — category-scoped (owner call 2026-07-05:
+      // pest + lawn first; other categories keep the old copy until their glass
+      // copy packs are approved). NOTE: the glass THEME is unconditional on
+      // every estimate now (the GATE_ESTIMATE_GLASS theme gate was retired);
+      // only the marketing COPY still rides this per-category `glassDefault`.
+      ...(glassCategoryEligible(estimateDataForIntelligence, recurringServicesForIntelligence, [
+        // The scope decision sees the RAW normalized rows unioned with the
+        // bundle items: alignOneTimeChoiceBreakdown (show_one_time_option)
+        // replaces raw rows with the synthetic choice + preserved pest/Bora
+        // add-ons, which would drop an out-of-scope row (e.g. WDO) before the
+        // fail-closed check could catch it. Union keeps both the dropped raw
+        // rows and any bundle-only generated add-ons in view.
+        ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+        ...(pricingBundle?.oneTimeBreakdown?.items || []),
+      ])
+        ? { glassDefault: true } : {}),
       depositPolicy: {
         enforced: depositPolicy.enforced,
         required: depositPolicy.required,
@@ -12716,6 +13286,7 @@ module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
@@ -12740,10 +13311,12 @@ module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
+module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
+module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
@@ -12764,7 +13337,9 @@ module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVi
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
+module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
+module.exports.isNonBillableOneTimeRow = isNonBillableOneTimeRow;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
@@ -12801,3 +13376,5 @@ module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;
 module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
+module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
+module.exports.anchoredAnnualTotal = anchoredAnnualTotal;

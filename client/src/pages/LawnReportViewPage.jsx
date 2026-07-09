@@ -1,7 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
+import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 
@@ -12,9 +15,12 @@ const WAVES_PHONE_TEL = '+19412975749';
 // Warm-brand tokens — mirror the public estimate view (customer surface, not admin).
 const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
-const TEXT = '#1B2C5B';
+// Canonical glass ink (owner ruling 2026-07-05) — this page is glass-only
+// (useGlassSurface mounts unconditionally), so the old marketing navy
+// #1B2C5B has no remaining render path here.
+const TEXT = '#04395E';
 const BODY = '#3F4A65';
-const MUTED = '#6B7280';
+const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
@@ -28,20 +34,45 @@ const SEVERITY_DOT = { mild: COLORS.green, moderate: COLORS.orange, severe: COLO
 
 function Page({ children }) {
   return (
-    <div style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
-      <header style={{ background: CARD, borderBottom: `1px solid ${BORDER}`, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontFamily: FONTS.display, fontSize: 22, color: TEXT, letterSpacing: '0.01em' }}>Waves Pest Control &amp; Lawn</span>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: COLORS.blueDeeper, textDecoration: 'none' }}>{WAVES_PHONE_DISPLAY}</a>
-      </header>
+    <div className="lawn-report-page" style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
+      {/* ---------- liquid glass ----------
+          useGlassSurface sets html[data-glass-theme]; every rule below is
+          scoped under it so the non-glass page stays pixel-identical. Card
+          material comes from glass-theme.css via the data-glass attributes —
+          this block only clears the page wash and adds the print reset. */}
+      <style>{`
+        html[data-glass-theme] .lawn-report-page { background: transparent !important; }
+        /* the glass ::before/::after specular layers position against the card */
+        html[data-glass-theme] .lawn-report-page [data-glass] { position: relative; }
+        @media print {
+          /* printing the glass view still yields the paper document */
+          html[data-glass-theme] .lawn-report-page { background: #fff !important; }
+          html[data-glass-theme] .lawn-report-page [data-glass],
+          html[data-glass-theme] .lawn-report-page [data-glass-accent] {
+            background: #fff !important;
+            border-color: #d4d4d4 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          html[data-glass-theme] .glass-scene-orbs,
+          html[data-glass-theme] .glass-scene-grain { display: none !important; }
+        }
+      `}</style>
+      {/* Page-local header removed — the WavesShell top bar (App.jsx route
+          wrap, owner 2026-07-06) provides the standard chrome. */}
       <main style={{ flex: 1, width: '100%', maxWidth: 720, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
+      {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
+      <GlassNewsletterCard source="lawn_report_footer" />
       <BrandFooter variant="light" />
     </div>
   );
 }
 
 function SectionCard({ children, style }) {
+  // data-glass is inert without html[data-glass-theme] — the non-glass render is unchanged.
   return (
-    <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -68,7 +99,7 @@ function NotFoundCard() {
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
       </p>
-      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -98,10 +129,23 @@ function QuoteRequestForm({ token, firstName }) {
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 409) { setStatus('success'); return; }
-      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      if (!res.ok) {
+        // Server validation returns machine codes ('contact_required',
+        // 'name_required') — map to friendly copy, never render them raw.
+        const friendly = {
+          name_required: 'Please add your name.',
+          contact_required: 'Add a valid phone number (10 digits) or email so we can reach you.',
+          invalid_body: 'Something looked off with the form — please check it and try again.',
+        }[data?.error];
+        throw Object.assign(
+          new Error(friendly || 'We couldn’t send your request. Please try again, or call us at (941) 297-5749.'),
+          { friendly: true },
+        );
+      }
       setStatus('success');
     } catch (err) {
-      setError(err.message || 'Something went wrong. Please try again.');
+      // Network/parse errors carry raw technical messages — never show those.
+      setError(err?.friendly ? err.message : 'Something went wrong. Please check your connection and try again.');
       setStatus('error');
     }
   };
@@ -122,7 +166,7 @@ function QuoteRequestForm({ token, firstName }) {
       <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" type="tel" autoComplete="tel" style={inputStyle} />
       <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" type="email" autoComplete="email" style={inputStyle} />
       <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" style={inputStyle} />
-      <button type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
+      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>
       {error ? (
@@ -137,6 +181,11 @@ export default function LawnReportViewPage() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+
+  // Liquid-glass theme — now unconditional. This page has no pdf/static
+  // render modes — the route only ever serves the live customer view.
+  const glassActive = true;
+  useGlassSurface(glassActive, 'full');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -219,7 +268,7 @@ export default function LawnReportViewPage() {
           ) : null}
           {watchItems.length ? (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
-              <div style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
+              <div data-gt="eyebrow" style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
               <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 14, lineHeight: 1.6 }}>
                 {watchItems.map((w, i) => <li key={i}>{w}</li>)}
               </ul>
@@ -230,8 +279,41 @@ export default function LawnReportViewPage() {
 
       {report.seasonal_context ? (
         <SectionCard style={{ background: COLORS.sand, border: `1px solid ${BORDER}` }}>
-          <div style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
+          <div data-gt="eyebrow" style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
           <p style={{ margin: 0, color: BODY, fontSize: 14, lineHeight: 1.55 }}>{report.seasonal_context}</p>
+        </SectionCard>
+      ) : null}
+
+      {/* Pricing — present only on assessment-funnel reports (server-computed
+          at unlock from the pricing engine; tech-sent reports carry none). */}
+      {Array.isArray(report.pricing?.tiers) && report.pricing.tiers.length ? (
+        <SectionCard>
+          <SectionTitle>{report.pricing.service_label || 'Your lawn program'}</SectionTitle>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {report.pricing.tiers.map((tier, i) => (
+              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+                <div>
+                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+                    {tier.label}{tier.recommended ? ' · Most popular' : ''}
+                  </div>
+                  {/* Engine labels usually already read "N Applications" — only add
+                      the cadence line when the label doesn't state it. */}
+                  {tier.visits && !/application/i.test(tier.label || '') ? <div style={{ fontSize: 14, color: MUTED }}>{tier.visits} applications per year</div> : null}
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  {tier.monthly != null ? (
+                    <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                      ${tier.monthly}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span>
+                    </div>
+                  ) : null}
+                  {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+          {report.pricing.basis_note ? (
+            <p style={{ margin: '12px 0 0', color: MUTED, fontSize: 14, lineHeight: 1.5 }}>{report.pricing.basis_note}</p>
+          ) : null}
         </SectionCard>
       ) : null}
 
@@ -245,7 +327,7 @@ export default function LawnReportViewPage() {
       </SectionCard>
 
       <GuaranteeStrip />
-      <QuestionsEscapeHatch estimateSlug={token} />
+      <QuestionsEscapeHatch context="lawn_report" />
     </Page>
   );
 }

@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
@@ -160,7 +161,6 @@ const DEFAULT_BLOG_AUTHOR = Object.freeze({
   name: 'Adam Benetti',
   role: 'Founder & Lead Technician',
   fdacs_license: 'JB351547',
-  years_swfl: 12,
   bio_url: '/about/authors/adam-benetti',
 });
 const DEFAULT_TECHNICAL_REVIEWER = Object.freeze({
@@ -215,7 +215,7 @@ async function buildFrontmatter(post) {
   const author = post.author_slug ? await authorService.getAuthor(post.author_slug) : null;
   const reviewer = post.reviewer_slug ? await authorService.getAuthor(post.reviewer_slug) : null;
 
-  const today = (post.publish_date ? new Date(post.publish_date) : new Date()).toISOString().slice(0, 10);
+  const today = calendarDateOnly(post.publish_date) || etDateString();
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const canonical = `${hub}/${slug}/`;
 
@@ -224,8 +224,15 @@ async function buildFrontmatter(post) {
         ? post.featured_image_url
         : `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.${post.hero_image_ext || imageExtFromSource(post.featured_image_url)}`)
     : null;
-  const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
-  const factCheckedDate = dateOnly(post.fact_checked_at);
+  // technically_reviewed / fact_checked are schema-REQUIRED: a present-but-
+  // corrupt stamp heals to today ET (matching publish_date's fallback) rather
+  // than dropping to undefined, which would fail assertValidBlogFrontmatter
+  // and strand the row before a PR ever opens. An absent stamp stays absent
+  // (unchanged behavior).
+  const technicallyReviewedDate = calendarDateOnly(post.technically_reviewed_at)
+    || (post.technically_reviewed_at ? etDateString() : null);
+  const factCheckedDate = calendarDateOnly(post.fact_checked_at)
+    || (post.fact_checked_at ? etDateString() : null);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
@@ -251,7 +258,6 @@ async function buildFrontmatter(post) {
       name: author.name,
       role: author.role,
       fdacs_license: author.fdacs_license || undefined,
-      years_swfl: author.years_swfl || undefined,
       bio_url: author.bio_url,
     } : undefined,
     technically_reviewed_by: reviewer ? {
@@ -356,8 +362,8 @@ function normalizeAuthorBlock(value, fallback) {
   const out = { name, role, bio_url: bioUrl };
   const fdacs = String(source.fdacs_license || fallback.fdacs_license || '').trim();
   if (/^JB\d{4,}$/.test(fdacs)) out.fdacs_license = fdacs;
-  const years = Number.isInteger(source.years_swfl) ? source.years_swfl : fallback.years_swfl;
-  if (Number.isInteger(years) && years >= 0) out.years_swfl = years;
+  // No tenure field: the old years_swfl emission was a fabricated "12" (owner
+  // ruling 2026-07-09 — real figure is 3, and tenure is not displayed anywhere).
   return out;
 }
 
@@ -424,13 +430,16 @@ function clampTitle(title) {
 }
 
 function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body = '', { slug, canonical } = {}) {
-  const published = dateOnly(frontmatter.published)
-    || dateOnly(frontmatter.publish_date)
-    || dateOnly(brief.publish_window)
-    || etDateString();
-  const updated = dateOnly(frontmatter.updated) || published;
-  const reviewed = dateOnly(frontmatter.technically_reviewed) || updated;
-  const factChecked = dateOnly(frontmatter.fact_checked) || updated;
+  // Dates are stamped deterministically at PR-open, never taken from the
+  // writer agent's emitted frontmatter — models echo their (UTC) context date,
+  // which reads as "tomorrow" when the PR opens in the ET evening, and
+  // placeholder dates pass schema validation. This lane only ever publishes
+  // brand-new posts (single caller, fresh content/autonomous-* branch), so
+  // PR-open day in ET IS the publication date for all four fields.
+  const published = etDateString();
+  const updated = published;
+  const reviewed = published;
+  const factChecked = published;
   const heroAlt = String(frontmatter?.hero_image?.alt || frontmatter.hero_image_alt || frontmatter.title || '').trim();
   const defaultHeroSrc = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`;
   const emittedHeroSrc = String(frontmatter?.hero_image?.src || '').trim();
@@ -506,11 +515,33 @@ function estimateReadingTime(text) {
   return Math.max(1, Math.round(words / 220));
 }
 
-function dateOnly(value) {
+// Calendar-date normalization for STORED blog dates (publish_date /
+// technically_reviewed_at / fact_checked_at are DATE columns). pg/Knex
+// returns DATE columns as midnight Date objects, so the stored calendar day
+// is read directly (local date fields / date-string prefix) — round-tripping
+// it through a timezone conversion shifts every persisted date to the
+// previous ET day. Timezone (ET, via etDateString) only applies to "now"
+// stamps. Sanity rails: dates before the company existed (2024) are corrupt
+// rows → null, caller falls back (a live post shipped dated 1970-01-01 from
+// exactly this); no post may claim a future publish date (clamped to today
+// ET — the UTC version of this bug stamped "tomorrow" on ET-evening PRs).
+const EARLIEST_VALID_CONTENT_DATE = '2024-01-01';
+
+function calendarDateOnly(value) {
   if (!value) return null;
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  let s = null;
+  if (typeof value === 'string') {
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[T ]|$)/.exec(value.trim());
+    if (m) s = m[1];
+  }
+  if (!s) {
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    s = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  if (s < EARLIEST_VALID_CONTENT_DATE) return null;
+  const today = etDateString();
+  return s > today ? today : s;
 }
 
 function imageExtFromMime(mime) {
@@ -662,20 +693,46 @@ async function publishAstro(postId) {
   //     DELETE them before opening the replacement — that both unblocks the
   //     retry and prevents an orphan. Best-effort: cleanup failure is logged
   //     but doesn't block the republish.
-  // live/merged/draft/publish_failed have no open PR to orphan (the existing-
-  // file SHA path handles in-place updates), so they fall through.
+  //   - publish_failed WITH a PR marker → the catch below persists the
+  //     PR/branch when the failure landed after gh.createPr (e.g. the
+  //     pr_open stamp itself died), so the admin Retry on publish_failed
+  //     gets the same close+delete — without it the retry opened a SECOND
+  //     PR and overwrote the marker, orphaning the first.
+  // live/merged/draft and marker-less publish_failed have no open PR to
+  // orphan (the existing-file SHA path handles in-place updates), so they
+  // fall through.
   if (post.astro_status === 'pr_open' || post.astro_status === 'unpublish_pending') {
     throw new Error(
       `cannot publish post ${postId}: an Astro PR is already in flight (status "${post.astro_status}"`
       + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
     );
   }
-  if (post.astro_status === 'build_failed' && (post.astro_pr_number || post.astro_branch_name)) {
+  if (
+    (post.astro_status === 'build_failed' || post.astro_status === 'publish_failed')
+    && (post.astro_pr_number || post.astro_branch_name)
+  ) {
     await cleanupStaleAstroPr(post);
   }
 
   const slug = post.slug || slugify(post.title);
   const branch = `content/blog-${slug}-${shortId()}`;
+  // Tracked OUTSIDE the try: once a PR exists on GitHub, the catch below
+  // must persist its number even though the pr_open stamp never landed —
+  // "astro_pr_number IS NULL" is what the scheduler's transient-retry fork
+  // reads as proof the failure happened BEFORE PR creation, and losing the
+  // marker here would let the next tick open a duplicate PR.
+  let openedPr = null;
+  // Same discipline for the branch: each attempt cuts a FRESH shortId
+  // branch, so a branch that was created but never reached a PR must be
+  // deleted on the way out — the scheduler's retry would otherwise leave
+  // one orphan branch (with its hero commit) per 15-minute tick that no
+  // later cleanup can locate.
+  let branchCreated = false;
+  // Whether gh.createPr was CALLED: a call that threw may still have
+  // created the PR on GitHub's side (ghFetch retries POSTs on 5xx, and a
+  // timeout can land after creation) — the catch must look the branch up
+  // before deleting it, or it deletes a live PR's head.
+  let prCreateAttempted = false;
 
   try {
     // 1. Hero image (required by the Astro schema). Fetch before branch
@@ -693,8 +750,26 @@ async function publishAstro(postId) {
     //     prior merged publish; reference it as-is, don't re-fetch.
     let heroImage = null;
     if (post.featured_image_url && !isCommittedHeroUrl(post.featured_image_url)) {
-      heroImage = await fetchImageBuffer(post.featured_image_url);
-      if (!heroImage?.buffer) throw new Error('featured image could not be fetched for Astro publish');
+      // Tagged BLOG_HERO_MEDIA_FAILED so the scheduler parks it with the
+      // other deterministic publish errors: a curated featured_image_url
+      // that 404s or isn't an image fails identically every attempt, and
+      // the transient-retry fork would re-burn the publish every 15
+      // minutes forever. (A rare network blip parking for review is the
+      // fail-safe direction; the author just reschedules.) AI hero
+      // GENERATION failures below stay untagged — provider hiccups are
+      // genuinely transient.
+      try {
+        heroImage = await fetchImageBuffer(post.featured_image_url);
+      } catch (mediaErr) {
+        const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
+        e.code = 'BLOG_HERO_MEDIA_FAILED';
+        throw e;
+      }
+      if (!heroImage?.buffer) {
+        const e = new Error('featured image could not be fetched for Astro publish');
+        e.code = 'BLOG_HERO_MEDIA_FAILED';
+        throw e;
+      }
     } else if (!post.featured_image_url) {
       heroImage = await generateHeroBuffer(post);
     }
@@ -751,6 +826,46 @@ async function publishAstro(postId) {
       throw gErr;
     }
 
+    // 2b-2. Comparison-table / named-competitor legal scan. The autonomous
+    // lane runs this before every publish, but the manual/calendar path
+    // skipped it entirely — a calendar-scheduled AI draft disparaging or
+    // ranking against a competitor could go fully live unattended (the
+    // scheduler-lane auto-merge needs no human once the build is green and
+    // Codex is clean). Same P0/P1 block as the guardrails above. A draft
+    // that PASSES but names curated competitors in a validated
+    // <ComparisonTable> (requiresHumanReview) is allowed to open its PR:
+    // the human sign-off happens at MERGE time — the admin lane's
+    // merge-astro click provides it, and the scheduler lane's unattended
+    // pages-poll auto-merge reads the astro_requires_human_merge stamp
+    // (persisted with the PR state below, from this exact evaluation) and
+    // withholds the merge for an admin instead.
+    let namedCompetitorEnabled = false;
+    try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
+    const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
+    if (!comparison.pass) {
+      // UNCLASSIFIED_OPTION is fail-closed classification AMBIGUITY (a
+      // business-SHAPED phrase like "Comparing Pest Control" in a title, or
+      // a category column the classifier can't prove is generic) — designed
+      // for the unattended autonomous lane, where a reviewer resolves it.
+      // Hard-blocking it here strands legitimate category-only comparisons
+      // at publish_failed, so on this lane it is ADVISORY (logged; Codex
+      // still reviews the PR). Every DEFINITE finding — disparagement,
+      // unknown real competitor, rigged ranking, unsourced competitor facts,
+      // competitor-in-prose, named-competitor-disabled — still blocks.
+      const blocking = comparison.findings.filter((f) =>
+        (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'COMPARISON_UNCLASSIFIED_OPTION');
+      if (blocking.length > 0) {
+        const cErr = new Error(`comparison/named-competitor gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`);
+        cErr.code = 'BLOG_COMPARISON_GATE_FAILED';
+        cErr.details = blocking;
+        throw cErr;
+      }
+      const advisory = comparison.findings.filter((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION');
+      if (advisory.length > 0) {
+        logger.warn(`[astro-publisher] comparison gate advisory for ${slug}: ${advisory.map((f) => f.message).join(' | ')}`);
+      }
+    }
+
     // 2c. LLM fact-check — the rule-based guardrails can't catch a wrong
     // species/pathogen name, a mislabeled active ingredient, or a bad Florida
     // ordinance date. This gate does, before the post ships under the licensed
@@ -764,6 +879,7 @@ async function publishAstro(postId) {
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
     await gh.createBranch(branch);
+    branchCreated = true;
 
     if (heroImage?.buffer) {
       const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`;
@@ -791,11 +907,13 @@ async function publishAstro(postId) {
 
     // 4. PR
     const prBody = buildPrBody({ post, slug, branch, content: body });
+    prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,
       title: `Blog: ${post.title}`.slice(0, 72),
       body: prBody,
     });
+    openedPr = pr;
     await requestCodexReview({
       pr,
       headSha: pr.head?.sha || fileCommit?.commit?.sha,
@@ -811,6 +929,13 @@ async function publishAstro(postId) {
       astro_preview_url: previewUrl,
       astro_publish_error: null,
       astro_published_at: null,
+      // Stamped from the comparison gate's evaluation of THIS publish (not
+      // re-derived later from row fields, which could drift from what was
+      // actually scanned): pages-poll withholds the scheduler-lane
+      // auto-merge when true, so competitor-naming posts always get a
+      // human merge. Explicit false otherwise — a republish of a post
+      // whose competitor mentions were edited out clears an old stamp.
+      astro_requires_human_merge: comparison.requiresHumanReview === true,
       updated_at: new Date(),
     });
 
@@ -823,9 +948,56 @@ async function publishAstro(postId) {
     };
   } catch (err) {
     logger.error(`[astro-publisher] publish failed for ${slug}: ${err.message}`);
+    // Branch disposition, in order of certainty:
+    //   - a KNOWN PR (openedPr) keeps its branch — the PR references it.
+    //   - createPr was ATTEMPTED but threw: GitHub may still have opened
+    //     the PR, so look the head branch up before deleting — deleting a
+    //     live PR's head leaves an open, broken PR with no DB marker. A
+    //     found PR is recovered as this attempt's PR and persisted below.
+    //   - lookup or deletion failed: the branch SURVIVES and is recorded
+    //     as external progress (astro_branch_name below) so the scheduler
+    //     parks for review instead of retrying into a duplicate; the
+    //     stale-PR cleanup reclaims it on the next republish.
+    //   - otherwise the pre-PR branch is deleted: retries publish on a
+    //     fresh shortId branch, so an undeleted one is an orphan per tick.
+    let survivingBranch = null;
+    if (branchCreated && !openedPr) {
+      let safeToDelete = true;
+      if (prCreateAttempted) {
+        try {
+          openedPr = await gh.findOpenPrByHead(branch) || null;
+          safeToDelete = !openedPr;
+          if (openedPr) logger.warn(`[astro-publisher] recovered PR #${openedPr.number} for ${branch} after a createPr error — persisting the marker instead of deleting the branch`);
+        } catch (lookupErr) {
+          safeToDelete = false;
+          logger.warn(`[astro-publisher] post-failure PR lookup failed for ${branch}: ${lookupErr.message}; leaving the branch in place`);
+        }
+      }
+      if (safeToDelete) {
+        try {
+          await gh.deleteRef(branch);
+        } catch (cleanupErr) {
+          survivingBranch = branch;
+          logger.warn(`[astro-publisher] pre-PR branch cleanup failed for ${branch}: ${cleanupErr.message} (branch marker persisted; the stale-PR cleanup reclaims it on republish)`);
+        }
+      } else if (!openedPr) {
+        survivingBranch = branch;
+      }
+    }
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'publish_failed',
       astro_publish_error: err.message.slice(0, 1000),
+      // Markers record THIS attempt's true external state. A known or
+      // recovered PR persists number+branch (the scheduler treats the row
+      // as PR-backed; the stale-PR path cleans it up on republish). A
+      // surviving branch persists alone — same parking, same reclaim. A
+      // provably-clean failure NULLs both: a retried publish_failed row
+      // must not keep the PREVIOUS attempt's marker after
+      // cleanupStaleAstroPr closed that PR, or the fixed post stays
+      // parked as PR-backed forever.
+      ...(openedPr
+        ? { astro_pr_number: openedPr.number, astro_branch_name: branch }
+        : { astro_pr_number: null, astro_branch_name: survivingBranch }),
       updated_at: new Date(),
     });
     throw err;
@@ -1318,7 +1490,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   // RENDERED field actually changed (checked above); mirrors publishRefresh
   // and avoids fake-freshness churn.
   {
-    const today = dateOnly(new Date());
+    const today = etDateString();
     if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
     else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
   }
@@ -1439,7 +1611,7 @@ async function publishRefresh(draft, brief = {}) {
 
   // Conditional freshness bump — only the field the live page already uses
   // (services: `modified`; blog v2: `updated`). Prevents fake-freshness churn.
-  const today = dateOnly(new Date());
+  const today = etDateString();
   if (currentFrontmatter.modified !== undefined) nextFrontmatter.modified = `${today}T12:00:00`;
   else if (currentFrontmatter.updated !== undefined) nextFrontmatter.updated = today;
 
@@ -1567,7 +1739,7 @@ function canPublishRefresh(draft, brief = {}) {
 
 // ── Merge (approval → prod) ────────────────────────────────────────
 
-async function mergeAstro(postId) {
+async function mergeAstro(postId, { expectHeadSha = null } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.astro_pr_number) throw new Error('post has no open PR');
@@ -1584,12 +1756,25 @@ async function mergeAstro(postId) {
     if (pr.state !== 'open') {
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
+    // Callers that gated on an EXTERNAL signal (pages-poll: "the branch's
+    // green build") bind that signal to a commit; if the PR head has moved
+    // since, the signal doesn't vouch for what would merge — refuse (the
+    // fresh head gets its own build + review, and the next tick retries).
+    if (expectHeadSha && pr.head?.sha
+        && String(expectHeadSha).trim().toLowerCase() !== String(pr.head.sha).trim().toLowerCase()) {
+      throw new Error(`PR #${pr.number} head ${String(pr.head.sha).slice(0, 7)} no longer matches the verified build commit ${String(expectHeadSha).slice(0, 7)}; re-verify before merge`);
+    }
     if (!isUnpublish) await assertOpenPublishPrIsHubOnly(post, pr);
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
     const result = await gh.mergePr(post.astro_pr_number, {
       method: 'squash',
       title: isUnpublish ? `Unpublish: ${post.title}`.slice(0, 72) : `Blog: ${post.title}`.slice(0, 72),
+      // Pin the merge to the exact head the hub-only/Codex gates just vetted —
+      // GitHub 409s if another push lands while this call is in flight
+      // (mergePr supports this; the autonomous poller already pins, this
+      // manual/scheduler path did not).
+      sha: pr.head?.sha,
     });
 
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
@@ -2323,12 +2508,26 @@ function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {})
   return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
 }
 
+// A body "matches" the head when it embeds the full SHA or any abbreviated
+// SHA (≥7 hex chars) that is a prefix of it. Codex's clean verdict arrives
+// as an ISSUE COMMENT embedding a 10-char "Reviewed commit:" SHA (no review
+// object), while this matcher previously demanded the first 12 chars — so
+// every comment-only clean verdict was ineligible and the poller sat at
+// codex_review_pending forever (astro PR #357 stalled >1h fully green).
+function bodyMatchesHead(body, headSha) {
+  const head = String(headSha || '').trim().toLowerCase();
+  if (!head) return false;
+  const text = String(body || '');
+  if (text.toLowerCase().includes(head)) return true;
+  const runs = text.match(/\b[0-9a-f]{7,40}\b/gi) || [];
+  return runs.some((run) => head.startsWith(run.toLowerCase()));
+}
+
 function latestReviewRequestAt(comments = [], headSha = null) {
   const head = String(headSha || '').trim();
-  const shortHead = head.slice(0, 12);
   const candidates = comments
     .filter((comment) => /@codex\s+review/i.test(String(comment?.body || '')))
-    .filter((comment) => !head || String(comment.body || '').includes(head) || (shortHead && String(comment.body || '').includes(shortHead)))
+    .filter((comment) => !head || bodyMatchesHead(comment.body, head))
     .map((comment) => Date.parse(comment.created_at || comment.createdAt || 0))
     .filter(Number.isFinite)
     .sort((a, b) => b - a);
@@ -2353,10 +2552,8 @@ function reviewEligibleForHead(review, { headSha = null, requestedAt = null } = 
 function commentEligibleForHead(comment, { headSha = null, requestedAt = null } = {}) {
   const head = String(headSha || '').trim();
   if (head) {
-    const body = String(comment?.body || '');
-    const shortHead = head.slice(0, 12);
     if (!requestedAt) return false;
-    if (!body.includes(head) && !(shortHead && body.includes(shortHead))) return false;
+    if (!bodyMatchesHead(comment?.body, head)) return false;
   }
   if (headSha && !requestedAt) return false;
   if (!requestedAt) return true;
@@ -2434,5 +2631,6 @@ module.exports = {
     assertOpenPublishPrIsHubOnly,
     syncDraftPublishTarget,
     mdxBreakingToken,
+    normalizeAutonomousCategory,
   },
 };

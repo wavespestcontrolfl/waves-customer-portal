@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
+const { ESTIMATE_SEND_EXPIRY_DAYS } = require('./admin-estimate-persistence');
 
 function getThresholdDays() {
   const raw = parseInt(process.env.ESTIMATE_EXPIRATION_DAYS, 10);
@@ -42,6 +43,23 @@ async function runEstimateExpiration() {
     .where('sent_at', '<', ageCutoff)
     .whereNull('accepted_at')
     .whereNull('declined_at')
+    // An operator EXTENSION overrides the inactivity rule: POST /:id/extend
+    // pushes expires_at (and texts the customer the new deadline) but
+    // leaves sent_at, so without this carve-out every extension of an
+    // estimate older than the threshold was re-expired at the next 6am
+    // run. Extensions are distinguished from the STANDARD send stamp —
+    // every successful send writes expires_at = send time +
+    // ESTIMATE_SEND_EXPIRY_DAYS (estimateExpiresAt, admin-estimate-
+    // persistence.js) — by exceeding sent_at + that send window (+1h clock
+    // slack). The whereNull('expires_at') filter above already keeps every
+    // stamped expiry out of the age rule; this nested block stays as the
+    // #2445 contract and a second fence should that filter ever loosen.
+    // Passed expires_at rows age out via Rule 2 regardless.
+    .where(function () {
+      this.whereNull('expires_at')
+        .orWhere('expires_at', '<=', now)
+        .orWhereRaw("expires_at <= sent_at + (? * interval '1 day') + interval '1 hour'", [ESTIMATE_SEND_EXPIRY_DAYS]);
+    })
     // Hold: a first-booking customer's estimate stays live until the visit
     // resolves — the archive sweep (which runs before this in the 6am chain)
     // claims it on completion; expiring it here would strand a booked

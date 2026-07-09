@@ -98,7 +98,7 @@ describe('prep and portal email template seeds', () => {
     expect(rendered.missingPayload).toEqual([]);
     expect(rendered.validation.ok).toBe(true);
     expect(rendered.text).not.toMatch(/\{\{|\}\}/);
-    expect(rendered.html).toContain('waves-logo.png');
+    expect(rendered.html).toContain('waves-logo-2026.png');
   });
 
   test('prep guide omits optional rows and CTA when details are missing', () => {

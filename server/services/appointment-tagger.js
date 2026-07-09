@@ -199,10 +199,19 @@ class AppointmentTagger {
     }
   }
 
-  // Pest prep — email prep guide (prep.cockroach / prep.bed_bug automations)
-  // plus the legacy SMS companion if an SMS template exists.
+  // Pest prep — email prep guide (prep.cockroach / prep.bed_bug / prep.flea
+  // automations) plus the SMS companion (auto_bed_bug / auto_cockroach /
+  // auto_flea templates). First-time treatments only (owner directive
+  // 2026-07-06): a follow-up booking in the same infestation series must not
+  // re-send "let's get started" prep messaging.
   async triggerPestPrep(service, pestType) {
-    await this.triggerPrepEmailGuide(service, pestType);
+    if (await this.hasPriorSameTypeBooking(service, pestType)) return;
+
+    // The SMS copy asserts "we emailed your treatment guide" — only send it
+    // when the guide email actually queued (gate on, upcoming open visit,
+    // valid recipient email). Codex review 2026-07-06.
+    const emailQueued = await this.triggerPrepEmailGuide(service, pestType);
+    if (!emailQueued) return;
 
     const prepSMS = await this.getPrepSMS(pestType, service);
     if (!prepSMS) return;
@@ -252,10 +261,12 @@ class AppointmentTagger {
   // (appointment.cancelled, re-evaluated against the live row at send time)
   // still apply, and the once-per-appointment idempotency key makes re-runs
   // of onServiceScheduled (e.g. regenerate-brief) safe.
+  // Returns true only when the prep-guide email automation was queued — the
+  // SMS companion's copy depends on it.
   async triggerPrepEmailGuide(service, pestType) {
     const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
-    if (!automationKey) return;
-    if (!isEnabled('emailTemplateAutomations')) return;
+    if (!automationKey) return false;
+    if (!isEnabled('emailTemplateAutomations')) return false;
 
     // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
     // for past/closed appointments too, and "prepare for your treatment"
@@ -263,9 +274,9 @@ class AppointmentTagger {
     // (appointment.closed / appointment.past) re-check this against the live
     // row at send time for queued runs.
     const status = String(service.status || '').toLowerCase();
-    if (PREP_TERMINAL_STATUSES.has(status)) return;
+    if (PREP_TERMINAL_STATUSES.has(status)) return false;
     const serviceDateStr = dateOnlyString(service.scheduled_date);
-    if (!serviceDateStr || serviceDateStr < etDateString()) return;
+    if (!serviceDateStr || serviceDateStr < etDateString()) return false;
 
     try {
       // Route like the other prep/project emails: service contact first (the
@@ -279,7 +290,7 @@ class AppointmentTagger {
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
-        return;
+        return false;
       }
       const firstName = String(recipient.name || '').trim().split(/\s+/)[0]
         || String(service.first_name || '').trim()
@@ -287,7 +298,7 @@ class AppointmentTagger {
 
       const executor = require('./email-template-automation-executor');
       const portalVisitsUrl = portalUrl('/?tab=visits');
-      await executor.processTrigger({
+      const trigger = await executor.processTrigger({
         triggerEventKey: 'appointment.booked',
         triggerEventId: `appointment_booked:${service.id}`,
         automationKey,
@@ -309,40 +320,65 @@ class AppointmentTagger {
         },
         executeImmediately: false,
       });
+      // "Queued" means a NEW run was created and not condition-skipped —
+      // an inactive automation (zero results), an idempotency dedupe
+      // (re-run of the same appointment), or a skipped run means no guide
+      // email is coming, so the SMS that references it must not send.
+      return (trigger?.results || []).some(
+        (r) => !r.deduped && String(r.run?.status || '') !== 'skipped',
+      );
     } catch (err) {
       logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
+      return false;
+    }
+  }
+
+  // True when this customer already had an earlier booking of the same pest
+  // family — the prep messaging is for first-time treatments only. Prior rows
+  // carry the appointment_type tag this tagger stamped when they were booked
+  // (german_roach and cockroach are the same family for prep purposes).
+  // Cancelled rows don't count (the customer never got that visit);
+  // rescheduled placeholders and completed visits do.
+  async hasPriorSameTypeBooking(service, pestType) {
+    const PREP_FAMILY_TAGS = {
+      cockroach: ['german_roach', 'cockroach'],
+      bed_bug: ['bed_bug'],
+      flea: ['flea'],
+    };
+    const tags = PREP_FAMILY_TAGS[pestType];
+    if (!service?.customer_id || !tags) return false;
+    try {
+      const prior = await db('scheduled_services')
+        .where({ customer_id: service.customer_id })
+        .whereIn('appointment_type', tags)
+        .whereNot('id', service.id)
+        .whereNotIn('status', ['cancelled'])
+        .where('created_at', '<', service.created_at || new Date())
+        .first('id');
+      return !!prior;
+    } catch (err) {
+      // Fail open (treat as first-time) — a lookup hiccup must not silently
+      // drop prep messaging for a genuine first treatment.
+      logger.warn(`[appointment-tagger] prior-booking lookup failed for service ${service.id}: ${err.message}`);
+      return false;
     }
   }
 
   async getPrepSMS(pestType, service) {
-    // Knex returns DATE columns as Date objects at UTC midnight — formatting
-    // that directly in ET names the previous day. Recover the calendar date
-    // string and anchor at noon (same as the string branch), guarding both
-    // shapes so the template never renders "Invalid Date" in a customer SMS.
-    let date = '';
-    try {
-      const raw = service.scheduled_date instanceof Date
-        ? service.scheduled_date.toISOString().split('T')[0]
-        : service.scheduled_date;
-      const d = raw ? new Date(String(raw).split('T')[0] + 'T12:00:00') : null;
-      if (d && !isNaN(d.getTime())) {
-        date = d.toLocaleDateString('en-US', {
-          weekday: 'long', month: 'short', day: 'numeric',
-          timeZone: 'America/New_York',
-        });
-      }
-    } catch { date = ''; }
-    if (!date) date = 'your scheduled date';
-
+    // Deliberately date-free: the pest_prep_* predecessors embedded the
+    // visit date, which went stale whenever the appointment moved (the
+    // reason 20260602000002 removed them). The auto_* copy references the
+    // emailed treatment guide instead.
     const templateKey = pestType === 'cockroach'
-      ? 'pest_prep_cockroach'
+      ? 'auto_cockroach'
       : pestType === 'bed_bug'
-        ? 'pest_prep_bed_bug'
-        : null;
+        ? 'auto_bed_bug'
+        : pestType === 'flea'
+          ? 'auto_flea'
+          : null;
     if (!templateKey) return null;
     const body = await renderSmsTemplate(templateKey, {
       first_name: service.first_name || 'there',
-      service_date: date,
     }, {
       workflow: 'appointment_tagger_prep',
       entity_type: 'scheduled_service',

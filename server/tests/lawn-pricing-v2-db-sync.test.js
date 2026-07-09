@@ -2,6 +2,12 @@ const db = require('../models/db');
 const PricingEngine = require('../services/pricing-engine');
 const constants = require('../services/pricing-engine/constants');
 
+// DB-backed integration suite: syncConstantsFromDB loads pricing_config from
+// Postgres. Self-skips without DATABASE_URL (same pattern as the other
+// DB-backed suites, e.g. auto-dispatch-schema).
+const SKIP = !process.env.DATABASE_URL;
+const describeOrSkip = SKIP ? describe.skip : describe;
+
 function property(overrides = {}) {
   return PricingEngine.calculatePropertyProfile({
     homeSqFt: 2000,
@@ -14,7 +20,7 @@ function property(overrides = {}) {
   });
 }
 
-describe('Lawn Pricing V2 DB sync', () => {
+describeOrSkip('Lawn Pricing V2 DB sync', () => {
   beforeAll(async () => {
     const synced = await PricingEngine.syncConstantsFromDB(db);
     if (!synced) throw new Error('Expected syncConstantsFromDB to load pricing_config');

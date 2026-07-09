@@ -229,10 +229,24 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
     monthly_total: 100,
     annual_total: 1200,
     onetime_total: 0,
-    estimate_data: JSON.stringify({ baseMonthly: 100 }),
+    // /preferences only applies to RESIDENTIAL pest estimates — without a
+    // pest_control recurring line it 400s before ever reaching the guarded
+    // UPDATE, so the fixture carries one.
+    estimate_data: JSON.stringify({
+      baseMonthly: 100,
+      result: {
+        recurring: {
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 100, frequency: 'quarterly' }],
+        },
+      },
+    }),
     expires_at: null,
     archived_at: null,
   };
+
+  // Mirrors the accept transaction's full status guard — the UPDATE refuses
+  // every non-active status, not just the terminal three.
+  const GUARDED_STATUSES = ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'];
 
   test('select-tier returns 409 when the conditional update hits a locked row', async () => {
     const handler = routeHandler(estimatePublicRouter, '/:token/select-tier', 'put');
@@ -243,7 +257,7 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
     const res = makeRes();
     await handler({ params: { token: 'tok1' }, body: { selectedTier: 'Gold' } }, res, jest.fn());
 
-    expect(writeBuilder.whereNotIn).toHaveBeenCalledWith('status', ['accepted', 'declined', 'expired']);
+    expect(writeBuilder.whereNotIn).toHaveBeenCalledWith('status', GUARDED_STATUSES);
     expect(writeBuilder.whereNull).toHaveBeenCalledWith('price_locked_at');
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: 'Estimate is no longer active' });
@@ -271,7 +285,7 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
     const res = makeRes();
     await handler({ params: { token: 'tok1' }, body: { interior_spray: false } }, res, jest.fn());
 
-    expect(writeBuilder.whereNotIn).toHaveBeenCalledWith('status', ['accepted', 'declined', 'expired']);
+    expect(writeBuilder.whereNotIn).toHaveBeenCalledWith('status', GUARDED_STATUSES);
     expect(writeBuilder.whereNull).toHaveBeenCalledWith('price_locked_at');
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: 'Estimate is no longer active' });

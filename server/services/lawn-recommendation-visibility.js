@@ -1,8 +1,8 @@
 /**
  * Single source of truth for "is this recommendation card surfaceable to the
- * customer?", shared by every customer-facing read path (lawn-health portal +
- * service report). Mirrors canShowRecommendationToCustomer() in
- * routes/admin-lawn-assessment.js and the DB CHECK constraint
+ * customer?". The lawn_snapshot_v1 pipeline that generated these cards is
+ * retired; this remains only for the legacy report path's historical reads
+ * (service-report/report-data.js). Mirrors the DB CHECK constraint
  * property_recommendation_cards_visible_requires_approval_check.
  *
  * A card surfaces when EITHER:

@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimePriceCopy } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -135,7 +135,8 @@ describe('ServiceSection', () => {
 
     expect(screen.getByText('$72')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
-    expect(screen.getByText('Service visits: Bi-monthly')).toBeInTheDocument();
+    // The "Service visits: …" cadence line was removed per owner directive.
+    expect(screen.queryByText(/Service visits:/)).not.toBeInTheDocument();
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
   });
 
@@ -192,6 +193,51 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('Flea Treatment Package')).toBeInTheDocument();
     expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
     expect(screen.getByText('Exterior yard area exceeds automatic quote threshold.')).toBeInTheDocument();
+  });
+
+  it('marks a prepay-waivable WaveGuard setup row with an asterisk and waiver note', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', detail: 'Membership setup fee', amount: 99, kind: 'charge' }],
+        }}
+        prepayWaivedServices={['waveguard_setup']}
+      />,
+    );
+
+    expect(screen.getByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).toBeInTheDocument();
+    expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
+  });
+
+  it('matches legacy label-only setup rows that carry no service key', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ label: 'WaveGuard Membership Setup', amount: 99, kind: 'charge' }],
+        }}
+        prepayWaivedServices={['waveguard_setup']}
+      />,
+    );
+
+    expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
+  });
+
+  it('shows no waiver note when the fee is not prepay-waivable', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 99,
+          items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', detail: 'Membership setup fee', amount: 99, kind: 'charge' }],
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
+    // Both the row amount and the one-time total render plain $99 — no asterisk.
+    expect(screen.getAllByText('$99').length).toBe(2);
+    expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 });
 
@@ -289,6 +335,31 @@ describe('estimateAddServiceOffer', () => {
 });
 
 describe('TerminalStateCard', () => {
+  it('shows the booked visit date on an accepted estimate instead of follow-up copy', () => {
+    render(
+      <TerminalStateCard
+        state="accepted"
+        customerFirstName="William"
+        address="10225 Kalamazoo Pl"
+        appointmentLabel="Thursday, July 9 · 9:00–10:00 AM"
+        appointmentServiceType="Quarterly Pest Control"
+      />,
+    );
+
+    expect(screen.getByText(/you're booked/)).toBeInTheDocument();
+    expect(screen.getByText('Thursday, July 9 · 9:00–10:00 AM')).toBeInTheDocument();
+    expect(screen.getByText('Quarterly Pest Control')).toBeInTheDocument();
+    expect(screen.queryByText(/Our team will follow up/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the follow-up copy on an accepted estimate with no upcoming visit', () => {
+    render(
+      <TerminalStateCard state="accepted" customerFirstName="William" address="10225 Kalamazoo Pl" />,
+    );
+
+    expect(screen.getByText(/Our team will follow up/)).toBeInTheDocument();
+  });
+
   it('shows the quote-required reason in the blocked React estimate state', () => {
     render(
       <TerminalStateCard
@@ -400,6 +471,51 @@ describe('getServiceLabel', () => {
         services: [{ key: 'mosquito', label: 'Mosquito Control', isRecurring: true }],
       },
     )).toBe('Seasonal Mosquito Control or One-Time Mosquito Control');
+  });
+
+  it('pins the label to an accepted one-time booking on a mixed estimate', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 202,
+        services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }],
+      },
+      'one_time',
+    )).toBe('One-Time Pest Control');
+  });
+
+  it('drops the one-time choice suffix once a recurring plan is accepted', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 202,
+        services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }],
+      },
+      'recurring',
+    )).toBe('Quarterly Pest Control');
+  });
+
+  it('excludes fee/review rows from the one-time eyebrow', () => {
+    expect(getServiceLabel(null, { isOneTimeOnly: true }, {
+      oneTimeBreakdown: {
+        items: [
+          { label: 'German Roach Cleanout', amount: 350 },
+          { label: 'WDO Inspection', amount: 150 },
+          { label: 'WaveGuard Setup', amount: 99 },
+          { label: 'Prepay credit', amount: 0 },
+        ],
+      },
+    })).toBe('German Roach Cleanout');
+  });
+
+  it('falls back to non-billable row labels when nothing billable remains', () => {
+    expect(getServiceLabel(null, { isOneTimeOnly: true }, {
+      oneTimeBreakdown: {
+        items: [{ label: 'WDO Inspection', amount: 150 }],
+      },
+    })).toBe('WDO Inspection');
   });
 });
 
@@ -548,5 +664,59 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     );
     expect(screen.getByText('Invoice due now')).toBeInTheDocument();
     expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
+  });
+});
+
+describe('oneTimeExtrasForPaymentNote', () => {
+  const pricing = {
+    oneTimeBreakdown: {
+      total: 348,
+      items: [
+        { service: 'flea_treatment', name: 'Flea treatment', price: 249 },
+        { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, detail: 'Membership setup fee' },
+      ],
+    },
+  };
+
+  it('subtracts the WaveGuard setup row — PPB already previews it as its own invoice line', () => {
+    expect(oneTimeExtrasForPaymentNote(pricing, {}, 'recurring')).toBe(249);
+  });
+
+  it('returns 0 when the setup fee is the only one-time row', () => {
+    const setupOnly = {
+      oneTimeBreakdown: {
+        total: 99,
+        items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(setupOnly, {}, 'recurring')).toBe(0);
+  });
+
+  it('matches setup rows by label when the service key is missing', () => {
+    const labeled = {
+      oneTimeBreakdown: {
+        total: 149,
+        items: [
+          { name: 'Rodent exclusion', price: 50 },
+          { label: 'WaveGuard Setup', price: 99 },
+        ],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(labeled, {}, 'recurring')).toBe(50);
+  });
+
+  it('stays 0 for one-time mode and for either/or one-time alternatives', () => {
+    expect(oneTimeExtrasForPaymentNote(pricing, {}, 'one_time')).toBe(0);
+    expect(oneTimeExtrasForPaymentNote(pricing, { showOneTimeOption: true }, 'recurring')).toBe(0);
+  });
+
+  it('keeps the full total when no setup row is present', () => {
+    const noSetup = {
+      oneTimeBreakdown: {
+        total: 249,
+        items: [{ service: 'flea_treatment', name: 'Flea treatment', price: 249 }],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(noSetup, {}, 'recurring')).toBe(249);
   });
 });

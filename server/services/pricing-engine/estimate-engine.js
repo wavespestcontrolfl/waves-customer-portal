@@ -464,6 +464,10 @@ function generateEstimate(input) {
     lawnSqFt: input.lawnSqFt,
     measuredTurfSf: input.measuredTurfSf,
     estimatedTurfSf: input.estimatedTurfSf,
+    turfSource: input.turfSource,
+    countyTurfPriorSf: input.countyTurfPriorSf,
+    countyTurfCeilingSf: input.countyTurfCeilingSf,
+    turfCappedToParcel: input.turfCappedToParcel,
     imperviousSurfacePercent: input.imperviousSurfacePercent,
     imperviosSurfacePercent: input.imperviosSurfacePercent,
     estimatedBedAreaSf: input.estimatedBedAreaSf,
@@ -909,6 +913,31 @@ function generateEstimate(input) {
         lawnFreq: services.oneTimeLawn.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
       });
       lineItems.push(result);
+    }
+  }
+
+  // Standalone one-time turf-pest knockdown (chinch bugs, sod webworms,
+  // armyworms, grubs) — the ONE_TIME.lawn 'pest' treatment multiplier, priced
+  // as its own line so it can coexist with a weed-type oneTimeLawn line
+  // (owner decision 2026-07-05: lawn-pest-control sells the one-time
+  // knockdown product, not a recurring program).
+  if (services.lawnPestControl) {
+    if (propertyIsCommercial) {
+      addCommercialManualQuote('lawn_care');
+    } else {
+      const result = priceOneTimeLawn(property, {
+        treatmentType: 'pest',
+        urgency: services.lawnPestControl.urgency || 'NONE',
+        afterHours: services.lawnPestControl.afterHours || false,
+        isRecurringCustomer,
+        track: services.lawnPestControl.track || services.lawn?.track || 'st_augustine',
+        tier: services.lawnPestControl.tier || services.lawn?.tier || 'enhanced',
+        lawnFreq: services.lawnPestControl.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
+      });
+      // Distinct display name: persistence compacts lines to service + name,
+      // so without this a lawn-pest row renders as generic one_time_lawn (and
+      // a mixed weed + pest quote loses which row is which).
+      lineItems.push({ ...result, name: 'Lawn Pest Knockdown' });
     }
   }
 
@@ -1622,6 +1651,15 @@ function generateEstimate(input) {
   ))?.renewal || 0;
   const year2WithRenewal = year2Total + trenchingRenewal;
 
+  // ── 6b. Hoist per-line review reasons to the estimate level ─
+  // Historically only dethatching hoisted its reasons, so missing-footprint,
+  // proxy-mosquito, and fallback-bed reviews stayed buried on the line item
+  // and never reached pricingMetadata (admin routing-notes box, win/loss
+  // slicing). Surfacing metadata only — accept gating is unchanged.
+  lineItems.forEach((item) => {
+    (item.manualReviewReasons || []).forEach(addManualReviewReason);
+  });
+
   // ── 7. Validate margins ────────────────────────────────────
   const marginWarnings = [
     ...validateEstimateDiscounts(lineItems, waveGuardTier),
@@ -1639,6 +1677,7 @@ function generateEstimate(input) {
   const turfPricedServicesSelected = !!(
     services.lawn ||
     services.oneTimeLawn ||
+    services.lawnPestControl ||
     services.topDressing ||
     services.dethatching ||
     services.plugging

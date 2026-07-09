@@ -39,6 +39,20 @@ function finiteOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// REI for the report-generation grounding prompt. rei_hours = 0 is the
+// residential "until sprays have dried" value, NOT a zero-hour / immediate
+// re-entry — render it as "until dry" so generated copy never tells a customer
+// there is a 0-hour REI. null/blank => omitted.
+function formatReiForPrompt(reiHours) {
+  // Distinguish "unknown" (null/blank) from an actual 0. Number(null) === 0, so
+  // guard the nullish/empty cases before coercing — an unknown REI must be
+  // omitted, not rendered as an until-dry (or zero-hour) claim we can't back.
+  if (reiHours == null || reiHours === '') return null;
+  const n = Number(reiHours);
+  if (!Number.isFinite(n)) return null;
+  return n > 0 ? `REI ${n} hr` : 'REI until dry';
+}
+
 // One-line SW Florida (Manatee / Sarasota / Charlotte) seasonal hint per month.
 // These are CONTEXT for setting realistic expectations — not facts to assert
 // verbatim. Index 0 unused; months are 1-12.
@@ -207,7 +221,9 @@ async function loadProductSafety(products, knex) {
       .map((r) => ({
         name: cleanText(r.name),
         activeIngredient: cleanText(r.active_ingredient) || null,
-        reiHours: finiteOrNull(r.rei_hours),
+        // Preserve a real DB null (unknown REI) — finiteOrNull(null) is 0, which
+        // would misrender an unknown REI as an until-dry/zero claim downstream.
+        reiHours: r.rei_hours == null ? null : finiteOrNull(r.rei_hours),
         rainfastMinutes: finiteOrNull(r.rainfast_minutes),
         reentryText: truncate(r.reentry_summary || r.reentry_text, 200) || null,
       }));
@@ -379,7 +395,7 @@ async function buildReportCopyContext({
     const lines = productSafety.map((p) => {
       const bits = [
         p.activeIngredient ? `active: ${p.activeIngredient}` : null,
-        p.reiHours != null ? `REI ${p.reiHours} hr` : null,
+        formatReiForPrompt(p.reiHours),
         p.rainfastMinutes != null ? `rainfast ${p.rainfastMinutes >= 60 ? `${(p.rainfastMinutes / 60).toFixed(p.rainfastMinutes % 60 ? 1 : 0)} hr` : `${p.rainfastMinutes} min`}` : null,
         p.reentryText ? `label: ${p.reentryText}` : null,
       ].filter(Boolean).join('; ');
@@ -429,5 +445,6 @@ async function buildReportCopyContext({
 
 module.exports = {
   buildReportCopyContext,
+  formatReiForPrompt,
   SWFL_SEASON_BY_MONTH,
 };

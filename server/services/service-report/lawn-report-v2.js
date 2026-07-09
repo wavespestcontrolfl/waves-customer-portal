@@ -187,6 +187,11 @@ function mapWater(waterContext, waterSnapshot = null) {
       confidence: waterSnapshot.confidence || 'medium',
       explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
+      // A POSITIVE stored per-week irrigation figure means the customer has a real
+      // schedule on file — the "add your watering schedule" CTA should not show. A
+      // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
+      // `irrigation <= 0 = missing`), so the CTA must stay up.
+      scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
     };
   }
   if (!waterContext) return null;
@@ -201,6 +206,12 @@ function mapWater(waterContext, waterSnapshot = null) {
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
     explanation: waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
+    // The customer has a usable irrigation schedule on file only when the advice
+    // engine says the profile is present. profileMissing already accounts for a
+    // 0/absent/disabled schedule (irrigation <= 0), so trust it directly — a raw
+    // `irrigationInchesPerWeek != null` would wrongly count 0 and hide the CTA
+    // while the card still shows the "no schedule on file" copy.
+    scheduleOnFile: advice.profileMissing === false,
   };
 }
 
@@ -254,7 +265,7 @@ function seriesFrom(trend, field, mapVal = (v) => num(v)) {
     .filter((p) => p.value !== null));
 }
 
-function buildTrends(lawnAssessment, mowingHeight) {
+function buildTrends(lawnAssessment, mowingHeight, waterGapHistory = [], mowingTrendFallback = null) {
   const trend = Array.isArray(lawnAssessment?.trend) ? lawnAssessment.trend : [];
   const out = {};
   const add = (key, series) => { if (series.length >= 2) out[key] = series; };
@@ -263,13 +274,27 @@ function buildTrends(lawnAssessment, mowingHeight) {
   add('weed', seriesFrom(trend, 'weedSuppression'));
   add('color', seriesFrom(trend, 'colorHealth'));
   add('stress', seriesFrom(trend, 'stressDamage'));
-  const mowTrend = Array.isArray(mowingHeight?.trend) ? mowingHeight.trend : [];
-  const mow = dedupeTrend(mowTrend
+  // Water gap vs the weekly target — from the per-visit water-intake snapshots
+  // persisted at report build. Rows arrive capped at THIS visit's date (a
+  // permanent report token must never expose later visits).
+  const gap = dedupeTrend((Array.isArray(waterGapHistory) ? waterGapHistory : [])
+    .map((r) => ({ label: monthLabel(r.serviceDate), value: num(r.waterGapInches) }))
+    .filter((p) => p.value !== null));
+  if (gap.length >= 2) out.waterGap = gap;
+  // Mowing height-of-cut vs the ideal band. Prefer the current reading's own
+  // trend; a visit with no gauge reading still shows the history via the
+  // fallback context (same {trend, band} shape, also capped at this visit).
+  const mowCtx = (mowingHeight && Array.isArray(mowingHeight.trend) && mowingHeight.trend.length)
+    ? mowingHeight
+    : mowingTrendFallback;
+  const mowTrend = Array.isArray(mowCtx?.trend) ? mowCtx.trend : [];
+  const mow = dedupeTrend([...mowTrend]
+    .sort((a, b) => new Date(a.measuredAt) - new Date(b.measuredAt))
     .map((r) => ({ label: monthLabel(r.measuredAt), value: num(r.heightIn) }))
     .filter((p) => p.value !== null));
   if (mow.length >= 2) {
     out.mowing = mow;
-    out.mowingBand = [num(mowingHeight.band?.min), num(mowingHeight.band?.max)];
+    out.mowingBand = [num(mowCtx.band?.min), num(mowCtx.band?.max)];
   }
   return out;
 }
@@ -356,18 +381,35 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // invents no number. Re-entry text comes from the label when available.
 function buildAftercare(applications) {
   const apps = Array.isArray(applications) ? applications : [];
-  let watering = null;
+  let productNote = null;
   let reentry = null;
+  // Whether ANY product applied today must be watered IN (fertilizer). true = a
+  // product requires watering-in; false = watering-in is simply not required for
+  // the product(s) seen (NOT that watering is prohibited); null = unknown.
+  let waterInRequired = null;
   for (const a of apps) {
     const p = (a && a.product) || a || {};
     const facts = (a && a.approved_report_product_facts) || {};
-    if (!watering) watering = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
+    const req = p.irrigation_required ?? facts.irrigationRequired ?? null;
+    if (req === true) waterInRequired = true;
+    else if (req === false && waterInRequired == null) waterInRequired = false;
+    if (!productNote) productNote = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
-  if (!watering) {
+  // A REQUIRED water-in is the strongest signal — it wins over a product's generic
+  // irrigation note. Otherwise prefer the product's own label note. irrigation_required
+  // false only means watering-in isn't required (not that watering is prohibited), so
+  // it and the unknown case both fall to the neutral "keep your normal schedule" copy —
+  // we never publish a do-not-water instruction the label doesn't back.
+  let watering;
+  if (waterInRequired === true) {
+    watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
+  } else if (productNote) {
+    watering = productNote;
+  } else {
     watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
   }
-  return { watering, reentry };
+  return { watering, reentry, waterInRequired };
 }
 
 // Short topic phrase for the headline, from the top issue card's category.
@@ -381,9 +423,13 @@ const ISSUE_TOPIC = {
  * @param {object} input.lawnAssessment  buildLawnAssessmentReportData(...) return
  * @param {object} [input.mowingHeight]  buildMowingHeightContext(...) return
  * @param {string} [input.customerConcern]
+ * @param {Array}  [input.waterGapHistory]  [{ serviceDate, waterGapInches }] per-visit
+ *   snapshot history, capped at this visit's date
+ * @param {object} [input.mowingTrendFallback]  { trend, band } history when THIS visit
+ *   has no gauge reading (same shape subset as mowingHeight)
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -495,7 +541,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const topIssue = issues[0] || null;
 
   // "Why 68": name the category dragging the score down, reassure on the rest.
-  const scored = diagnosis.filter((c) => Number.isFinite(num(c.score)));
+  // Only the DISPLAYED categories — the Water/Coverage card is hidden (its score
+  // is fungus-derived, not a real moisture read), so it must never be named as the
+  // driver of a score with no matching card on screen.
+  const scored = diagnosis.filter(
+    (c) => c.key !== 'water_moisture_stress' && Number.isFinite(num(c.score)),
+  );
   const lowest = scored.slice().sort((a, b) => num(a.score) - num(b.score))[0];
   const scoreExplanation = (lowest && num(lowest.score) < 60 && scored.length > 2)
     ? `Your lawn is stable overall — the score is mainly pulled down by ${lowest.label.toLowerCase()}, while the other areas are generally in a healthy range.`
@@ -550,11 +601,19 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     : null;
   const aftercare = buildAftercare(applications);
 
-  const trends = buildTrends(lawnAssessment, mowingHeight);
+  const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
   if (trendSeasonNote) trends.seasonalNote = trendSeasonNote;
 
+  // The "Water / Coverage" diagnosis card is intentionally NOT displayed: its
+  // score is derived from the fungus/over-water signals (not a true moisture
+  // measurement), and the dedicated "Water This Week" card already owns the
+  // watering story with real rain + irrigation data. We still COMPUTE the
+  // category above so the insights + coverage-watch reconciliation keep working;
+  // we only drop it from the customer-facing cards.
+  const displayDiagnosis = diagnosis.filter((c) => c.key !== 'water_moisture_stress');
+
   return {
-    snapshot, diagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
+    snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
     beforeAfter, progression, progressionNote, aftercare, seasonalNote, smsSummary, trends,
   };
 }

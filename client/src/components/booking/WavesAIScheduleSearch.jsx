@@ -9,6 +9,14 @@
  * and selection wiring.
  *
  * onSearch(query) => Promise<{ summary: string }>  (may throw)
+ *
+ * Glass: the markup carries native data-glass / data-gt hooks (glass-theme.css)
+ * so any surface mounted under html[data-glass-theme] — glass estimate, glass
+ * reschedule — renders the bar in the glass language with no walker pass.
+ * The attributes are inert everywhere else; the inline `theme` styles remain
+ * the non-glass rendering. Buttons are tagged data-glass-accent (not "chip")
+ * because their inline navy fill is what the estimate walker normalizes to an
+ * accent anyway, and the accent rules force readable navy-on-gold text.
  */
 import { useState } from 'react';
 
@@ -20,6 +28,7 @@ export default function WavesAIScheduleSearch({
   subtitle = 'Tell Waves AI when works — we’ll show what’s open.',
   placeholder = 'e.g. “anything next Tuesday afternoon”',
   chips = DEFAULT_CHIPS,
+  showEyebrow = true,
   onSearch,
 }) {
   const t = {
@@ -53,17 +62,19 @@ export default function WavesAIScheduleSearch({
   };
 
   return (
-    <section style={{
+    <section data-glass="soft" style={{
       background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12,
       padding: 20, display: 'grid', gap: 12,
     }}>
       <div>
-        <div style={{
-          fontSize: 12, color: t.muted, letterSpacing: '0.12em',
-          textTransform: 'uppercase', fontWeight: 700, marginBottom: 4,
-        }}>
-          Waves AI
-        </div>
+        {showEyebrow ? (
+          <div data-gt="eyebrow" style={{
+            fontSize: 12, color: t.muted, letterSpacing: '0.12em',
+            textTransform: 'uppercase', fontWeight: 700, marginBottom: 4,
+          }}>
+            Waves AI
+          </div>
+        ) : null}
         <div style={{ fontSize: 18, fontWeight: 700, color: t.text }}>{title}</div>
         {subtitle ? <div style={{ fontSize: 14, color: t.muted, marginTop: 2 }}>{subtitle}</div> : null}
       </div>
@@ -86,12 +97,13 @@ export default function WavesAIScheduleSearch({
         />
         <button
           type="submit"
+          data-glass-accent=""
           disabled={asking || !query.trim()}
           style={{
-            minHeight: 46, border: 0, borderRadius: 10, padding: '0 18px',
-            background: t.accent, color: t.accentText, fontSize: 14, fontWeight: 700,
+            minHeight: 46, border: 0, borderRadius: 10, padding: '0 20px',
+            background: t.accent, color: t.accentText, fontSize: 15, fontWeight: 800,
             cursor: asking || !query.trim() ? 'not-allowed' : 'pointer',
-            opacity: asking || !query.trim() ? 0.65 : 1,
+            opacity: asking || !query.trim() ? 0.8 : 1,
           }}
         >
           {asking ? 'Searching…' : 'Search'}
@@ -104,12 +116,13 @@ export default function WavesAIScheduleSearch({
             <button
               key={chip}
               type="button"
+              data-glass-accent=""
               disabled={asking}
               onClick={() => { setQuery(chip); run(chip); }}
               style={{
-                border: `1px solid ${t.border}`, background: t.inputBg, color: t.text,
-                borderRadius: 999, padding: '7px 12px', fontSize: 13, fontWeight: 600,
-                cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.65 : 1,
+                border: 0, background: t.accent, color: t.accentText,
+                borderRadius: 999, padding: '8px 14px', fontSize: 14, fontWeight: 700,
+                cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.8 : 1,
               }}
             >
               {chip}
@@ -119,7 +132,7 @@ export default function WavesAIScheduleSearch({
       ) : null}
 
       {summary ? (
-        <div aria-live="polite" style={{
+        <div aria-live="polite" data-glass="soft" style={{
           fontSize: 14, lineHeight: 1.5, color: t.text,
           background: t.inputBg, border: `1px solid ${t.border}`,
           borderRadius: 10, padding: '10px 12px',

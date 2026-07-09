@@ -80,6 +80,8 @@ export default function DashboardPageV2() {
   const [callsBySource, setCallsBySource] = useState(null);
   const [leadsBySource, setLeadsBySource] = useState(null);
   const [channelMix, setChannelMix] = useState(null);
+  const [leadFunnel, setLeadFunnel] = useState(null); // /admin/dashboard/lead-funnel (period-driven)
+  const [channelRoi, setChannelRoi] = useState(null); // /admin/dashboard/channel-roi (period-driven)
   const [mix, setMix] = useState(null);
   const [revenueByCity, setRevenueByCity] = useState(null);
   const [reviewTrend, setReviewTrend] = useState(null);
@@ -91,6 +93,18 @@ export default function DashboardPageV2() {
   // true = the LATEST alerts fetch failed (value above is a kept-previous).
   // ActionInbox suppresses the green all-clear while stale.
   const [alertsStale, setAlertsStale] = useState(false);
+  // KPI-target store rows keyed by metric, + per-metric sparkline series
+  // (wave3). null while unfetched — tiles fall back to DEFAULT_KPI_TARGETS.
+  const [kpiTargets, setKpiTargets] = useState(null);
+  const [kpiHistory, setKpiHistory] = useState(null);
+  const [ebitda, setEbitda] = useState(null); // /admin/dashboard/ebitda-bridge (wave4)
+  const [mrrBridge, setMrrBridge] = useState(null); // /admin/dashboard/mrr-bridge (wave5)
+  const [revenueOverview, setRevenueOverview] = useState(null); // /admin/revenue/overview (wave6 — margin by line)
+  const [churnReasons, setChurnReasons] = useState(null); // /admin/dashboard/churn-reasons (wave7)
+  // Mobile scorecard: below md the five sections render ONE at a time behind
+  // the jump-nav pills (real tabs), so a phone isn't scrolling five sections
+  // of charts. Desktop keeps the one-page scroll + IntersectionObserver nav.
+  const [mobileTab, setMobileTab] = useState(SECTIONS[0].id);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -142,6 +156,20 @@ export default function DashboardPageV2() {
     setCustomRange(null);
   }, []);
   const navigate = useNavigate();
+  // Mobile tab switch: swap the visible section and snap the admin scroll
+  // container back to the top so every tab opens at its header.
+  const selectMobileTab = useCallback((id) => {
+    setMobileTab(id);
+    const scroller = document.querySelector(".admin-main");
+    if (scroller && typeof scroller.scrollTo === "function") {
+      // "instant" opts out of the shell's smooth scroll-behavior — the
+      // content swaps at the same moment, so animating would be jarring.
+      scroller.scrollTo({ top: 0, behavior: "instant" });
+    }
+  }, []);
+  // On mobile only the active tab's section mounts (five sections of recharts
+  // is heavy on a phone); on desktop every section renders for the one-page scroll.
+  const sectionVisible = (id) => !isMobile || mobileTab === id;
   // Drill-down: open the Leads list filtered to this attribution source, scoped
   // to the same period window the panel is showing so the list matches the count.
   const drillToSource = useCallback(
@@ -234,6 +262,61 @@ export default function DashboardPageV2() {
     setReviewTrend((prev) => rev ?? prev);
     setCohort((prev) => coh ?? prev);
     setCapAlloc((prev) => cap ?? prev);
+
+    // Wave 3 — KPI-target store + sparkline history for the tiles. A new wave
+    // (never appended to 1/2) so the added fetches can't push an existing
+    // wave over the per-user rate-limit budget. Both fail soft: tiles fall
+    // back to DEFAULT_KPI_TARGETS / no sparkline.
+    const wave3 = await Promise.all([
+      track("/kpi-targets", adminFetch("/admin/kpi-targets")),
+      track("/kpi-history", adminFetch("/admin/dashboard/kpi-history?days=90")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [tgt, hist] = wave3;
+    setKpiTargets((prev) => {
+      if (!Array.isArray(tgt?.targets)) return prev;
+      const byMetric = {};
+      for (const row of tgt.targets) byMetric[row.metric] = row;
+      return byMetric;
+    });
+    setKpiHistory((prev) => (hist?.series && typeof hist.series === "object" ? hist.series : prev));
+
+    // Wave 4 — the adjusted-EBITDA bridge. Its own wave for the same rate-limit
+    // reason wave3 exists (never grow an existing wave); fails soft to the
+    // card's loading/empty state.
+    const wave4 = await Promise.all([
+      track("/ebitda-bridge", adminFetch("/admin/dashboard/ebitda-bridge")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [eb] = wave4;
+    setEbitda((prev) => eb ?? prev);
+
+    // Wave 5 — the net-MRR bridge. Same one-fetch-per-new-wave rule as wave4
+    // (rate-limiter budget); fails soft to the card's loading/empty state.
+    const wave5 = await Promise.all([
+      track("/mrr-bridge", adminFetch("/admin/dashboard/mrr-bridge?months=6")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [mb] = wave5;
+    setMrrBridge((prev) => mb ?? prev);
+
+    // Wave 6 — revenue overview for the margin-by-service-line card (reuses
+    // the revenue page's job-costed byServiceLine; zero new SQL). Same
+    // one-fetch-per-new-wave rate-limit rule; fails soft.
+    const wave6 = await Promise.all([
+      track("/revenue-overview", adminFetch("/admin/revenue/overview?period=month")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [ro] = wave6;
+    setRevenueOverview((prev) => ro ?? prev);
+
+    // Wave 7 — churn Pareto. Same one-fetch-per-new-wave rule; fails soft.
+    const wave7 = await Promise.all([
+      track("/churn-reasons", adminFetch("/admin/dashboard/churn-reasons?months=12")),
+    ]);
+    if (!mountedRef.current) { inFlightRef.current = false; return; }
+    const [cr] = wave7;
+    setChurnReasons((prev) => cr ?? prev);
     inFlightRef.current = false;
     // Report this generation's outcome to the freshness gate. "Updated just
     // now" only advances once loadAll AND the period effects (Core KPIs +
@@ -347,6 +430,8 @@ export default function DashboardPageV2() {
       setCallsBySource(null);
       setLeadsBySource(null);
       setChannelMix(null);
+      setLeadFunnel(null);
+      setChannelRoi(null);
       setAttributionError(null);
       setAttributionLoading(true);
     }
@@ -361,11 +446,29 @@ export default function DashboardPageV2() {
       adminFetch(`/admin/dashboard/channel-mix?${periodQS}`, {
         signal: ctrl.signal,
       }),
+      // Fails soft to null on its own — the optional funnel card must never
+      // reject the batch and take down the attribution panels beside it.
+      adminFetch(`/admin/dashboard/lead-funnel?${periodQS}`, {
+        signal: ctrl.signal,
+      }).catch((e) => {
+        if (e?.name !== "AbortError") console.error("[dashboard-v2] /lead-funnel", e);
+        return null;
+      }),
+      // Same fail-soft rule for the optional Channel ROI card.
+      adminFetch(`/admin/dashboard/channel-roi?${periodQS}`, {
+        signal: ctrl.signal,
+      }).catch((e) => {
+        if (e?.name !== "AbortError") console.error("[dashboard-v2] /channel-roi", e);
+        return null;
+      }),
     ])
-      .then(([calls, leads, channels]) => {
+      .then(([calls, leads, channels, funnelBySrc, roi]) => {
         setCallsBySource(calls);
         setLeadsBySource(leads);
         setChannelMix(channels);
+        // Preserve-on-fail like the loadAll panels (blanked on period switch above).
+        setLeadFunnel((prev) => funnelBySrc ?? prev);
+        setChannelRoi((prev) => roi ?? prev);
         setAttributionError(null);
       })
       .catch((e) => {
@@ -441,7 +544,16 @@ export default function DashboardPageV2() {
     timeZone: "America/New_York",
   });
   const firstName = adminFirstName();
-  const kpiStripProps = { kpis, kpisLoading, kpisError };
+  // Sparklines are daily MONTH-TO-DATE snapshots (kpi-snapshot cron) — under
+  // any other period the tile's number and the trend would silently disagree
+  // on basis, so the series only render while the selector is on MTD.
+  const kpiStripProps = {
+    kpis,
+    kpisLoading,
+    kpisError,
+    kpiTargets,
+    kpiHistory: period === "mtd" ? kpiHistory : null,
+  };
 
   return (
     <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
@@ -492,52 +604,75 @@ export default function DashboardPageV2() {
         periodLabel={kpis?.periodLabel}
         onSelectPeriod={selectNamedPeriod}
         onApplyCustomRange={applyCustomRange}
+        activeSection={isMobile ? mobileTab : undefined}
+        onSelectSection={isMobile ? selectMobileTab : undefined}
       />
 
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
-      <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
+      {sectionVisible("today") && (
+        <TodaySection alerts={alerts} alertsStale={alertsStale} today={today} {...kpiStripProps} />
+      )}
 
       {/* AI chart builder — describe a metric, the AI builds + pins it. Gated off
           by default; the model only proposes SQL, the server sandboxes it. */}
-      {aiChartsEnabled && (
+      {aiChartsEnabled && sectionVisible("today") && (
         <div className="mb-5">
           <AiChartsPanel />
         </div>
       )}
 
-      <GrowthSection
-        data={data}
-        compare={compare}
-        salesCapture={salesCapture}
-        funnel={funnel}
-        revenueByCity={revenueByCity}
-        capAlloc={capAlloc}
-        callsBySource={callsBySource}
-        leadsBySource={leadsBySource}
-        channelMix={channelMix}
-        attributionLoading={attributionLoading}
-        attributionError={attributionError}
-        onDrillSource={drillToSource}
-        isMobile={isMobile}
-        {...kpiStripProps}
-      />
 
-      <ProfitSection mix={mix} isMobile={isMobile} {...kpiStripProps} />
+      {sectionVisible("growth") && (
+        <GrowthSection
+          data={data}
+          compare={compare}
+          salesCapture={salesCapture}
+          funnel={funnel}
+          revenueByCity={revenueByCity}
+          capAlloc={capAlloc}
+          callsBySource={callsBySource}
+          leadsBySource={leadsBySource}
+          channelMix={channelMix}
+          leadFunnel={leadFunnel}
+          channelRoi={channelRoi}
+          attributionLoading={attributionLoading}
+          attributionError={attributionError}
+          onDrillSource={drillToSource}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
 
-      <RetentionSection
-        mrrTrend={mrrTrend}
-        cohort={cohort}
-        reviewTrend={reviewTrend}
-        isMobile={isMobile}
-        {...kpiStripProps}
-      />
+      {sectionVisible("profit") && (
+        <ProfitSection
+          mix={mix}
+          ebitda={ebitda}
+          revenueOverview={revenueOverview}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
 
-      <CashSection
-        aging={aging}
-        billing={billing}
-        isMobile={isMobile}
-        {...kpiStripProps}
-      />
+      {sectionVisible("retention") && (
+        <RetentionSection
+          mrrTrend={mrrTrend}
+          mrrBridge={mrrBridge}
+          churnReasons={churnReasons}
+          cohort={cohort}
+          reviewTrend={reviewTrend}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
+
+      {sectionVisible("cash") && (
+        <CashSection
+          aging={aging}
+          billing={billing}
+          isMobile={isMobile}
+          {...kpiStripProps}
+        />
+      )}
     </div>
   );
 }

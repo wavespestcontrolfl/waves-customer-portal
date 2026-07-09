@@ -175,10 +175,12 @@ export default function BillingRecoveryPage() {
   useEffect(() => { load(); }, [load]);
 
   const bill = useCallback(async (visit, { confirm } = {}) => {
-    if (confirm && !window.confirm(
-      `${visit.customer} has a monthly rate (${formatMoney(visit.monthly_rate)}). ` +
-      `Confirm they are NOT billed on a recurring cadence before invoicing this visit. Continue?`,
-    )) return;
+    const confirmMsg = visit.billing_mode === "per_application"
+      ? `${visit.customer} is billed per application (${formatMoney(visit.price)}/visit, auto-charged at completion). `
+        + `Confirm completion billing really did miss this visit before invoicing it. Continue?`
+      : `${visit.customer} has a monthly rate (${formatMoney(visit.monthly_rate)}). `
+        + `Confirm they are NOT billed on a recurring cadence before invoicing this visit. Continue?`;
+    if (confirm && !window.confirm(confirmMsg)) return;
     setBusyId(visit.scheduled_service_id);
     try {
       await adminFetch(`/admin/billing-recovery/${visit.scheduled_service_id}/bill`, { method: "POST", body: "{}" });
@@ -220,7 +222,7 @@ export default function BillingRecoveryPage() {
             <Banknote className="w-5 h-5 text-zinc-500" /> Billing Recovery
           </h1>
           <p className="text-13 text-zinc-500 mt-1">
-            Completed visits that were never invoiced, plus aging receivables. Autopay visits are excluded — they bill separately.
+            Completed visits that were never invoiced, plus aging receivables. Monthly-autopay visits are excluded — they bill separately; per-application visits surface under Needs review.
           </p>
         </div>
         <Select value={days} onChange={(e) => setDays(Number(e.target.value))} className="w-44">
@@ -268,7 +270,7 @@ export default function BillingRecoveryPage() {
             <Card className="mb-6">
               <CardHeader>
                 <CardTitle>Needs review — recurring or partially prepaid</CardTitle>
-                <p className="text-12 text-zinc-500 mt-1">These have a monthly rate or a partial prepayment — confirm they aren't billed on a cadence, and bill partial-prepay visits manually so the credit is applied.</p>
+                <p className="text-12 text-zinc-500 mt-1">These have a monthly rate, a partial prepayment, or bill per application — confirm they aren't already billed (cadence or completion auto-charge), and bill partial-prepay visits manually so the credit is applied.</p>
               </CardHeader>
               <CardBody>
                 <Table>

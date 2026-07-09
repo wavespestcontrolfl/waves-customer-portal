@@ -12,6 +12,7 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../services/customer-contact', () => ({
   getServiceContact: jest.fn(),
+  firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
@@ -109,7 +110,9 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customerQuery;
       throw new Error(`Unexpected table query: ${table}`);
     });
-    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    // Service contact stored as a full name — the {first_name} slot must be the
+    // first token only ("Jamie"), not "Jamie Rios".
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1' });
 

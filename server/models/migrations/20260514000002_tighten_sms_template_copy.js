@@ -116,13 +116,19 @@ const TEMPLATES = [
     variables: ['first_name', 'invoice_number', 'amount', 'card_line', 'receipt_url'],
     sort_order: 17,
   },
+  // The WaveGuard monthly pre-charge CRON is retired
+  // (20260706000010_sms_template_cleanup.js), but this row survives as the
+  // isTemplateActive kill switch for manual Comms/IB billing texts — a
+  // missing row reads as ACTIVE. Seeded disabled so fresh environments
+  // match prod's safe posture.
   {
     template_key: 'billing_reminder',
     name: 'Billing Reminder (WaveGuard Monthly)',
-    category: 'billing',
-    body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.\n\nManage your payment method in the customer portal or call (941) 297-5749.',
+    category: 'system',
+    body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.',
     variables: ['first_name', 'waveguard_tier', 'amount', 'charge_date'],
     sort_order: 18,
+    is_active: false,
   },
   {
     template_key: 'invoice_followup_3day',
@@ -392,14 +398,8 @@ const TEMPLATES = [
     variables: ['first_name', 'referral_link'],
     sort_order: 31,
   },
-  {
-    template_key: 'referral_enrollment',
-    name: 'Referral Program Enrollment',
-    category: 'referrals',
-    body: "Hello {first_name}! You're enrolled in the Waves Referral Program. Share your link and earn a reward for every new customer: {referral_link}",
-    variables: ['first_name', 'referral_link'],
-    sort_order: 32,
-  },
+  // referral_enrollment removed by 20260706000010_sms_template_cleanup.js —
+  // enrollment is automatic; its only sender was an unmounted legacy route.
   {
     template_key: 'referral_invite',
     name: 'Referral Invite',
@@ -426,61 +426,30 @@ const TEMPLATES = [
   },
 
   // retention
-  {
-    template_key: 'health_check_in',
-    name: 'Health — Check In',
-    category: 'retention',
-    body: 'Hello {first_name}! Adam from Waves here. Is everything going well with your service? Reply if you need anything.',
-    variables: ['first_name'],
-    sort_order: 41,
-  },
+  // Most health_* outreach texts removed by
+  // 20260706000010_sms_template_cleanup.js — health alerts stay admin-facing
+  // (call actions only) and the post-service upsell workflow is retired.
+  // health_retention_offer and waveguard_upsell SURVIVE as isTemplateActive
+  // kill switches for still-live send paths (retention outreach approvals /
+  // campaign upsell drafts) — a missing row reads as ACTIVE. Seeded disabled
+  // so fresh environments match prod's safe posture.
   {
     template_key: 'health_retention_offer',
     name: 'Health — Retention Offer',
-    category: 'retention',
+    category: 'system',
     body: 'Hello {first_name}! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?',
     variables: ['first_name'],
     sort_order: 42,
-  },
-  {
-    template_key: 'health_rebook',
-    name: 'Health — Rebook',
-    category: 'retention',
-    body: "Hello {first_name}! It's been a while since your last Waves service. Reply here and we'll help get you back on the schedule.",
-    variables: ['first_name'],
-    sort_order: 43,
-  },
-  {
-    template_key: 'health_payment_reminder',
-    name: 'Health — Payment Reminder',
-    category: 'retention',
-    body: 'Hello {first_name}! Waves here. We noticed a billing issue on your account. Reply here or call us when you can so we can get it sorted.',
-    variables: ['first_name'],
-    sort_order: 44,
-  },
-  {
-    template_key: 'health_apology',
-    name: 'Health — Apology / Feedback',
-    category: 'retention',
-    body: "Hello {first_name}! Adam from Waves here. I want to make sure you're fully satisfied with your service. Mind if I give you a quick call for feedback?",
-    variables: ['first_name'],
-    sort_order: 45,
-  },
-  {
-    template_key: 'health_welcome_followup',
-    name: 'Health — Welcome Follow-Up',
-    category: 'retention',
-    body: 'Hello {first_name}! Adam from Waves here. Following up on your service - did everything meet your expectations? Reply if you need anything.',
-    variables: ['first_name'],
-    sort_order: 46,
+    is_active: false,
   },
   {
     template_key: 'waveguard_upsell',
     name: 'WaveGuard Plan Recommendation',
-    category: 'retention',
+    category: 'system',
     body: 'Hello {first_name}! Based on your recent services, {tier_label} WaveGuard may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more.',
     variables: ['first_name', 'tier_label'],
     sort_order: 47,
+    is_active: false,
   },
   {
     template_key: 'renewal_reminder',
@@ -498,14 +467,8 @@ const TEMPLATES = [
     variables: ['first_name', 'term_end', 'last_service_sentence'],
     sort_order: 50,
   },
-  {
-    template_key: 'seasonal_alert',
-    name: 'Seasonal Alert / Tip (hardcoded)',
-    category: 'retention',
-    body: 'Hello {first_name}! {tip}\n\nQuestions or requests? Reply here or call (941) 297-5749.',
-    variables: ['first_name', 'tip'],
-    sort_order: 51,
-  },
+  // seasonal_alert removed by 20260706000010_sms_template_cleanup.js
+  // (seasonal_reactivation below is a separate, retained flow).
   {
     template_key: 'seasonal_reactivation',
     name: 'Seasonal Reactivation (hardcoded)',
@@ -654,14 +617,8 @@ const TEMPLATES = [
   },
 
   // sales
-  {
-    template_key: 'estimate_auto_renewed',
-    name: 'Estimate — Auto-Renewed',
-    category: 'sales',
-    body: 'Hello {first_name}! Your Waves estimate was about to expire, so we extended it a few more days. Take another look here: {estimate_url}\n\nQuestions or requests? Reply here or call (941) 297-5749.',
-    variables: ['first_name', 'estimate_url'],
-    sort_order: 30,
-  },
+  // estimate_auto_renewed removed by 20260706000010_sms_template_cleanup.js —
+  // estimates still auto-extend silently; the customer text is retired.
 
   // service
   {
@@ -728,22 +685,10 @@ const TEMPLATES = [
     variables: ['first_name', 'service_type', 'portal_url'],
     sort_order: 8,
   },
-  {
-    template_key: 'service_complete_concise',
-    name: 'Service Complete - Concise',
-    category: 'service',
-    body: 'Hello {first_name}! Report: {portal_url}\nReply with questions.',
-    variables: ['first_name', 'portal_url'],
-    sort_order: 9,
-  },
-  {
-    template_key: 'appointment_call_confirmed',
-    name: 'Appointment Confirmed (Call)',
-    category: 'service',
-    body: 'Hello {first_name}! Your {service_type} with Waves is confirmed for {date} at {time}.\n\nQuestions or requests? Reply here.',
-    variables: ['first_name', 'service_type', 'date', 'time'],
-    sort_order: 10,
-  },
+  // service_complete_concise removed by 20260706000010_sms_template_cleanup.js —
+  // the completion-text overflow swap is retired.
+  // appointment_call_confirmed removed by 20260706000010_sms_template_cleanup.js —
+  // call bookings confirm through the shared appointment_confirmation template.
   {
     template_key: 'appointment_rescheduled',
     name: 'Appointment Rescheduled',
@@ -768,38 +713,10 @@ const TEMPLATES = [
     variables: ['first_name'],
     sort_order: 13,
   },
-  {
-    template_key: 'reschedule_options_weather',
-    name: 'Reschedule Options - Weather (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Weather means your {service_type} on {original_date} needs to move.\n\nOptions:\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2, or suggest another day.',
-    variables: ['first_name', 'service_type', 'original_date', 'option_1', 'option_2'],
-    sort_order: 14,
-  },
-  {
-    template_key: 'reschedule_options_access',
-    name: 'Reschedule Options - Access Issue (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! We stopped by for your {service_type}, but {access_issue}. We can come back:\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2.',
-    variables: ['first_name', 'service_type', 'access_issue', 'option_1', 'option_2'],
-    sort_order: 15,
-  },
-  {
-    template_key: 'reschedule_options_general',
-    name: 'Reschedule Options - General (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Your {service_type} on {original_date} needs to be rescheduled.{reason_text}\n\n1. {option_1}\n2. {option_2}\n\nReply 1 or 2.',
-    variables: ['first_name', 'service_type', 'original_date', 'reason_text', 'option_1', 'option_2'],
-    sort_order: 16,
-  },
-  {
-    template_key: 'self_booking_confirmation',
-    name: 'Self-Booking Confirmation (hardcoded)',
-    category: 'service',
-    body: 'Hello {first_name}! Your Waves appointment is confirmed for {date}, {time} at {address}. Confirmation: {confirmation_code}.\n\nNeed to change it? Reply RESCHEDULE.',
-    variables: ['first_name', 'date', 'time', 'address', 'confirmation_code'],
-    sort_order: 19,
-  },
+  // reschedule_options_* removed by 20260706000010_sms_template_cleanup.js —
+  // their sender was never wired; the rain-out engine owns weather moves.
+  // self_booking_confirmation removed by 20260706000010_sms_template_cleanup.js —
+  // self-bookings confirm through the shared appointment_confirmation flow.
   {
     template_key: 'appointment_series_rescheduled',
     name: 'Appointment Series Rescheduled',

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
@@ -26,7 +27,11 @@ import {
   COLORS as B,
   FONTS,
 } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
+import { useWavesShell } from '../components/brand/WavesShellContext';
+import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import ActivityCard from '../components/ActivityCard';
 
@@ -34,11 +39,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+// Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_BUTTON_BG = B.blueDeeper;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
@@ -407,6 +413,39 @@ export function visitTimeLabel(data = {}) {
   return arrived || exited || '';
 }
 
+// Mirrors the estimate hero's phone display: 10-digit US numbers get the
+// (xxx) xxx-xxxx treatment, anything else renders as stored.
+function formatCustomerPhone(phone) {
+  const raw = String(phone || '').replace(/\D/g, '');
+  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
+  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return String(phone || '').trim();
+}
+
+// "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
+// The displayed arrival window is ALWAYS window_start + 2 hours — window_end
+// is the internal job block and never renders on customer surfaces.
+function formatNextAppointmentLabel(nextAppointment) {
+  if (!nextAppointment?.scheduledDate) return null;
+  const dateLabel = (() => {
+    try {
+      return new Date(`${nextAppointment.scheduledDate}T12:00:00Z`)
+        .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    } catch { return null; }
+  })();
+  if (!dateLabel) return null;
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
+  if (!m) return dateLabel;
+  const fmt = (mins) => {
+    const h24 = Math.floor(mins / 60) % 24;
+    const h12 = h24 % 12 || 12;
+    const mm = mins % 60;
+    return `${h12}:${String(mm).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
+  };
+  const start = (Number(m[1]) * 60) + Number(m[2]);
+  return `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+}
+
 export function serviceReportDateTimeLabel(data = {}) {
   const serviceDate = formatDate(data.serviceDate);
   const serviceTime = visitTimeLabel(data);
@@ -580,7 +619,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (pendingTarget) {
     return {
-      heading: 'your service is complete.',
+      heading: 'your service is complete!',
       status: pendingReadyText,
       statusTone: 'pending',
       result: `${pendingTarget.label || 'Treated'} areas are still drying.`,
@@ -601,7 +640,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   }
 
   return {
-    heading: 'your service is complete.',
+    heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',
     statusTone: allReady ? 'ready' : 'neutral',
     result: 'Routine service completed. No high-priority issues were noted.',
@@ -1255,7 +1294,7 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
   })();
   const Root = embedded ? 'div' : 'section';
   return (
-    <Root className={`${embedded ? 'pressure-trend-card pressure-trend-card-embedded' : 'report-card pressure-trend-card'}`} data-section="pressure-trend">
+    <Root data-glass={embedded ? undefined : 'card'} className={`${embedded ? 'pressure-trend-card pressure-trend-card-embedded' : 'report-card pressure-trend-card'}`} data-section="pressure-trend">
       <div className="pressure-trend-layout">
         <div>
           {!embedded && <h2>{pressureHeadline}</h2>}
@@ -1448,7 +1487,7 @@ function LawnProtocolCard({ protocol }) {
       : 'Seasonal protocol';
 
   return (
-    <section className="sr-section lawn-protocol-section" id="lawn-protocol">
+    <section data-glass="card" className="sr-section lawn-protocol-section" id="lawn-protocol">
       <h2>Seasonal lawn protocol</h2>
       <p>{window.goal || 'Today’s lawn visit followed the current St. Augustine seasonal protocol for this property.'}</p>
       <div className="sr-grid-3">
@@ -1620,21 +1659,44 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const serviceLabel = serviceDisplayName(data);
+  // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
+  // headline never reads "... Service service is complete".
+  const headlineServiceLabel = String(serviceLabel || '').replace(/\s+service$/i, '').trim();
+  const headline = headlineServiceLabel
+    ? String(smartStatus.heading || '').replace(/^your service\b/, `your ${headlineServiceLabel} service`)
+    : smartStatus.heading;
   const serviceDateTime = serviceReportDateTimeLabel(data);
+  const nextAppointmentLabel = formatNextAppointmentLabel(data.nextAppointment);
 
   return (
     <section className="service-report-hero" id="service-status">
       <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
-        <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
-        {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
+        <div className="section-eyebrow">Service report</div>
+        <h1 className="sr-title">Hey {firstName}, {headline}</h1>
+        {(() => {
+          // Mirrors the estimate header's contact block: each of name / email /
+          // phone / address on its own eyebrow-styled line.
+          const contactLines = [
+            data.customerName,
+            data.customerEmail,
+            formatCustomerPhone(data.customerPhone),
+            data.serviceAddress,
+          ].map((line) => String(line || '').trim()).filter(Boolean);
+          return contactLines.length ? (
+            <div className="service-meta-contact">
+              {contactLines.map((line) => (
+                <div key={line} className="service-meta-address">{line}</div>
+              ))}
+            </div>
+          ) : null;
+        })()}
       </div>
-      <div className="service-status-card">
+      <div data-glass="card" className="service-status-card">
         <div className="service-status-main">
           <div>
             <div className="section-eyebrow">Today&apos;s result</div>
             <div className="smart-status-result">{resultOverride || smartStatus.result}</div>
-            <div className="sr-meta">{[serviceLabel, serviceDateTime].filter(Boolean).join(' | ')}</div>
+            {serviceDateTime && <div className="sr-meta">{serviceDateTime}</div>}
           </div>
           {(smartStatus.status || readinessBadge) && (
             <div className={`status-badge status-${smartStatus.statusTone || (readinessBadge?.ready ? 'ready' : 'pending')}`}>
@@ -1655,6 +1717,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             <div className="sr-cell-label">Completion status</div>
             <div className="sr-cell-value">{completionStatus}</div>
           </div>
+          {nextAppointmentLabel && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Next appointment</div>
+              <div className="sr-cell-value">{nextAppointmentLabel}</div>
+            </div>
+          )}
         </div>
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
         <HeroConditions
@@ -1672,7 +1740,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
 // never reach this page for suppressed reports (the server 404s them).
 function InternalReviewBar() {
   return (
-    <section className="report-action-bar" aria-label="Internal review notice">
+    <section data-glass="card" className="report-action-bar" aria-label="Internal review notice">
       <div className="section-eyebrow">Internal Review</div>
       <h2 className="report-action-title">Not sent to the customer</h2>
       <p className="report-action-copy">
@@ -1684,19 +1752,75 @@ function InternalReviewBar() {
 }
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
+  const [copied, setCopied] = useState(false);
+  const handleShare = async () => {
+    const result = await onShare();
+    if (result === 'copied') {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
   return (
-    <section className="report-action-bar" aria-label="Report tools">
+    <section data-glass="card" className="report-action-bar" aria-label="Report tools">
       <div className="section-eyebrow">Report Tools</div>
       <h2 className="report-action-title">Download, share, or print</h2>
       <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
         {pdfUrl
-          ? <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
-          : <span style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
-        <button type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
-        <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
-        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
+          ? <a
+              data-glass-accent=""
+              href={pdfUrl}
+              download
+              onClick={(e) => {
+                trackReportEvent(token, 'pdf_downloaded');
+                // In the Capacitor shell an <a download> dead-ends the
+                // webview — route through the native share sheet (F-046).
+                // canSaveNative: old installed binaries run this JS without
+                // the plugins — leave their legacy tap behavior alone.
+                if (canSaveNative()) {
+                  e.preventDefault();
+                  saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
+                    .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                }
+              }}
+              style={actionButtonStyle('primary')}
+            ><Download size={16} /> Download PDF</a>
+          : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
+        <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? 'Link copied' : 'Share'}</button>
+        {/* window.print() is a no-op in the Capacitor webview — hide the
+            button there; the Download PDF share sheet carries Print on iOS. */}
+        {isNativeApp() ? null : <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>}
+        <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
+    </section>
+  );
+}
+
+// "Your Visit, in Motion" — the tech-approved recap clip embedded in the
+// report (owner ask 2026-07-05; the standalone /recap/:token player was
+// retired 2026-07-09 — this card is the only surface, and old SMS links
+// redirect here). The server only attaches `recap` on live views of PEST
+// reports when an approved clip exists, so this self-gates everywhere else
+// (pdf/static/sms_preview, non-pest lines, and visits without a recap).
+function RecapVideoCard({ recap, token }) {
+  // ready:true only reflects the DB row — the video read can still 404/5xx
+  // (pruned clip, S3 error), which used to strand a dead black player. Hide
+  // the whole card on load failure instead.
+  const [videoFailed, setVideoFailed] = useState(false);
+  if (!recap?.ready || !token || videoFailed) return null;
+  return (
+    <section data-glass="card" className="sr-section recap-video-section" id="visit-recap">
+      <div className="section-eyebrow">Your visit, in motion</div>
+      <h2>Watch today&apos;s service</h2>
+      <p className="map-context-copy">A short recap your technician recorded during the visit.</p>
+      <video
+        src={`${API_BASE}/reports/${token}/recap/video`}
+        controls
+        preload="metadata"
+        playsInline
+        onError={() => setVideoFailed(true)}
+        style={{ width: '100%', maxWidth: 420, borderRadius: 14, background: '#000', display: 'block', margin: '12px auto 0' }}
+      />
     </section>
   );
 }
@@ -1714,7 +1838,7 @@ function ReentryReadinessCard({ context, mode, token }) {
 
   if (!context) return null;
   return (
-    <section className={`sr-section readiness-card ${readiness.allReady ? 'is-ready' : ''}`} id="re-entry">
+    <section data-glass="card" className={`sr-section readiness-card ${readiness.allReady ? 'is-ready' : ''}`} id="re-entry">
       <div className="readiness-card-header">
         <div>
           <div className="section-eyebrow">Re-entry / readiness</div>
@@ -1852,7 +1976,9 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'question_failed');
       setAnswer(data.answer || 'I could not answer that from this report.');
-      trackReportEvent(token, 'report_question_asked');
+      // No client-side event here: the server's /ask handler already records
+      // report_question_asked — posting it again double-counted the first
+      // question of every session in report analytics.
     } catch {
       setAnswer('I could not answer that right now. Reply to the text message or call Waves for help.');
     } finally {
@@ -1880,13 +2006,13 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
           placeholder={placeholder}
           aria-label="Ask Waves about this service report"
         />
-        <button type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+        <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
           {asking ? 'Checking...' : 'Submit'}
         </button>
       </div>
       <div className="report-ask-actions" aria-label="Example questions">
         {prompts.map((prompt) => (
-          <button type="button" key={prompt} onClick={() => ask(prompt)} disabled={asking}>
+          <button data-glass="chip" type="button" key={prompt} onClick={() => ask(prompt)} disabled={asking}>
             {prompt}
           </button>
         ))}
@@ -1910,12 +2036,15 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
   ].filter(Boolean);
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false }) {
-  const hasCoverageMap = !(serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')));
+function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true }) {
+  // hasCoverageMap comes from the page (the same hideCoverageCard gate that
+  // decides whether the Service Coverage card renders) — deriving it here
+  // from serviceLine alone missed pest V2, whose card hides while the Map
+  // link would still render and jump nowhere.
   const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
 
   return (
-    <section className="sr-section quick-report-tools" id="quick-navigation">
+    <section data-glass="card" className="sr-section quick-report-tools" id="quick-navigation">
       <div className="coverage-section-header">
         <div>
           <h2>Need help with this report?</h2>
@@ -1942,7 +2071,7 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   return (
-    <section className="report-card" data-section="todays-result" id={sectionId}>
+    <section data-glass="card" className="report-card" data-section="todays-result" id={sectionId}>
       <div className="section-eyebrow">
         {typedReport.isProgressVisit ? typedReport.reportTypeLabel : "Today's result"}
       </div>
@@ -1969,15 +2098,15 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   const items = typedReport?.findings;
   if (!Array.isArray(items) || !items.length) return null;
   return (
-    <section className="sr-section" id={sectionId} data-section="typed-findings">
+    <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found & did</h2>
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
           <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700, marginBottom: 2 }}>
+            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
-            <dd style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
+            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
               {item.customerValueLabel != null && item.customerValueLabel !== ''
                 ? String(item.customerValueLabel)
                 : String(item.value)}
@@ -2000,7 +2129,7 @@ function CompanionSectionHeader({ companion }) {
   const title = companion.typeLabel || companion.reportTypeLabel || 'Additional service';
   if (companion.internalOnly) {
     return (
-      <section className="report-action-bar" aria-label="Internal review notice">
+      <section data-glass="card" className="report-action-bar" aria-label="Internal review notice">
         <div className="section-eyebrow">Internal Review</div>
         <h2 className="report-action-title">{title}</h2>
         <p className="report-action-copy">
@@ -2011,7 +2140,7 @@ function CompanionSectionHeader({ companion }) {
     );
   }
   return (
-    <section className="sr-section" data-section="companion-heading">
+    <section data-glass="card" className="sr-section" data-section="companion-heading">
       <div className="section-eyebrow">Also completed this visit</div>
       <h2 style={{ margin: 0 }}>{title}</h2>
     </section>
@@ -2040,7 +2169,7 @@ function WavesAiSummary({ context = {}, mode, token, pressureTrend, neighborhood
   const body = isLawn ? lawnAssessmentBody(lawnAssessment) : context.body;
 
   return (
-    <section className="report-card ai-summary-card" data-section="waves-ai-summary">
+    <section data-glass="card" className="report-card ai-summary-card" data-section="waves-ai-summary">
       {isLawn && <div className="section-eyebrow">Lawn intelligence</div>}
       <h2>{headline}</h2>
       {isLawn ? <LawnMethodologyDropdown /> : <PressureMethodologyDropdown />}
@@ -2127,7 +2256,7 @@ function WavesAiPersonalitySummary({ context, mode, token, pressureTrend, neighb
   const headline = pressureProgressHeadline(pressureTrend, active.headline || 'Service is complete.');
 
   return (
-    <section className="report-card ai-summary-card premium-ai-summary" data-section="waves-ai-summary">
+    <section data-glass="card" className="report-card ai-summary-card premium-ai-summary" data-section="waves-ai-summary">
       <div className="premium-section-header">
         <div>
           <h2>{headline}</h2>
@@ -2158,7 +2287,7 @@ function WavesAiPersonalitySummary({ context, mode, token, pressureTrend, neighb
 function TheOneThing({ move }) {
   if (!move?.title) return null;
   return (
-    <section className="report-card the-one-thing" data-section="the-one-thing">
+    <section data-glass="card" className="report-card the-one-thing" data-section="the-one-thing">
       <div className="section-eyebrow">The one thing</div>
       <h2>{move.title}</h2>
       {(move.why || move.impact) && (
@@ -2196,7 +2325,7 @@ function statusLabel(value) {
 function PropertyDefenseStatus({ context }) {
   if (!context?.items?.length) return null;
   return (
-    <section className="report-card property-defense-status" data-section="property-defense-status">
+    <section data-glass="card" className="report-card property-defense-status" data-section="property-defense-status">
       <div className="section-eyebrow">Property defense status</div>
       <h2>{context.summary}</h2>
       <div className="defense-status-grid">
@@ -2297,11 +2426,12 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   const location = reviewLocationForReport(data);
   const copy = reviewRequestCopy(placement);
   return (
-    <section className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
+    <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
         <h2>{copy.title}</h2>
       </div>
       <a
+        data-glass-accent=""
         className="review-cta"
         href={location.reviewUrl}
         target="_blank"
@@ -2356,7 +2486,7 @@ function SinceLastVisit({ context }) {
   ].filter(Boolean);
   if (!rows.length) return null;
   return (
-    <section className="sr-section since-last-visit">
+    <section data-glass="card" className="sr-section since-last-visit">
       <h2>Since last visit</h2>
       <div className="sr-list">
         {rows.map(([label, value]) => (
@@ -2378,7 +2508,7 @@ function RecommendedActionCard({ findings = [], aiSummary, primaryMove }) {
   const text = primaryMove?.title || aiAction || finding?.recommendation;
   if (!text) return null;
   return (
-    <section className="sr-section recommended-action-card">
+    <section data-glass="card" className="sr-section recommended-action-card">
       <h2>Recommended next step</h2>
       <p className="recommended-action-text">{text}</p>
     </section>
@@ -2443,7 +2573,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   );
 
   return (
-    <section className="sr-section applied-products-section" id="products-applied">
+    <section data-glass="card" className="sr-section applied-products-section" id="products-applied">
       <div className="applied-products-header">
         <div>
           <h2>Products Applied</h2>
@@ -2566,7 +2696,7 @@ function LawnProgramOverviewCard({ context }) {
   ].filter(Boolean);
 
   return (
-    <section className="report-card lawn-program-overview-card" data-section="lawn-program-overview">
+    <section data-glass="card" className="report-card lawn-program-overview-card" data-section="lawn-program-overview">
       <div className="lawn-program-heading">
         <div className="lawn-program-icon" aria-hidden="true">
           <FileCheck2 size={20} />
@@ -3508,7 +3638,7 @@ function ServiceCoverageCard({
 
   if (!showList && !showMap) {
     return (
-      <section className="sr-section service-coverage-section" id="service-coverage">
+      <section data-glass="card" className="sr-section service-coverage-section" id="service-coverage">
         <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
         <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
         <h2>{coverage.title || 'Service Area Map'}</h2>
@@ -3518,7 +3648,7 @@ function ServiceCoverageCard({
   }
 
   return (
-    <section className="sr-section service-coverage-section unified-service-coverage" id="service-coverage">
+    <section data-glass="card" className="sr-section service-coverage-section unified-service-coverage" id="service-coverage">
       <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
       <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
       <div className="coverage-section-header">
@@ -4088,7 +4218,7 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
 
   if (loading) {
     return (
-      <section className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
+      <section data-glass="card" className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
         <h2>Visit Timeline</h2>
         <div className="workflow-skeleton-list">
           <span />
@@ -4102,7 +4232,7 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
   if (!timeline.enabled) return null;
 
   return (
-    <section className="sr-section service-workflow-section" id="service-timeline">
+    <section data-glass="card" className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
           <h2>{timeline.title || 'Visit Timeline'}</h2>
@@ -4154,49 +4284,6 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
         </>
       )}
     </section>
-  );
-}
-
-function ServiceReportCoverageAndWorkflow({
-  serviceType,
-  serviceCoverage,
-  visitTimeline,
-  workflowEvents,
-  customerInteraction,
-  visitTiming,
-  timingSource,
-  evidenceLevel,
-  mapBackgroundUrl,
-  mapAttribution,
-  applications = [],
-  serviceLine = null,
-  hideCoverageMap = false,
-}) {
-  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
-  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2 hides
-  // it too (the "Where we protected" Waves diagram up top replaces the legacy
-  // lettered map). Keep the Visit Timeline for every service line.
-  const hideCoverage = serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')) || hideCoverageMap;
-  return (
-    <>
-      <ServiceTimelineSection
-        serviceType={serviceType}
-        visitTimeline={visitTimeline}
-        workflowEvents={workflowEvents}
-        customerInteraction={customerInteraction}
-        visitTiming={visitTiming}
-        timingSource={timingSource}
-      />
-      {!hideCoverage && (
-        <ServiceCoverageCard
-          coverage={serviceCoverage}
-          evidenceLevel={evidenceLevel}
-          mapBackgroundUrl={mapBackgroundUrl}
-          mapAttribution={mapAttribution}
-          applications={applications}
-        />
-      )}
-    </>
   );
 }
 
@@ -4384,37 +4471,67 @@ function SmsReportPreview({ data }) {
   );
 }
 
-function LoadingState() {
+// Both interstitial states render glass-native while the theme is mounted
+// (the page-level useGlassSurface has already set html[data-glass-theme]
+// before first paint) and keep the warm legacy tokens for the pdf / static
+// print renders, which never mount the scene.
+function LoadingState({ glass = false }) {
+  const skeleton = glass ? 'rgba(4, 57, 94, 0.10)' : '#F7F5EE';
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: ESTIMATE_BG, fontFamily: FONT_BODY, padding: 20 }}>
-      <div style={{ background: '#fff', borderRadius: 16, border: `1px solid ${ESTIMATE_BORDER}`, padding: 24, width: 'min(420px, 100%)', boxSizing: 'border-box' }}>
-        <div style={{ height: 12, width: 120, background: '#F7F5EE', borderRadius: 4 }} />
-        <div style={{ height: 32, width: '70%', background: '#F7F5EE', borderRadius: 4, marginTop: 14 }} />
-        <div style={{ height: 14, width: '50%', background: '#F7F5EE', borderRadius: 4, marginTop: 10 }} />
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, padding: 20 }}>
+      <div
+        data-glass={glass ? 'card' : undefined}
+        style={{
+          background: glass ? undefined : '#fff',
+          border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`,
+          borderRadius: 16,
+          padding: 24,
+          width: 'min(420px, 100%)',
+          boxSizing: 'border-box',
+        }}
+      >
+        <div style={{ height: 12, width: 120, background: skeleton, borderRadius: 4 }} />
+        <div style={{ height: 32, width: '70%', background: skeleton, borderRadius: 4, marginTop: 14 }} />
+        <div style={{ height: 14, width: '50%', background: skeleton, borderRadius: 4, marginTop: 10 }} />
       </div>
     </div>
   );
 }
 
-function NotFoundState() {
+function NotFoundState({ glass = false }) {
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ background: '#fff', borderRadius: 16, border: `1px solid ${ESTIMATE_BORDER}`, padding: 32, maxWidth: 420, textAlign: 'center' }}>
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glass ? 'transparent' : ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
+      <div
+        data-glass={glass ? 'card' : undefined}
+        style={{
+          background: glass ? undefined : '#fff',
+          border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`,
+          borderRadius: 16,
+          padding: 32,
+          maxWidth: 420,
+          textAlign: 'center',
+        }}
+      >
+        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
+        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
+        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
       </div>
     </div>
   );
 }
 
-function LegacyReport({ data, token }) {
+function LegacyReport({ data, token, glass = false }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
+  // sticky header replaces this page-local top bar — rendering both stacked
+  // two headers (codex P2, PR #2439). Kept for any standalone render.
+  const { inShell } = useWavesShell();
   return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, fontFamily: FONT_BODY, color: ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100vh', background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+      {!inShell ? (
       <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
           maxWidth: 960,
@@ -4431,6 +4548,7 @@ function LegacyReport({ data, token }) {
           <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
         </div>
       </header>
+      ) : null}
       <main style={{ flex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
@@ -4441,15 +4559,29 @@ function LegacyReport({ data, token }) {
           </h1>
           {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
         </div>
-        <section style={{ background: '#fff', borderRadius: 16, padding: 24, border: `1px solid ${ESTIMATE_BORDER}` }}>
+        <section data-glass={glass ? 'card' : undefined} style={{ background: glass ? undefined : '#fff', borderRadius: 16, padding: 24, border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}` }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: ESTIMATE_TEXT }}>{data.serviceType}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
           {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
-          <a href={pdfUrl} download style={{ ...actionButtonStyle('primary'), marginTop: 18 }}><Download size={16} /> Download PDF</a>
+          <a
+            href={pdfUrl}
+            download
+            data-glass-accent={glass ? '' : undefined}
+            onClick={(e) => {
+              // Capacitor webview: <a download> dead-ends — share sheet
+              // instead (old binaries without the plugins keep legacy taps).
+              if (canSaveNative()) {
+                e.preventDefault();
+                saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
+                  .catch(() => window.alert('Could not save the PDF. Please try again.'));
+              }
+            }}
+            style={{ ...actionButtonStyle('primary'), marginTop: 18 }}
+          ><Download size={16} /> Download PDF</a>
         </section>
-        <div style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: '#fff' }}>
-          <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none' }} title="Service report PDF" />
+        <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
+          <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </main>
       <BrandFooter />
@@ -4550,15 +4682,37 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
   const hasReentry = Boolean(dynamicContext.reentry);
+  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
+  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
+  // hides it too (the "Where we protected" diagram replaces the lettered map).
+  const hideCoverageCard = data.serviceLine === 'lawn'
+    || /tree|shrub/.test(String(data.serviceLine || ''))
+    || Boolean(data.pestReportV2);
 
+  // Returns 'copied' when the clipboard fallback ran so the action bar can
+  // show feedback. Canceling the native share sheet is not an error and
+  // records no event.
   const share = async () => {
-    if (navigator.share) {
-      await navigator.share({ title: 'Waves service report', url: reportUrl });
-      trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
-      return;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: 'Waves service report', url: reportUrl });
+        trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
+        return null;
+      }
+    } catch {
+      return null; // share sheet canceled
     }
-    await navigator.clipboard?.writeText(reportUrl);
-    trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
+    try {
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Link copied" without an actual write.
+      if (typeof navigator.clipboard?.writeText !== 'function') return null;
+      await navigator.clipboard.writeText(reportUrl);
+      trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
+      return 'copied';
+    } catch {
+      return null; // clipboard unavailable
+    }
   };
 
   if (mode === 'sms_preview') return <SmsReportPreview data={data} />;
@@ -4726,6 +4880,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
+        }
+        .service-meta-contact {
+          margin-top: 16px;
+          display: grid;
+          gap: 4px;
+        }
+        .service-meta-contact .service-meta-address {
+          margin-top: 0;
         }
         .service-meta-address {
           margin-top: 16px;
@@ -7199,6 +7361,98 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .pressure-trend-chart { justify-self: stretch; max-width: none; }
           .review-request-card { grid-template-columns: 1fr; }
         }
+        /* ---------- liquid glass (live mode only) ----------
+           useGlassSurface sets html[data-glass-theme]; every rule below is
+           scoped under it so the non-glass report stays pixel-identical.
+           Card material comes from glass-theme.css via data-glass attrs —
+           this block only remaps the page's own tokens + inner surfaces. */
+        html[data-glass-theme] .service-report-v1 {
+          --text: #04395E;
+          --muted: rgba(12, 21, 40, 0.7);
+          --soft: rgba(12, 21, 40, 0.7);
+          --line: rgba(4, 57, 94, 0.16);
+          --line-strong: rgba(4, 57, 94, 0.24);
+          --page: transparent;
+          --wash: rgba(255, 255, 255, 0.38);
+          --soft-blue: rgba(255, 255, 255, 0.38);
+          --soft-blue-border: rgba(255, 255, 255, 0.6);
+          --report-action: #04395E;
+          background: transparent;
+        }
+        /* the glass ::before/::after specular layers position against the card */
+        html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        /* glass layout drops the uppercase eyebrow labels (owner ask 2026-07-05);
+           the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
+           ("Overall Lawn Status") without touching their inner list labels */
+        html[data-glass-theme] .service-report-v1 .section-eyebrow,
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1) { display: none; }
+        html[data-glass-theme] .service-report-v1 .sr-cell,
+        html[data-glass-theme] .service-report-v1 .sr-metric {
+          background: rgba(255, 255, 255, 0.42);
+          border-radius: 12px;
+        }
+        /* inner fact grids + weather panel: the navy hairline wash / solid-white
+           panels read legacy on the scene — go whisper-white (owner ask 2026-07-05) */
+        html[data-glass-theme] .service-report-v1 .service-status-grid,
+        html[data-glass-theme] .service-report-v1 .hero-condition-row,
+        html[data-glass-theme] .service-report-v1 .readiness-facts {
+          background: rgba(255, 255, 255, 0.6);
+          border-color: rgba(255, 255, 255, 0.7);
+        }
+        html[data-glass-theme] .service-report-v1 .hero-conditions {
+          background: rgba(255, 255, 255, 0.42);
+          border-color: rgba(255, 255, 255, 0.65);
+        }
+        html[data-glass-theme] .service-report-v1 .hero-condition-cell {
+          background: rgba(255, 255, 255, 0.5);
+        }
+        /* lawn V2 water callouts carry inline legacy surfaces — glass overrides
+           ride the class hooks (inert outside the theme) */
+        html[data-glass-theme] .service-report-v1 .lawn-callout-watch {
+          background: rgba(255, 236, 190, 0.55) !important;
+          border-color: rgba(240, 165, 0, 0.6) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-callout-after {
+          border-top-color: rgba(4, 57, 94, 0.16) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-water-cta {
+          background: rgba(255, 255, 255, 0.42) !important;
+          border-color: rgba(255, 255, 255, 0.65) !important;
+        }
+        /* photo-strip arrows + photo score badges carry the old marketing
+           navy #1B2C5B inline — remap to the glass navy while the theme is
+           mounted (inert in the legacy / pdf render) */
+        html[data-glass-theme] .service-report-v1 .lawn-photo-arrow {
+          background: rgba(4, 57, 94, 0.85) !important;
+        }
+        html[data-glass-theme] .service-report-v1 .lawn-photo-score {
+          background: rgba(4, 57, 94, 0.88) !important;
+        }
+        /* chip CTAs sit on translucent glass — their inline white text would wash out */
+        html[data-glass-theme] .service-report-v1 [data-glass="chip"],
+        html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
+          color: #04395E !important;
+        }
+        /* inline #1B2C5B stragglers (typed-findings dd, photo summary) — the
+           inline styles stay untouched for non-glass purity; .sr-ink remaps
+           them to the glass navy only while the theme is mounted */
+        html[data-glass-theme] .service-report-v1 .sr-ink {
+          color: #04395E !important;
+        }
+        @media print {
+          /* a customer printing the glass view still gets the paper document */
+          html[data-glass-theme] .service-report-v1 { background: #fff; }
+          html[data-glass-theme] .service-report-v1 [data-glass],
+          html[data-glass-theme] .service-report-v1 [data-glass-accent] {
+            background: #fff !important;
+            border-color: #d4d4d4 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          html[data-glass-theme] .glass-scene-orbs,
+          html[data-glass-theme] .glass-scene-grain { display: none !important; }
+        }
         @media print {
           .sr-top { position: static; }
           .sr-actions,
@@ -7225,13 +7479,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
       `}</style>
 
-      <header className="sr-top">
-        <div className="sr-top-inner">
-          <a className="sr-top-phone" href={`tel:${WAVES_PHONE_TEL}`}>{WAVES_PHONE_DISPLAY}</a>
-          <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
-        </div>
-      </header>
-
+      {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
+          route wrap, owner 2026-07-06) provides the standard chrome. */}
       <main className="sr-shell">
         {mode === 'live' && (data.internalOnly
           ? <InternalReviewBar />
@@ -7239,13 +7488,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
-        {/* V2: a review ask up top, location-synced to the closest GBP (ReviewRequestCard
-            picks the office review URL). Self-gates on eligibility / already-reviewed. */}
-        {data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
+        {/* V2 + pest: a review ask up top, location-synced to the closest GBP
+            (ReviewRequestCard picks the office review URL). Self-gates on
+            eligibility / already-reviewed. Pest gets the top placement like
+            lawn V2 (owner 2026-07-05); the bottom card below is suppressed
+            for pest to match. */}
+        {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard typedReport={data.typedReport} />
 
+        <RecapVideoCard recap={data.recap} token={token} />
+
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
+
+        {/* Visit Timeline sits directly under Re-entry on every layout (owner
+            ask 2026-07-05): lawn/tree V2 already lead with it below; the
+            standard layout renders it here instead of down in the coverage
+            block. */}
+        {!isV2LeadLayout && (
+          <ServiceTimelineSection
+            serviceType={visitTimelineServiceType}
+            visitTimeline={normalizedVisitTimeline}
+            workflowEvents={data.workflowEvents}
+            customerInteraction={data.customerInteraction}
+            visitTiming={data.visitTiming}
+            timingSource={data}
+          />
+        )}
 
         {/* Pest Report V2 — protection-first dashboard, right under Re-entry so it
             leads the pest report. Surfaces the premium-experience intelligence
@@ -7275,6 +7544,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               hasPestPressure={hasPestPressure}
               hasReentry={hasReentry}
               hasActivity={Boolean(data.activity)}
+              hasCoverageMap={!hideCoverageCard}
             />
           </>
         )}
@@ -7283,7 +7553,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             carries the id="visit-summary" anchor), so the legacy Visit Summary
             paragraph is suppressed for pest V2 to avoid showing the report twice. */}
         {!data.pestReportV2 && (
-          <section className="sr-section visit-summary-section" id="visit-summary">
+          <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
             {/* Lawn Report V2 visual dashboard slots in here (right after Re-entry),
@@ -7398,27 +7668,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hasPestPressure={hasPestPressure && !data.pestReportV2}
             hasReentry={hasReentry}
             hasActivity={Boolean(data.activity) && !data.pestReportV2}
+            hasCoverageMap={!hideCoverageCard}
           />
         )}
 
         {/* Non-lead-layout lines keep Timeline + Coverage and Products here; lawn +
             tree_shrub V2 already rendered them up top. */}
-        {!isV2LeadLayout && (
+        {!isV2LeadLayout && !hideCoverageCard && (
           <div id="map">
-            <ServiceReportCoverageAndWorkflow
-              serviceType={visitTimelineServiceType}
-              serviceCoverage={serviceCoverage}
-              visitTimeline={normalizedVisitTimeline}
-              workflowEvents={data.workflowEvents}
-              customerInteraction={data.customerInteraction}
-              visitTiming={data.visitTiming}
-              timingSource={data}
+            <ServiceCoverageCard
+              coverage={serviceCoverage}
               evidenceLevel={data.evidenceLevel}
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               applications={data.applications || []}
-              serviceLine={data.serviceLine}
-              hideCoverageMap={Boolean(data.pestReportV2)}
             />
           </div>
         )}
@@ -7431,7 +7694,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         {orderedProofMoments.length > 0 && (
-          <section className="sr-section" id="service-highlights">
+          <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
             <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, margin: '0 0 14px' }}>
               {visualProofMomentIntro(orderedProofMoments)}
@@ -7473,10 +7736,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             (which can over-diagnose). When reportV2 is present, the V2 photo strip
             above replaces this with a horizontal gallery + ONE consolidated analysis. */}
         {(data.photos || []).length > 0 && !data.reportV2 && (
-          <section className="sr-section" id="photos">
+          <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
+              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}
@@ -7491,8 +7754,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {/* V2 shows the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
-        {!data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
+        {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
@@ -7505,7 +7768,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        <BrandFooter variant="document" />
+        {/* Live (glass) view carries the standard newsletter card + identity
+            footer — same as /track (owner 2026-07-08/09). PDF/static/
+            sms_preview keep the quiet document sign-off so the print
+            pipeline stays byte-identical. */}
+        {mode === 'live' && <GlassNewsletterCard source="report_footer" />}
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>
   );
@@ -7520,6 +7788,15 @@ export default function ReportViewPage() {
     const requestedMode = new URLSearchParams(window.location.search).get('mode');
     return ['pdf', 'static', 'sms_preview'].includes(requestedMode) ? requestedMode : 'live';
   }, []);
+
+  // Liquid-glass theme — live view only, mounted at the PAGE level so the
+  // scene is up from the very first paint (loading skeleton included), not
+  // only after /data resolves — mounting it inside ServiceReportV1 made the
+  // legacy warm theme flash for the whole fetch. PDF / static / sms_preview
+  // renders never mount the scene, so the Playwright print pipeline and
+  // cached artifacts stay byte-identical.
+  const glassActive = mode === 'live';
+  useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
     let cancelled = false;
@@ -7556,8 +7833,52 @@ export default function ReportViewPage() {
     applyReportDocumentMetadata(data);
   }, [data]);
 
-  if (loading) return <LoadingState />;
-  if (!data || data.error) return <NotFoundState />;
+  // The browser resolves the URL fragment against the loading skeleton —
+  // anchor targets (e.g. #visit-recap from recap SMS links) don't exist
+  // until /data resolves and the report tree commits, so re-run the scroll
+  // here. Cards above the anchor keep settling after that first commit
+  // (self-gating sections unmount, images load) and shift the target, so
+  // re-anchor for a short window — stopping the moment the reader scrolls
+  // or the window elapses. No-op when the hash is absent or the target
+  // never renders (recap not ready), which leaves the reader at the top.
+  useEffect(() => {
+    if (!data || data.error) return undefined;
+    const anchorId = window.location.hash.slice(1);
+    if (!anchorId) return undefined;
+
+    let readerTookOver = false;
+    const markTakeover = () => { readerTookOver = true; };
+    const inputEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+    inputEvents.forEach((e) => window.addEventListener(e, markTakeover, { passive: true }));
+
+    const align = () => {
+      const target = document.getElementById(anchorId);
+      if (!target) return;
+      // The WavesShell top bar is sticky — without a scroll margin the
+      // card's top edge lands underneath it.
+      const header = document.querySelector('[data-waves-shell-header]');
+      const margin = (header?.offsetHeight || 64) + 12;
+      target.style.scrollMarginTop = `${margin}px`;
+      if (Math.abs(target.getBoundingClientRect().top - margin) > 4) {
+        target.scrollIntoView({ block: 'start' });
+      }
+    };
+
+    align();
+    const interval = setInterval(() => {
+      if (readerTookOver) { clearInterval(interval); return; }
+      align();
+    }, 250);
+    const stop = setTimeout(() => clearInterval(interval), 2000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(stop);
+      inputEvents.forEach((e) => window.removeEventListener(e, markTakeover));
+    };
+  }, [data]);
+
+  if (loading) return <LoadingState glass={glassActive} />;
+  if (!data || data.error) return <NotFoundState glass={glassActive} />;
   if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
-  return <LegacyReport data={data} token={token} />;
+  return <LegacyReport data={data} token={token} glass={glassActive} />;
 }

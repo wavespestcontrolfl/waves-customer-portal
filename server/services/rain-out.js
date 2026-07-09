@@ -25,6 +25,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { getDailyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
 const WEATHER_PHRASES = {
   weather_rain: 'heavy rain',
@@ -37,11 +38,19 @@ const WEATHER_PHRASES = {
 // live-override sets; terminal rows are never touched.
 const MOVABLE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 
-// Same-day options stop offering starts after this ET hour — a 2-hour
-// window starting later than 5 PM runs past a reasonable service day.
+// Same-day options stop offering starts after this ET hour — a slot
+// starting later than 5 PM runs past a reasonable service day.
 const LAST_SAME_DAY_START_HOUR = 17;
 const SAME_DAY_OFFSETS_MINUTES = [120, 240];
-const SAME_DAY_WINDOW_MINUTES = 120;
+
+// Reschedule slots are booked as a 1-hour, on-the-hour block — the internal
+// job-duration window, matching how normal appointments are scheduled. The
+// customer-facing 2-hour "arrival between" promise is derived separately from
+// the start time (arrivalWindowRange in admin-dispatch.js), so a tight 1-hour
+// internal block still texts the customer their usual leniency window. Rain-out
+// used to offer 2-hour windows here, which drifted from the rest of the
+// schedule; on-the-hour keeps dispatch times clean.
+const RESCHEDULE_WINDOW_MINUTES = 60;
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -85,9 +94,35 @@ function displayDate(dateStr) {
     .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 }
 
-function displayOption(dateStr, window) {
-  const win = displayWindow(window);
-  return win ? `${displayDate(dateStr)}, ${win}` : displayDate(dateStr);
+// Customer-facing option label. The slot is BOOKED as a tight 1-hour on-the-hour
+// block (window.start→end drives scheduling/overlap), but the customer is always
+// quoted the 2-hour arrival window from the start — the owner directive encoded
+// in arrivalWindowRange. So the moved-SMS and reply text promise the usual
+// leniency even though the internal slot is 1 hour. Falls back to the raw window
+// only if the start can't be parsed into an arrival range.
+function customerArrivalLabel(window) {
+  const range = arrivalWindowRange(window?.start);
+  return range ? formatSmsTimeRange(range) : displayWindow(window);
+}
+
+function customerArrivalOption(dateStr, window) {
+  const label = customerArrivalLabel(window);
+  return label ? `${displayDate(dateStr)}, ${label}` : displayDate(dateStr);
+}
+
+// Normalize a suggested start to an on-the-hour 1-hour block. The rebooker's
+// findBestWindow returns 2-3h arrival-promise ranges shared with the SMS
+// self-reschedule flow; rain-out books the tighter internal slot here without
+// touching that shared helper. Falls back to a zero-length window if the start
+// can't be parsed (day option renders its start with no end rather than crash).
+function oneHourWindow(startHHMM) {
+  const startMin = hhmmToMinutes(startHHMM);
+  if (startMin == null) return { start: startHHMM, end: startHHMM };
+  const onHour = Math.floor(startMin / 60) * 60;
+  return {
+    start: minutesToHHMM(onHour),
+    end: minutesToHHMM(onHour + RESCHEDULE_WINDOW_MINUTES),
+  };
 }
 
 async function loadServiceWithCustomer(serviceId) {
@@ -139,8 +174,8 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
   return query;
 }
 
-// "Later today" candidates: now + 2h and now + 4h, rounded up to the
-// half hour, 2-hour windows, none starting after LAST_SAME_DAY_START_HOUR.
+// "Later today" candidates: now + 2h and now + 4h, snapped to the nearest
+// hour, 1-hour on-the-hour windows, none starting after LAST_SAME_DAY_START_HOUR.
 function sameDayOptions(now = new Date()) {
   const parts = etParts(now);
   const nowMinutes = parts.hour * 60 + parts.minute;
@@ -148,11 +183,13 @@ function sameDayOptions(now = new Date()) {
 
   const options = [];
   for (const offset of SAME_DAY_OFFSETS_MINUTES) {
-    const start = Math.ceil((nowMinutes + offset) / 30) * 30;
+    // Snap to the nearest hour so same-day slots land on the hour like the
+    // rest of the schedule; the 2h/4h offset keeps them safely in the future.
+    const start = Math.round((nowMinutes + offset) / 60) * 60;
     if (start > LAST_SAME_DAY_START_HOUR * 60) continue;
     const window = {
       start: minutesToHHMM(start),
-      end: minutesToHHMM(start + SAME_DAY_WINDOW_MINUTES),
+      end: minutesToHHMM(start + RESCHEDULE_WINDOW_MINUTES),
     };
     options.push({
       kind: 'same_day',
@@ -188,14 +225,20 @@ async function getOptions(serviceId) {
     logger.info(`[rain-out] outlook lookup failed for ${serviceId}: ${err.message}`);
   }
 
-  const days = (dayOptionsRaw || []).slice(0, 3).map((opt) => ({
-    kind: 'day',
-    date: opt.date,
-    window: { start: opt.suggestedWindow.start, end: opt.suggestedWindow.end },
-    display: `${opt.displayDate}, ${opt.suggestedWindow.display}`,
-    rainChance: outlook?.[opt.date]?.rainChance ?? null,
-    shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
-  }));
+  const days = (dayOptionsRaw || []).slice(0, 3).map((opt) => {
+    // Book the tighter on-the-hour slot, but re-derive the display string from
+    // it so the pill matches what actually gets scheduled (the rebooker's own
+    // suggestedWindow.display is the wider 2-3h arrival range).
+    const window = oneHourWindow(opt.suggestedWindow.start);
+    return {
+      kind: 'day',
+      date: opt.date,
+      window,
+      display: `${opt.displayDate}, ${displayWindow(window)}`,
+      rainChance: outlook?.[opt.date]?.rainChance ?? null,
+      shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
+    };
+  });
 
   const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
 
@@ -225,7 +268,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   const altClause = alt
-    ? ` Reply 1 to confirm, or 2 to switch to ${displayOption(alt.date, alt.window)}.`
+    ? ` Reply 1 to confirm, or 2 to switch to ${customerArrivalOption(alt.date, alt.window)}.`
     : ' Reply to this message if you need a different time.';
   const forecastLink = forecastLinkForZip(customer.zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
@@ -234,7 +277,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
     first_name: customer.first_name || 'there',
     weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
     service_type: (job.service_type || 'service').toLowerCase(),
-    new_option: displayOption(chosen.date, chosen.window),
+    new_option: customerArrivalOption(chosen.date, chosen.window),
     alt_clause: altClause,
     forecast_clause: forecastClause,
   }, {
@@ -268,9 +311,16 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
 // reply 1 re-confirms) and option2 (the alternate) into its notes so
 // the existing handleRescheduleReply webhook flow can act on 1/2.
 // Windows carry `display` because the reply confirmation SMS renders
-// selectedOption.window.display for its {time} variable.
+// selectedOption.window.display for its {time} variable. start/end are the tight
+// 1-hour internal slot the appointment is actually booked into — a reply re-books
+// (or, for the slot the customer is already on, confirms) exactly that, so the
+// on-the-hour booking is never widened. `display` is the customer-facing 2-hour
+// arrival window, matching the moved SMS. A late reply inside the quoted window
+// is handled by the confirm-in-place path in reschedule-sms (it does not
+// re-validate a slot the appointment already occupies), so the 1-hour end here
+// no longer risks a same-day elapsed rejection.
 function replyWindow(window) {
-  return { start: window.start, end: window.end, display: displayWindow(window) };
+  return { start: window.start, end: window.end, display: customerArrivalLabel(window) };
 }
 
 async function attachReplyOptions(serviceJobId, chosen, alt) {
@@ -341,13 +391,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
     ? targetStartMin - anchorStartMin
     : 0;
 
-  // Same-day forward pushes must move tail-first: the rebooker checks the
-  // anchor's new window against the not-yet-moved next stop, so moving the
-  // anchor first would SLOT_TAKEN against a sibling about to vacate that
-  // slot. Process later stops first so each target window is already clear.
-  // Day moves land on a different (empty) date — order doesn't matter, and
-  // keeping anchor-first there fires its reply-alt SMS first.
-  const orderedJobs = isSameDay ? [...jobs].reverse() : jobs;
+  // Same-day forward pushes (positive delta) must move tail-first: the rebooker
+  // checks the anchor's new window against the not-yet-moved next stop, so
+  // moving the anchor first would SLOT_TAKEN against a sibling about to vacate
+  // that slot. Process later stops first so each target window is already clear.
+  // A backward pull (custom time earlier than the anchor — negative delta) is
+  // the mirror image: process head-first (anchor first) so each stop vacates its
+  // old slot before the next, earlier-shifted stop claims it. Day moves land on
+  // a different (empty) date — order doesn't matter, and keeping anchor-first
+  // there fires its reply-alt SMS first.
+  const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
   const results = [];
   for (const job of orderedJobs) {
     let newWindow;
@@ -415,5 +468,5 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
 module.exports = {
   getOptions,
   commit,
-  _test: { sameDayOptions, displayOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES },
+  _test: { sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES },
 };

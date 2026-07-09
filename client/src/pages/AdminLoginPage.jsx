@@ -1,9 +1,24 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { BUTTON_BASE } from '../theme';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// Frozen copy of the retired theme.js BUTTON_BASE (this page was its last
+// importer) — theme-brand's BUTTON_BASE is a pill (radius 9999, weight 800)
+// and would restyle the login button. fontFamily is overridden at the use
+// site (ADMIN_FONT), so it is omitted here.
+const BUTTON_BASE = {
+  borderRadius: 12,
+  fontWeight: 700,
+  fontSize: 14,
+  border: 'none',
+  cursor: 'pointer',
+  textDecoration: 'none',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  transition: 'all 0.3s ease',
+};
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', text: '#e2e8f0', muted: '#94a3b8', white: '#fff', red: '#A83B34' };
 const ADMIN_FONT = "'Roboto', Arial, sans-serif";
 

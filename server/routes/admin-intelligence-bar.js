@@ -99,6 +99,7 @@ const PII_TOOL_NAMES = new Set([
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
+  'get_stock_movements',
 ]);
 
 function isNonAdminDashboardRequest(req) {
@@ -170,18 +171,48 @@ function markImageTaintedContent(content, imageTainted) {
   return `${content}\n${IMAGE_TAINT_MARKER}`;
 }
 
-// Build the current-turn user message. Plain string when no images so the
-// common path is unchanged; an [image, …, text] block array when images are
-// attached (Anthropic vision format).
-function buildUserMessageContent(prompt, images) {
-  if (!images.length) return prompt;
+// Build the current-turn user message. Plain string when no images and no
+// page data so the common path is unchanged; a block array otherwise
+// ([image, …, page-state, text] — Anthropic vision format). Page state rides
+// on the user turn instead of the system prompt so the system prompt stays
+// byte-stable per (context, gate) and the prompt cache can hit (see
+// withCacheBreakpoint below).
+function buildUserMessageContent(prompt, images, pageData) {
+  if (!images.length && !pageData) return prompt;
   return [
     ...images.map((img) => ({
       type: 'image',
       source: { type: 'base64', media_type: img.mediaType, data: img.data },
     })),
+    ...(pageData
+      ? [{ type: 'text', text: `CURRENT PAGE STATE:\n${JSON.stringify(pageData, null, 2)}` }]
+      : []),
     { type: 'text', text: prompt },
   ];
+}
+
+// Prompt caching (cost-audit 2026-07-04 #1). Two ephemeral breakpoints per
+// request: one on the system prompt — the API renders tools before system, so
+// this one marker caches the ~20K-token tool schemas + system prompt together
+// and is reused across separate queries — and one on the last content block
+// of the last message, so the growing conversation is reused across the
+// up-to-MAX_TOOL_ROUNDS rounds of a single query. The message marker is
+// applied to a shallow copy at call time (never to currentMessages itself) so
+// markers don't accumulate across rounds past the API's 4-breakpoint limit.
+const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
+
+function withCacheBreakpoint(messages) {
+  if (!messages.length) return messages;
+  const last = messages[messages.length - 1];
+  let content = last.content;
+  if (typeof content === 'string') {
+    content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
+  } else if (Array.isArray(content) && content.length) {
+    content = [...content.slice(0, -1), { ...content[content.length - 1], ...EPHEMERAL_CACHE }];
+  } else {
+    return messages;
+  }
+  return [...messages.slice(0, -1), { ...last, content }];
 }
 
 // UI-backed write confirmation (issue #1568). Dark until the Railway env
@@ -411,6 +442,13 @@ PROCUREMENT CAPABILITIES:
 - Track price trends over time
 - Find unpriced products and prioritize what to price next
 
+STOCK TRACKING (physical inventory):
+- query_stock shows on-hand quantities; get_stock_movements shows the per-product ledger (usage deducted at completion, restocks, corrections); get_restock_queue shows the purchase queue
+- adjust_stock records restocks, corrections, and damaged/lost write-offs; for a physical count use movement_type "correction" with set_total ("we have 64 oz on the shelf")
+- create_restock_request queues a purchase; update_restock_request marks it ordered, receives it INTO stock, or cancels it
+- Products with NO on-hand value are UNTRACKED: completion-flow deduction skips them. Logging a first count turns tracking ON — after that, insufficient stock can block completions for that product, so push for real numbers, and flag when an adjustment goes negative or below the low-stock threshold
+- When the operator reads off a stock count for several products, handle them one adjust_stock call per product
+
 PRICING INTELLIGENCE:
 - The operator uses a $35/hr loaded labor rate
 - Products are normalized to price-per-oz or price-per-lb for comparison
@@ -469,14 +507,14 @@ PESTICIDE / FERTILIZER / RODENTICIDE / IGR / ADJUVANT APPLICATION RATES (HARD RU
 EPA pesticide labels are legally enforceable — using a product inconsistently with labeling violates federal law. Apply these rules to every rate question:
 - Return rates ONLY from the label-backed product knowledge base. Never infer a rate from general training-data memory.
 - When you give a rate, include: product name, target pest/site, rate (with the rate basis e.g. "per 1000 sq ft" or "per gallon"), and EPA Reg. No. when available.
-- Mention PPE / re-entry interval (REI) when the label specifies one and the tech is asking about active application.
+- State PPE / re-entry interval (REI) / watering-in ONLY from the product's \`safety\` block returned by get_product_info — never from memory. If a safety field is absent there, say "check the product label" rather than supplying a default.
 - If label data is missing, stale, ambiguous, or you can't confirm the rate from the knowledge base, say: "Check the current label before applying." Do NOT guess, interpolate, or recall a number.
 - Never describe an off-label use, off-label site, or off-label combination — even if the tech asks.
 - For lawn fertilizer in Sarasota or Manatee counties, also flag the June 1–Sept 30 nitrogen+phosphorus restriction before recommending an application.
 
 Example correct format:
-  "Demand CS — perimeter exterior — 0.4 oz per 1000 sq ft (label rate, EPA Reg. No. 100-1066). PPE: long sleeves, gloves. REI: until dry."
-  (Only return numbers from the knowledge base — the example here is illustrative only.)`,
+  "Demand CS — perimeter exterior — 0.4 oz per 1000 sq ft (label rate, EPA Reg. No. 100-1066). PPE and REI: from the product's safety block."
+  (Only return numbers and safety details from the tool data — the example rate here is illustrative only.)`,
 
   reviews: `
 REVIEWS & REPUTATION CONTEXT:
@@ -880,12 +918,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`
         : `\n\nWRITE CONFIRMATION (conversational mode):
-For create_customer and the route-optimization writes: the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
+For create_customer, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
     }
-    // Inject live page data (current date, schedule stats, etc.)
-    if (pageData) {
-      systemPrompt += `\n\nCURRENT PAGE STATE:\n${JSON.stringify(pageData, null, 2)}`;
-    }
+    // Live page data (current date, schedule stats, etc.) is injected on the
+    // current user turn by buildUserMessageContent, NOT here — appending it to
+    // the system prompt made the prefix unique per request and defeated
+    // prompt caching.
 
     // Build tech context for tech portal calls
     const techContext = context === 'tech' ? {
@@ -903,7 +941,7 @@ For create_customer and the route-optimization writes: the first call returns a 
     // ride on the current user turn as vision blocks.
     const messages = [
       ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
-      { role: 'user', content: buildUserMessageContent(prompt, images) },
+      { role: 'user', content: buildUserMessageContent(prompt, images, pageData) },
     ];
 
     let currentMessages = messages;
@@ -918,10 +956,20 @@ For create_customer and the route-optimization writes: the first call returns a 
       const response = await anthropic.messages.create({
         model: model,
         max_tokens: context === 'tech' ? 1024 : 4096,
-        system: systemPrompt,
+        system: [{ type: 'text', text: systemPrompt, ...EPHEMERAL_CACHE }],
         tools,
-        messages: currentMessages,
+        messages: withCacheBreakpoint(currentMessages),
       });
+
+      // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
+      // is the prod verification signal; all-zero across repeats means a
+      // silent invalidator crept back into the prefix.
+      const usage = response.usage || {};
+      logger.info(
+        `[intelligence-bar] usage round=${round} in=${usage.input_tokens ?? 0} ` +
+        `cache_write=${usage.cache_creation_input_tokens ?? 0} ` +
+        `cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens ?? 0}`
+      );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
       const textBlocks = response.content.filter(c => c.type === 'text');
@@ -1299,6 +1347,9 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'margins', group: 'Analyze', label: 'Margin Analysis', prompt: 'What are our margins by service type?' },
       { id: 'trends', group: 'Analyze', label: 'Price Trends', prompt: 'Have any product prices gone up in the last 90 days?' },
       { id: 'price_check', group: 'Act', label: 'Run Price Check', prompt: 'Run a price check on Demand CS across all vendors' },
+      { id: 'low_stock', group: 'Find', label: 'Low Stock', prompt: 'Which products are low or out of stock? Include anything at or below its low-stock threshold.' },
+      { id: 'restock_queue', group: 'Find', label: 'Restock Queue', prompt: 'Show the open restock requests. Anything urgent or past its needed-by date?' },
+      { id: 'stock_count', group: 'Act', label: 'Log Stock Count', prompt: 'I just did a physical stock count. Walk me through logging on-hand amounts product by product.' },
     ] });
   } else if (context === 'revenue') {
     res.json({ actions: [

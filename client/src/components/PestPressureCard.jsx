@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { CheckCircle2 } from 'lucide-react';
 import {
   MAX_SCORE,
@@ -55,8 +56,8 @@ function ComponentsTable({ components }) {
       <tbody>
         {rows.map((row) => (
           <tr key={row.key} style={{ borderBottom: '1px solid #F1F5F9' }}>
-            <td style={{ padding: '6px 4px', color: '#1B2C5B' }}>{row.label}</td>
-            <td style={{ padding: '6px 4px', textAlign: 'right', color: row.value === null ? '#94A3B8' : '#1B2C5B', fontFamily: "'JetBrains Mono', monospace" }}>
+            <td style={{ padding: '6px 4px', color: CUSTOMER_SURFACE.text }}>{row.label}</td>
+            <td style={{ padding: '6px 4px', textAlign: 'right', color: row.value === null ? '#94A3B8' : CUSTOMER_SURFACE.text, fontFamily: "'JetBrains Mono', monospace" }}>
               {row.value === null ? '—' : row.value.toFixed(1)}
             </td>
             <td style={{ padding: '6px 4px', textAlign: 'right', color: '#64748B', fontFamily: "'JetBrains Mono', monospace" }}>
@@ -83,14 +84,18 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating }),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
+      if (res.status === 409) {
+        // Already recorded (another tab/device) — reflect the submitted
+        // state instead of surfacing a raw error code.
+        if (onSubmitted) onSubmitted(null, rating);
+        return;
       }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
-      if (onSubmitted) onSubmitted(body.pestPressure);
-    } catch (err) {
-      setError(err.message || 'Could not submit rating');
+      if (onSubmitted) onSubmitted(body.pestPressure, rating);
+    } catch {
+      // Server codes are snake_case internals — never show them verbatim.
+      setError('Couldn’t save your rating — please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -99,12 +104,12 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
   return (
     <div style={{
       marginTop: 12, marginBottom: 4, padding: 14,
-      background: '#FAF8F3', border: '1px solid #E7E2D7', borderRadius: 10,
+      background: CUSTOMER_SURFACE.page, border: `1px solid ${CUSTOMER_SURFACE.border}`, borderRadius: 10,
     }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: 4 }}>
         Help us calibrate your Pest Pressure score
       </div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: '#1B2C5B', marginBottom: 8 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: CUSTOMER_SURFACE.text, marginBottom: 8 }}>
         {question}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
@@ -127,7 +132,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
           </button>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+      <div style={{ fontSize: 11, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
         0 = no activity · 5 = severe activity
       </div>
       {error ? (
@@ -177,26 +182,27 @@ export default function PestPressureCard({ data, token }) {
     <section
       id="pest-pressure"
       data-section="pest-pressure"
+      data-glass="card"
       style={{
         background: '#FFFFFF',
-        border: '1px solid #E7E2D7',
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
         borderRadius: 14,
         padding: 24,
         margin: '0 0 16px',
         fontFamily: "'Inter', system-ui, sans-serif",
-        color: '#1B2C5B',
+        color: CUSTOMER_SURFACE.text,
       }}
     >
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 600 }}>
+          <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 600 }}>
             Pest Pressure
           </div>
-          <h2 style={{ margin: '4px 0 0', fontSize: 18, fontWeight: 700, color: '#1B2C5B' }}>
+          <h2 style={{ margin: '4px 0 0', fontSize: 18, fontWeight: 700, color: CUSTOMER_SURFACE.text }}>
             {isInsufficient ? 'Pest Pressure is being calculated' : `${labelName || 'Score'} — ${scoreNum.toFixed(1)} / ${MAX_SCORE}`}
           </h2>
           {dateText ? (
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>As of {dateText}</div>
+            <div style={{ fontSize: 12, color: CUSTOMER_SURFACE.muted, marginTop: 4 }}>As of {dateText}</div>
           ) : null}
         </div>
         <TrendChip trend={effective.trend} delta={effective.trendDelta} />
@@ -220,7 +226,13 @@ export default function PestPressureCard({ data, token }) {
         <ClientRatingPicker
           token={token}
           question={effective.clientRatingQuestion || 'Over the past 3 months, how much pest activity have you noticed?'}
-          onSubmitted={(updated) => setOverride(updated || effective)}
+          onSubmitted={(updated, rating) => setOverride(updated || {
+            // Server returned no refreshed view (or 409 already-submitted):
+            // mark the rating consumed locally so the picker doesn't re-show.
+            ...effective,
+            canCaptureClientRating: false,
+            submittedClientRating: rating,
+          })}
         />
       ) : null}
 

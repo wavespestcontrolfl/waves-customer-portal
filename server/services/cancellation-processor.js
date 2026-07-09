@@ -72,7 +72,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active');
+      .first('pipeline_stage', 'active', 'monthly_rate');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -95,6 +95,14 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         // stage-change path).
         update.churned_at = etDateString();
         update.churn_reason = CHURN_REASON;
+        // Taxonomy (Phase 7): snapshot the rate AT churn (monthly_rate gets
+        // zeroed/repriced later — without this the Pareto's dollars rewrite
+        // history), keep the customer's own words (legacy churn_reason is
+        // varchar(30)), and start at 'unclassified' — the AI classification
+        // runs LAST (see below) so it can never block this wind-down.
+        update.churn_mrr = Number(customer.monthly_rate) || 0;
+        update.churn_reason_detail = cancelReason;
+        update.churn_reason_code = 'unclassified';
       }
       await db('customers').where({ id: customerId }).update(update);
 
@@ -447,6 +455,23 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       });
     } catch (noteErr) {
       logger.warn(`[cancellation-processor] audit note failed for ${customerId}: ${noteErr.message}`);
+    }
+  }
+
+  // AI churn-reason classification — deliberately the LAST step so a slow or
+  // broken model can never delay the billing wind-down or the visit sweep,
+  // and deliberately OUTSIDE `errors` — a classification miss leaves the row
+  // at 'unclassified' (fail-closed), it is not an operational failure that
+  // should flag the request for manual review.
+  if (churned && !wasChurnedStage) {
+    try {
+      const { classifyChurnReason } = require('./churn-classifier');
+      const { code } = await classifyChurnReason(cancelReason);
+      if (code && code !== 'unclassified') {
+        await db('customers').where({ id: customerId }).update({ churn_reason_code: code });
+      }
+    } catch (err) {
+      logger.warn(`[cancellation-processor] churn classification failed for ${customerId} (left unclassified): ${err.message}`);
     }
   }
 

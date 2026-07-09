@@ -147,7 +147,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
     // One exception: if a prior arrival already flipped THIS job on_property but
     // its arrival SMS is still pending (guard NULL — a retryable first-send miss
     // released it), let the idempotent retry run. Otherwise a transient
-    // provider/quiet-hours miss is stranded until a manual retap or an event
+    // provider miss is stranded until a manual retap or an event
     // after the cooldown clears. markOnProperty's CAS makes this a no-op once
     // the guard is stamped, and gating on track_state === 'on_property' avoids
     // flipping a still-scheduled (e.g. reminder-mode) job from a duplicate ENTER.

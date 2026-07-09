@@ -48,4 +48,24 @@ describe('email template wrappers', () => {
     expect(text).toContain(WAVES_ADDRESS_LINE);
     expect(text).toContain('Unsubscribe: https://portal.wavespestcontrol.com/unsubscribe/token');
   });
+
+  test('bounds width for Outlook with an MSO ghost table per wrapper variant', () => {
+    // Word's engine ignores max-width, so without the conditional ghost table
+    // every email stretches to the full Outlook window width.
+    expect(wrapEmail({ heading: 'Update', intro: '<p>Hi.</p>' }))
+      .toContain('<!--[if mso]><table role="presentation" width="560"');
+    expect(wrapServiceEmail({ body: '<p>Hi.</p>' }))
+      .toContain('<!--[if mso]><table role="presentation" width="620"');
+    expect(wrapNewsletter({ body: '<p>Hi.</p>', unsubscribeUrl: 'https://x.example/u' }))
+      .toContain('<!--[if mso]><table role="presentation" width="640"');
+    expect(wrapServiceEmail({ body: '<p>Hi.</p>' }))
+      .toContain('<!--[if mso]></td></tr></table><![endif]-->');
+  });
+
+  test('pads the hidden preheader so inbox previews do not bleed into the header', () => {
+    const html = wrapServiceEmail({ body: '<p>Hi.</p>', preheader: 'Short preview.' });
+    expect(html).toContain('Short preview.&nbsp;&zwnj;&nbsp;&zwnj;');
+    // No preheader → no hidden div at all (unchanged behavior).
+    expect(wrapServiceEmail({ body: '<p>Hi.</p>' })).not.toContain('&nbsp;&zwnj;&nbsp;&zwnj;');
+  });
 });

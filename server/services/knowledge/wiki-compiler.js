@@ -7,6 +7,8 @@ const MODELS = require('../../config/models');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+const { createDeepMessage } = require('../llm/deep');
+
 function cleanText(value) {
   if (value === null || value === undefined) return '';
   return String(value).trim();
@@ -161,9 +163,9 @@ class WikiCompiler {
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 8000,
+    const response = await createDeepMessage(anthropic, {
+      model: MODELS.DEEP,
+      max_tokens: 12000, // DEEP: thinking spends from max_tokens — keep headroom for the compiled articles
       system: `You are the knowledge base compiler for Waves Pest Control. Read raw source documents and compile them into structured, interlinked wiki articles in markdown.
 
 RULES:
@@ -364,9 +366,9 @@ ${content.substring(0, 50000)}`
       ? `\n\nDEFAULT CATEGORY HINT: prefer category "${defaultCategory}" unless the content clearly belongs elsewhere.`
       : '';
 
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 8000,
+    const response = await createDeepMessage(anthropic, {
+      model: MODELS.DEEP,
+      max_tokens: 12000, // DEEP: thinking spends from max_tokens — keep headroom for the compiled articles
       system: `You are the knowledge base compiler for Waves Pest Control. Read raw source documents and compile them into structured, interlinked wiki articles in markdown.
 
 RULES:

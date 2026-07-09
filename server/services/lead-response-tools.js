@@ -287,6 +287,10 @@ async function executeLeadTool(toolName, input) {
               status: 'contacted',
               updated_at: new Date(),
             });
+            // Funnel-row mirror (monotonic in SQL — can never downgrade a row
+            // that already advanced past 'contacted'; best-effort inside).
+            const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+            await bridgeLeadFunnelStage(input.lead_id, 'contacted');
           }
         }
       }

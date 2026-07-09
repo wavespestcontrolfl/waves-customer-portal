@@ -14,6 +14,14 @@ import {
 import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import FunnelBySource from "../FunnelBySource";
+import ChannelROI from "../ChannelROI";
+import {
+  capitalVerdict,
+  captureVerdict,
+  funnelVerdict,
+} from "../scorecard-metrics";
 
 // Build a daily-revenue sparkline series from the array of { date, total }
 // returned by /admin/dashboard. Pad to at least 2 points so the sparkline
@@ -33,12 +41,16 @@ export default function GrowthSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   funnel,
   revenueByCity,
   capAlloc,
   callsBySource,
   leadsBySource,
   channelMix,
+  leadFunnel,
+  channelRoi,
   attributionLoading,
   attributionError,
   onDrillSource,
@@ -87,7 +99,12 @@ export default function GrowthSection({
   ];
 
   return (
-    <DashboardSection id="growth" title="Growth" caption="Is the business growing?">
+    <DashboardSection
+      id="growth"
+      title="Growth"
+      caption="Is the business growing?"
+      about="Top of the funnel to closed revenue: how much estimated work you're capturing, revenue vs the same days last month, lead-to-booked conversion, and where customers actually come from. The ad-dollars card banding is 12-month gross-profit LTV against all-in acquisition cost — 3:1 is the floor; cut what's below it, feed what's far above it."
+    >
       {/* Sales Capture gauge + Revenue trend — capture rate next to the
           revenue it drives. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
@@ -105,6 +122,7 @@ export default function GrowthSection({
               wonCount={salesCapture.wonCount}
               lostCount={salesCapture.lostCount}
             />
+            <Verdict verdict={captureVerdict(salesCapture)} />
           </ChartCard>
         )}
         <ChartCard
@@ -142,8 +160,13 @@ export default function GrowthSection({
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
           {kpis && (
             <>
+              {/* Threshold tones come from the kpi_targets store via
+                  metricKey; `alert` keeps only the unavailable-data red. */}
               <KpiTile
                 label="Lead → Booked"
+                metricKey="lead_conversion"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   !salesUnavailable && sales.conversion != null
                     ? `${sales.conversion}%`
@@ -154,14 +177,14 @@ export default function GrowthSection({
                     ? "lead metrics unavailable"
                     : `${sales.booked ?? 0}/${sales.leads ?? 0} leads`
                 }
-                alert={
-                  salesUnavailable ||
-                  (sales.conversion != null && sales.conversion < 20)
-                }
-                chart={{ kind: "gauge", value: sales.conversion, max: 100, target: 20 }}
+                alert={salesUnavailable}
+                chart={{ kind: "gauge", value: salesUnavailable ? null : sales.conversion, max: 100 }}
               />
               <KpiTile
                 label="Response Speed"
+                metricKey="response_speed_min"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   !salesUnavailable && sales.avgResponseMin != null
                     ? `${sales.avgResponseMin}m`
@@ -172,11 +195,8 @@ export default function GrowthSection({
                     ? "lead metrics unavailable"
                     : "lead → first contact"
                 }
-                alert={
-                  salesUnavailable ||
-                  (sales.avgResponseMin != null && sales.avgResponseMin > 60)
-                }
-                chart={{ kind: "bullet", value: sales.avgResponseMin, target: 60, lowerIsBetter: true }}
+                alert={salesUnavailable}
+                chart={{ kind: "bullet", value: salesUnavailable ? null : sales.avgResponseMin }}
               />
               <KpiTile
                 label="Call → Booking"
@@ -218,7 +238,9 @@ export default function GrowthSection({
             funnel={funnel?.funnel || {}}
             rates={funnel?.rates || {}}
             totalAcceptedValue={funnel?.total_accepted_value}
+            byService={funnel?.by_service}
           />
+          <Verdict verdict={funnelVerdict(funnel)} />
         </ChartCard>
         {revenueByCity ? (
           <ChartCard
@@ -235,28 +257,62 @@ export default function GrowthSection({
         )}
       </div>
 
-      {/* Capital allocation — acquisition channels banded by LTV:CAC (lifetime
-          gross profit ÷ ad spend) so the owner can see where to pour cash and
-          where it's leaking. Trailing 90 days. */}
+      {/* Capital allocation — acquisition channels banded by LTV:CAC. Basis
+          (stated on the card itself): 12-mo lifetime GROSS PROFIT ÷ all-in
+          marketing cost (ad spend + retainers + referral rewards) — see
+          server/services/capital-allocation.js. Trailing 90 days. */}
       {isMobile ? (
         <MobileFold
           title="Where to Put Ad Dollars"
-          sub="channels by LTV:CAC · last 90 days"
+          sub="gross-profit LTV : all-in CAC · 90 days"
         >
-          <ChartCard
-            title="Where to Put Ad Dollars"
-            sub="channels by LTV:CAC · last 90 days"
-          >
+          {/* No inner ChartCard — the fold's summary already carries the
+              title/sub, and repeating them read as a rendering bug. */}
+          <div className="px-1 pt-1">
             <CapitalAllocationCard data={capAlloc} />
-          </ChartCard>
+            <Verdict verdict={capitalVerdict(capAlloc)} />
+          </div>
         </MobileFold>
       ) : (
         <div className="mb-5">
           <ChartCard
             title="Where to Put Ad Dollars"
-            sub="acquisition channels by LTV:CAC · last 90 days"
+            sub="acquisition channels by gross-profit LTV : all-in CAC · last 90 days"
           >
             <CapitalAllocationCard data={capAlloc} />
+            <Verdict verdict={capitalVerdict(capAlloc)} />
+          </ChartCard>
+        </div>
+      )}
+
+      {/* Channel ROI — the ad-dollars card's tabular twin: money in vs all-in
+          money out per channel (attribution-row + job-cost basis, stated on
+          the card; same period selector as the attribution panels below,
+          unlike the fixed-90-day banding card above). */}
+      {isMobile ? (
+        <MobileFold
+          title="Channel ROI"
+          sub={channelRoi?.period?.label || kpis?.periodLabel || "Month to Date"}
+        >
+          <div className="px-1 pt-1">
+            <ChannelROI
+              data={channelRoi}
+              loading={attributionLoading}
+              error={attributionError}
+            />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          <ChartCard
+            title="Channel ROI"
+            sub={channelRoi?.period?.label || kpis?.periodLabel || "Month to Date"}
+          >
+            <ChannelROI
+              data={channelRoi}
+              loading={attributionLoading}
+              error={attributionError}
+            />
           </ChartCard>
         </div>
       )}
@@ -298,6 +354,36 @@ export default function GrowthSection({
             onDrillSource={onDrillSource}
           />
         </ChartCard>
+      )}
+
+      {/* Lead funnel by source — how far each channel's leads actually get
+          (attribution-row basis, stated on the card; same period selector). */}
+      {isMobile ? (
+        <MobileFold
+          title="Lead Funnel by Source"
+          sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
+        >
+          <div className="px-1 pt-1">
+            <FunnelBySource
+              data={leadFunnel}
+              loading={attributionLoading}
+              error={attributionError}
+            />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mt-4">
+          <ChartCard
+            title="Lead Funnel by Source"
+            sub={leadFunnel?.period?.label || kpis?.periodLabel || "Month to Date"}
+          >
+            <FunnelBySource
+              data={leadFunnel}
+              loading={attributionLoading}
+              error={attributionError}
+            />
+          </ChartCard>
+        </div>
       )}
     </DashboardSection>
   );

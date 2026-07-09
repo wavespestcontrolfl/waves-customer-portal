@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { generateEstimate } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -12,6 +12,7 @@ const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { attributionForSourceType, backfillCallLeadAttribution } = require('../services/ads/call-attribution');
+const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -21,6 +22,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
+const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -166,6 +168,15 @@ function derivePerApplication(estimate) {
   };
 }
 
+// Which SURFACE converted the visitor (Ask Waves chat vs the classic wizard) —
+// strict allowlist so a public caller can't invent channels. Acquisition
+// attribution (resolveLeadSource) is deliberately untouched: a paid click that
+// converts via chat is still a paid click. lead_type / estimates.source stay
+// 'quote_wizard' — they are dedup/replace discriminators, not cohorts.
+function resolveEntryChannel(attr) {
+  return attr?.channel === 'ai_chat' ? 'ai_chat' : 'quote_wizard';
+}
+
 // Same-phone wizard re-runs may refresh ONLY the wizard's own open draft.
 // Estimates from any other source (admin/tech/lead automation) or already
 // promoted past draft keep the duplicate hard-block.
@@ -199,11 +210,64 @@ function publicQuotePestLabel(pest = {}) {
     bimonthly: 'Bi-Monthly Pest Control',
     monthly: 'Monthly Pest Control',
   };
-  return labels[frequency] || 'Quarterly Pest Control';
+  const base = labels[frequency] || 'Quarterly Pest Control';
+  // The engine prices a roach-knockdown modifier on the pest line when
+  // roachType is set (the cockroach estimate/chip path) — reflect it in the
+  // lead's service-interest label so the office sees what was quoted. Same
+  // normalization as the engine: raw values like 'no'/'FALSE'/garbage
+  // normalize to 'none' and price no knockdown, so they must not label one.
+  return normalizeRoachType(pest.roachType || 'none').roachType !== 'none'
+    ? `${base} + Roach Knockdown`
+    : base;
 }
 
 function publicQuoteCompactPestLabel(pest = {}) {
   return publicQuotePestLabel(pest).replace(' Pest Control', ' Pest');
+}
+
+// priceBedBugTreatment assertEnum-throws on any unknown key, so a public
+// caller must never reach it with a label-ish value — the old 'residential'
+// default was itself invalid (the engine key is singleFamily) and 500'd every
+// chat-gate bed bug quote. Unknown/absent values collapse to the chat gate's
+// product: a standard prepped single-family CHEMICAL treatment. Method is
+// deliberately CHEMICAL-only here — HEAT/HYBRID carry extra required inputs
+// (heat scope/footprint) no public surface collects.
+function publicQuoteBedBugInput(bedBug = {}) {
+  const pick = (value, allowed, fallback) => {
+    const raw = String(value == null ? '' : value).trim().toLowerCase();
+    return allowed.find((k) => k.toLowerCase() === raw) || fallback;
+  };
+  return {
+    method: 'CHEMICAL',
+    rooms: Number(bedBug.rooms) || 2,
+    severity: pick(bedBug.severity, ['light', 'moderate', 'heavy', 'severe'], 'moderate'),
+    prepStatus: pick(bedBug.prepStatus, ['ready', 'partial', 'poor'], 'ready'),
+    occupancyType: pick(bedBug.occupancyType, ['singleFamily', 'apartment', 'hotel', 'studentHousing'], 'singleFamily'),
+  };
+}
+
+// /booking/confirm prices a quote→book handoff's visits from the recurring
+// annual only (annual_total / 4), and a generic /book link books the
+// recurring cadence with no pay-at-visit pricing at all — either way, every
+// one-time add-on the engine attached (pest_initial_roach from the roach
+// chip, the lawn-pest knockdown, ...) silently vanishes from the booked
+// series' billing. Mixed recurring + one-time quotes therefore get NO
+// handoff token and NO self-book link; the office schedules them. (A plain
+// recurring pest quote has oneTimeTotal 0 — setup fees are not in it.)
+function estimateBlocksBookingHandoff(estimate) {
+  const summary = estimate?.summary || {};
+  const hasRecurring = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? 0) > 0;
+  return hasRecurring && Number(summary.oneTimeTotal || 0) > 0;
+}
+
+// Services with no self-bookable slot shape: bed bug treatment is multi-visit
+// with prep coordination, and bookingServiceFor('Bed Bug Treatment') falls
+// through to the generic 60-minute pest_control slot — undersized and
+// mis-labeled. These quotes show the price but the office schedules them.
+const NO_SELF_BOOK_LINE_SERVICES = new Set(['bed_bug']);
+function estimateBlocksSelfBookLink(estimate) {
+  return estimateBlocksBookingHandoff(estimate)
+    || (estimate?.lineItems || []).some((l) => l && NO_SELF_BOOK_LINE_SERVICES.has(l.service));
 }
 
 function compactServiceInterestPart(value) {
@@ -356,6 +420,13 @@ const quoteLimiter = rateLimit({
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
+    // Honeypot (always on). /calculate is step 2 of the quote flow — the paid
+    // property-lookup (step 1) carries the Turnstile check; here the cheap
+    // pricing call just drops indiscriminate bots that filled the hidden field.
+    if (isHoneypotTripped(req.body)) {
+      logger.info('[public-quote] honeypot tripped — dropping calculate');
+      return res.status(200).json({ ok: true });
+    }
     const {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
       buildingSizeConfirmed,
@@ -365,12 +436,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
+      line2: req.body.address_line2 || req.body.addressLine2 || req.body.unit,
       city,
       state: req.body.state,
       zip,
       placeId: req.body.google_place_id || req.body.googlePlaceId,
       components: req.body.address_components || req.body.addressComponents,
     });
+    // Inline street unit and dedicated unit field disagree — ambiguous, fail
+    // closed like /api/booking/confirm rather than pick a door.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
     const quoteAddress = normalizedAddress.line1 || address;
     // Fall back to a ZIP lookup when neither the parsed address nor the client
     // supplied a city (free-text address with no Places pick). Feeds the lead,
@@ -522,7 +599,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (palms !== undefined) engineInput.palmCount = palms;
     }
     if (services.pest) {
-      engineInput.services.pest = { frequency: services.pest.frequency || 'quarterly' };
+      engineInput.services.pest = {
+        frequency: services.pest.frequency || 'quarterly',
+        // Forward the roach type (the cockroach chip path) so the engine
+        // actually prices the knockdown modifier the label advertises. The
+        // engine normalizes aliases and defaults invalid values to 'none'
+        // with a warning.
+        ...(services.pest.roachType ? { roachType: services.pest.roachType } : {}),
+      };
     }
     if (services.lawn) {
       engineInput.services.lawn = {
@@ -547,10 +631,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.rodentBait = {};
     }
     if (services.treeShrub) {
+      // Only forward a real count. An explicit treeCount: 0 (the old ?? 0
+      // default) suppresses priceTreeShrub's density fallback — it estimates
+      // the count from the property's treeDensity only when the field is
+      // absent — so blank-count estimate-page quotes priced zero trees.
+      const treeShrubCount = Number(services.treeShrub.treeCount);
       engineInput.services.treeShrub = {
         tier: services.treeShrub.tier,
         access: services.treeShrub.access || 'easy',
-        treeCount: services.treeShrub.treeCount ?? 0,
+        ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
       };
     }
     if (services.palm) {
@@ -608,8 +697,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.dethatching = {};
     }
     if (services.plugging) {
+      // Forward a positive patch area so the engine prices the patch; when
+      // absent the engine falls back to the whole lawn (the /estimate page's
+      // default behavior).
+      const pluggingArea = Number(services.plugging.area);
       engineInput.services.plugging = {
         spacing: services.plugging.spacing || 12,
+        ...(Number.isFinite(pluggingArea) && pluggingArea > 0 ? { area: pluggingArea } : {}),
       };
     }
     if (services.topDressing) {
@@ -621,13 +715,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.lawnPestControl = {};
     }
     if (services.bedBug) {
-      engineInput.services.bedBug = {
-        method: services.bedBug.method || 'CHEMICAL',
-        rooms: Number(services.bedBug.rooms) || 2,
-        severity: services.bedBug.severity || 'moderate',
-        prepStatus: services.bedBug.prepStatus || 'ready',
-        occupancyType: services.bedBug.occupancyType || 'residential',
-      };
+      engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
 
     const estimate = generateEstimate(engineInput);
@@ -683,13 +771,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const fbclid = attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null;
     const fbc = attr?.fbc ? String(attr.fbc).slice(0, 255) : null;
     const fbp = attr?.fbp ? String(attr.fbp).slice(0, 255) : null;
+    // Anonymous experiment unit id (waves_exp_uid) — joins this lead to any
+    // A/B assignments in experiment_exposures. First-class column like the
+    // click ids so extracted_data replacement can't drop it.
+    const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
+    const entryChannel = resolveEntryChannel(attr);
 
     const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
     const leadMonthlyValue = quoteRequired ? null : (monthly || null);
 
     const extractedData = JSON.stringify({
       stage: 'quote_calculated',
+      entry_channel: entryChannel,
       homeSqFt: sqft,
       lotSqFt: lot,
       services,
@@ -753,6 +847,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbclid) updateFields.fbclid = fbclid;
       if (fbc) updateFields.fbc = fbc;
       if (fbp) updateFields.fbp = fbp;
+      if (anonId) updateFields.anon_id = anonId;
       const rows = await db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
@@ -785,6 +880,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         fbclid,
         fbc,
         fbp,
+        anon_id: anonId,
         extracted_data: extractedData,
       }).returning(['id']);
       lead = rows[0];
@@ -830,10 +926,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         };
         if (!existingCust.lead_source) updates.lead_source = 'website_quote';
         if (!existingCust.lead_source_detail) updates.lead_source_detail = sourceMeta.leadSourceDetail;
-        if (!existingCust.lead_source_channel) updates.lead_source_channel = 'quote_wizard';
+        if (!existingCust.lead_source_channel) updates.lead_source_channel = entryChannel;
         if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
         if (!existingCust.email && emailLc) updates.email = emailLc;
-        if (!existingCust.address_line1 && quoteAddress) updates.address_line1 = quoteAddress;
+        if (!existingCust.address_line1 && quoteAddress) {
+          updates.address_line1 = quoteAddress;
+          // Unit rides ONLY with a whole-address fill — this public route
+          // resolves the customer without proven identity, so a unit must
+          // never be bolted onto an existing address (same rule as /api/leads).
+          if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
+        }
         if (!existingCust.city && quoteCity) updates.city = quoteCity;
         if (!existingCust.state && quoteState) updates.state = quoteState;
         if (!existingCust.zip && quoteZip) updates.zip = quoteZip;
@@ -853,6 +955,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           email: emailLc,
           phone: contactPhone,
           address_line1: quoteAddress,
+          address_line2: normalizedAddress.line2 || null,
           city: quoteCity || '',
           state: quoteState || 'FL',
           zip: quoteZip || '',
@@ -864,7 +967,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           pipeline_stage_changed_at: new Date(),
           lead_source: 'website_quote',
           lead_source_detail: sourceMeta.leadSourceDetail,
-          lead_source_channel: 'quote_wizard',
+          lead_source_channel: entryChannel,
           lead_source_area: quoteCity ? String(quoteCity).slice(0, 50) : null,
           lead_service_interest: serviceInterestForCustomer,
           landing_page_url: landingForCustomer,
@@ -1023,8 +1126,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // mint-time and confirm-time agree by construction. Lawn/tree/mosquito
       // quotes get NO token rather than one that silently prices nothing;
       // widening the handoff means extending confirm's cadence support first.
+      // A roach-chip quote also gets NO token: its one-time pest_initial_roach
+      // add-on is outside what confirm bills (see estimateBlocksBookingHandoff).
       const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
-      handoffPriceable = !!resolveBookingVisitPrice({
+      handoffPriceable = !estimateBlocksBookingHandoff(estimate) && !!resolveBookingVisitPrice({
         estimate: { estimate_data: estimateDataObj, annual_total: annual || null, monthly_total: monthly || null },
         serviceKey: 'pest_control',
         bookingVisits: 4,
@@ -1087,9 +1192,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // commercial job (priced from tens of thousands of sqft) could self-book a
     // residential-length slot. The price still shows instantly; a team member
     // schedules the (longer, route-sensitive) commercial visit.
-    if (!quoteRequired && !commercialDetected) {
+    // estimateBlocksSelfBookLink adds two more no-link shapes: mixed
+    // recurring + one-time quotes (the /book path would never bill the
+    // one-time add-on) and bed bug (no right-sized bookable slot).
+    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate)) {
       try {
         let bookingServiceId;
+        let recurringServiceLabelParam = null;
         if (isOneTimeOnly) {
           const { bookingServiceFor } = require('./estimate-public');
           const bookingService = bookingServiceFor(serviceInterest);
@@ -1107,7 +1216,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           );
           const wantsPest = pricedServiceKeys.has('pest_control');
           const wantsLawn = pricedServiceKeys.has('lawn_care') || pricedServiceKeys.has('commercial_lawn');
-          const wantsTreeShrub = pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub');
+          // palm_injection books under the tree_shrub visit — same bucket
+          // bookingServiceFor() collapses 'palm' labels into on the one-time
+          // path; without it a palm-only recurring quote falls to Lawn Care.
+          const wantsTreeShrub = pricedServiceKeys.has('tree_shrub')
+            || pricedServiceKeys.has('commercial_tree_shrub')
+            || pricedServiceKeys.has('palm_injection');
           if (wantsPest) {
             bookingServiceId = 'pest_control';
             bookingServiceLabel = wantsLawn ? 'Pest Control & Lawn Care' : 'Pest Control';
@@ -1118,7 +1232,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // Tree/shrub-only (incl. commercial_tree_shrub auto-priced) must not
             // fall back to the Lawn Care booking link.
             bookingServiceId = 'tree_shrub';
-            bookingServiceLabel = 'Tree & Shrub';
+            if (pricedServiceKeys.has('tree_shrub') || pricedServiceKeys.has('commercial_tree_shrub')) {
+              bookingServiceLabel = 'Tree & Shrub';
+            } else {
+              // Palm-only rides the tree_shrub booking service, but the
+              // visit's persisted service type must say what was quoted —
+              // /booking stores quoted_service_label as resolvedServiceType.
+              bookingServiceLabel = 'Palm Injections';
+              recurringServiceLabelParam = bookingServiceLabel;
+            }
           } else {
             bookingServiceId = 'lawn_care';
             bookingServiceLabel = 'Lawn Care';
@@ -1127,6 +1249,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
         const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
         if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
+        else if (recurringServiceLabelParam) bookingParams.set('service_label', recurringServiceLabelParam);
         // Quote→book handoff on the emailed/texted booking link too, so an invite
         // booking is priced from this exact estimate (not just the astro CTA).
         // Recurring-only — one-time bookings aren't pay-at-visit-priced — and
@@ -1157,7 +1280,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected
         ? 'This is an estimated price based on your property details — a Waves team member will confirm it on site and schedule your service.'
-        : 'You can book online now, or reply here if anything needs to be adjusted first.';
+        : !bookingUrl
+          // No self-book link (mixed one-time add-on, bed bug, or link
+          // failure) — never tell the lead to "book online" without one.
+          ? 'A Waves team member will reach out shortly to get your service scheduled.'
+          : 'You can book online now, or reply here if anything needs to be adjusted first.';
 
     await sendQuoteRequestEmail({
       lead,
@@ -1445,10 +1572,15 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 module.exports = router;
 module.exports._internals = {
   isPublicCommercialQuote,
+  publicQuotePestLabel,
+  publicQuoteBedBugInput,
+  estimateBlocksBookingHandoff,
+  estimateBlocksSelfBookLink,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
+  resolveEntryChannel,
 };

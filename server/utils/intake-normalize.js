@@ -32,6 +32,19 @@ function cleanValidEmailOrNull(value) {
   return EMAIL_RE.test(email) ? email : null;
 }
 
+// A syntactically-valid email whose local part reads like a URL fragment is a
+// transcription artifact, not a mailbox — a caller spelling "W, C-as-in-
+// Charlie, W, 63" gets transcribed as "www.cw63 at gmail.com" and the literal
+// "www.cw63@gmail.com" may be a real stranger's mailbox. Transcript captures
+// matching this are demoted to email_raw (below) so no write path stores them
+// and no first-touch email fires. Transcript-specific by design: a TYPED
+// web-form email is the user's own claim and never runs through this.
+const GARBLED_TRANSCRIPT_EMAIL_RE = /^(?:www\.|https?[:.]|[^@]*\.(?:com|net|org)@)/i;
+function looksGarbledTranscriptEmail(value) {
+  const email = cleanEmail(value);
+  return !!email && GARBLED_TRANSCRIPT_EMAIL_RE.test(email);
+}
+
 function normalizeNanpPhone(value) {
   const raw = cleanText(value);
   if (!raw) return null;
@@ -158,17 +171,88 @@ function normalizeQuotedPrice(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Strict boolean for the model's quote flags: only a literal true (or "true")
+// counts. Anything else — false, null, absent, junk — is false, so a garbled
+// value can never keep a lead open or fire a quote-promised notification.
+function normalizeStrictBoolean(value) {
+  return value === true || (typeof value === 'string' && value.trim().toLowerCase() === 'true');
+}
+
+// Model-emitted additional_properties (multi-property calls): keep only entries
+// with a usable street line, normalize each address component with the same
+// helpers as the primary address, and cap the list — a hallucinated flood of
+// entries must not fan out into customer_properties writes.
+const MAX_ADDITIONAL_PROPERTIES = 5;
+function normalizeAdditionalProperties(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const address_line1 = normalizeNullableStreetLine(entry.address_line1);
+    if (!address_line1) continue;
+    out.push({
+      address_line1,
+      address_line2: normalizeNullableStreetLine(entry.address_line2),
+      city: cleanNullableText(entry.city),
+      state: normalizeCallState(entry.state),
+      zip: normalizeZip(entry.zip),
+      is_rental: normalizeStrictBoolean(entry.is_rental),
+      property_type: cleanNullableText(entry.property_type),
+      notes: cleanNullableText(entry.notes),
+    });
+    if (out.length >= MAX_ADDITIONAL_PROPERTIES) break;
+  }
+  return out;
+}
+
+// Model-emitted secondary_contact (a SECOND person named as a party to the
+// service — a realtor's home buyer, a landlord's tenant, a spouse): normalize
+// each component with the same helpers as the caller's own fields, allowlist
+// the role, and drop the object entirely when nothing identifying survives —
+// a hallucinated empty shell must not fan out into service-contact writes.
+const SECONDARY_CONTACT_ROLES = new Set([
+  'home_buyer', 'home_seller', 'tenant', 'landlord', 'spouse_partner',
+  'family_member', 'real_estate_agent', 'property_manager', 'other', 'unknown',
+]);
+function normalizeSecondaryContact(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const validEmail = cleanValidEmailOrNull(value.email);
+  const usableEmail = validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null;
+  const role = cleanText(value.role).toLowerCase().replace(/[\s-]+/g, '_');
+  const contact = {
+    first_name: cleanNullableText(value.first_name),
+    last_name: cleanNullableText(value.last_name),
+    phone: normalizeE164Phone(value.phone),
+    email: usableEmail,
+    role: SECONDARY_CONTACT_ROLES.has(role) ? role : 'unknown',
+    wants_notifications: normalizeStrictBoolean(value.wants_notifications),
+    notes: cleanNullableText(value.notes),
+  };
+  if (!contact.first_name && !contact.last_name && !contact.phone && !contact.email) return null;
+  return contact;
+}
+
 function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
   const source = extracted && typeof extracted === 'object' && !Array.isArray(extracted)
     ? extracted
     : {};
   const normalizedPhone = normalizeCallPhone(source.phone, callerPhone);
+  const validEmail = cleanValidEmailOrNull(source.email);
+  // Regex-valid but URL-shaped ("www.cw63@gmail.com") = transcription garble;
+  // demote to email_raw with the rest of the rejects.
+  const usableEmail = validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null;
 
   return {
     ...source,
     first_name: cleanNullableText(source.first_name),
     last_name: cleanNullableText(source.last_name),
-    email: cleanValidEmailOrNull(source.email),
+    email: usableEmail,
+    // The raw model email survives normalization when the regex (or the
+    // transcript-garble guard) rejects it — the call-review bridge needs it to
+    // flag email_invalid (and to attempt a missing-dot domain fix) for
+    // read-back on the callback; `email` stays the only value any write path
+    // stores.
+    email_raw: usableEmail ? null : (cleanNullableText(source.email) || null),
     phone: normalizedPhone || null,
     address_line1: normalizeNullableStreetLine(source.address_line1),
     city: cleanNullableText(source.city),
@@ -187,6 +271,10 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     follow_up_date_time: cleanNullableText(source.follow_up_date_time),
     is_lead: normalizeIsLead(source.is_lead),
     call_type: normalizeCallType(source.call_type),
+    additional_properties: normalizeAdditionalProperties(source.additional_properties),
+    quote_requested: normalizeStrictBoolean(source.quote_requested),
+    quote_promised: normalizeStrictBoolean(source.quote_promised),
+    secondary_contact: normalizeSecondaryContact(source.secondary_contact),
   };
 }
 
@@ -272,10 +360,13 @@ module.exports = {
   cleanNullableText,
   cleanEmail,
   cleanValidEmailOrNull,
+  looksGarbledTranscriptEmail,
   normalizeNanpPhone,
   normalizePhoneForStorage,
   normalizeWebsiteQuoteContact,
   normalizeCallExtraction,
+  normalizeAdditionalProperties,
+  normalizeSecondaryContact,
   normalizeContactRecord,
   applyContactNormalization,
   clearLineTypeOnPhoneChange,

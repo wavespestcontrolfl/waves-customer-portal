@@ -13,3 +13,4 @@ android/
 
 # Capacitor CLI scratch
 .capacitor/
+public/__stub/

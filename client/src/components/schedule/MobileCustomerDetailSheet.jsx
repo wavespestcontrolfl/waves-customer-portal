@@ -119,7 +119,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
       {/* Top bar */}
       <div
         className="sticky top-0 bg-surface-page flex items-center justify-between gap-3 px-4 border-b border-hairline border-zinc-200"
-        style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"
@@ -150,7 +150,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
             {/* Name */}
             <h1
               className="text-ink-primary"
-              style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1, margin: '4px 0 20px' }}
+              style={{ fontSize: 32, fontWeight: 500, lineHeight: 1.1, margin: '4px 0 20px' }}
             >
               {`${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown'}
             </h1>
@@ -245,7 +245,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
 
             {/* Appointments */}
             <section style={{ paddingTop: 24 }}>
-              <h2 className="text-ink-primary" style={{ fontSize: 20, fontWeight: 700, margin: '0 0 14px' }}>
+              <h2 className="text-ink-primary" style={{ fontSize: 20, fontWeight: 500, margin: '0 0 14px' }}>
                 Appointments
               </h2>
               <div className="flex items-center border-b border-hairline border-zinc-200" style={{ marginBottom: 14 }}>
@@ -313,7 +313,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
                   type="button"
                   onClick={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
                   className="text-ink-primary"
-                  style={{ fontSize: 16, fontWeight: 700, marginTop: 16, padding: '8px 0', background: 'none' }}
+                  style={{ fontSize: 16, fontWeight: 500, marginTop: 16, padding: '8px 0', background: 'none' }}
                 >
                   View all
                 </button>
@@ -330,7 +330,7 @@ function StatCell({ label, value }) {
   return (
     <div className="flex-1 min-w-0">
       <div className="text-ink-secondary" style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>{label}</div>
-      <div className="text-ink-primary truncate" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>{value}</div>
+      <div className="text-ink-primary truncate" style={{ fontSize: 22, fontWeight: 500, lineHeight: 1.1 }}>{value}</div>
     </div>
   );
 }
@@ -338,7 +338,7 @@ function StatCell({ label, value }) {
 function ContactRow({ label, children }) {
   return (
     <div style={{ paddingBottom: 16, marginBottom: 16, borderBottom: '1px solid #E4E4E7' }}>
-      <div className="text-ink-primary" style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>{label}</div>
+      <div className="text-ink-primary" style={{ fontSize: 17, fontWeight: 500, marginBottom: 4 }}>{label}</div>
       {children}
     </div>
   );
@@ -354,7 +354,7 @@ function Section({ title, children, bottomBorder = false }) {
         marginBottom: bottomBorder ? 16 : 0,
       }}
     >
-      <h2 className="text-ink-primary" style={{ fontSize: 20, fontWeight: 700, margin: '0 0 10px' }}>
+      <h2 className="text-ink-primary" style={{ fontSize: 20, fontWeight: 500, margin: '0 0 10px' }}>
         {title}
       </h2>
       {children}

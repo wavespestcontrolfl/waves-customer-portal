@@ -11,7 +11,7 @@
  * GATE_BOOKING_ABANDON_RECOVERY=false → shadow-logs counts, never sends).
  *
  * Mirrors the estimate deposit-abandonment stage (services/estimate-follow-up.js):
- * per-stage atomic claim flags, quiet hours, reply-pause, transactional consent,
+ * per-stage atomic claim flags, reply-pause, transactional consent,
  * release-on-failure so a blocked send retries next tick. Runs from scheduler.js.
  */
 
@@ -23,6 +23,7 @@ const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const Experiments = require('./experimentation/growthbook');
 
 // Touch windows (hours from captured_at). The cron runs every 30 min, so the
 // SMS fires ~1–1.5h after abandon. Max-age caps how stale a lead we'll chase.
@@ -35,24 +36,13 @@ const BOOKING_URL = 'https://portal.wavespestcontrol.com/book?source=booking_rec
 
 // Genuine TERMINAL suppression codes — the recipient can never receive this
 // purpose, so keep the claim (never re-attempt). Everything else that blocks
-// (CONSENT_LOOKUP_FAILED / CONTRACT_VIOLATION / UNKNOWN_POLICY / PROVIDER_FAILURE
-// / QUIET_HOURS_HOLD) sent nothing operationally → release the claim and retry.
+// (CONSENT_LOOKUP_FAILED / CONTRACT_VIOLATION / UNKNOWN_POLICY / PROVIDER_FAILURE)
+// sent nothing operationally → release the claim and retry.
 const TERMINAL_SMS_CODES = new Set([
   'SMS_OPTED_OUT', 'PURPOSE_OPTED_OUT', 'NO_MARKETING_CONSENT', 'NO_CONSENT_RECORD',
   'SUPPRESSED_OPT_OUT', 'SUPPRESSED_NON_MOBILE', 'SUPPRESSED_MANUAL_DNC',
   'SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_OTHER', 'NON_MOBILE_SMS_RECIPIENT',
 ]);
-
-// 8a–8p America/New_York — never text outside business hours (matches the
-// messaging quiet-hours validator window for enforced purposes). The pre-check
-// avoids claim churn; the validator is the backstop.
-function isQuietHours(now = new Date()) {
-  const hour = parseInt(new Intl.DateTimeFormat('en-US', {
-    hour: '2-digit', hour12: false, timeZone: 'America/New_York',
-  }).format(now), 10);
-  if (Number.isNaN(hour)) return false; // fail open
-  return hour < 8 || hour >= 20;
-}
 
 function last10(phone) {
   const d = String(phone || '').replace(/\D/g, '');
@@ -136,6 +126,43 @@ async function renderSms(vars) {
   }
   logger.warn('[booking-recovery] booking_abandonment_recovery SMS template missing/disabled');
   return null;
+}
+
+// Measured-rollout holdback (GrowthBook `booking-abandon-recovery`, Phase 2 of
+// the experimentation initiative). Intent-to-treat: decided at candidacy, per
+// PERSON (phone last-10 — the same key the send-dedup uses), before the
+// reply-pause filter so both arms are measured from the same point. A
+// held-back person gets NEITHER touch: both stage flags are claimed so the
+// intent never re-surfaces. Fails open to "send" (today's behavior) on any
+// miss — gate off, no phone, GrowthBook unreachable, feature absent.
+async function heldBackByExperiment(intent, maxActivityBefore) {
+  try {
+    const assignment = await Experiments.assignBookingRecoveryExperiment(last10(intent.phone), intent.id);
+    if (!(assignment.inExperiment && assignment.value === false)) return false;
+    // followup_sms_sent_at intentionally NOT stamped — nothing was sent, and
+    // that timestamp only exists to pace the email touch after a real SMS.
+    // Claim under the SAME eligibility predicates as claimStage: if the
+    // visitor converted, got suppressed, or resumed the form (fresh
+    // last_activity_at) between the candidate SELECT and this UPDATE, the
+    // claim loses and the row is left alone — a later re-abandon re-claims
+    // under sticky control. The person is control-arm either way, so this
+    // tick still sends nothing.
+    const claimQuery = db('booking_intents')
+      .where({ id: intent.id })
+      .whereNull('converted_at')
+      .where('suppressed', false);
+    if (maxActivityBefore) claimQuery.where('last_activity_at', '<', maxActivityBefore);
+    const affected = await claimQuery.update({
+      followup_sms_sent: true,
+      followup_email_sent: true,
+      updated_at: db.fn.now(),
+    });
+    logger.info(`[booking-recovery] intent ${intent.id} held back (experiment control) — no touches${affected === 1 ? '' : ' (claim lost — converted/suppressed/resumed since select)'}`);
+    return true;
+  } catch (e) {
+    logger.warn(`[booking-recovery] holdback check failed for intent ${intent.id} — sending as usual: ${e.message}`);
+    return false;
+  }
 }
 
 // Atomic stage claim — flips false/NULL → true, returns true only if THIS caller
@@ -260,9 +287,9 @@ async function runSmsStage(now, sentPhones) {
   for (const intent of candidates) {
     const ten = last10(intent.phone);
     if (ten && sentPhones.has(ten)) continue; // one touch per phone per run
+    if (await heldBackByExperiment(intent, new Date(nowMs - SMS_MIN_AGE_H * 3600000))) continue;
     let claimed = false;
     try {
-      if (isQuietHours(now)) continue;
       if (await hasRepliedRecently(intent.phone)) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: customer-replied-recently`);
         continue;
@@ -306,7 +333,7 @@ async function runSmsStage(now, sentPhones) {
         claimed = false;
         if (ten) sentPhones.add(ten);
         // Stamp when the SMS actually went out so the 24h email is held to ~23h
-        // AFTER it, even if the SMS itself fired late (gate/quiet-hours/outage).
+        // AFTER it, even if the SMS itself fired late (gate/outage).
         await db('booking_intents').where({ id: intent.id })
           .update({ followup_sms_sent_at: db.fn.now() }).catch(() => {});
         await markSiblingsSent(intent.phone, 'followup_sms_sent', intent.id);
@@ -340,7 +367,7 @@ async function runEmailStage(now, sentPhones) {
     .where('last_activity_at', '<', new Date(nowMs - EMAIL_MIN_AGE_H * 3600000))
     .where('last_activity_at', '>', new Date(nowMs - EMAIL_MAX_AGE_H * 3600000))
     // Hold the email to ~23h AFTER the SMS actually went out, so a late first
-    // touch (gate/quiet-hours/outage delayed the SMS past 24h) doesn't trigger
+    // touch (gate/outage delayed the SMS past 24h) doesn't trigger
     // SMS-then-email back-to-back in consecutive ticks.
     .where((q) => q.whereNull('followup_sms_sent_at').orWhere('followup_sms_sent_at', '<', new Date(nowMs - 23 * 3600000)))
     .whereNotNull('email')
@@ -362,6 +389,10 @@ async function runEmailStage(now, sentPhones) {
     if (ten && sentPhones.has(ten)) continue;
     const emailKey = String(intent.email || '').trim().toLowerCase();
     if (emailKey && sentPhones.has(`email:${emailKey}`)) continue;
+    // Email-stage holdback check too: an intent can reach this stage without
+    // ever passing through the SMS loop (e.g. SMS window already aged out at
+    // gate-flip time), and sticky replay keeps the arm consistent either way.
+    if (await heldBackByExperiment(intent, new Date(nowMs - EMAIL_MIN_AGE_H * 3600000))) continue;
     let claimed = false;
     try {
       if (await customerEmailDisabled(intent.customer_id)) {
@@ -423,5 +454,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { isQuietHours, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor },
+  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor },
 };

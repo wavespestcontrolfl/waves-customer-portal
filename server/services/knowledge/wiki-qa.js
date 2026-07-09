@@ -6,6 +6,11 @@ const { etDateString } = require('../../utils/datetime-et');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
+// NOTE: WikiQA.query stays on FLAGSHIP, not DEEP — it serves interactive
+// surfaces (tech field lookup, admin Q&A, assistant tools) where a
+// minutes-long DEEP turn is unacceptable. The DEEP tier writes/audits the
+// wiki content offline; this path just reads it back fast.
+
 class WikiQA {
 
   /**

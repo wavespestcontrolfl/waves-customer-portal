@@ -310,6 +310,36 @@ async function getProductInfo(productName) {
   const product = await db('products_catalog').whereILike('name', `%${productName}%`).first();
   if (!product) return { error: `Product "${productName}" not found` };
 
+  // Label/SDS-derived safety fields so the model states grounded PPE / re-entry
+  // instead of recalling them from training memory. Null fields are omitted so
+  // the model doesn't read a blank as "none required".
+  const safety = {
+    signal_word: product.signal_word || undefined,
+    ppe: product.ppe_text || undefined,
+    reentry: product.reentry_text || product.reentry_summary || undefined,
+    // Only surface a positive REI as a number. rei_hours = 0 is the residential
+    // "until sprays have dried" value, NOT "0 hours" — exposing the bare 0 to the
+    // model would read as an immediate re-entry. The until-dry meaning is carried
+    // by `reentry` text instead.
+    rei_hours: product.rei_hours > 0 ? product.rei_hours : undefined,
+    rainfast_minutes: product.rainfast_minutes != null ? product.rainfast_minutes : undefined,
+    // irrigation_required records only whether watering-in is REQUIRED. A false
+    // value means "not required" — NOT "prohibited" (many liquid fertilizers are
+    // seeded false yet benefit from watering in). Never turn it into a do-not-
+    // water instruction the label doesn't back; the customer report path makes
+    // the same call. irrigation_notes carries any real label nuance.
+    watering_in: product.irrigation_required === true
+      ? 'Water in after application'
+      : (product.irrigation_notes
+          ? String(product.irrigation_notes)
+          : (product.irrigation_required === false
+              ? 'Watering-in not required per the label'
+              : undefined)),
+    epa_reg_number: product.epa_reg_number || product.epa_registration_number || undefined,
+    label_url: product.label_url || undefined,
+    sds_url: product.sds_url || undefined,
+  };
+
   return {
     name: product.name,
     category: product.category,
@@ -320,6 +350,7 @@ async function getProductInfo(productName) {
     default_rate: product.default_rate,
     default_unit: product.default_unit,
     sku: product.sku,
+    safety,
   };
 }
 

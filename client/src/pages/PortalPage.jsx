@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { useAuth } from '../hooks/useAuth';
+import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import api from '../utils/api';
 import { formatAddress } from '../utils/format-address';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
@@ -18,8 +20,231 @@ import {
   setupIntentIncompleteMessage,
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
-import { isNativeApp } from '../native/platform';
+import { isNativeApp, nativePlatform } from '../native/platform';
+import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
+import { useGlassSurface } from '../glass/glass-engine';
+
+// Portal glass state, readable from any tab component. Warm #FAF8F3
+// sub-panels turn whisper-white under glass (the report-glass idiom) so
+// solid beige tiles never sit on top of translucent cards.
+const PortalGlassContext = createContext(false);
+const usePortalGlass = () => useContext(PortalGlassContext);
+const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+// Authenticated fetch → blob download for Bearer-only report endpoints. A
+// bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
+// auth) — same path DocumentsTab's handleDownload uses.
+async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
+  const token = localStorage.getItem('waves_token');
+  let abs = url;
+  try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
+  // In the Capacitor shell the programmatic <a download> click below is a
+  // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
+// Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
+// into a readable error. Shared by the Documents + Visits report flows.
+async function fetchAuthedPdfBlob(url) {
+  const token = localStorage.getItem('waves_token');
+  let abs = url;
+  try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const contentType = r.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.message || body?.error || 'This document is not ready to download yet.');
+  }
+  return r.blob();
+}
+
+// In-app report preview state for the Capacitor shell (rendered by
+// DocumentPreviewOverlay). Page previews iframe a report route directly;
+// PDF previews fetch Bearer-only endpoints into a blob URL first. The doc
+// passed in needs { id, title, fileName?, pdfUrl? } — pdfUrl drives the
+// overlay's Save-to-share-sheet button.
+function useReportPreview(onError) {
+  const [preview, setPreview] = useState(null); // { doc, src, blob?, blobUrl?, loading? }
+
+  const closePreview = () => {
+    setPreview(p => {
+      if (p?.blobUrl) URL.revokeObjectURL(p.blobUrl);
+      return null;
+    });
+  };
+
+  const openPagePreview = (doc, src) => setPreview({ doc, src });
+
+  const openPdfPreview = (doc, url) => {
+    setPreview({ doc, src: null, loading: true });
+    fetchAuthedPdfBlob(url)
+      .then(blob => {
+        const blobUrl = URL.createObjectURL(blob);
+        setPreview(p => {
+          if (!p || p.doc.id !== doc.id) { URL.revokeObjectURL(blobUrl); return p; }
+          return { doc, src: blobUrl, blob, blobUrl };
+        });
+      })
+      .catch(err => {
+        console.error(err);
+        setPreview(p => (p && p.doc.id === doc.id ? null : p));
+        onError?.(err);
+      });
+  };
+
+  return { preview, openPagePreview, openPdfPreview, closePreview };
+}
+
+// The arrival window quoted to customers is ALWAYS window_start + 2 hours
+// (owner directive — see server/utils/sms-time-format.js). window_end is the
+// internal job-duration block and must never render on customer surfaces.
+// Accepts an "HH:MM[:SS]" time string or an ISO datetime; returns the same
+// shape shifted +120 minutes, or null when the start is unparseable.
+const arrivalWindowEnd = (windowStart) => {
+  if (!windowStart) return null;
+  const raw = String(windowStart);
+  const m = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (m) {
+    const mins = ((Number(m[1]) * 60) + Number(m[2]) + 120) % 1440;
+    return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + 120 * 60000).toISOString();
+};
+
+// ---------------------------------------------------------------------------
+// Waves AI bar — the wavespestcontrol.com "Ask Waves" intake, embedded on
+// every portal tab. Pills are screen-aware; asking opens the authenticated
+// Waves Assistant (ChatWidget) with the question pre-sent.
+const WAVES_AI_TABS = {
+  dashboard: {
+    placeholder: "Tell us what's bugging you…",
+    pills: ['Reschedule my visit', 'Explain my last charge', "I'm seeing ants again"],
+  },
+  plan: {
+    placeholder: 'Ask about your plan or coverage…',
+    pills: ["What's included in my plan?", 'Add mosquito protection', 'What does WaveGuard Gold add?'],
+  },
+  visits: {
+    placeholder: 'Ask about visits or scheduling…',
+    pills: ['When is my next visit?', 'What was done last visit?', 'How do I reschedule?'],
+  },
+  billing: {
+    placeholder: 'Ask about a charge or payment…',
+    pills: ['Explain my last charge', 'Set up Auto Pay', 'Update my card'],
+  },
+  refer: {
+    placeholder: 'Ask about referrals and rewards…',
+    pills: ['How do referral credits work?', 'Where is my referral reward?', 'How do I share my code?'],
+  },
+  documents: {
+    placeholder: 'Ask about your paperwork…',
+    pills: ['Find my termite paperwork', 'Where are my service reports?', 'Send me my agreement'],
+  },
+  property: {
+    placeholder: 'Ask about your property details…',
+    pills: ['Update my gate code', 'We got a new dog', 'Report a problem area'],
+  },
+  learn: {
+    placeholder: 'Ask about lawn or pest care…',
+    pills: ['Why is my lawn yellowing?', 'When is mosquito season?', 'Are treatments pet-safe?'],
+  },
+};
+
+function WavesAiBar({ tab, onAsk }) {
+  const [question, setQuestion] = useState('');
+  const { placeholder, pills } = WAVES_AI_TABS[tab] || WAVES_AI_TABS.dashboard;
+  const submit = () => {
+    const q = question.trim();
+    if (!q) return;
+    setQuestion('');
+    onAsk(q);
+  };
+  return (
+    <section data-glass="card" aria-label="Ask Waves AI" style={{
+      ...PORTAL_CARD_STYLE,
+      padding: 14,
+      marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 12,
+        fontWeight: 850,
+        color: B.blueDeeper,
+        textTransform: 'uppercase',
+        letterSpacing: 0,
+        fontFamily: FONTS.heading,
+        marginBottom: 8,
+      }}>
+        Waves AI
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <ShellIconTile icon="bot" size={36} />
+        <input
+          type="text"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && submit()}
+          placeholder={placeholder}
+          aria-label="Ask Waves AI"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: 40,
+            padding: '9px 12px',
+            borderRadius: 10,
+            border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+            fontSize: 14,
+            fontFamily: FONTS.body,
+            color: PORTAL_SHELL.text,
+            background: PORTAL_SHELL.surface,
+            outline: 'none',
+          }}
+        />
+        <button type="button" onClick={submit} disabled={!question.trim()} data-glass-accent="" style={{
+          ...PORTAL_PRIMARY_ACTION,
+          minHeight: 40,
+          padding: '9px 16px',
+          position: 'relative',
+          opacity: question.trim() ? 1 : 0.6,
+        }}>
+          Ask
+        </button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+        {pills.map((pill) => (
+          <button key={pill} type="button" onClick={() => onAsk(pill)} data-glass-accent="" style={{
+            padding: '6px 11px',
+            borderRadius: 999,
+            border: `1px solid ${PORTAL_SHELL.border}`,
+            background: PORTAL_SHELL.surface,
+            color: PORTAL_SHELL.text,
+            fontSize: 12,
+            fontWeight: 800,
+            fontFamily: FONTS.body,
+            cursor: 'pointer',
+          }}>
+            {pill}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -34,12 +259,19 @@ function utcDayFromDateKey(key) {
   return Date.UTC(y, m - 1, d);
 }
 
-function daysUntilEtDate(d) {
+// Signed ET-calendar-day difference from today (negative = past), null when
+// the input doesn't yield a valid date key.
+function etDayDiff(d) {
   const targetKey = typeof d === 'string' ? d.split('T')[0] : etDateString(new Date(d));
   const targetDay = utcDayFromDateKey(targetKey);
   const todayDay = utcDayFromDateKey(etDateString());
   if (!Number.isFinite(targetDay) || !Number.isFinite(todayDay)) return null;
-  return Math.max(0, Math.round((targetDay - todayDay) / 86400000));
+  return Math.round((targetDay - todayDay) / 86400000);
+}
+
+function daysUntilEtDate(d) {
+  const diff = etDayDiff(d);
+  return diff == null ? null : Math.max(0, diff);
 }
 
 function fmtDate(d, opts) {
@@ -86,14 +318,14 @@ const VISUALLY_HIDDEN = {
   border: 0,
 };
 
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_BORDER_STRONG = '#D8D0C0';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_BODY = '#3F4A65';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_SOFT = '#F8FCFE';
-const ESTIMATE_SOFT_BORDER = '#CFE7F5';
+const ESTIMATE_BG = CUSTOMER_SURFACE.page;
+const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
+const ESTIMATE_BORDER_STRONG = CUSTOMER_SURFACE.borderStrong;
+const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
+const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
+const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
+const ESTIMATE_SOFT = CUSTOMER_SURFACE.soft;
+const ESTIMATE_SOFT_BORDER = CUSTOMER_SURFACE.softBorder;
 
 const PORTAL_SHELL = {
   page: ESTIMATE_BG,
@@ -105,9 +337,9 @@ const PORTAL_SHELL = {
   body: ESTIMATE_BODY,
   soft: ESTIMATE_SOFT,
   softBorder: ESTIMATE_SOFT_BORDER,
-  successBg: '#F0FDF4',
-  successBorder: '#BBF7D0',
-  successText: '#047857',
+  successBg: CUSTOMER_SURFACE.successBg,
+  successBorder: CUSTOMER_SURFACE.successBorder,
+  successText: CUSTOMER_SURFACE.successText,
   shadow: '0 18px 45px rgba(27,44,91,0.10)',
   shadowSoft: 'none',
 };
@@ -203,8 +435,9 @@ function PortalStatePanel({
   actionStyle = PORTAL_SECONDARY_ACTION,
 }) {
   return (
-    <section style={{
+    <section data-glass="card" style={{
       ...PORTAL_CARD_STYLE,
+      position: 'relative',
       padding: 24,
       textAlign: 'center',
       color: PORTAL_SHELL.text,
@@ -246,7 +479,7 @@ function PortalStatePanel({
       )}
       {children}
       {actionLabel && onAction && (
-        <button type="button" onClick={onAction} style={{ ...actionStyle, marginTop: 16 }}>
+        <button type="button" onClick={onAction} data-glass-accent="" style={{ ...actionStyle, marginTop: 16, position: 'relative' }}>
           {actionLabel}
         </button>
       )}
@@ -259,8 +492,10 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand' }
     <div style={{
       padding: 16,
       borderRadius: 8,
-      background: PORTAL_SHELL.page,
-      border: `1px solid ${PORTAL_SHELL.border}`,
+      // Whisper-white, not the warm PORTAL_SHELL.page — this inline state
+      // sits inside glass cards and the warm wash read as the old theme.
+      background: GLASS_SUBTLE,
+      border: '1px solid rgba(255,255,255,0.65)',
       display: 'flex',
       gap: 12,
       alignItems: 'flex-start',
@@ -284,7 +519,6 @@ function useLawnHealth(customerId) {
     photos: [], beforeAfter: null, trend: [], recommendations: null,
     assessmentCount: 0, nextMilestone: null,
     seasonalContext: null, neighborBenchmark: null,
-    latestSnapshot: null, recommendationCards: [],
   });
 
   useEffect(() => {
@@ -303,34 +537,12 @@ function useLawnHealth(customerId) {
         nextMilestone: d.nextMilestone || null,
         seasonalContext: d.seasonalContext || null,
         neighborBenchmark: d.neighborBenchmark || null,
-        latestSnapshot: d.latestSnapshot || null,
-        recommendationCards: d.recommendationCards || [],
         mowingHeight: d.mowingHeight || null,
       }))
       .catch(() => setData(prev => ({ ...prev, loading: false })));
   }, [customerId]);
 
   return data;
-}
-
-const sentLawnRecommendationEvents = new Set();
-
-function trackLawnRecommendationEvent(customerId, payload = {}) {
-  if (!customerId || !payload.eventType) return;
-  const key = [
-    customerId,
-    payload.eventType,
-    payload.snapshotId || '',
-    payload.recommendationId || '',
-    payload.placement || '',
-  ].join(':');
-  if (sentLawnRecommendationEvents.has(key)) return;
-  sentLawnRecommendationEvents.add(key);
-  api.trackLawnRecommendationEvent(customerId, {
-    surface: 'customer_portal',
-    placement: 'lawn_snapshot_card',
-    ...payload,
-  }).catch(() => {});
 }
 
 // =========================================================================
@@ -424,7 +636,7 @@ function BeforeAfterSlider({ beforeAfter }) {
             AFTER {afterDate ? `— ${fmtDate(afterDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.after?.overallScore != null && (
-            <div style={{ color: B.green, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.blueDeeper, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.after.overallScore}%
             </div>
           )}
@@ -484,7 +696,7 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
         <div style={{ fontSize: size * 0.28, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1 }}>
           {score || 0}
         </div>
-        {label && <div style={{ fontSize: 9, color: B.grayMid, marginTop: 2, fontWeight: 600 }}>{label}</div>}
+        {label && <div style={{ fontSize: 9, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
       </div>
     </div>
   );
@@ -589,13 +801,13 @@ function PhotoGallery({ photos }) {
           display: 'flex', gap: 16, fontSize: 12,
         }}>
           {visiblePhotos[selected].scores.turfDensity != null && (
-            <div><span style={{ color: B.grayMid }}>Density:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.turfDensity}%</span></div>
+            <div><span style={{ color: PORTAL_SHELL.muted }}>Density:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.turfDensity}%</span></div>
           )}
           {visiblePhotos[selected].scores.colorHealth != null && (
-            <div><span style={{ color: B.grayMid }}>Color:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.colorHealth}/10</span></div>
+            <div><span style={{ color: PORTAL_SHELL.muted }}>Color:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.colorHealth}/10</span></div>
           )}
           {visiblePhotos[selected].scores.weedCoverage != null && (
-            <div><span style={{ color: B.grayMid }}>Weeds:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.weedCoverage}%</span></div>
+            <div><span style={{ color: PORTAL_SHELL.muted }}>Weeds:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.weedCoverage}%</span></div>
           )}
         </div>
       )}
@@ -606,128 +818,12 @@ function PhotoGallery({ photos }) {
 // =========================================================================
 // LAWN HEALTH CARD — overall score, progress bars, photos, trend, recs
 // =========================================================================
-function LawnSnapshotCard({ customerId, snapshot, recommendationCards = [], onRequest }) {
-  useEffect(() => {
-    if (!customerId || !snapshot?.id) return;
-    trackLawnRecommendationEvent(customerId, {
-      eventType: 'snapshot_viewed',
-      snapshotId: snapshot.id,
-    });
-    recommendationCards.forEach((card) => {
-      if (!card?.id) return;
-      trackLawnRecommendationEvent(customerId, {
-        eventType: 'recommendation_shown',
-        snapshotId: snapshot.id,
-        recommendationId: card.id,
-      });
-    });
-  }, [customerId, snapshot?.id, recommendationCards]);
-
-  if (!snapshot) return null;
-  const finding = snapshot.findings?.[0];
-  const treatment = snapshot.treatment || {};
-  const expected = snapshot.expectedWindow || {};
-  const expectedText = expected.minDays && expected.maxDays
-    ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
-    : 'Visible improvement depends on irrigation, mowing, rainfall, and site conditions.';
-  const whatWeDid = treatment.completedToday
-    ? `Your technician completed the scheduled lawn service${treatment.productsAppliedSummary ? ` and applied ${treatment.productsAppliedSummary}` : ''}.`
-    : 'We documented the condition so it can be compared on the next lawn review.';
-
-  return (
-    <section style={{
-      marginBottom: 16,
-      padding: 16,
-      borderRadius: 12,
-      border: `1px solid ${B.green}22`,
-      background: `${B.green}07`,
-    }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <ShellIconTile icon="leaf" tone="success" size={38} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 850, color: B.green, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: 0 }}>
-            Today's Lawn Snapshot
-          </div>
-          <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
-            {snapshot.headline || 'Lawn condition update'}
-          </div>
-          {snapshot.summary && (
-            <div style={{ marginTop: 7, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
-              {snapshot.summary}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
-        <SnapshotDetail label="What we saw" value={finding?.customerCopy || 'No major issue was observed during this lawn review.'} />
-        <SnapshotDetail label="What we did" value={whatWeDid} />
-        <SnapshotDetail label="What to expect" value={expectedText} />
-        <SnapshotDetail
-          label="What we're watching"
-          value={snapshot.nextWatchItems?.[0] || 'We will compare this area against today\'s review during the next service.'}
-        />
-      </div>
-
-      {recommendationCards.length > 0 && (
-        <div style={{ marginTop: 14, display: 'grid', gap: 8 }}>
-          {recommendationCards.map((card) => (
-            <div key={card.id} style={{
-              padding: 12,
-              borderRadius: 10,
-              background: B.white,
-              border: `1px solid ${PORTAL_SHELL.border}`,
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.navy, fontFamily: FONTS.heading }}>
-                {card.title}
-              </div>
-              <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                {card.customerCopy}
-              </div>
-              {card.action?.label && (
-                <button
-                  type="button"
-                  style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, padding: '9px 12px', fontSize: 14 }}
-                  onClick={() => {
-                    trackLawnRecommendationEvent(customerId, {
-                      eventType: 'recommendation_clicked',
-                      snapshotId: snapshot.id,
-                      recommendationId: card.id,
-                      actionType: card.action?.type || null,
-                    });
-                    onRequest?.(card.action);
-                  }}
-                >
-                  {card.action.label}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function SnapshotDetail({ label, value }) {
-  return (
-    <div style={{ paddingLeft: 50 }}>
-      <div style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0, fontFamily: FONTS.heading }}>
-        {label}
-      </div>
-      <div style={{ marginTop: 2, fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
 // Customer card mowing-height section. Advisory voice — Waves doesn't mow, so the
 // copy speaks to how the lawn is being kept. `below` is the only red state.
 function PortalMowingHeight({ mowing }) {
   if (!mowing || mowing.heightIn == null) return null;
   const meta = {
-    in_range: { color: B.green, pill: 'In range', copy: `Right in the ideal ${mowing.bandLabel} range — keep it up.` },
+    in_range: { color: B.blueDeeper, pill: 'In range', copy: `Right in the ideal ${mowing.bandLabel} range — keep it up.` },
     above: { color: B.orange, pill: 'A bit long', copy: `A notch toward ${mowing.bandLabel} keeps it healthiest.` },
     below: { color: B.red, pill: 'Cut low', copy: `Raising the mower toward ${mowing.bandLabel} avoids scalping and stress.` },
   }[mowing.status] || { color: B.textCaption, pill: '', copy: '' };
@@ -758,7 +854,7 @@ function PortalMowingHeight({ mowing }) {
   );
 }
 
-function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, latestSnapshot, recommendationCards, mowingHeight, onRequest }) {
+function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, mowingHeight }) {
   const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
 
@@ -787,12 +883,11 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   const overallDelta = overallScore - initialOverall;
 
   return (
-    <div style={{
+    <div data-glass="card" style={{
       ...PORTAL_CARD_STYLE,
+      position: 'relative',
       padding: 20,
     }}>
-      <LawnSnapshotCard customerId={customerId} snapshot={latestSnapshot} recommendationCards={recommendationCards} onRequest={onRequest} />
-
       {/* Header with overall score ring */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
         <ScoreRing score={overallScore} size={80} label="OVERALL" />
@@ -801,11 +896,11 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
             Lawn Health Progress
           </div>
           {scores.aiSummary ? (
-            <div style={{ fontSize: 12, color: B.grayMid, lineHeight: 1.5, marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, lineHeight: 1.5, marginTop: 4 }}>
               {scores.aiSummary}
             </div>
           ) : (
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 4 }}>
               Your lawn's journey since starting the program.
             </div>
           )}
@@ -858,7 +953,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
                   )}
-                  <span style={{ color: B.grayMid, fontSize: 10, marginLeft: 4 }}>from {initial}%</span>
+                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 10, marginLeft: 4 }}>from {initial}%</span>
                 </span>
               </div>
               <div style={{
@@ -908,7 +1003,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               border: `1px solid ${B.teal}12`,
             }}>
               <TrendSparkline trend={trend} height={70} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: B.grayMid }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: PORTAL_SHELL.muted }}>
                 <span>{fmtDate(trend[0].date, { month: 'short', year: '2-digit' })}</span>
                 <span>{fmtDate(trend[trend.length - 1].date, { month: 'short', year: '2-digit' })}</span>
               </div>
@@ -938,7 +1033,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               marginTop: 8, padding: '12px 16px', borderRadius: 8,
               background: `${B.green}08`, border: `1px solid ${B.green}20`,
             }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.green, marginBottom: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.blueDeeper, marginBottom: 4 }}>
                 Next Visit Focus
               </div>
               <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
@@ -973,7 +1068,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
             <span>Before &amp; After</span>
             {beforeAfter.improvement?.overall != null && beforeAfter.improvement.overall > 0 && (
               <span style={{
-                fontSize: 12, fontWeight: 700, color: B.green,
+                fontSize: 12, fontWeight: 700, color: B.blueDeeper,
                 background: `${B.green}12`, padding: '2px 8px', borderRadius: 6,
               }}>
                 +{beforeAfter.improvement.overall} pts improvement
@@ -982,7 +1077,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           </div>
           <BeforeAfterSlider beforeAfter={beforeAfter} />
           {beforeAfter.improvement?.daysSinceStart > 0 && (
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 6, textAlign: 'center' }}>
               {beforeAfter.improvement.daysSinceStart} days of progress
             </div>
           )}
@@ -1024,7 +1119,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
                 : neighborBenchmark.percentile === 'top 50%' ? 'Above average for your area'
                 : 'Growing toward the neighborhood average'}
             </div>
-            <div style={{ fontSize: 12, color: B.grayMid, marginTop: 2, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2, lineHeight: 1.4 }}>
               Your score of {neighborBenchmark.customerScore}% vs {neighborBenchmark.neighborhoodAvg}% neighborhood avg
               {neighborBenchmark.customerCount > 5 && ` across ${neighborBenchmark.customerCount} properties`}
             </div>
@@ -1035,7 +1130,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {/* Seasonal context — FAWN weather powered */}
       <div style={{
         marginTop: 10, padding: '10px 12px', borderRadius: 8,
-        background: `${B.wavesBlue}08`, fontSize: 12, color: B.grayMid, lineHeight: 1.5,
+        background: `${B.wavesBlue}08`, fontSize: 12, color: PORTAL_SHELL.muted, lineHeight: 1.5,
       }}>
         {seasonalContext ? (
           <>
@@ -1072,10 +1167,143 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   );
 }
 
+// Share action on the home-page content cards (owner 2026-07-09): native
+// share sheet where available, clipboard fallback with a "Copied!" flash.
+// A canceled share sheet is not an error and does nothing.
+function SharePostButton({ url, title }) {
+  const [copied, setCopied] = useState(false);
+  const share = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const absolute = new URL(url, window.location.origin).toString();
+    if (navigator.share) {
+      try { await navigator.share({ title: title || 'Waves Pest Control', url: absolute }); } catch { /* canceled */ }
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(absolute);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch { /* clipboard unavailable */ }
+  };
+  return (
+    <button
+      type="button"
+      onClick={share}
+      style={{
+        border: 'none', background: 'none', padding: 0, cursor: 'pointer',
+        fontSize: 12, fontWeight: 800, color: PORTAL_SHELL.muted, fontFamily: FONTS.heading,
+      }}
+    >
+      {copied ? 'Copied!' : 'Share'}
+    </button>
+  );
+}
+
+// Home-page content row (owner 2026-07-09): one glass section per source —
+// Facebook, the Waves blog, and the newsletter — each a swipeable card rail
+// mirroring the wavespestcontrol.com Social Hub cards (View Post + Share,
+// no quote CTA). Hidden entirely while its feed is empty or unreachable.
+function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compact, ctaLabel }) {
+  if (!posts.length) return null;
+  return (
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          {iconTile}
+          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
+        </div>
+        {followHref && (
+          <a
+            href={followHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-glass="chip"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 36,
+              padding: '0 14px', borderRadius: 999, textDecoration: 'none',
+              background: '#fff', border: '1px solid #E7E2D7',
+              color: B.blueDeeper, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {followLabel}
+          </a>
+        )}
+      </div>
+      <div style={{
+        display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
+        WebkitOverflowScrolling: 'touch', paddingBottom: 4, scrollbarWidth: 'thin',
+      }}>
+        {posts.map((post) => (
+          <div
+            key={post.url}
+            data-glass="soft"
+            style={{
+              // Exactly three cards fill the rail on desktop (owner
+              // 2026-07-09); extra posts overflow into the horizontal
+              // scroll. Mobile keeps a fixed swipe width.
+              flex: compact ? '0 0 230px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
+              display: 'flex', flexDirection: 'column',
+              background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+              overflow: 'hidden', position: 'relative',
+            }}
+          >
+            <a href={post.url} target={post.external ? '_blank' : undefined} rel={post.external ? 'noopener noreferrer' : undefined} style={{ display: 'block', textDecoration: 'none' }}>
+              {post.image ? (
+                <img
+                  src={post.image}
+                  alt=""
+                  loading="lazy"
+                  style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
+                />
+              ) : (
+                <div style={{
+                  width: '100%', aspectRatio: '4 / 3', display: 'flex',
+                  alignItems: 'center', justifyContent: 'center',
+                  background: PORTAL_SHELL.soft, color: B.blueDeeper,
+                }}>
+                  <Icon name="waves" size={30} strokeWidth={1.6} />
+                </div>
+              )}
+            </a>
+            <div style={{ padding: '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+              {post.title && (
+                <div style={{
+                  fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
+                  display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                }}>{post.title}</div>
+              )}
+              {post.text && (
+                <div style={{
+                  fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.45,
+                  display: '-webkit-box', WebkitLineClamp: post.title ? 2 : 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                }}>{post.text}</div>
+              )}
+              <div style={{ marginTop: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
+                <a
+                  href={post.url}
+                  target={post.external ? '_blank' : undefined}
+                  rel={post.external ? 'noopener noreferrer' : undefined}
+                  style={{ fontSize: 12, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.heading, textDecoration: 'none' }}
+                >
+                  {ctaLabel} →
+                </a>
+                <SharePostButton url={post.url} title={post.title || post.text} />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function DashboardTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
@@ -1091,6 +1319,13 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [satOfficeName, setSatOfficeName] = useState('');
   const [satSubmitting, setSatSubmitting] = useState(false);
   const [satDismissed, setSatDismissed] = useState(false);
+  // Home-page content rows (owner 2026-07-09) — Facebook (same public feed
+  // the wavespestcontrol.com Social Hub renders, Facebook only), the Waves
+  // blog, and the newsletter. Best-effort: an empty/failed feed just hides
+  // its row.
+  const [facebookPosts, setFacebookPosts] = useState([]);
+  const [blogPosts, setBlogPosts] = useState([]);
+  const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
   const tier = TIER[customer.tier];
   const annualPrepay = customer.annualPrepay || null;
@@ -1137,6 +1372,21 @@ function DashboardTab({ customer, onSwitchTab }) {
         rewardPerReferral: Number(d.rewardPerReferral) || 25,
       });
     }).catch(console.error);
+    fetch(`${API_BASE}/public/social-feed`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const posts = (d?.posts || [])
+          .filter((p) => p.platform === 'facebook' && p.postUrl)
+          .slice(0, 6);
+        setFacebookPosts(posts);
+      })
+      .catch(() => {});
+    api.getBlogPosts()
+      .then((d) => setBlogPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
+      .catch(() => {});
+    api.getNewsletterPosts()
+      .then((d) => setNewsletterPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
+      .catch(() => {});
   }, []);
 
   const formatTime = (t) => {
@@ -1182,15 +1432,19 @@ function DashboardTab({ customer, onSwitchTab }) {
     setSatSubmitting(false);
   };
 
-  const card = PORTAL_CARD_STYLE;
+  // position:relative lets the glass specular pseudo-elements anchor to each
+  // card; inert without the glass theme mounted (no offsets, no stacking context).
+  const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
-  const subtle = PORTAL_SHELL.page;
+  // Whisper-white like every other tab — the warm PORTAL_SHELL.page wash
+  // read as the old theme on the glass scene (portal is glass-only).
+  const subtle = GLASS_SUBTLE;
   const dashboardLabel = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
     fontFamily: FONTS.heading,
   };
   const dashboardActionCard = {
@@ -1208,6 +1462,7 @@ function DashboardTab({ customer, onSwitchTab }) {
     justifyContent: compact ? 'center' : 'flex-start',
     gap: compact ? 6 : 8,
     boxShadow: 'none',
+    position: 'relative',
   };
   const dashboardSecondaryButton = {
     ...PORTAL_SECONDARY_ACTION,
@@ -1218,6 +1473,7 @@ function DashboardTab({ customer, onSwitchTab }) {
     ...PORTAL_PRIMARY_ACTION,
     padding: '11px 18px',
     fontSize: 14,
+    position: 'relative',
   };
   const balanceReady = balanceStatus === 'ready' && !!balance;
   const balancePending = balanceStatus === 'loading';
@@ -1254,9 +1510,6 @@ function DashboardTab({ customer, onSwitchTab }) {
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
-  const renewalCredit = customer.memberSince
-    ? Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25))
-    : 0;
   const referralReward = Number(referralStats?.rewardPerReferral) || 25;
   // Server-authoritative earned dollars — not an estimate off referrals *sent*.
   const referralCredits = Math.round(Number(referralStats?.totalEarned || 0));
@@ -1271,8 +1524,10 @@ function DashboardTab({ customer, onSwitchTab }) {
     {
       icon: 'coins',
       label: 'WaveGuard Rewards',
-      value: `$${renewalCredit + referralCredits}`,
-      sub: `$${renewalCredit} renewal credit · $${referralCredits} referral credits`,
+      // Server-backed dollars only — the old card summed in a client-invented,
+      // tenure-prorated "renewal credit" no system ever grants.
+      value: `$${referralCredits}`,
+      sub: `$${referralCredits} referral credits earned`,
       actionLabel: null,
     },
     {
@@ -1288,7 +1543,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1322,7 +1577,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   borderRadius: 8,
                   background: annualPrepay.status === 'payment_pending' ? '#FFF7ED' : '#F0FDF4',
                   border: `1px solid ${annualPrepay.status === 'payment_pending' ? '#FED7AA' : '#BBF7D0'}`,
-                  color: annualPrepay.status === 'payment_pending' ? '#9A3412' : '#047857',
+                  color: annualPrepay.status === 'payment_pending' ? '#9A3412' : B.blueDeeper,
                   fontSize: 12,
                   fontWeight: 850,
                   fontFamily: FONTS.heading,
@@ -1340,7 +1595,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              Hi, {customer.firstName || 'there'}.
+              Hello {customer.firstName || 'there'}!
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
               {customer.address?.line1}
@@ -1353,13 +1608,13 @@ function DashboardTab({ customer, onSwitchTab }) {
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
-            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#FAF8F3',
-            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E7E2D7'}`,
+            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : GLASS_SUBTLE,
+            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : 'rgba(255,255,255,0.65)'}`,
             cursor: 'pointer',
             textAlign: 'left',
             fontFamily: FONTS.body,
           }}>
-            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : '#047857') : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : B.blueDeeper) : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 800, color: B.blueDeeper }}>
@@ -1370,7 +1625,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
-            <button key={item.label} type="button" onClick={item.action} style={dashboardActionCard}>
+            <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
               <div style={{ fontSize: compact ? 12 : 14, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
               {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
@@ -1380,7 +1635,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       </section>
 
       {pendingSatisfaction && !satDismissed && (
-        <section style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
+        <section data-glass="card" style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
           {satPhase === 'rate' && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -1404,7 +1659,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   return (
                     <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
                       minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : '#FAF8F3',
+                      background: active ? color : GLASS_SUBTLE,
                       color: active ? '#fff' : B.grayMid,
                       fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
                     }}>{n}</button>
@@ -1460,20 +1715,19 @@ function DashboardTab({ customer, onSwitchTab }) {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
-        <section style={{ ...card, overflow: 'hidden' }}>
+        <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <ShellIconTile icon="calendar" size={38} />
               <div style={{ minWidth: 0 }}>
-                <div style={dashboardLabel}>Next Visit</div>
+                <div style={{ ...dashboardLabel, color: B.blueDeeper }}>Next Visit</div>
                 <div style={{ marginTop: 8, fontSize: 26, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{nextDateLabel}</div>
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
                 {nextService?.windowStart && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {formatTime(nextService.windowStart)} - {formatTime(nextService.windowEnd)}
-                    {nextService.technician ? ` · ${nextService.technician}` : ''}
+                    {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
                   </div>
                 )}
               </div>
@@ -1488,31 +1742,41 @@ function DashboardTab({ customer, onSwitchTab }) {
             )}
           </div>
           {nextService ? (
-            <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
-                <button type="button" onClick={() => {
-                  api.confirmAppointment(nextService.id).then(() => {
+                <button type="button" disabled={confirmingVisit} onClick={async () => {
+                  if (confirmingVisit) return;
+                  setConfirmingVisit(true);
+                  try {
+                    await api.confirmAppointment(nextService.id);
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
-                  });
-                }} style={{
+                  } catch (err) {
+                    console.error(err);
+                    alert('Could not confirm this visit. Please try again.');
+                  } finally {
+                    setConfirmingVisit(false);
+                  }
+                }} data-glass-accent="" style={{
                   ...dashboardPrimaryButton,
+                  ...(confirmingVisit ? { opacity: 0.6, cursor: 'default' } : {}),
                 }}>
-                  Confirm Visit
+                  {confirmingVisit ? 'Confirming…' : 'Confirm Visit'}
                 </button>
               ) : (
                 <span style={{
                   padding: '11px 18px', borderRadius: 8, background: '#ECFDF5',
-                  color: '#047857', fontSize: 14, fontWeight: 800,
+                  color: B.blueDeeper, fontSize: 14, fontWeight: 800,
                 }}>Confirmed</span>
               )}
-              <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} style={{
+              <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} data-glass-accent="" style={{
                 ...dashboardSecondaryButton,
                 textDecoration: 'none',
+                position: 'relative',
               }}>Reschedule</a>
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
-              <button type="button" onClick={() => onSwitchTab?.('request')} style={{
+              <button type="button" onClick={() => onSwitchTab?.('request')} data-glass-accent="" style={{
                 ...dashboardPrimaryButton,
               }}>
                 Request Service
@@ -1527,7 +1791,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           )}
         </section>
 
-        <section style={{ ...card, padding: 18 }}>
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
           <div style={dashboardLabel}>At a glance</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
@@ -1544,7 +1808,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E7E2D7', paddingBottom: 10 }}>
                 <div>
                   <div style={{ fontSize: 14, color: muted }}>{item.label}</div>
-                  <div style={{ fontSize: 12, color: '#94A3B8', marginTop: 1 }}>{item.sub}</div>
+                  <div style={{ fontSize: 12, color: '#475569', marginTop: 1 }}>{item.sub}</div>
                 </div>
                 <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper }}>{item.value}</div>
               </div>
@@ -1556,7 +1820,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       <ServiceTracker />
 
       {lastServiceStatus === 'loading' ? (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="clipboard"
             title="Loading last visit"
@@ -1564,7 +1828,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           />
         </section>
       ) : lastServiceStatus === 'error' ? (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="warning"
             tone="danger"
@@ -1573,7 +1837,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           />
         </section>
       ) : lastService ? (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <ShellIconTile icon="clipboard" tone="success" size={38} />
@@ -1585,7 +1849,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 </div>
               </div>
             </div>
-            <span style={{ borderRadius: 8, background: '#ECFDF5', color: '#047857', border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, padding: '5px 9px' }}>Completed</span>
+            <span style={{ borderRadius: 8, background: '#ECFDF5', color: B.blueDeeper, border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, padding: '5px 9px' }}>Completed</span>
           </div>
           {(lastService.notes || lastService.technician_notes) ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
@@ -1603,7 +1867,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           )}
         </section>
       ) : (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="calendar"
             title="No completed visits yet"
@@ -1623,14 +1887,11 @@ function DashboardTab({ customer, onSwitchTab }) {
           recommendations={lawnHealth.recommendations}
           seasonalContext={lawnHealth.seasonalContext}
           neighborBenchmark={lawnHealth.neighborBenchmark}
-          latestSnapshot={lawnHealth.latestSnapshot}
-          recommendationCards={lawnHealth.recommendationCards}
           mowingHeight={lawnHealth.mowingHeight}
-          onRequest={() => onSwitchTab?.('request')}
         />
       )}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           {/* Mowing height shows even before the first vision assessment. */}
           <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
           <PortalInlineState
@@ -1641,9 +1902,55 @@ function DashboardTab({ customer, onSwitchTab }) {
         </section>
       )}
 
+      {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog, and
+          the newsletter — Social Hub-style cards in glass, each with View
+          Post + Share (no quote CTA), above the rewards cards. */}
+      <HomeContentRow
+        compact={compact}
+        title="Latest from Facebook"
+        followHref="https://facebook.com/wavespestcontrol"
+        followLabel="Follow Waves on Facebook"
+        ctaLabel="View Post"
+        iconTile={(
+          <span style={{
+            width: 38, height: 38, borderRadius: 10, flexShrink: 0,
+            background: '#1877F2', color: '#fff',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+          </span>
+        )}
+        posts={facebookPosts.map((p) => ({
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', external: true,
+        }))}
+      />
+      <HomeContentRow
+        compact={compact}
+        title="Latest from the Blog"
+        followHref="https://www.wavespestcontrol.com/blog/"
+        followLabel="Visit the Waves Blog"
+        ctaLabel="Read Post"
+        iconTile={<ShellIconTile icon="bulb" size={38} />}
+        posts={blogPosts.map((p) => ({
+          url: p.link, image: p.image, title: p.title, text: p.description, external: true,
+        }))}
+      />
+      <HomeContentRow
+        compact={compact}
+        title="The Waves Newsletter"
+        followHref="https://www.wavespestcontrol.com/newsletter/"
+        followLabel="Subscribe to the Waves Newsletter"
+        ctaLabel="Read Issue"
+        iconTile={<ShellIconTile icon="newspaper" size={38} />}
+        posts={newsletterPosts.map((p) => ({
+          url: p.link, image: p.image, title: p.title, text: p.description,
+          external: !String(p.link || '').startsWith('/'),
+        }))}
+      />
+
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
         {rewardCards.map(item => (
-          <section key={item.label} style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <section key={item.label} data-glass="card" style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
               <ShellIconTile icon={item.icon} size={38} />
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -1653,13 +1960,39 @@ function DashboardTab({ customer, onSwitchTab }) {
               <div style={{ fontSize: 22, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap' }}>{item.value}</div>
             </div>
             {item.actionLabel && (
-              <button type="button" onClick={() => onSwitchTab?.('refer')} style={dashboardSecondaryButton}>
+              <button type="button" onClick={() => onSwitchTab?.('refer')} data-glass-accent="" style={{ ...dashboardSecondaryButton, position: 'relative' }}>
                 {item.actionLabel}
               </button>
             )}
           </section>
         ))}
       </div>
+
+      {/* Store badges for web-portal regulars — hidden inside the native
+          apps (isNativeApp), where advertising an install is noise. */}
+      {!isNativeApp() && (
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <ShellIconTile icon="smartphone" size={38} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+                The Waves app
+              </div>
+              <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+                Track your tech in real time, read every service report, and pay in seconds — wherever you are.
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 14, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <a href="https://apps.apple.com/us/app/waves-pest-control/id6782775654" target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store" style={{ minWidth: 0 }}>
+              <img src="/app-email/apple-app-store-badge.png" alt="Download on the App Store" style={{ height: 44, maxWidth: '100%', display: 'block' }} />
+            </a>
+            <a href="https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal" target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play" style={{ minWidth: 0 }}>
+              <img src="/app-email/google-play-badge-tight.png" alt="Get it on Google Play" style={{ height: 44, maxWidth: '100%', display: 'block' }} />
+            </a>
+          </div>
+        </section>
+      )}
 
       <MyRequestsCard />
     </div>
@@ -1670,6 +2003,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 // SERVICES TAB
 // =========================================================================
 function ServicesTab() {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1680,6 +2014,10 @@ function ServicesTab() {
   const [searchTerm, setSearchTerm] = useState('');
   const [photoMap, setPhotoMap] = useState({});
   const [lightbox, setLightbox] = useState(null);
+  useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
+  const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
+    (err) => alert(err?.message || 'Could not open this report. Please try again.')
+  );
 
   const loadServices = useCallback(() => {
     setLoading(true);
@@ -1712,25 +2050,29 @@ function ServicesTab() {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 14px',
+    padding: '10px 16px',
     fontSize: 14,
+    minHeight: 40,
+    position: 'relative',
   };
 
   if (loading) {
@@ -1776,7 +2118,7 @@ function ServicesTab() {
 
   const statusBadge = (status) => {
     const styles = {
-      Completed: { bg: '#F0FDF4', color: B.green, border: '#BBF7D0' },
+      Completed: { bg: '#F0FDF4', color: B.blueDeeper, border: '#BBF7D0' },
       Callback: { bg: '#F8FCFE', color: B.wavesBlue, border: '#BFDBFE' },
       Rescheduled: { bg: subtle, color: muted, border: '#E7E2D7' },
     };
@@ -1866,7 +2208,7 @@ function ServicesTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 24 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
         <div style={sectionTitle}>Completed Visits</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>
           Service reports and visit history
@@ -1889,7 +2231,7 @@ function ServicesTab() {
         </div>
       </section>
 
-      <section style={{ ...card, padding: 16 }}>
+      <section data-glass="card" style={{ ...card, padding: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {typeOptions.map(t => (
@@ -1993,7 +2335,7 @@ function ServicesTab() {
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.25 }}>
                             {s.type}
-                            {s._visitNum && <span style={{ fontSize: 12, fontWeight: 600, color: B.grayMid, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
+                            {s._visitNum && <span style={{ fontSize: 12, fontWeight: 600, color: PORTAL_SHELL.muted, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
                           </div>
                           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
@@ -2088,11 +2430,11 @@ function ServicesTab() {
                                     <tr key={`${s.id}-${p.product_name || ''}-${p.active_ingredient || ''}-${i}`}>
                                       <td style={{ ...tdSt, fontWeight: 600 }}>
                                         {p.product_name}
-                                        {p.product_category && <div style={{ fontSize: 10, color: B.grayMid, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
+                                        {p.product_category && <div style={{ fontSize: 10, color: PORTAL_SHELL.muted, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
                                       </td>
                                       <td style={{ ...tdSt, fontSize: 12, color: B.grayDark }}>
                                         {p.active_ingredient || '—'}
-                                        {p.moa_group && <div style={{ fontSize: 10, color: B.grayMid }}>{p.moa_group}</div>}
+                                        {p.moa_group && <div style={{ fontSize: 10, color: PORTAL_SHELL.muted }}>{p.moa_group}</div>}
                                       </td>
                                       <td style={{ ...tdSt, fontSize: 12 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
                                       <td style={{ ...tdSt, fontSize: 12 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
@@ -2107,7 +2449,7 @@ function ServicesTab() {
                         {/* What's Next — aftercare tips */}
                         {tip && (
                           <div style={{ padding: '14px 18px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0' }}>
-                            <div style={{ ...sectionTitle, color: B.green, marginBottom: 6 }}>What's Next</div>
+                            <div style={{ ...sectionTitle, color: B.blueDeeper, marginBottom: 6 }}>What's Next</div>
                             <div style={{ fontSize: 14, color: B.blueDeeper, lineHeight: 1.6 }}>{tip}</div>
                           </div>
                         )}
@@ -2173,18 +2515,73 @@ function ServicesTab() {
                             {/* reportAvailable === false → no button at all: the
                                 fallback generator 404s for internal-only records. */}
                             {(s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false) && (
-                              <a
-                                href={s.reportUrl || api.getServiceReportUrl(s.id)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                style={{
-                                  ...primaryButton, padding: '7px 12px', fontSize: 12,
-                                  textDecoration: 'none',
-                                  borderRadius: 8,
-                                }}
-                              >
-                                <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : s.reportUrl ? 'View report' : 'Download PDF'}
-                              </a>
+                              s.reportUrl ? (
+                                isNativeApp() ? (
+                                  // Capacitor shell: target=_blank replaces the
+                                  // SPA with no back control (F-017) — render the
+                                  // report in the in-app overlay instead.
+                                  <button
+                                    type="button"
+                                    data-glass-accent=""
+                                    onClick={() => openPagePreview({
+                                      id: s.id,
+                                      title: `Visit Report — ${s.type}`,
+                                      fileName: `Service_Report_${s.date}.pdf`,
+                                      pdfUrl: s.isProjectCompletion ? null : s.reportPdfUrl,
+                                    }, s.reportUrl)}
+                                    style={{
+                                      ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                      borderRadius: 8, cursor: 'pointer',
+                                    }}
+                                  >
+                                    <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                  </button>
+                                ) : (
+                                  <a
+                                    href={s.reportUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    data-glass-accent="" style={{
+                                      ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                      textDecoration: 'none',
+                                      borderRadius: 8,
+                                    }}
+                                  >
+                                    <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : 'View report'}
+                                  </a>
+                                )
+                              ) : (
+                                // No public reportUrl — the fallback endpoint is
+                                // Bearer-only, so a bare anchor opened a raw 401
+                                // JSON page. Download through authed fetch instead.
+                                // Native (non-Android): render the PDF in the
+                                // in-app overlay; Android's webview can't show
+                                // PDFs inline, so it keeps the share-sheet path.
+                                <button
+                                  type="button"
+                                  data-glass-accent=""
+                                  onClick={() => {
+                                    if (isNativeApp() && nativePlatform() !== 'android') {
+                                      openPdfPreview({
+                                        id: s.id,
+                                        title: `Visit Report — ${s.type}`,
+                                        fileName: `Service_Report_${s.date}.pdf`,
+                                        pdfUrl: api.getServiceReportUrl(s.id),
+                                      }, api.getServiceReportUrl(s.id));
+                                      return;
+                                    }
+                                    downloadAuthedPdf(api.getServiceReportUrl(s.id)).catch(() => {
+                                      alert('Could not download this report. Please try again.');
+                                    });
+                                  }}
+                                  style={{
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                    borderRadius: 8, cursor: 'pointer',
+                                  }}
+                                >
+                                  <Icon name="document" size={16} strokeWidth={1.75} /> {isNativeApp() && nativePlatform() !== 'android' ? 'View report' : 'Download PDF'}
+                                </button>
+                              )
                             )}
                             <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
@@ -2198,6 +2595,13 @@ function ServicesTab() {
           </div>
         );
       })}
+      {preview && (
+        <DocumentPreviewOverlay
+          preview={preview}
+          onClose={closePreview}
+          onError={(err) => alert(err?.message || 'Could not save this report. Please try again.')}
+        />
+      )}
       {lightbox && (
         <div onClick={() => setLightbox(null)}
           style={{
@@ -2302,9 +2706,12 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
+  'enRouteChannel',
+  'techArrivedChannel',
 ];
 
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
@@ -2526,32 +2933,36 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 14px',
+    padding: '10px 16px',
     fontSize: 14,
+    minHeight: 40,
+    position: 'relative',
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #D8D0C0',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
     fontSize: 14,
@@ -2587,11 +2998,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const enriched = upcoming.map((s, idx) => {
     const svcDate = parseDate(s.date);
     const diffHrs = (svcDate - now) / (1000 * 60 * 60);
-    const isToday = svcDate.toDateString() === now.toDateString();
-    const isSoon = !isToday && diffHrs > 0 && diffHrs <= 48;
-    const isTomorrow = isSoon;
-    const isFuture = diffHrs > 48;
-    const daysUntil = Math.max(0, Math.ceil(diffHrs / 24));
+    // ET-calendar-day math, not rolling hours: a 46-hours-out visit is
+    // "2 days", not "Tomorrow", and the counter can't drift before noon.
+    const dayDiff = etDayDiff(s.date);
+    const isToday = dayDiff === 0;
+    const isTomorrow = dayDiff === 1;
+    const isSoon = isTomorrow;
+    const isFuture = dayDiff != null && dayDiff > 1;
+    const daysUntil = dayDiff == null ? 0 : Math.max(0, dayDiff);
     const visitNum = s.visitNumber || (idx + 1);
     const description = getScheduleVisitDescription(s.serviceType, visitNum);
     return { ...s, svcDate, diffHrs, isToday, isTomorrow, isSoon, isFuture, daysUntil, visitNum, description };
@@ -2637,7 +3051,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           flex: compact ? undefined : 1,
           padding: compact ? '7px 12px' : '10px 14px',
           borderRadius: 8, background: '#F0FDF4',
-          color: B.green, border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, textAlign: 'center',
+          color: B.blueDeeper, border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
         }}>
           <Icon name="check" size={16} strokeWidth={1.75} /> Confirmed{ts ? ` ${formatConfirmTs(ts)}` : ''}
@@ -2646,11 +3060,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     }
     const busy = !!confirmingIds[s.id];
     return (
-      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} style={{
+      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
         ...primaryButton, padding: compact ? '7px 12px' : '10px 14px', flex: compact ? undefined : 1,
         fontSize: 12,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
-      }}>{busy ? 'Confirming...' : <><Icon name="check" size={16} strokeWidth={1.75} /> Confirm</>}</button>
+      }}>{busy ? 'Confirming...' : 'Confirm'}</button>
     );
   };
 
@@ -2663,7 +3077,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     const toneBorder = isGreen ? '#BBF7D0' : isOrange ? '#FED7AA' : '#BFDBFE';
 
     return (
-      <div key={s.id} style={{
+      <div key={s.id} data-glass="card" style={{
         ...card,
         overflow: 'hidden',
         border: `1px solid ${toneBorder}`,
@@ -2703,7 +3117,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}{s.technician ? ` - ${s.technician}` : ''}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
           </div>
 
           {/* Service description */}
@@ -2751,9 +3165,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           {/* Confirm + Reschedule */}
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
-            <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
+            <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
               ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-              fontSize: 12,
+              fontSize: 12, position: 'relative',
             }}>Reschedule</a>
           </div>
         </div>
@@ -2763,7 +3177,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
   // Compact card for future (3+ days) services
   const renderCompactCard = (s) => (
-    <div key={s.id} style={{
+    <div key={s.id} data-glass="card" style={{
       ...card,
       padding: 16,
       display: 'flex', gap: 14, alignItems: 'center',
@@ -2784,7 +3198,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{s.serviceType}</div>
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(s.windowEnd)}` : 'Time TBD'}{s.technician ? ` - ${s.technician}` : ''}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
         </div>
         <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -2793,9 +3207,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           {renderConfirmBtn(s, true)}
-          <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} style={{
+          <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
             ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
-            fontSize: 12,
+            fontSize: 12, position: 'relative',
           }}>Reschedule</a>
         </div>
       </div>
@@ -2806,7 +3220,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <style>{pulsingDotCss}</style>
 
-      <section style={{ ...card, padding: compact ? 20 : 24 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={sectionTitle}>Upcoming Visits</div>
@@ -2817,7 +3231,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               Appointment timing, confirmation status, reminders, and reschedule options.
             </div>
           </div>
-          <button type="button" onClick={onRequestVisit} style={{ ...primaryButton, minHeight: 40, flexShrink: 0 }}>
+          <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 40, flexShrink: 0 }}>
             Request Visit
           </button>
         </div>
@@ -2848,7 +3262,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
       {/* Recent Completed Visits */}
       {recentCompleted.length > 0 && (
-        <section style={{ ...card, padding: 16, marginTop: 4 }}>
+        <section data-glass="card" style={{ ...card, padding: 16, marginTop: 4 }}>
           <div style={sectionTitle}>Recent Visits</div>
           {recentCompleted.map(s => {
             const sDate = parseDate(s.date);
@@ -2879,7 +3293,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
       {/* Notification Preferences */}
       {prefs && (
-        <section style={{ ...card, overflow: 'hidden' }}>
+        <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}>Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Service notifications</div>
@@ -2916,11 +3330,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'checkCircle', locked: false, defaultOn: true },
                 { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-                { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
+                { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'A message the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Phase 2E: per-customer auto-flip opt-out. Distinct
                 // from techEnRoute — that one fires when the tech taps
                 // "En Route". This one fires automatically when the
@@ -2928,9 +3342,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // (column DEFAULT TRUE); user can toggle off to skip
                 // the auto-detected version while keeping the manual
                 // tap-triggered text.
-                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route text the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
+                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route alert the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
                 { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
                 { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
+                // Kept as the customer's only in-portal opt-out: the irrigation
+                // weekly email and the retention/marketing policy key on
+                // notification_prefs.seasonal_tips. Email-only since the
+                // seasonal_alert SMS blast was retired (2026-07-06), so no
+                // delivery-channel select — the on/off toggle is the honest control.
                 { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
               ];
               return items.map((p, i) => {
@@ -2950,7 +3369,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <div style={{ fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>{p.label}</div>
                       <div style={{ fontSize: 12, color: muted }}>{p.desc}</div>
                       {p.locked && (
-                        <div style={{ fontSize: 10, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
+                        <div style={{ fontSize: 12, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
@@ -2979,21 +3398,32 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     );
                   })()}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
-                    <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
-                      width: 44, height: 24, borderRadius: 12,
-                      cursor: p.locked ? 'default' : 'pointer',
-                      background: isOn ? (p.locked ? B.green : B.blueDeeper) : '#D8D0C0',
-                      position: 'relative', transition: 'background 0.3s',
-                      opacity: p.locked ? 0.85 : 1,
-                    }}>
-                      <div style={{
+                    {/* Real switch semantics: the old plain div was invisible
+                        to keyboards and screen readers. */}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isOn}
+                      aria-label={p.label}
+                      disabled={p.locked}
+                      onClick={p.locked ? undefined : () => handleToggle(p.key)}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12, border: 'none', padding: 0,
+                        cursor: p.locked ? 'default' : 'pointer',
+                        // Gold = on, light blue = off (owner directive 2026-07-06)
+                        background: isOn ? B.yellow : `${B.wavesBlue}55`,
+                        position: 'relative', transition: 'background 0.3s',
+                        opacity: p.locked ? 0.85 : 1,
+                      }}
+                    >
+                      <span style={{
                         position: 'absolute', top: 2, width: 20, height: 20,
                         borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
                         left: isOn ? 22 : 2, transition: 'left 0.3s',
                       }} />
-                    </div>
+                    </button>
                     {p.locked && (
-                      <span style={{ fontSize: 8, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
+                      <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
                   </div>
                 </div>
@@ -3005,7 +3435,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       )}
 
       {propertyPrefs.length > 0 && (
-        <section style={{ ...card, overflow: 'hidden' }}>
+        <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             {propertyPrefs.length > 1 ? (
               <>
@@ -3120,12 +3550,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.firstName || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
                             placeholder="First name"
+                            autoCapitalize="words"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
                           <input
                             value={contact.lastName || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
                             placeholder="Last name"
+                            autoCapitalize="words"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
                         </div>
@@ -3134,6 +3566,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.phone || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
                             placeholder="Phone number"
+                            type="tel"
                             inputMode="tel"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
@@ -3141,7 +3574,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             value={contact.email || ''}
                             onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
                             placeholder="Email address"
+                            type="email"
                             inputMode="email"
+                            autoCapitalize="none"
                             style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                           />
                         </div>
@@ -3198,6 +3633,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // BILLING TAB
 // =========================================================================
 function BillingTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
@@ -3209,11 +3645,17 @@ function BillingTab({ customer }) {
   const [billingEmail, setBillingEmail] = useState('');
   const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
+  const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
+  const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
+  const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const compact = useIsMobile(760);
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
+  useLockBodyScroll(showAddCard); // freeze the page behind the add-card modal
+  const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
   const [stripeReady, setStripeReady] = useState(false);
@@ -3242,6 +3684,9 @@ function BillingTab({ customer }) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingSmsEnabled(!!prefsData.billingReminder);
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
+          setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
+          setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setEmailPrefEnabled(prefsData.emailEnabled !== false);
         }
         setLoading(false);
       }).catch(err => {
@@ -3344,6 +3789,9 @@ function BillingTab({ customer }) {
     try {
       await api.removeCard(cardId);
       await refreshCards();
+      // Card changes can move or disable Auto Pay server-side — remount the
+      // AutopayCard so it never shows "Active" against a removed card.
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       alert(err.message || 'Failed to remove card');
     }
@@ -3353,6 +3801,7 @@ function BillingTab({ customer }) {
     try {
       await api.setDefaultCard(cardId);
       await refreshCards();
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       alert(err.message || 'Failed to set default card');
     }
@@ -3363,32 +3812,36 @@ function BillingTab({ customer }) {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 14px',
+    padding: '10px 16px',
     fontSize: 14,
+    minHeight: 40,
+    position: 'relative',
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #D8D0C0',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
     fontSize: 14,
@@ -3437,8 +3890,16 @@ function BillingTab({ customer }) {
       : autopay?.autopay_enabled
         ? 'active'
         : 'disabled';
+  // Per-application customers pay per completed visit — no monthly charge to
+  // project, so never fall back to monthly_rate for them (the server also
+  // sends next_charge_amount/date as null).
+  const perApplicationBilling = autopay?.billing_mode === 'per_application';
+  // Annual prepay is term-covered — no monthly charge runs; the saved method
+  // is used at renewal.
+  const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
   const amountDue = Number(autopayState === 'active'
-    ? (autopay?.next_charge_amount ?? autopay?.monthly_rate ?? 0)
+    ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
   const autopayBaseAmount = Number(autopay?.next_charge_base_amount ?? 0);
   const autopaySurcharge = Number(autopay?.next_charge_surcharge_amount ?? 0);
@@ -3499,15 +3960,23 @@ function BillingTab({ customer }) {
     },
     active: {
       bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
-      badge: 'Auto Pay active', titleColor: B.green, subtitleColor: B.grayDark,
-      title: daysUntilDue === 0
-        ? 'Auto Pay is processing today'
-        : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
-      detail: daysUntilDue === 0
-        ? `Amount: ${money(amountDue)}`
-        : autopaySurcharge > 0
-          ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`
-          : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
+      badge: 'Auto Pay active', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
+      title: perApplicationBilling
+        ? 'Auto Pay is on — charged per visit'
+        : annualPrepayBilling
+          ? 'Auto Pay is on — plan prepaid'
+          : daysUntilDue === 0
+            ? 'Auto Pay is processing today'
+            : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
+      detail: perApplicationBilling
+        ? 'Your saved payment method is charged for each service visit after it is completed.'
+        : annualPrepayBilling
+          ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
+          : daysUntilDue === 0
+          ? `Amount: ${money(amountDue)}`
+          : autopaySurcharge > 0
+            ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`
+            : `Amount due ${money(amountDue)}${dueDate ? ` - due ${dueDateLabel}` : ''}`,
     },
     paused: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'clock',
@@ -3536,11 +4005,11 @@ function BillingTab({ customer }) {
   // Payment status badge helper
   const statusBadge = (status) => {
     const map = {
-      paid: { bg: `${B.green}20`, color: B.green },
+      paid: { bg: `${B.green}20`, color: B.blueDeeper },
       upcoming: { bg: `${B.orange}20`, color: B.orange },
       processing: { bg: B.blueSurface, color: B.wavesBlue },
       failed: { bg: `${B.red}20`, color: B.red },
-      refunded: { bg: B.offWhite, color: B.grayMid },
+      refunded: { bg: B.offWhite, color: PORTAL_SHELL.muted },
     };
     const s = map[status] || map.paid;
     return { background: s.bg, color: s.color };
@@ -3590,7 +4059,7 @@ function BillingTab({ customer }) {
 
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
-  const balanceTone = currentBalance > 0 ? B.orange : B.green;
+  const balanceTone = currentBalance > 0 ? B.orange : B.blueDeeper;
   const autopayLabel = bannerConfig.badge;
   const defaultMethodLabel = methodLabel(defaultCard);
   const historyDescription = filteredPayments.length === payments.length
@@ -3624,34 +4093,67 @@ function BillingTab({ customer }) {
     </div>
   );
 
+  // Email/Both delivery can only be offered with an email on file (the billing
+  // recipient email or the account email) — otherwise the backend would
+  // suppress the texts with no deliverable email leg left. Same for the
+  // portal-wide email opt-out (Settings → Email Messages off): the receipt
+  // senders skip their email legs when email_enabled=false, so an email-only
+  // channel would suppress the text AND never email — the notice just drops.
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
+
   const saveBillingPrefs = () => {
     setBillingPrefsSaving(true);
+    setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
+      // No email on file (or email messages opted out portal-wide) → the
+      // dropdowns render locked to Text; persist what is shown so an
+      // SMS-suppressing 'email' choice can't linger with no deliverable
+      // email leg.
+      billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
+      paymentConfirmationChannel: hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
-      .then(() => setBillingPrefsSaving(false))
-      .catch(() => setBillingPrefsSaving(false));
+      .then(() => {
+        // Keep local state in step with the coerced save — otherwise
+        // re-adding an email (or re-enabling email messages) in the same
+        // session resurrects a stale Email/Both selection the server was
+        // just normalized away from.
+        if (!hasBillingEmail) {
+          setBillingReminderChannel('sms');
+          setPaymentConfirmationChannel('sms');
+        }
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('saved');
+        setTimeout(() => setBillingPrefsStatus((s) => (s === 'saved' ? null : s)), 3000);
+      })
+      .catch(() => {
+        // A silent failure here left the customer believing prefs were saved.
+        setBillingPrefsSaving(false);
+        setBillingPrefsStatus('error');
+      });
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 8,
-              padding: '5px 10px',
-              borderRadius: 999,
-              background: tier ? `${tier.color}18` : '#F8FCFE',
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: PORTAL_SHELL.soft,
+              border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
             }}>
-              {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
+              <Icon name="card" size={14} strokeWidth={2} />
+              Billing & Payments
             </div>
             <h1 style={{
               margin: '12px 0 8px',
@@ -3694,7 +4196,7 @@ function BillingTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? `Next ${dueDateLabel}` : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per visit' : annualPrepayBilling ? 'Plan prepaid' : `Next ${dueDateLabel}`) : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             { label: 'Monthly plan', value: money(monthlyRate), sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan') },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
@@ -3714,6 +4216,9 @@ function BillingTab({ customer }) {
         </div>
       </section>
 
+      {/* Alert states only — the healthy 'active' summary lives on the
+          AutopayCard directly below; repeating it here read as clutter. */}
+      {bannerState !== 'active' && (
       <div style={{
         background: bannerConfig.bg,
         borderRadius: 8,
@@ -3749,10 +4254,11 @@ function BillingTab({ customer }) {
           </div>
         </div>
       </div>
+      )}
 
-      <AutopayCard onStateChange={setAutopay} />
+      <AutopayCard key={autopayRefreshKey} onStateChange={setAutopay} />
 
-      <div style={{
+      <div data-glass="card" style={{
         ...card,
         padding: 20,
       }}>
@@ -3786,7 +4292,7 @@ function BillingTab({ customer }) {
               <Icon name={svc.icon} size={16} strokeWidth={1.8} style={{ color: B.blueDeeper }} />
               <span style={{ minWidth: 0, flex: 1 }}>{svc.name}</span>
               {discount > 0 && (
-                <span style={{ fontSize: 14, color: B.green, fontWeight: 850, whiteSpace: 'nowrap' }}>
+                <span style={{ fontSize: 14, color: B.blueDeeper, fontWeight: 850, whiteSpace: 'nowrap' }}>
                   {money(svc.basePrice * (1 - discount), 0)}/mo
                 </span>
               )}
@@ -3794,7 +4300,7 @@ function BillingTab({ customer }) {
           ))}
         </div>
         {annualSavings > 0 && (
-          <div style={{ marginTop: 12, padding: '10px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.green, fontWeight: 850 }}>
+          <div style={{ marginTop: 12, padding: '10px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>
             Saving {money(annualSavings, 0)}/year with your {tierName} bundle
           </div>
         )}
@@ -3805,7 +4311,7 @@ function BillingTab({ customer }) {
         )}
       </div>
 
-      <div style={{ ...card, padding: 20 }}>
+      <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div>
             <div style={sectionTitle}>Payment Methods</div>
@@ -3815,9 +4321,9 @@ function BillingTab({ customer }) {
             type="button"
             onClick={handleAddCard}
             disabled={stripeLoading}
-            style={{ ...secondaryButton, opacity: stripeLoading ? 0.6 : 1, cursor: stripeLoading ? 'wait' : 'pointer' }}
+            data-glass-accent=""
+            style={{ ...secondaryButton, opacity: stripeLoading ? 0.6 : 1, cursor: stripeLoading ? 'wait' : 'pointer', position: 'relative' }}
           >
-            <Icon name="plus" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
             {stripeLoading && !showAddCard ? 'Loading...' : 'Add method'}
           </button>
         </div>
@@ -3828,24 +4334,34 @@ function BillingTab({ customer }) {
             background: subtle, borderRadius: 8, marginBottom: 8, border: '1px solid #E7E2D7',
             flexWrap: 'wrap',
           }}>
-            <div style={{
-              width: 48, height: 32, borderRadius: 6,
-              background: B.blueDeeper,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
-            }}>{c.brand || 'CARD'}</div>
+            {/* Real brand mark (same SVGs as the wavespestcontrol.com footer);
+                unknown brands fall back to a neutral navy tile. */}
+            {['visa', 'mastercard', 'amex', 'discover'].includes(String(c.brand || '').toLowerCase()) ? (
+              <img
+                src={`/card-brands/${String(c.brand).toLowerCase()}.svg`}
+                alt={c.brand}
+                style={{ width: 48, height: 32, borderRadius: 6, objectFit: 'cover', border: '1px solid #E7E2D7', background: '#fff' }}
+              />
+            ) : (
+              <div style={{
+                width: 48, height: 32, borderRadius: 6,
+                background: B.blueDeeper,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
+              }}>{(c.brand || 'CARD').toUpperCase().slice(0, 6)}</div>
+            )}
             <div style={{ flex: 1, minWidth: 180 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{methodLabel(c)}</div>
               {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
               {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', flex: compact ? '1 1 100%' : '0 0 auto' }}>
               {c.isDefault ? (
-                <span style={{ fontSize: 12, fontWeight: 850, color: B.green, background: '#F0FDF4', padding: '5px 9px', borderRadius: 8, border: '1px solid #BBF7D0' }}>Default</span>
+                <span data-glass-accent="" style={{ fontSize: 12, fontWeight: 850, color: B.blueDeeper, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
               ) : (
-                <button type="button" onClick={() => handleSetDefault(c.id)} style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12 }}>Set default</button>
+                <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Set default</button>
               )}
-              <button type="button" onClick={() => handleRemoveCard(c.id)} style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, color: B.red }}>Remove</button>
+              <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Remove</button>
             </div>
           </div>
         ))}
@@ -3867,13 +4383,14 @@ function BillingTab({ customer }) {
 
       {/* ── Stripe Add Card Modal ── */}
       {showAddCard && (
-        <div style={{
+        <div data-glass-scrim="" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
           zIndex: 9999, padding: 20,
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
-          <div style={{
+          <div role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
+            maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
             boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
             border: '1px solid #E7E2D7',
           }}>
@@ -3896,7 +4413,7 @@ function BillingTab({ customer }) {
             <div style={{ marginBottom: 12 }}>
               <SaveCardConsent locked onChange={() => {}} />
             </div>
-            <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} style={{
+            <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} data-glass-accent="" style={{
               ...primaryButton,
               width: '100%',
               padding: 14,
@@ -3913,7 +4430,7 @@ function BillingTab({ customer }) {
       )}
 
       {(totalCredits > 0 || credits.length > 0) && (
-        <div style={{ ...card, padding: 20 }}>
+        <div data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}>Credits</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Adjustments</div>
           {totalCredits > 0 && (
@@ -3925,7 +4442,7 @@ function BillingTab({ customer }) {
               marginBottom: 12,
               fontSize: 14,
               fontWeight: 850,
-              color: B.green,
+              color: B.blueDeeper,
               display: 'flex',
               justifyContent: 'space-between',
               gap: 12,
@@ -3949,7 +4466,7 @@ function BillingTab({ customer }) {
                   padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 4, border: '1px solid #E7E2D7',
                 }}>
                   <span style={{ fontSize: 14, color: B.grayDark }}>{cr.description || group.label}</span>
-                  <span style={{ fontSize: 14, fontWeight: 850, color: B.green, fontFamily: FONTS.ui }}>{money(cr.amount || 0)}</span>
+                  <span style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>{money(cr.amount || 0)}</span>
                 </div>
               ))}
             </div>
@@ -3960,7 +4477,7 @@ function BillingTab({ customer }) {
         </div>
       )}
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>{currentYear} Summary</div>
         <div style={{ marginTop: 8, fontSize: 28, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
           {money(ytdTotal)}
@@ -3982,7 +4499,7 @@ function BillingTab({ customer }) {
         </div>
       </div>
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}>Payment History</div>
@@ -4022,7 +4539,10 @@ function BillingTab({ customer }) {
                 {p.lastFour && ` - ${p.cardBrand || 'Card'} ending in ${p.lastFour}`}
               </div>
               {p.status === 'failed' && (
-                <button type="button" style={{
+                <button type="button" onClick={() => {
+                  document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  handleAddCard();
+                }} style={{
                   marginTop: 8, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
                   background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                 }}>Update Payment Method</button>
@@ -4046,7 +4566,7 @@ function BillingTab({ customer }) {
         ))}
       </div>
 
-      <div style={{ ...card, padding: 20 }}>
+      <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Recipients</div>
 
@@ -4058,6 +4578,9 @@ function BillingTab({ customer }) {
             id="portal-billing-email"
             name="billingEmail"
             type="email"
+            inputMode="email"
+            autoComplete="email"
+            autoCapitalize="none"
             value={billingEmail}
             onChange={e => setBillingEmail(e.target.value)}
             placeholder={customer?.email || 'billing@example.com'}
@@ -4075,17 +4598,37 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Billing reminder texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
           </div>
+          {(() => {
+            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const selectable = billingSmsEnabled && hasBillingEmail;
+            return (
+              <select
+                value={hasBillingEmail ? billingReminderChannel : 'sms'}
+                onChange={(e) => setBillingReminderChannel(e.target.value)}
+                disabled={!selectable}
+                aria-label="Delivery method for billing reminders"
+                style={{
+                  fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                }}
+              >
+                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
             aria-label={`Billing reminder texts ${billingSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
               width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
-              background: billingSmsEnabled ? B.green : B.grayLight,
+              background: billingSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
               position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
@@ -4103,17 +4646,37 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Payment confirmation texts</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
           </div>
+          {(() => {
+            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const selectable = paymentSmsEnabled && hasBillingEmail;
+            return (
+              <select
+                value={hasBillingEmail ? paymentConfirmationChannel : 'sms'}
+                onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
+                disabled={!selectable}
+                aria-label="Delivery method for payment confirmations"
+                style={{
+                  fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                }}
+              >
+                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}
             aria-label={`Payment confirmation texts ${paymentSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
               width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
-              background: paymentSmsEnabled ? B.green : B.grayLight,
+              background: paymentSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
               position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
@@ -4127,13 +4690,18 @@ function BillingTab({ customer }) {
           </button>
         </div>
 
-        <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} style={{
+        {billingPrefsStatus === 'error' && (
+          <div style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
+            Couldn&rsquo;t save your billing preferences. Please try again.
+          </div>
+        )}
+        <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} data-glass-accent="" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
           cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
-          {billingPrefsSaving ? 'Saving...' : 'Save Billing Preferences'}
+          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save Billing Preferences'}
         </button>
       </div>
     </div>
@@ -4146,12 +4714,13 @@ function BillingTab({ customer }) {
 function PropertySection({ title, icon = 'document', summary, defaultOpen, children, aside }) {
   const [open, setOpen] = useState(defaultOpen !== false);
   return (
-    <section style={{
+    <section data-glass="card" style={{
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
       border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+      position: 'relative',
     }}>
       <button
         type="button"
@@ -4187,12 +4756,12 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
           </span>
           <span style={{ minWidth: 0 }}>
             <span style={{ display: 'block', fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{title}</span>
-            {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#6B7280', lineHeight: 1.35 }}>{summary}</span>}
+            {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#475569', lineHeight: 1.35 }}>{summary}</span>}
           </span>
         </span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           {aside}
-          <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#6B7280', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
+          <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#475569', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
         </span>
       </button>
       {open && <div style={{ padding: '0 18px 18px' }}>{children}</div>}
@@ -4205,7 +4774,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
   const inputLabel = label || placeholder || 'Secure field';
   return (
     <div>
-      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#6B7280', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
+      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#475569', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
@@ -4213,6 +4782,12 @@ function PasswordField({ value, onChange, placeholder, label }) {
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
           aria-label={inputLabel}
+          // Gate / garage / lockbox access codes — not login credentials.
+          // Suppress the password-manager save/fill prompt and text munging.
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           style={{
             width: '100%',
             padding: '10px 42px 10px 12px',
@@ -4231,7 +4806,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'transparent', border: 'none', cursor: 'pointer',
-          color: '#6B7280', padding: 4, width: 32, height: 32,
+          color: '#475569', padding: 4, width: 32, height: 32,
         }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={2} /></button>
       </div>
     </div>
@@ -4260,7 +4835,7 @@ function PillSelector({ options, value, onChange, multiple = false }) {
             letterSpacing: 0,
             boxShadow: 'none',
             background: active ? '#F8FCFE' : '#fff',
-            color: active ? B.blueDeeper : '#6B7280',
+            color: active ? B.blueDeeper : ESTIMATE_MUTED,
             border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
           }}>{o.label}</button>
         );
@@ -4371,7 +4946,7 @@ function ServicePrefsSection() {
       icon="wrench"
       summary="Choose what is included on each recurring pest control visit."
     >
-      <div style={{ fontSize: 14, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 14, color: '#475569', marginBottom: 12, lineHeight: 1.5 }}>
         These update your next work order automatically, so the office and technician see the same preference.
       </div>
       {rows.map((r) => {
@@ -4390,19 +4965,19 @@ function ServicePrefsSection() {
                 width: 34,
                 height: 34,
                 borderRadius: 8,
-                background: on ? '#F8FCFE' : '#FAF8F3',
-                color: on ? B.blueDeeper : '#6B7280',
+                background: on ? '#F8FCFE' : GLASS_SUBTLE,
+                color: on ? B.blueDeeper : ESTIMATE_MUTED,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                border: '1px solid #E7E2D7',
+                border: '1px solid rgba(255,255,255,0.65)',
               }}>
                 <Icon name={r.icon} size={17} strokeWidth={2} />
               </span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{r.title}</div>
-                <div style={{ fontSize: 14, color: '#6B7280', marginTop: 2, lineHeight: 1.45 }}>{r.desc}</div>
+                <div style={{ fontSize: 14, color: '#475569', marginTop: 2, lineHeight: 1.45 }}>{r.desc}</div>
               </div>
             </div>
             <ToggleSwitch
@@ -4420,6 +4995,7 @@ function ServicePrefsSection() {
 }
 
 function PropertyTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4479,15 +5055,17 @@ function PropertyTab({ customer }) {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const labelStyle = {
     fontSize: 12,
@@ -4564,11 +5142,21 @@ function PropertyTab({ customer }) {
     />
   );
 
+  // Mobile keyboard hints derived from the field type, so every typed usage
+  // (e.g. HOA phone/email) gets the right keyboard without touching each call
+  // site. No autoComplete: these collect third-party contacts (HOA/management),
+  // so autofill shouldn't offer the account holder's own details. Plain text
+  // stays unhinted.
+  const TYPE_HINTS = {
+    tel: { inputMode: 'tel' },
+    email: { inputMode: 'email', autoCapitalize: 'none' },
+  };
   const textInput = (field, placeholder, label, type = 'text') => (
     <div>
       {label && <label style={labelStyle}>{label}</label>}
       <input
         type={type}
+        {...(TYPE_HINTS[type] || {})}
         value={prefs[field] || ''}
         onChange={e => updateField(field, e.target.value)}
         placeholder={placeholder}
@@ -4586,6 +5174,7 @@ function PropertyTab({ customer }) {
       <div style={{ position: 'relative' }}>
         <input
           type="number"
+          inputMode="decimal"
           min="0"
           max="5"
           step="0.25"
@@ -4695,7 +5284,7 @@ function PropertyTab({ customer }) {
         </div>
       )}
 
-      <section style={{ ...card, overflow: 'hidden' }}>
+      <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
         {staticMapUrl && (
           <div style={{ width: '100%', height: compact ? 140 : 170, overflow: 'hidden', background: subtle }}>
             <img
@@ -5160,6 +5749,7 @@ const ARTICLES = [
 ];
 
 function WeatherPestWidget({ customer, nextService }) {
+  const portalGlass = usePortalGlass();
   const [weather, setWeather] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -5174,9 +5764,10 @@ function WeatherPestWidget({ customer, nextService }) {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
 
   if (loading) return (
     <PortalStatePanel
@@ -5231,7 +5822,7 @@ function WeatherPestWidget({ customer, nextService }) {
     : null;
 
   return (
-    <section style={{ ...card, padding: 18 }}>
+    <section data-glass="card" style={{ ...card, padding: 18 }}>
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -5365,7 +5956,7 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
   }, []);
 
   if (loading) return (
-    <div style={{ padding: 20, textAlign: 'center', color: B.grayMid, fontSize: 12 }}>Loading {title.toLowerCase()}...</div>
+    <div style={{ padding: 20, textAlign: 'center', color: PORTAL_SHELL.muted, fontSize: 12 }}>Loading {title.toLowerCase()}...</div>
   );
   if (!posts.length) return null;
 
@@ -5390,7 +5981,7 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
                   {p.description}{p.description.length >= 200 ? '...' : ''}
                 </div>
               )}
-              <div style={{ fontSize: 12, color: B.grayMid, marginTop: 6 }}>
+              <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 6 }}>
                 {pubDate && !isNaN(pubDate) ? pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
                 {p.category ? ` · ${p.category}` : ''}
               </div>
@@ -5407,10 +5998,10 @@ function ContentCard({ post, large, compact }) {
   const sourceMeta = {
     blog: { color: B.wavesBlue, label: 'Waves', icon: 'waves' },
     newsletter: { color: B.orange, label: 'Newsletter', icon: 'newspaper' },
-    ifas: { color: B.green, label: 'UF/IFAS', icon: 'leaf' },
-    local: { color: B.grayMid, label: 'Local', icon: 'map' },
+    ifas: { color: B.blueDeeper, label: 'UF/IFAS', icon: 'leaf' },
+    local: { color: PORTAL_SHELL.muted, label: 'Local', icon: 'map' },
   };
-  const meta = sourceMeta[post.source] || { color: B.grayMid, label: post.sourceName || 'Article', icon: 'document' };
+  const meta = sourceMeta[post.source] || { color: PORTAL_SHELL.muted, label: post.sourceName || 'Article', icon: 'document' };
   const srcColor = meta.color;
   const sourceLabel = post.sourceName || meta.label;
 
@@ -5515,7 +6106,7 @@ function ContentCard({ post, large, compact }) {
               {sourceLabel}
             </span>
             {pubDate && !isNaN(pubDate) && (
-              <span style={{ fontSize: 12, color: '#6B7280' }}>
+              <span style={{ fontSize: 12, color: '#475569' }}>
                 {pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </span>
             )}
@@ -5533,7 +6124,7 @@ function ContentCard({ post, large, compact }) {
           {post.description && (large || !safeImg) && (
             <div style={{
               fontSize: 14,
-              color: '#6B7280',
+              color: '#475569',
               marginTop: 7,
               lineHeight: 1.45,
               overflow: 'hidden',
@@ -5543,7 +6134,7 @@ function ContentCard({ post, large, compact }) {
             }}>{post.description}</div>
           )}
           <div style={{ marginTop: 10, fontSize: 12, color: B.blueDeeper, fontWeight: 850, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            Read article <Icon name="arrowRight" size={13} strokeWidth={2} />
+            Read article
           </div>
         </div>
       </div>
@@ -5552,6 +6143,7 @@ function ContentCard({ post, large, compact }) {
 }
 
 function LearnTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
@@ -5581,22 +6173,24 @@ function LearnTab({ customer }) {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #D8D0C0',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
     padding: '9px 12px',
     fontSize: 14,
@@ -5663,7 +6257,7 @@ function LearnTab({ customer }) {
   };
 
   const renderFeedSection = (title, icon, posts, emptyText) => (
-    <section style={{ ...card, padding: 18, minWidth: 0 }}>
+    <section data-glass="card" style={{ ...card, padding: 18, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <span style={iconTile}><Icon name={icon} size={18} strokeWidth={2} /></span>
@@ -5693,16 +6287,17 @@ function LearnTab({ customer }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 320px' }}>
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 8,
-              padding: '5px 10px',
-              borderRadius: 999,
-              background: '#F8FCFE',
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: PORTAL_SHELL.soft,
+              border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -5794,7 +6389,7 @@ function LearnTab({ customer }) {
       <WeatherPestWidget customer={customer} nextService={nextService} />
 
       {alerts.length > 0 && (
-        <section style={{ ...card, padding: 18 }}>
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
             <span style={iconTile}><Icon name="warning" size={18} strokeWidth={2} /></span>
             <div>
@@ -5832,7 +6427,7 @@ function LearnTab({ customer }) {
       )}
 
       {monthlyTip && (
-        <section style={{ ...card, padding: 18 }}>
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
             <span style={iconTile}><Icon name="sparkles" size={18} strokeWidth={2} /></span>
             <div style={{ minWidth: 0, flex: 1 }}>
@@ -5862,7 +6457,7 @@ function LearnTab({ customer }) {
         </section>
       )}
 
-      <section style={{ ...card, padding: 18 }}>
+      <section data-glass="card" style={{ ...card, padding: 18 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={iconTile}><Icon name="waves" size={18} strokeWidth={2} /></span>
@@ -5872,8 +6467,7 @@ function LearnTab({ customer }) {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <a href="https://wavespestcontrol.com/blog/" target="_blank" rel="noopener noreferrer" style={{ ...secondaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-              <Icon name="arrowRight" size={14} strokeWidth={2} />
+            <a href="https://wavespestcontrol.com/blog/" target="_blank" rel="noopener noreferrer" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 7, position: 'relative' }}>
               Visit Blog
             </a>
             {hasMoreBlogPosts && (
@@ -5907,12 +6501,16 @@ function LearnTab({ customer }) {
           />
         )}
 
-        <div style={{
+        {/* Glass material (owner 2026-07-09) — the sand wash read as the old
+            warm theme inside the glass Learn tab; sand stays as the non-glass
+            fallback. Nested inside a glass card → soft tier. */}
+        <div data-glass="soft" style={{
           marginTop: 14,
           padding: 16,
           background: B.sand,
           border: '1px solid #E7E2D7',
           borderRadius: 8,
+          position: 'relative',
         }}>
           <NewsletterSignup
             variant="light"
@@ -5935,7 +6533,7 @@ function LearnTab({ customer }) {
       </div>
 
       {(filteredFaq.length > 0 || faqSearch.trim()) && (
-        <section style={{ ...card, padding: 18 }}>
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={iconTile}><Icon name="message" size={18} strokeWidth={2} /></span>
@@ -6041,7 +6639,7 @@ function LearnTab({ customer }) {
                             borderRadius: 8,
                             background: `${B.green}10`,
                             fontSize: 12,
-                            color: B.green,
+                            color: B.blueDeeper,
                             fontWeight: 850,
                           }}>
                             As a {tierName} member, you have unlimited callbacks between services.
@@ -6089,7 +6687,7 @@ const SERVICE_CATALOG = [
     products: ['Merit 75 WP', 'Keel Fungicide', 'Arborjet TREE-age'],
   },
   {
-    id: 'termite', name: 'Termite Bait Monitoring', icon: '🪵',
+    id: 'termite', name: 'Termite Bait Monitoring', icon: 'shield',
     frequencies: ['Basic (annual inspection)', 'Premier (quarterly monitoring + warranty)'],
     basePrice: 35, description: 'Bait station installation, quarterly monitoring, damage warranty (Premier)',
     products: ['Sentricon Always Active', 'Trelona ATBS'],
@@ -6206,12 +6804,12 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   ];
 
   return (
-    <section style={{ ...card, padding: 20 }}>
+    <section data-glass="card" style={{ ...card, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
           <div style={sectionTitle}>WAVES AI</div>
           <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>Property-aware pricing</div>
-          <div style={{ marginTop: 4, color: '#6B7280', fontSize: 14, lineHeight: 1.5 }}>
+          <div style={{ marginTop: 4, color: '#475569', fontSize: 14, lineHeight: 1.5 }}>
             Pricing is calculated from this property profile and your current Waves services.
           </div>
         </div>
@@ -6221,9 +6819,9 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
               <button
                 type="button"
                 onClick={onExploreTiers}
-                style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                data-glass-accent=""
+                style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, position: 'relative' }}
               >
-                <Icon name="plan" size={14} strokeWidth={1.9} />
                 Explore WaveGuard tiers
               </button>
             )}
@@ -6277,7 +6875,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             }}
           />
         </div>
-        <button type="submit" disabled={loading} style={{
+        <button type="submit" disabled={loading} data-glass-accent="" style={{
           ...primaryButton,
           minHeight: 42,
           display: 'inline-flex',
@@ -6287,7 +6885,6 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           opacity: loading ? 0.65 : 1,
           cursor: loading ? 'wait' : 'pointer',
         }}>
-          <Icon name="brain" size={15} strokeWidth={2} />
           {loading ? 'Pricing...' : 'Get Pricing'}
         </button>
       </form>
@@ -6325,7 +6922,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           }}>
             <strong style={{ color: B.blueDeeper }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
             {result.property?.homeSqFt || result.property?.lotSqFt ? (
-              <div style={{ marginTop: 6, color: '#6B7280', fontSize: 12 }}>
+              <div style={{ marginTop: 6, color: '#475569', fontSize: 12 }}>
                 Property basis: {[
                   result.property.homeSqFt ? `${Number(result.property.homeSqFt).toLocaleString()} sq ft home` : null,
                   result.property.lotSqFt ? `${Number(result.property.lotSqFt).toLocaleString()} sq ft lot` : null,
@@ -6338,7 +6935,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           {options.length > 0 && (
             <>
               <label style={{ display: 'grid', gap: 6 }}>
-                <span style={{ fontSize: 12, color: '#6B7280', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                <span style={{ fontSize: 12, color: '#475569', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
                 <select
                   value={selected?.id || ''}
                   onChange={(e) => {
@@ -6377,13 +6974,13 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                     <div>
                       <div style={{ fontSize: 16, color: B.blueDeeper, fontWeight: 850 }}>{selected.label}</div>
-                      <div style={{ marginTop: 3, color: '#6B7280', fontSize: 14 }}>{selected.cadence}</div>
+                      <div style={{ marginTop: 3, color: '#475569', fontSize: 14 }}>{selected.cadence}</div>
                     </div>
                     <div style={{ textAlign: compact ? 'left' : 'right' }}>
                       <div style={{ fontSize: 24, color: B.blueDeeper, fontWeight: 850, lineHeight: 1 }}>
                         {selected.monthly ? `${money(selected.monthly, 0)}/mo` : money(selected.oneTime || selected.dueAtStart, 0)}
                       </div>
-                      <div style={{ marginTop: 4, color: '#6B7280', fontSize: 12 }}>
+                      <div style={{ marginTop: 4, color: '#475569', fontSize: 12 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
                       </div>
                     </div>
@@ -6397,8 +6994,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime, 0) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
-                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
-                        <div style={{ color: '#6B7280', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
+                        <div style={{ color: '#475569', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                         <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                       </div>
                     ))}
@@ -6411,11 +7008,11 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                   ) : null}
 
                   {requested ? (
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.blueDeeper, fontSize: 14, fontWeight: 850 }}>
                       <Icon name="check" size={15} strokeWidth={2} /> Request sent
                     </span>
                   ) : (
-                    <button type="button" onClick={submitRequest} disabled={requesting} style={{
+                    <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" style={{
                       ...primaryButton,
                       width: compact ? '100%' : 'fit-content',
                       display: 'inline-flex',
@@ -6452,6 +7049,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 }
 
 function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, secondaryButton, onClose }) {
+  // Rendered only while open — lock the page behind the modal.
+  useLockBodyScroll(true);
   const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
   const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
   const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
@@ -6526,6 +7125,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 
   return (
     <div
+      data-glass-scrim=""
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
         position: 'fixed',
@@ -6539,7 +7139,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         padding: compact ? 0 : 20,
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" style={{
+      <div role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" data-glass="modal" style={{
+        position: 'relative',
         width: '100%',
         maxWidth: 860,
         maxHeight: compact ? 'calc(100vh - 10px)' : 'calc(100vh - 40px)',
@@ -6566,12 +7167,13 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
           <ShellCloseButton onClick={onClose} label="Close tier explorer" />
         </div>
 
-        <section style={{
+        <section data-glass="soft" style={{
           marginTop: 16,
           border: `1px solid ${PORTAL_SHELL.border}`,
           borderRadius: 8,
           background: PORTAL_SHELL.surface,
           padding: 14,
+          position: 'relative',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
             <div>
@@ -6629,7 +7231,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
               >
                 <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
                   <span style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>WaveGuard {tierName}</span>
-                  {isCurrent && <span style={{ color: B.green, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
+                  {isCurrent && <span style={{ color: B.blueDeeper, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
                 </span>
                 <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.green : PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850 }}>
                   {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
@@ -6637,7 +7239,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                 <span style={{ display: 'grid', gap: 5, marginTop: 10 }}>
                   {(TIER_SERVICE_NAMES[tierName] || []).map(service => (
                     <span key={service} style={{ display: 'flex', gap: 6, color: B.grayDark, fontSize: 12, lineHeight: 1.35 }}>
-                      <Icon name="check" size={13} strokeWidth={2} style={{ color: B.green, marginTop: 1 }} />
+                      <Icon name="check" size={13} strokeWidth={2} style={{ color: B.blueDeeper, marginTop: 1 }} />
                       <span>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </span>
                   ))}
@@ -6647,12 +7249,13 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
           })}
         </div>
 
-        <section style={{
+        <section data-glass="soft" style={{
           marginTop: 12,
           border: `1px solid ${PORTAL_SHELL.border}`,
           borderRadius: 8,
           background: PORTAL_SHELL.surface,
           padding: 14,
+          position: 'relative',
           display: 'grid',
           gap: 12,
         }}>
@@ -6668,7 +7271,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
               </div>
             </div>
             {canPriceTier ? (
-              <button type="button" onClick={runPricing} disabled={loading} style={{
+              <button type="button" onClick={runPricing} disabled={loading} data-glass-accent="" style={{
                 ...primaryButton,
                 minHeight: 40,
                 display: 'inline-flex',
@@ -6765,7 +7368,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                           selected.estimatedPlanMonthly ? { label: 'Plan total', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
                           selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                         ].filter(Boolean).map(item => (
-                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
+                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
                             <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                             <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                           </div>
@@ -6777,11 +7380,11 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                       ) : null}
 
                       {requested ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.blueDeeper, fontSize: 14, fontWeight: 850 }}>
                           <Icon name="check" size={15} strokeWidth={2} /> Request sent
                         </span>
                       ) : (
-                        <button type="button" onClick={submitRequest} disabled={requesting} style={{
+                        <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" style={{
                           ...primaryButton,
                           width: compact ? '100%' : 'fit-content',
                           display: 'inline-flex',
@@ -6821,6 +7424,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 // MY PLAN TAB
 // =========================================================================
 function MyPlanTab({ customer }) {
+  const portalGlass = usePortalGlass();
   const [expandedService, setExpandedService] = useState(null);
   const [hoveredCalendarItem, setHoveredCalendarItem] = useState(null);
   const [nextService, setNextService] = useState(null);
@@ -6961,19 +7565,11 @@ function MyPlanTab({ customer }) {
       }
     });
   }
-  // If no activity log, construct from tier
-  if (planTimeline.length === 1 && tierIdx > 0) {
-    const startDate = parseDate(customer.memberSince);
-    const upgradeDate = new Date(startDate);
-    upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
-    planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: 'upgrade' });
-  }
-  if (activeTierName && numServices >= 3 && planTimeline.length <= 2) {
-    const startDate = parseDate(customer.memberSince);
-    const addDate = new Date(startDate);
-    addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
-    planTimeline.push({ date: addDate, label: 'Added mosquito service', icon: 'bug' });
-  }
+  // No activity log = show only what we actually know (the start entry).
+  // The old fallback FABRICATED account events — an invented "Upgraded to
+  // <tier>" at 40% of tenure (even for customers who started on that tier)
+  // and a hardcoded "Added mosquito service" at 60% (even with no mosquito
+  // service) — real-looking history the customer never lived.
   planTimeline.sort((a, b) => a.date - b.date);
 
   // Current month for calendar
@@ -7017,7 +7613,7 @@ function MyPlanTab({ customer }) {
 
   const calendarTime = (event = {}) => {
     const windowStart = clockLabel(event.windowStart || event.window_start);
-    const windowEnd = clockLabel(event.windowEnd || event.window_end);
+    const windowEnd = clockLabel(arrivalWindowEnd(event.windowStart || event.window_start));
     if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
     if (windowStart) return windowStart;
 
@@ -7103,39 +7699,42 @@ function MyPlanTab({ customer }) {
     ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : 'Not set';
   const currentAnnual = totalFullPrice - annualSavings;
-  const renewalCredit = Math.min(75, Math.round(memberMonths * 6.25));
 
   const card = {
     background: B.white,
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 14px',
+    padding: '10px 16px',
     fontSize: 14,
+    minHeight: 40,
+    position: 'relative',
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #D8D0C0',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
     fontSize: 14,
@@ -7157,7 +7756,7 @@ function MyPlanTab({ customer }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{
@@ -7192,7 +7791,7 @@ function MyPlanTab({ customer }) {
             border: `1px solid ${activeTierName ? '#BBF7D0' : '#E2E8F0'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: activeTierName ? '#047857' : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: activeTierName ? B.blueDeeper : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               {planBillingLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>
@@ -7212,7 +7811,6 @@ function MyPlanTab({ customer }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: `${money(annualSavings)}/yr saved` },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
-            { label: 'Renewal credit', value: money(renewalCredit, 0), sub: 'Month 13' },
           ].map((item) => (
             <div key={item.label} style={{
               border: '1px solid #E7E2D7',
@@ -7236,7 +7834,7 @@ function MyPlanTab({ customer }) {
         alignItems: 'start',
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <section style={{ ...card, overflow: 'hidden' }}>
+          <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
             <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
               <div style={sectionTitle}>Included Services</div>
               <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>
@@ -7332,7 +7930,7 @@ function MyPlanTab({ customer }) {
                             <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                               {coverage.details.map((detail) => (
                                 <div key={detail} style={{ display: 'flex', gap: 8, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
-                                  <Icon name="check" size={14} strokeWidth={2} style={{ color: B.green, marginTop: 2 }} />
+                                  <Icon name="check" size={14} strokeWidth={2} style={{ color: B.blueDeeper, marginTop: 2 }} />
                                   <span>{detail}</span>
                                 </div>
                               ))}
@@ -7372,33 +7970,40 @@ function MyPlanTab({ customer }) {
         </div>
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <section style={{ ...card, padding: 20 }}>
+          <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
-            <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
+            <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {includedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
-                  <div key={svc.id}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 850, marginBottom: 8 }}>
-                      <Icon name={iconName(svc.icon)} size={14} strokeWidth={1.8} />
+                  <div key={svc.id} style={{
+                    background: subtle,
+                    border: '1px solid rgba(255,255,255,0.65)',
+                    borderRadius: 14,
+                    padding: '12px 12px 10px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: B.blueDeeper, fontSize: 14, fontWeight: 700, marginBottom: 10 }}>
+                      <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 3 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
-                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#D8D0C0' : 'transparent';
-                        const border = isScheduled ? fill : '#E7E2D7';
+                        const isFilled = isCompleted || isOverdue || (isCurrentMonth && isScheduled);
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
+                        const border = isFilled ? 'rgba(255,255,255,0.55)' : isScheduled ? 'rgba(27,44,91,0.35)' : 'rgba(27,44,91,0.14)';
                         const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
+                        const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 0 }}>
+                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -7408,17 +8013,34 @@ function MyPlanTab({ customer }) {
                               onBlur={() => setHoveredCalendarItem(null)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 999,
-                              background: fill,
-                              border: `1px solid ${border}`,
-                              opacity: isScheduled ? 1 : 0.45,
-                              boxShadow: isCurrentMonth && isScheduled ? `0 0 0 3px ${B.wavesBlue}18` : 'none',
-                              padding: 0,
-                              cursor: isScheduled ? 'pointer' : 'default',
-                            }}
-                            />
+                                width: '100%',
+                                height: 26,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                background: 'transparent',
+                                border: 'none',
+                                padding: 0,
+                                cursor: isScheduled ? 'pointer' : 'default',
+                              }}
+                            >
+                              <span aria-hidden="true" style={{
+                                display: 'block',
+                                boxSizing: 'border-box',
+                                width: 15,
+                                height: 15,
+                                borderRadius: 999,
+                                background: fill,
+                                border: `1.5px solid ${border}`,
+                                boxShadow: isFilled
+                                  ? `inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 6px rgba(4,57,94,0.22)${isCurrentMonth ? `, 0 0 0 3px ${B.wavesBlue}2E` : ''}`
+                                  : isScheduled
+                                    ? 'inset 0 1px 0 rgba(255,255,255,0.8), 0 1px 3px rgba(4,57,94,0.12)'
+                                    : 'none',
+                                transform: isHovered ? 'scale(1.35)' : 'scale(1)',
+                                transition: 'transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 200ms ease',
+                              }} />
+                            </button>
                             {isScheduled && hoveredCalendarItem === tooltipKey && (
                               <div role="tooltip" style={{
                                 position: 'absolute',
@@ -7444,7 +8066,12 @@ function MyPlanTab({ customer }) {
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 9, color: muted }}>{month[0]}</div>
+                            <div style={{
+                              fontSize: 10,
+                              fontWeight: isCurrentMonth ? 800 : 600,
+                              letterSpacing: '0.02em',
+                              color: isCurrentMonth ? B.wavesBlue : 'rgba(27,44,91,0.5)',
+                            }}>{month[0]}</div>
                           </div>
                         );
                       })}
@@ -7455,9 +8082,9 @@ function MyPlanTab({ customer }) {
             </div>
           </section>
 
-          <section style={{ ...card, padding: 20 }}>
+          <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Savings</div>
-            <div style={{ marginTop: 8, color: B.green, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
+            <div style={{ marginTop: 8, color: B.blueDeeper, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
               {money(annualSavings)}
             </div>
             <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
@@ -7466,11 +8093,12 @@ function MyPlanTab({ customer }) {
           </section>
 
           {tier && (
-            <section style={{ ...card, padding: 20 }}>
+            <section data-glass="card" style={{ ...card, padding: 20 }}>
               <div style={sectionTitle}>Loyalty</div>
               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                 {[
-                  { text: `${money(renewalCredit, 0)} annual renewal credit`, icon: 'money' },
+                  // Renewal-credit bullet removed: it promised a tenure-
+                  // prorated dollar figure no server system grants (F-015).
                   tierIdx < TIER_ORDER.length - 1 && {
                     text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25, 0)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
                     icon: 'upgrade',
@@ -7486,7 +8114,7 @@ function MyPlanTab({ customer }) {
             </section>
           )}
 
-          <section style={{ ...card, padding: 20 }}>
+          <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Plan History</div>
             <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
               {planTimeline.map((event) => (
@@ -7507,7 +8135,7 @@ function MyPlanTab({ customer }) {
                   <span style={{ width: 10, height: 10, borderRadius: 999, background: B.green, marginTop: 5, flexShrink: 0 }} />
                   <span>
                     <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>Now</span>
-                    <span style={{ display: 'block', marginTop: 2, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                    <span style={{ display: 'block', marginTop: 2, color: B.blueDeeper, fontSize: 14, fontWeight: 850 }}>
                       Active - WaveGuard {tierName}
                     </span>
                   </span>
@@ -7516,7 +8144,7 @@ function MyPlanTab({ customer }) {
             </div>
           </section>
 
-          <section style={{ ...card, padding: 20 }}>
+          <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Account Options</div>
             {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
@@ -7586,7 +8214,7 @@ function MyPlanTab({ customer }) {
                         setPauseSubmitting(false);
                       }
                     }}
-                    style={{ ...primaryButton, opacity: pauseSubmitting ? 0.65 : 1, cursor: pauseSubmitting ? 'wait' : 'pointer' }}
+                    data-glass-accent="" style={{ ...primaryButton, opacity: pauseSubmitting ? 0.65 : 1, cursor: pauseSubmitting ? 'wait' : 'pointer' }}
                   >
                     {pauseSubmitting ? 'Sending...' : 'Submit Pause'}
                   </button>
@@ -7596,7 +8224,7 @@ function MyPlanTab({ customer }) {
             )}
 
             {pauseSubmitted && (
-              <div style={{ marginTop: 12, color: B.green, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
+              <div style={{ marginTop: 12, color: B.blueDeeper, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
                 Pause request submitted. We will confirm within 1 business day.
               </div>
             )}
@@ -7901,7 +8529,7 @@ function ServiceTracker() {
   const isTermite = svcType.toLowerCase().includes('termite');
 
   const fmtTime = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
-  const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(tracker.service.windowEnd)}` : 'today';
+  const window = tracker.service?.windowStart ? `${fmtTime(tracker.service.windowStart)} – ${fmtTime(arrivalWindowEnd(tracker.service.windowStart))}` : 'today';
   const stepTs = tracker.steps[step - 1]?.completedAt;
   const etaSource = tracker.etaSource || tracker.techPosition?.eta?.source;
   const etaDisplay = eta == null ? '—' : eta < 1 ? 'Now' : Math.round(eta);
@@ -7922,14 +8550,14 @@ function ServiceTracker() {
   const distMi = tracker.techPosition?.eta?.distanceMiles;
   const status = (() => {
     if (tracker.state === 'no_show') return { label: 'Missed visit', color: B.orange };
-    if (step === 7) return { label: 'Service complete', color: B.green };
+    if (step === 7) return { label: 'Service complete', color: B.blueDeeper };
     if (step >= 4) {
-      if (step === 6) return { label: 'Finishing up', color: B.green };
-      if (step === 5) return { label: 'Servicing now', color: B.green };
-      return { label: 'On property', color: B.green };
+      if (step === 6) return { label: 'Finishing up', color: B.blueDeeper };
+      if (step === 5) return { label: 'Servicing now', color: B.blueDeeper };
+      return { label: 'On property', color: B.blueDeeper };
     }
     if (step === 3) {
-      if (distMi != null && distMi < 0.3) return { label: 'Arriving now', color: B.green };
+      if (distMi != null && distMi < 0.3) return { label: 'Arriving now', color: B.blueDeeper };
       if (distMi != null && distMi < 3)   return { label: 'Nearby',       color: B.wavesBlue };
       return { label: 'On the way', color: B.wavesBlue };
     }
@@ -8179,7 +8807,7 @@ function ServiceTracker() {
         {step === 3 && office?.phone && (
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            style={{
+            data-glass-accent="" style={{
               ...PORTAL_PRIMARY_ACTION,
               width: '100%',
               minHeight: 48,
@@ -8271,11 +8899,11 @@ function ServiceTracker() {
         <div style={{ display: 'flex', gap: 8 }}>
           <a
             href={`tel:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
+            data-glass-accent="" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
           >Call</a>
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
+            data-glass-accent="" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
           >Text</a>
         </div>
       </div>
@@ -8283,7 +8911,7 @@ function ServiceTracker() {
       {/* Completion summary at step 7 */}
       {step === 7 && summary && (
         <div style={{ ...subCardBase, background: `${B.green}14`, borderColor: `${B.green}33` }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.green, letterSpacing: 0, marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.blueDeeper, letterSpacing: 0, marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -8319,12 +8947,15 @@ function ServiceTracker() {
 const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_failed'];
 
 function ReferTab({ customer, onSwitchTab }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [form, setForm] = useState({ name: '', phone: '' });
+  const [emailForm, setEmailForm] = useState({ name: '', email: '' });
   const [submitting, setSubmitting] = useState(false);
+  const [emailSubmitting, setEmailSubmitting] = useState(false);
   const [notice, setNotice] = useState(null);
   const [copied, setCopied] = useState(false);
 
@@ -8434,32 +9065,36 @@ function ReferTab({ customer, onSwitchTab }) {
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.blueDeeper,
     color: '#fff',
     border: 'none',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 14px',
+    padding: '10px 16px',
     fontSize: 14,
+    minHeight: 40,
+    position: 'relative',
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #D8D0C0',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
     fontSize: 14,
@@ -8510,11 +9145,11 @@ function ReferTab({ customer, onSwitchTab }) {
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
-    pending: { label: 'Pending', color: muted, bg: '#FAF8F3' },
+    pending: { label: 'Pending', color: muted, bg: GLASS_SUBTLE },
     contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#F8FCFE' },
     estimated: { label: 'Estimated', color: B.orange, bg: `${B.orange}14` },
-    signed_up: { label: 'Signed up', color: B.green, bg: '#F0FDF4' },
-    credited: { label: 'Credit applied', color: B.green, bg: '#F0FDF4' },
+    signed_up: { label: 'Signed up', color: B.blueDeeper, bg: '#F0FDF4' },
+    credited: { label: 'Credit applied', color: B.blueDeeper, bg: '#F0FDF4' },
     sms_failed: { label: 'Text failed', color: B.red, bg: `${B.red}10` },
     rejected: { label: 'Closed', color: B.red, bg: `${B.red}10` },
     lost: { label: 'Closed', color: B.red, bg: `${B.red}10` },
@@ -8543,10 +9178,29 @@ function ReferTab({ customer, onSwitchTab }) {
   const handleSmsShare = () => {
     openShareUrl(`sms:?body=${encodeURIComponent(shareText)}`, 'Text message opened. Referral link copied as a backup.');
   };
+  // Email now routes through the branded-glass server send (Email a friend
+  // form below) instead of a plain mailto draft — focus that form.
   const handleEmailShare = () => {
-    const subject = encodeURIComponent('Waves Pest Control referral');
-    const body = encodeURIComponent(`${shareText}\n\nThanks!`);
-    openShareUrl(`mailto:?subject=${subject}&body=${body}`, 'Email draft opened. Referral link copied as a backup.');
+    const el = document.getElementById('portal-referral-email');
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => el.focus(), 350);
+  };
+  const handleEmailSubmit = async (e) => {
+    e.preventDefault();
+    const friendName = emailForm.name.trim();
+    const friendEmail = emailForm.email.trim();
+    if (!friendName || !friendEmail) return;
+    setEmailSubmitting(true);
+    try {
+      await api.sendReferralEmailInvite({ friendName, email: friendEmail });
+      setEmailForm({ name: '', email: '' });
+      flash(`Your referral email to ${friendName.split(/\s+/)[0]} is on the way!`);
+    } catch (err) {
+      flash(err?.message || 'Could not send the referral email. Please try again.', 'error');
+    } finally {
+      setEmailSubmitting(false);
+    }
   };
 
   return (
@@ -8565,16 +9219,17 @@ function ReferTab({ customer, onSwitchTab }) {
         </div>
       )}
 
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 300px' }}>
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 8,
-              padding: '5px 10px',
-              borderRadius: 999,
-              background: '#F8FCFE',
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: PORTAL_SHELL.soft,
+              border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -8645,7 +9300,7 @@ function ReferTab({ customer, onSwitchTab }) {
       </section>
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, alignItems: 'stretch' }}>
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}>Share Link</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Your referral code</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
@@ -8667,12 +9322,11 @@ function ReferTab({ customer, onSwitchTab }) {
                 {referralCode || 'Auto-assigned'}
               </div>
             </div>
-            <button type="button" onClick={() => handleCopy(shareLink)} style={{
+            <button type="button" onClick={() => handleCopy(shareLink)} data-glass-accent="" style={{
               ...primaryButton,
-              background: copied ? B.green : B.blueDeeper,
               whiteSpace: 'nowrap',
+              position: 'relative',
             }}>
-              <Icon name={copied ? 'check' : 'share'} size={15} strokeWidth={2} style={{ marginRight: 6 }} />
               {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
@@ -8689,16 +9343,16 @@ function ReferTab({ customer, onSwitchTab }) {
             {shareLink}
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-            <button type="button" onClick={handleSmsShare} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center' }}>
-              <Icon name="message" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Text
+            <button type="button" onClick={handleSmsShare} data-glass-accent="" style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center', position: 'relative' }}>
+              Text
             </button>
-            <button type="button" onClick={handleEmailShare} style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center' }}>
-              <Icon name="mail" size={15} strokeWidth={2} style={{ marginRight: 6 }} /> Email
+            <button type="button" onClick={handleEmailShare} data-glass-accent="" style={{ ...secondaryButton, flex: '1 1 120px', justifyContent: 'center', position: 'relative' }}>
+              Email
             </button>
           </div>
         </section>
 
-        <section style={{ ...card, padding: 20 }}>
+        <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}>Send Invite</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Text a friend</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
@@ -8756,20 +9410,88 @@ function ReferTab({ customer, onSwitchTab }) {
                 marginBottom: 14,
               }}
             />
-            <button type="submit" disabled={!form.name.trim() || !form.phone.trim() || submitting} style={{
+            <button type="submit" disabled={!form.name.trim() || !form.phone.trim() || submitting} data-glass-accent="" style={{
               ...primaryButton,
               width: '100%',
               opacity: submitting || !form.name.trim() || !form.phone.trim() ? 0.65 : 1,
               cursor: submitting || !form.name.trim() || !form.phone.trim() ? 'not-allowed' : 'pointer',
             }}>
-              <Icon name="phone" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
               {submitting ? 'Sending...' : 'Send Invite'}
             </button>
           </form>
         </section>
       </div>
 
-      <section style={{ ...card, padding: 20 }}>
+      <section data-glass="card" style={{ ...card, padding: 20 }}>
+        <div style={sectionTitle}>Send Invite</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Email a friend</div>
+        <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+          We will send a branded referral email from Waves with your link and their new-customer offer.
+        </div>
+        <form onSubmit={handleEmailSubmit} style={{ marginTop: 16 }}>
+          <label htmlFor="portal-referral-email-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            Friend's Name
+          </label>
+          <input
+            id="portal-referral-email-name"
+            name="referralEmailName"
+            type="text"
+            value={emailForm.name}
+            onChange={e => setEmailForm(prev => ({ ...prev, name: e.target.value }))}
+            placeholder="Jane Smith"
+            autoComplete="name"
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid #D8D0C0',
+              fontSize: 14,
+              fontFamily: FONTS.body,
+              color: B.blueDeeper,
+              background: '#fff',
+              outline: 'none',
+              boxSizing: 'border-box',
+              marginBottom: 12,
+            }}
+          />
+          <label htmlFor="portal-referral-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            Email Address
+          </label>
+          <input
+            id="portal-referral-email"
+            name="referralEmail"
+            type="email"
+            inputMode="email"
+            value={emailForm.email}
+            onChange={e => setEmailForm(prev => ({ ...prev, email: e.target.value }))}
+            placeholder="jane@example.com"
+            autoComplete="email"
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid #D8D0C0',
+              fontSize: 14,
+              fontFamily: FONTS.body,
+              color: B.blueDeeper,
+              background: '#fff',
+              outline: 'none',
+              boxSizing: 'border-box',
+              marginBottom: 14,
+            }}
+          />
+          <button type="submit" disabled={!emailForm.name.trim() || !emailForm.email.trim() || emailSubmitting} data-glass-accent="" style={{
+            ...primaryButton,
+            width: '100%',
+            opacity: emailSubmitting || !emailForm.name.trim() || !emailForm.email.trim() ? 0.65 : 1,
+            cursor: emailSubmitting || !emailForm.name.trim() || !emailForm.email.trim() ? 'not-allowed' : 'pointer',
+          }}>
+            {emailSubmitting ? 'Sending...' : 'Send Email Invite'}
+          </button>
+        </form>
+      </section>
+
+      <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}>Milestone</div>
@@ -8780,10 +9502,10 @@ function ReferTab({ customer, onSwitchTab }) {
           {nextMilestone ? (
             <div style={{ color: muted, fontSize: 14, lineHeight: 1.4, textAlign: compact ? 'left' : 'right' }}>
               {milestoneRemaining} more converted referral{milestoneRemaining === 1 ? '' : 's'} to {milestoneMeta[nextMilestone.level]?.label || 'the next level'}
-              {nextMilestone.bonus ? <div style={{ color: B.green, fontWeight: 850 }}>Bonus {cents(nextMilestone.bonus)}</div> : null}
+              {nextMilestone.bonus ? <div style={{ color: B.blueDeeper, fontWeight: 850 }}>Bonus {cents(nextMilestone.bonus)}</div> : null}
             </div>
           ) : (
-            <div style={{ color: B.green, fontSize: 14, fontWeight: 850 }}>Top referral level reached</div>
+            <div style={{ color: B.blueDeeper, fontSize: 14, fontWeight: 850 }}>Top referral level reached</div>
           )}
         </div>
         <div style={{ height: 8, borderRadius: 999, background: subtle, overflow: 'hidden', border: '1px solid #E7E2D7' }}>
@@ -8801,7 +9523,7 @@ function ReferTab({ customer, onSwitchTab }) {
         </div>
       </section>
 
-      <section style={{ ...card, padding: 20 }}>
+      <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}>Referral Activity</div>
@@ -8866,7 +9588,7 @@ function ReferTab({ customer, onSwitchTab }) {
                       {[phoneLabel, created && !isNaN(created) ? created.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null].filter(Boolean).join(' - ')}
                     </div>
                     {rewardEarned && reward > 0 && (
-                      <div style={{ marginTop: 6, fontSize: 12, color: B.green, fontWeight: 850 }}>
+                      <div style={{ marginTop: 6, fontSize: 12, color: B.blueDeeper, fontWeight: 850 }}>
                         {money(reward)} credit earned
                       </div>
                     )}
@@ -8888,7 +9610,7 @@ function ReferTab({ customer, onSwitchTab }) {
         )}
       </section>
 
-      <section style={{ ...card, padding: 20 }}>
+      <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>How It Works</div>
         <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, 1fr)', gap: 10 }}>
           {[
@@ -8930,6 +9652,7 @@ function ReferTab({ customer, onSwitchTab }) {
 // DOCUMENTS TAB
 // =========================================================================
 function DocumentsTab({ customer, onSwitchTab }) {
+  const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [docs, setDocs] = useState({});
   const [totalDocs, setTotalDocs] = useState(0);
@@ -8939,21 +9662,26 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [notice, setNotice] = useState(null);
   const [shareStatus, setShareStatus] = useState({}); // { docId: 'copying' | 'copied' | shareLink }
+  const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
+    (err) => flash(err?.message || 'Could not open this document. Please try again.', 'error')
+  );
 
   const card = {
     background: B.white,
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -8964,6 +9692,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     boxShadow: 'none',
     padding: '10px 14px',
     fontSize: 14,
+    position: 'relative',
     letterSpacing: 0,
   };
   const secondaryButton = {
@@ -8971,7 +9700,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     background: '#fff',
     color: B.blueDeeper,
     border: '1px solid #D8D0C0',
-    borderRadius: 8,
+    borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
     fontSize: 14,
@@ -9008,7 +9737,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
     }
   };
 
-  const downloadBlob = (blob, fileName = 'Waves_Document.pdf') => {
+  const downloadBlob = async (blob, fileName = 'Waves_Document.pdf') => {
+    // In the Capacitor shell the programmatic <a download> click below is a
+    // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+    if (await saveBlobNative(blob, fileName)) return;
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;
@@ -9019,7 +9751,31 @@ function DocumentsTab({ customer, onSwitchTab }) {
     URL.revokeObjectURL(blobUrl);
   };
 
+  // PDF endpoint for auto-generated service reports (V1 infographic PDFs are
+  // public token routes; legacy summaries are Bearer-only fallbacks). Project
+  // reports and uploaded documents have no PDF endpoint — returns null.
+  const serviceReportPdfUrl = (doc) =>
+    doc.isAutoGenerated && !doc.isProjectReport && doc.linkedServiceRecordId
+      ? (doc.pdfUrl || api.getServiceReportUrl(doc.linkedServiceRecordId))
+      : null;
+
   const handleDownload = (doc) => {
+    // Capacitor shell: window.open(_blank) and <a download> are both dead
+    // ends in the webview (F-017/F-046) — render the report itself in an
+    // in-app overlay instead. Android's webview can't display PDFs inline,
+    // so PDF-only docs there fall through to the share-sheet download path.
+    if (isNativeApp()) {
+      if (doc.viewUrl || doc.isProjectReport) {
+        openPagePreview({ ...doc, pdfUrl: serviceReportPdfUrl(doc) }, absoluteUrl(doc.viewUrl || doc.downloadUrl));
+        return;
+      }
+      const pdfUrl = serviceReportPdfUrl(doc);
+      if (pdfUrl && nativePlatform() !== 'android') {
+        openPdfPreview({ ...doc, pdfUrl }, pdfUrl);
+        return;
+      }
+    }
+
     if (doc.viewUrl || doc.isProjectReport) {
       window.open(absoluteUrl(doc.viewUrl || doc.downloadUrl), '_blank', 'noopener,noreferrer');
       return;
@@ -9034,17 +9790,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       return;
     }
 
-    const token = localStorage.getItem('waves_token');
-    fetch(absoluteUrl(url), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then(async r => {
-        if (!r.ok) throw new Error(`Download failed (${r.status})`);
-        const contentType = r.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const body = await r.json().catch(() => null);
-          throw new Error(body?.message || body?.error || 'This document is not ready to download yet.');
-        }
-        return r.blob();
-      })
+    fetchAuthedPdfBlob(url)
       .then(blob => downloadBlob(blob, doc.fileName || `${doc.title || 'Waves_Document'}.pdf`))
       .catch(err => {
         console.error(err);
@@ -9055,9 +9801,27 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const handleShare = async (doc) => {
     setShareStatus(prev => ({ ...prev, [doc.id]: 'copying' }));
     try {
+      // Native shell: share the report file itself when a PDF exists — the
+      // OS share sheet previews the document and the recipient receives the
+      // report, not a bare link. Link-only docs (project reports, uploaded
+      // files) go through the Share plugin with a URL; the clipboard path
+      // below is unreliable in the webview. Old binaries without the plugins
+      // fall through to clipboard.
+      if (isNativeApp() && canSaveNative()) {
+        const pdfUrl = serviceReportPdfUrl(doc);
+        if (pdfUrl) {
+          await saveUrlNative(pdfUrl, doc.fileName || `${doc.title || 'Waves_Document'}.pdf`);
+          setShareStatus(prev => ({ ...prev, [doc.id]: null }));
+          return;
+        }
+      }
       const shareLink = doc.viewUrl || doc.isProjectReport
         ? absoluteUrl(doc.viewUrl || doc.downloadUrl)
         : (await api.shareDocument(doc.id)).shareLink;
+      if (isNativeApp() && await shareUrlNative(shareLink, doc.title)) {
+        setShareStatus(prev => ({ ...prev, [doc.id]: null }));
+        return;
+      }
       await navigator.clipboard?.writeText(shareLink);
       setShareStatus(prev => ({ ...prev, [doc.id]: 'copied' }));
       setTimeout(() => setShareStatus(prev => ({ ...prev, [doc.id]: null })), 3000);
@@ -9160,7 +9924,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     if (daysUntil < 0) return { label: 'Expired', color: B.red, bg: `${B.red}20` };
     if (daysUntil <= 30) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.red, bg: `${B.red}20` };
     if (daysUntil <= 60) return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.orange, bg: `${B.orange}20` };
-    return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.green, bg: `${B.green}20` };
+    return { label: `Valid through ${exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, color: B.blueDeeper, bg: `${B.green}20` };
   };
 
   const formatDate = (docOrDate) => {
@@ -9218,16 +9982,17 @@ function DocumentsTab({ customer, onSwitchTab }) {
         </div>
       )}
 
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 300px' }}>
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 8,
-              padding: '5px 10px',
-              borderRadius: 999,
-              background: '#F8FCFE',
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: PORTAL_SHELL.soft,
+              border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -9307,7 +10072,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         </div>
       </section>
 
-      <section style={{ ...card, padding: 16 }}>
+      <section data-glass="card" style={{ ...card, padding: 16 }}>
         <div style={{ display: 'flex', gap: 10, alignItems: 'stretch', flexWrap: 'wrap' }}>
           <div style={{ position: 'relative', flex: '1 1 260px', minWidth: 0 }}>
             <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: muted, pointerEvents: 'none' }}>
@@ -9371,7 +10136,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         )}
       </section>
 
-      <section style={{
+      <section data-glass="card" style={{
         ...card,
         padding: 18,
         display: 'flex',
@@ -9399,12 +10164,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Looking for a recent service report?</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2, lineHeight: 1.45 }}>
-              Quarterly Pest Control reports appear here after a completed visit and under Visits, Completed.
+              Reports from every completed service visit appear here — you can also open them any time under Visits → Completed.
             </div>
           </div>
         </div>
-        <button type="button" onClick={() => onSwitchTab?.('services')} style={secondaryButton}>
-          <Icon name="calendar" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+        <button type="button" onClick={() => onSwitchTab?.('services')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative' }}>
           Open Completed Visits
         </button>
       </section>
@@ -9430,7 +10194,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       ))}
 
       {/* Invoices link — redirect to Billing tab */}
-      <section style={{
+      <section data-glass="card" style={{
         ...card,
         padding: 18,
         display: 'flex',
@@ -9458,14 +10222,13 @@ function DocumentsTab({ customer, onSwitchTab }) {
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Payment records now live in Billing.</div>
           </div>
         </div>
-        <button type="button" onClick={() => onSwitchTab?.('billing')} style={secondaryButton}>
-          <Icon name="card" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+        <button type="button" onClick={() => onSwitchTab?.('billing')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative' }}>
           Open Billing
         </button>
       </section>
 
       {/* Bottom note */}
-      <section style={{
+      <section data-glass="card" style={{
         ...card,
         padding: 20,
         display: 'flex',
@@ -9481,31 +10244,118 @@ function DocumentsTab({ customer, onSwitchTab }) {
             Tell us what you need and we will upload it to your portal.
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <a href="tel:+19412975749" style={{ ...secondaryButton, textDecoration: 'none' }}>
-            <Icon name="phone" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative' }}>
             Call
           </a>
-          <a href="sms:+19412975749" style={{ ...primaryButton, textDecoration: 'none' }}>
-            <Icon name="message" size={15} strokeWidth={2} style={{ marginRight: 6 }} />
+          <a href="sms:+19412975749" data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none' }}>
             Text
+          </a>
+          <a href="mailto:contact@wavespestcontrol.com?subject=Document%20request" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative' }}>
+            Email
           </a>
         </div>
       </section>
+
+      {preview && (
+        <DocumentPreviewOverlay
+          preview={preview}
+          onClose={closePreview}
+          onError={(err) => flash(err?.message || 'Could not save this document. Please try again.', 'error')}
+        />
+      )}
+    </div>
+  );
+}
+
+// Full-screen in-app viewer for the Capacitor shell: the webview has no new
+// tab and no download UI, so "Open"/"Download" render the report itself here
+// instead (report pages via their token route, legacy PDFs via a blob URL —
+// WKWebView displays PDFs inline). Save hands the bytes to the OS share sheet.
+function DocumentPreviewOverlay({ preview, onClose, onError }) {
+  useLockBodyScroll(true);
+  const { doc, src, loading } = preview;
+  const canSave = canSaveNative() && Boolean(preview.blob || doc.pdfUrl);
+  const handleSave = async () => {
+    const fileName = doc.fileName || `${doc.title || 'Waves_Document'}.pdf`;
+    try {
+      if (preview.blob && await saveBlobNative(preview.blob, fileName)) return;
+      if (doc.pdfUrl && await saveUrlNative(doc.pdfUrl, fileName)) return;
+      throw new Error('Could not save this document. Please try again.');
+    } catch (err) {
+      console.error(err);
+      onError?.(err);
+    }
+  };
+  const headerButton = {
+    ...PORTAL_BUTTON_BASE,
+    background: '#fff',
+    color: B.blueDeeper,
+    border: '1px solid #D8D0C0',
+    borderRadius: 8,
+    boxShadow: 'none',
+    padding: '8px 12px',
+    fontSize: 14,
+    minHeight: 38,
+    letterSpacing: 0,
+  };
+
+  return (
+    // data-glass: the preview shell + header pick up the glass material like
+    // every other portal overlay (owner 2026-07-09); the document itself
+    // stays opaque inside its iframe. Inert without the glass theme.
+    <div role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
+      position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div data-glass="soft" style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: 'calc(env(safe-area-inset-top, 0px) + 10px) 14px 10px',
+        background: B.white, borderBottom: '1px solid #E7E2D7', flexShrink: 0,
+        position: 'relative',
+      }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {doc.title || 'Document'}
+        </div>
+        {canSave && (
+          <button type="button" onClick={handleSave} style={headerButton} aria-label="Save or share this document">
+            <Icon name="download" size={15} strokeWidth={2} style={{ marginRight: 5 }} />
+            Save
+          </button>
+        )}
+        <button type="button" onClick={onClose} style={{ ...headerButton, padding: '8px 10px' }} aria-label="Close preview">
+          <Icon name="x" size={16} strokeWidth={2} />
+        </button>
+      </div>
+      {src ? (
+        <iframe
+          src={src}
+          title={doc.title || 'Document preview'}
+          style={{ flex: 1, width: '100%', border: 'none', background: '#fff' }}
+        />
+      ) : (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#475569', fontSize: 14 }}>
+          {loading ? 'Loading your report…' : 'This document is not ready yet.'}
+        </div>
+      )}
     </div>
   );
 }
 
 function DocumentSection({ section, items, emptyMessage, onDownload, onShare, onShareWithRealtor, shareStatus, getExpirationBadge, formatDate, relativeTime, formatSize, customer, compact }) {
-  const [open, setOpen] = useState(true);
-  const muted = '#6B7280';
-  const subtle = '#FAF8F3';
+  const portalGlass = usePortalGlass();
+  // Dropdown behavior: sections with documents open themselves; empty
+  // categories stay collapsed so the tab isn't a wall of "Nothing here yet".
+  const [open, setOpen] = useState(items.length > 0);
+  const muted = '#475569';
+  const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
+    fontFamily: FONTS.heading,
   };
   const actionButton = {
     ...PORTAL_BUTTON_BASE,
@@ -9521,12 +10371,13 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
   };
 
   return (
-    <section style={{
+    <section data-glass="card" style={{
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
       border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+      position: 'relative',
     }}>
       <button
         type="button"
@@ -9572,6 +10423,63 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 
       {open && (
         <div style={{ padding: '0 18px 16px' }}>
+          {/* Service reports get a visual slider (owner 2026-07-09): one card
+              per past visit with the tech's first photo, swipeable so clients
+              can slide through their report history. Tapping opens the report
+              via the same handler as the list rows. The detailed list below
+              keeps the download/share actions. */}
+          {section.id === 'service_reports' && items.length > 0 && (
+            <div style={{
+              display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
+              WebkitOverflowScrolling: 'touch', padding: '2px 0 12px', scrollbarWidth: 'thin',
+            }}>
+              {items.map((doc) => (
+                <button
+                  key={`slide-${doc.id}`}
+                  type="button"
+                  onClick={() => onDownload(doc)}
+                  data-glass="soft"
+                  aria-label={`Open ${doc.title}`}
+                  style={{
+                    // Exactly three cards fill the rail on desktop (owner
+                    // 2026-07-09); older reports overflow into the
+                    // horizontal scroll. Mobile keeps a fixed swipe width.
+                    flex: compact ? '0 0 180px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
+                    display: 'flex', flexDirection: 'column', textAlign: 'left',
+                    background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+                    overflow: 'hidden', padding: 0, cursor: 'pointer', position: 'relative',
+                    fontFamily: FONTS.body,
+                  }}
+                >
+                  {doc.previewImage ? (
+                    <img
+                      src={doc.previewImage}
+                      alt=""
+                      loading="lazy"
+                      style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
+                    />
+                  ) : (
+                    <div style={{
+                      width: '100%', aspectRatio: '4 / 3', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      background: '#F8FCFE', color: B.blueDeeper,
+                    }}>
+                      <Icon name="clipboard" size={28} strokeWidth={1.6} />
+                    </div>
+                  )}
+                  <div style={{ padding: '10px 12px 12px' }}>
+                    <div style={{
+                      fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {(doc.title || '').replace(/^Visit Report — /, '')}
+                    </div>
+                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>{formatDate(doc)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
           {items.length === 0 ? (
             <PortalInlineState
               icon="document"
@@ -9722,6 +10630,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
+  useLockBodyScroll(open);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -9796,13 +10705,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     border: `1px solid ${PORTAL_SHELL.border}`,
     borderRadius: 8,
     boxShadow: PORTAL_SHELL.shadowSoft,
+    position: 'relative',
   };
   const sectionTitle = {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 850,
-    color: muted,
+    color: B.blueDeeper,
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: '0.06em',
     fontFamily: FONTS.heading,
   };
   const helperText = {
@@ -9911,7 +10821,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   if (!open) return null;
 
   return (
-    <div style={{
+    <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
       backdropFilter: compact ? 'none' : 'blur(5px)',
@@ -9933,7 +10843,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         aria-modal="true"
         aria-label="New request"
         data-request-overlay
+        data-glass="modal"
         style={{
+          position: 'relative',
           width: '100%',
           maxWidth: compact ? 'none' : 720,
           height: compact ? '100%' : 'auto',
@@ -9991,7 +10903,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   height: 68,
                   borderRadius: 8,
                   background: B.greenLight,
-                  color: B.green,
+                  color: B.blueDeeper,
                 }}>
                   <Icon name="check" size={30} strokeWidth={2.2} />
                 </span>
@@ -10002,8 +10914,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
               </div>
               <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
-                <a href="tel:+19412975749" style={secondaryAction}><Icon name="phone" size={15} strokeWidth={2} /> Call</a>
-                <a href="sms:+19412975749" style={secondaryAction}><Icon name="chat" size={15} strokeWidth={2} /> Text</a>
+                <a href="tel:+19412975749" style={secondaryAction}>Call</a>
+                <a href="sms:+19412975749" style={secondaryAction}>Text</a>
               </div>
             </div>
           </div>
@@ -10019,7 +10931,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               gap: 12,
             }}>
               {customer && (
-                <section style={{ ...card, padding: 14 }}>
+                <section data-glass="card" style={{ ...card, padding: 14 }}>
                   <div style={{ display: 'grid', gap: 10 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                       <span style={iconTile}><Icon name="house" size={16} strokeWidth={2} /></span>
@@ -10039,13 +10951,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                       gap: 8,
                     }}>
-                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Plan</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
                           {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
                         </div>
                       </div>
-                      <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
+                      <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Last service</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
@@ -10054,7 +10966,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </section>
               )}
 
-              <section style={{ ...card, padding: 16 }}>
+              <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <div style={sectionTitle}>Request type</div>
                 <div style={helperText}>Pick the closest match so the right Waves team sees it first.</div>
                 <div style={{
@@ -10116,7 +11028,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       gap: 10,
                       alignItems: 'flex-start',
                     }}>
-                      <span style={{ ...iconTile, background: B.greenLight, color: B.green }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
+                      <span style={{ ...iconTile, background: B.greenLight, color: B.blueDeeper }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered callback</div>
                         <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.4 }}>
@@ -10150,7 +11062,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               )}
 
               {isProblemCategory && (
-                <section style={{ ...card, padding: 16 }}>
+                <section data-glass="card" style={{ ...card, padding: 16 }}>
                   <div style={sectionTitle}>Priority</div>
                   <div style={helperText}>Routine is best for most issues. Use urgent for active interior activity or access-sensitive timing.</div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
@@ -10193,7 +11105,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </section>
               )}
 
-              <section style={{ ...card, padding: 16 }}>
+              <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <label htmlFor="portal-request-description" style={sectionTitle}>Details</label>
                 <div style={helperText}>
                   {selectedCategory
@@ -10241,7 +11153,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               </section>
 
               {isProblemCategory && (
-                <section style={{ ...card, padding: 16 }}>
+                <section data-glass="card" style={{ ...card, padding: 16 }}>
                   <div style={sectionTitle}>Location</div>
                   <div style={helperText}>Select the area where the issue is happening.</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 12 }}>
@@ -10274,7 +11186,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </section>
               )}
 
-              <section style={{ ...card, padding: 16 }}>
+              <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                   <div>
                     <div style={sectionTitle}>Photos</div>
@@ -10326,8 +11238,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     alignItems: photos.length ? 'stretch' : 'center',
                     minHeight: photos.length ? 0 : 92,
                     borderRadius: 8,
-                    border: photos.length ? 'none' : '1px solid #E7E2D7',
-                    background: photos.length ? 'transparent' : '#FAF8F3',
+                    border: photos.length ? 'none' : '1px solid rgba(255,255,255,0.65)',
+                    background: photos.length ? 'transparent' : GLASS_SUBTLE,
                     padding: photos.length ? 0 : 12,
                     color: muted,
                     fontSize: 14,
@@ -10405,10 +11317,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             }}>
               <div style={{ display: 'flex', gap: 8, minWidth: 0 }}>
                 <a href="tel:+19412975749" style={{ ...secondaryAction, flex: compact ? 1 : '0 0 auto', padding: '0 12px' }}>
-                  <Icon name="phone" size={15} strokeWidth={2} /> Call
+                  Call
                 </a>
                 <a href="sms:+19412975749" style={{ ...secondaryAction, flex: compact ? 1 : '0 0 auto', padding: '0 12px' }}>
-                  <Icon name="chat" size={15} strokeWidth={2} /> Text
+                  Text
                 </a>
               </div>
               <button type="submit" disabled={!canSubmit} style={{
@@ -10429,7 +11341,6 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 minWidth: compact ? '100%' : 180,
               }}>
                 {submitting ? 'Sending...' : 'Submit Request'}
-                {!submitting && <Icon name="arrowRight" size={16} strokeWidth={2.2} />}
               </button>
             </footer>
           </form>
@@ -10468,15 +11379,16 @@ function MyRequestsCard() {
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   if (!recent.length) return null;
 
-  const muted = '#6B7280';
+  const muted = '#475569';
 
   return (
-    <section style={{
+    <section data-glass="card" style={{
       background: B.white,
       borderRadius: 8,
       padding: 16,
       border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+      position: 'relative',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, marginBottom: 12 }}>
         <span style={{
@@ -10503,9 +11415,9 @@ function MyRequestsCard() {
           const created = new Date(r.createdAt);
           return (
             <article key={r.id} style={{
-              border: '1px solid #E7E2D7',
+              border: '1px solid rgba(255,255,255,0.65)',
               borderRadius: 8,
-              background: '#FAF8F3',
+              background: GLASS_SUBTLE,
               padding: 12,
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
@@ -10521,7 +11433,7 @@ function MyRequestsCard() {
                   padding: '5px 8px',
                   borderRadius: 8,
                   background: '#F0FDF4',
-                  color: B.green,
+                  color: B.blueDeeper,
                   border: '1px solid #BBF7D0',
                   whiteSpace: 'nowrap',
                 }}>Received</span>
@@ -10598,7 +11510,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
     </button>
   );
   return (
-    <nav aria-label="Main" style={{
+    <nav aria-label="Main" data-glass="" style={{
       position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
@@ -10619,6 +11531,8 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
 }
 
 function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
+  // Rendered only while open — lock the page behind the sheet.
+  useLockBodyScroll(true);
   // Close on Esc for keyboard users.
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -10632,6 +11546,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
     border: `1px solid ${PORTAL_SHELL.border}`,
     borderRadius: 8,
     boxShadow: PORTAL_SHELL.shadowSoft,
+    position: 'relative',
   };
   const iconTile = {
     width: 38,
@@ -10664,6 +11579,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      data-glass-scrim=""
       style={{
         position: 'fixed', inset: 0, zIndex: 150,
         background: 'rgba(15,23,42,0.42)',
@@ -10671,9 +11587,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="More navigation" style={{
+      <div role="dialog" aria-modal="true" aria-label="More navigation" data-glass="modal" style={{
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
+        position: 'relative',
         padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
@@ -10681,6 +11598,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         maxHeight: 'calc(100vh - 16px)',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
       }}>
         <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
         <div style={{
@@ -10689,13 +11607,13 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         }} />
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.15 }}>More</div>
-            <div style={{ marginTop: 3, fontSize: 14, color: muted }}>Documents, property tools, and help from Waves.</div>
+            <div style={{ fontSize: 20, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.15 }}>Your Account</div>
+            <div style={{ marginTop: 3, fontSize: 14, color: muted }}>Documents, your property, and help when you need it.</div>
           </div>
           <ShellCloseButton onClick={onClose} label="Close more menu" />
         </div>
 
-        <section style={{ ...card, padding: 8, marginBottom: 10 }}>
+        <section data-glass="soft" style={{ ...card, padding: 8, marginBottom: 10 }}>
           {MORE_TABS.map(t => {
             const isActive = activeTab === t.id;
             return (
@@ -10726,7 +11644,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
           })}
         </section>
 
-        <section style={{ ...card, padding: 14 }}>
+        <section data-glass="soft" style={{ ...card, padding: 14 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={iconTile}><Icon name="sos" size={18} strokeWidth={2} /></span>
             <div>
@@ -10740,13 +11658,13 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
             gap: 8,
             marginTop: 12,
           }}>
-            <a href="tel:+19412975749" onClick={onClose} style={supportActionStyle}><Icon name="phone" size={15} strokeWidth={2} /> Call</a>
-            <a href="sms:+19412975749" onClick={onClose} style={supportActionStyle}><Icon name="chat" size={15} strokeWidth={2} /> Text</a>
+            <a href="tel:+19412975749" onClick={onClose} style={supportActionStyle}>Call</a>
+            <a href="sms:+19412975749" onClick={onClose} style={supportActionStyle}>Text</a>
             <button type="button" onClick={() => { onRequest?.(); onClose(); }} style={supportActionStyle}>
-              <Icon name="wrench" size={15} strokeWidth={2} /> Request
+              Request
             </button>
             <button type="button" onClick={() => { onChat?.(); onClose(); }} style={supportActionStyle}>
-              <Icon name="bot" size={15} strokeWidth={2} /> Chat
+              Chat
             </button>
           </div>
         </section>
@@ -10766,8 +11684,9 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
     border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+    position: 'relative',
   };
-  const muted = '#6B7280';
+  const muted = '#475569';
   const propertyLine = [
     customer.address?.line1,
     customer.address?.city,
@@ -10794,20 +11713,22 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section style={{ ...card, padding: compact ? 20 : 28 }}>
+      <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 8,
-              padding: '5px 10px',
-              borderRadius: 999,
-              background: '#F8FCFE',
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: PORTAL_SHELL.soft,
+              border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
             }}>
+              <Icon name="calendar" size={14} strokeWidth={2} />
               Service Schedule
             </div>
             <h1 style={{
@@ -10828,10 +11749,10 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           <div style={{
             display: 'flex',
             gap: 4,
-            background: '#FAF8F3',
+            background: GLASS_SUBTLE,
             borderRadius: 8,
             padding: 4,
-            border: '1px solid #E7E2D7',
+            border: '1px solid rgba(255,255,255,0.65)',
             minWidth: compact ? '100%' : 260,
           }}>
             {pill('upcoming', 'Upcoming')}
@@ -10847,7 +11768,9 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 // =========================================================================
 // AI CHAT WIDGET
 // =========================================================================
-function ChatWidget({ customer, onClose }) {
+function ChatWidget({ customer, onClose, initialQuestion }) {
+  // Rendered only while open — lock the page behind the chat overlay.
+  useLockBodyScroll(true);
   const compact = useIsMobile(760);
   const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
@@ -10857,13 +11780,36 @@ function ChatWidget({ customer, onClose }) {
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef(null);
   const sessionId = useRef(`chat-${Date.now()}`);
+  const initialSentRef = useRef(false);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const send = async () => {
-    const text = input.trim();
+  // The iOS keyboard doesn't resize the layout viewport — it pans it, which
+  // shoved the sheet (header and close button included) off the top of the
+  // screen while typing. Cap the sheet to the visual viewport instead.
+  const [viewportH, setViewportH] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const update = () => setViewportH(Math.round(vv.height));
+    update();
+    vv.addEventListener('resize', update);
+    return () => vv.removeEventListener('resize', update);
+  }, []);
+
+  // A question handed in from the Waves AI bar sends itself on open.
+  useEffect(() => {
+    if (initialQuestion && !initialSentRef.current) {
+      initialSentRef.current = true;
+      send(initialQuestion);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuestion]);
+
+  const send = async (textOverride) => {
+    const text = (typeof textOverride === 'string' ? textOverride : input).trim();
     if (!text || sending) return;
 
     setMessages(prev => [...prev, { role: 'user', content: text }]);
@@ -10891,7 +11837,7 @@ function ChatWidget({ customer, onClose }) {
   };
 
   return (
-    <div style={{
+    <div data-glass-scrim="" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
       background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
       display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
@@ -10901,10 +11847,15 @@ function ChatWidget({ customer, onClose }) {
         role="dialog"
         aria-modal="true"
         aria-label="Waves assistant"
+        data-glass="modal"
         style={{
-          background: PORTAL_SHELL.surface,
+          background: PORTAL_SHELL.page,
+          position: 'relative',
+          boxSizing: 'border-box',
           borderRadius: compact ? '8px 8px 0 0' : 8,
-          maxHeight: compact ? '85vh' : 'min(760px, calc(100vh - 48px))',
+          maxHeight: compact
+            ? (viewportH ? `min(85dvh, ${viewportH}px)` : '85dvh')
+            : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
           margin: '0 auto',
@@ -10920,6 +11871,7 @@ function ChatWidget({ customer, onClose }) {
         <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }`}</style>
 
         <div style={{
+          flexShrink: 0,
           padding: '16px 18px',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -10927,7 +11879,7 @@ function ChatWidget({ customer, onClose }) {
           backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <ShellIconTile icon="waves" size={40} />
+            <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
             <div>
               <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Waves Assistant</div>
               <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
@@ -10940,9 +11892,9 @@ function ChatWidget({ customer, onClose }) {
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
+          overscrollBehavior: 'contain',
           padding: '16px 18px',
-          maxHeight: compact ? '60vh' : 'none',
-          background: PORTAL_SHELL.page,
+          background: 'transparent',
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
@@ -10982,6 +11934,7 @@ function ChatWidget({ customer, onClose }) {
         </div>
 
         <div style={{
+          flexShrink: 0,
           padding: '12px 16px',
           borderTop: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
@@ -11000,13 +11953,15 @@ function ChatWidget({ customer, onClose }) {
               padding: '0 14px',
               borderRadius: 8,
               border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-              fontSize: 14,
+              // 16px floor: anything smaller makes iOS auto-zoom the page on
+              // focus, which is what pushed the open chat off the screen.
+              fontSize: 16,
               fontFamily: FONTS.body,
               outline: 'none',
               background: '#fff',
               color: PORTAL_SHELL.text,
             }}
-            autoFocus
+            autoFocus={!compact}
           />
           <button onClick={send} disabled={sending || !input.trim()} style={{
             width: 44,
@@ -11093,10 +12048,15 @@ export default function PortalPage() {
     );
   };
   const [showChat, setShowChat] = useState(false);
+  // Question handed from the Waves AI bar into the assistant on open.
+  const [chatPrompt, setChatPrompt] = useState(null);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
+  // Home is the hero surface (full scene with orbs). Glass is the unconditional
+  // portal theme now, so the scene always mounts.
+  useGlassSurface(true, 'full');
 
   // Close menu on outside click
   useEffect(() => {
@@ -11113,6 +12073,16 @@ export default function PortalPage() {
       document.removeEventListener('mousedown', onPointer);
       document.removeEventListener('keydown', onKey);
     };
+  }, [showMenu]);
+
+  // Lock the page scroll while the account menu is open — on iOS a touch
+  // scroll on the dropdown otherwise chains to the page behind it, so the
+  // background moved while the menu stayed put.
+  useEffect(() => {
+    if (!showMenu) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
   }, [showMenu]);
 
   if (!customer) return null;
@@ -11155,14 +12125,17 @@ export default function PortalPage() {
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (
-    <div style={{
+    <PortalGlassContext.Provider value={true}>
+    <div className="portal-root" style={{
       minHeight: '100vh',
-      background: PORTAL_SHELL.page,
+      // Under glass the fixed scene on <html> provides the backdrop; an
+      // opaque page wash here would occlude it.
+      background: 'transparent',
       fontFamily: FONTS.body,
       color: PORTAL_SHELL.body,
     }}>
       {/* Header */}
-      <div style={{
+      <div data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
@@ -11179,30 +12152,22 @@ export default function PortalPage() {
             <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>Customer Portal</div>
           </div>
         </div>
-        {!isMobileShell && (
-          <nav aria-label="Customer portal" style={{
-            flex: 1, minWidth: 0, margin: '0 10px',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
-            background: PORTAL_SHELL.soft,
-            border: `1px solid ${PORTAL_SHELL.border}`,
-            borderRadius: 12,
-            padding: 4,
-          }}>
-            {headerNavItems.map(headerNavButton)}
-          </nav>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
+            renders as a glass card above the Waves AI bar in the content
+            column. Mobile keeps the bottom nav untouched. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
           {!isMobileShell && (
             <button
               type="button"
               onClick={() => setShowReportIssue(true)}
+              data-glass-accent=""
               style={{
                 minHeight: 38,
                 borderRadius: 10,
                 border: 'none',
                 background: PORTAL_SHELL.text,
                 color: '#fff',
+                position: 'relative',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -11226,12 +12191,14 @@ export default function PortalPage() {
               aria-label="Account menu"
               aria-haspopup="dialog"
               aria-expanded={showMenu}
+              data-glass="chip"
               style={{
                 minHeight: 38,
                 width: isMobileShell ? 38 : 'auto',
                 borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
+                position: 'relative',
                 padding: isMobileShell ? 0 : '4px 8px 4px 4px',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -11266,7 +12233,7 @@ export default function PortalPage() {
               )}
             </button>
             {showMenu && (
-              <div role="dialog" aria-label="Account menu" style={{
+              <div role="dialog" aria-label="Account menu" data-glass="modal" style={{
                 position: 'absolute',
                 right: 0,
                 top: 46,
@@ -11275,8 +12242,13 @@ export default function PortalPage() {
                 background: PORTAL_SHELL.page,
                 borderRadius: 16,
                 overflow: 'hidden',
-                maxHeight: 'calc(100vh - 72px)',
+                // dvh + safe-area: the menu sits ~60px below the notch, so a
+                // plain 100vh budget pushed the last rows off-screen on iOS.
+                maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 84px)',
                 overflowY: 'auto',
+                WebkitOverflowScrolling: 'touch',
+                // Keep the menu's scroll from chaining to the page behind it.
+                overscrollBehavior: 'contain',
                 boxShadow: PORTAL_SHELL.shadow,
                 border: `1px solid ${PORTAL_SHELL.border}`,
                 zIndex: 200,
@@ -11550,6 +12522,26 @@ export default function PortalPage() {
       {/* Content — bottom padding clears the mobile nav so fixed UI doesn't hide the last section. */}
       <div style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
+        {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
+            Home · Plan · Visits · Billing · Refer · Documents · My Property ·
+            Learn — renders as a glass card right above the Waves AI bar
+            instead of inside the sticky top bar. Desktop only; the mobile
+            shell keeps its bottom nav. data-glass is inert without glass. */}
+        {!isMobileShell && (
+          <nav aria-label="Customer portal" data-glass="card" style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
+            background: PORTAL_SHELL.soft,
+            border: `1px solid ${PORTAL_SHELL.border}`,
+            borderRadius: 14,
+            padding: 5,
+            marginBottom: 12,
+            position: 'relative',
+          }}>
+            {headerNavItems.map(headerNavButton)}
+          </nav>
+        )}
+        <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
@@ -11580,7 +12572,7 @@ export default function PortalPage() {
       )}
 
       {/* AI Chat Widget */}
-      {showChat && <ChatWidget customer={customer} onClose={() => setShowChat(false)} />}
+      {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} onClose={() => { setShowChat(false); setChatPrompt(null); }} />}
 
       {/* Report Issue Overlay */}
       <ReportIssueOverlay
@@ -11590,5 +12582,6 @@ export default function PortalPage() {
         customer={customer}
       />
     </div>
+    </PortalGlassContext.Provider>
   );
 }

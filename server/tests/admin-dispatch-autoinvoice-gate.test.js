@@ -73,3 +73,167 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, invoiceAmount: 0 })).toBe(false);
   });
 });
+
+// Per-application billing (billing_mode 'per_application' — owner ruling
+// 2026-07-09): every completed application bills the acceptance fee even
+// without a scheduler flag, a WaveGuard tier, or the priced-visits gate —
+// but never a callback or an always-free type, and never through the
+// monthly-membership autopay suppression (the caller excludes per-application
+// customers from autopayCoversVisit; billing is HOW their autopay card is
+// used, not a reason to skip).
+describe('shouldAutoInvoiceCompletion — per-application billing', () => {
+  const perApp = { ...base, perApplicationBilling: true, invoiceAmount: 98 };
+
+  test('per-application visit invoices with no flag, no tier, gate off', () => {
+    expect(shouldAutoInvoiceCompletion(perApp)).toBe(true);
+  });
+
+  test('tier-less commercial per-application visit still invoices', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, waveguardTier: null })).toBe(true);
+  });
+
+  test('per-application callback / re-treat is never billed', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, isCallback: true })).toBe(false);
+  });
+
+  test('per-application always-free types are never billed', () => {
+    ['Waves Pest Control Appointment Service', 'Estimate service', 'Pest Control Re-Service', 'Follow-up visit']
+      .forEach((serviceType) => {
+        expect(shouldAutoInvoiceCompletion({ ...perApp, serviceType })).toBe(false);
+      });
+  });
+
+  test("per-application decides BEFORE the WaveGuard-tier shortcut — a tiered per-app customer's free visit types stay free (Codex P1)", () => {
+    const tiered = { ...perApp, waveguardTier: 'Bronze' };
+    expect(shouldAutoInvoiceCompletion({ ...tiered, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...tiered, isCallback: true })).toBe(false);
+    // ...while their normal application still bills.
+    expect(shouldAutoInvoiceCompletion(tiered)).toBe(true);
+  });
+
+  test('the explicit scheduler flag still outranks per-application (operator intent)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, serviceType: 'Pest Control Re-Service', createInvoiceOnComplete: true })).toBe(true);
+  });
+
+  test('coverage guards still block a per-application bill (first visit paid at acceptance)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, alreadyPaid: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...perApp, existingCompletionInvoice: { id: 'inv' } })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...perApp, prepaidCovered: true })).toBe(false);
+  });
+
+  test('zero fee never bills', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount: 0 })).toBe(false);
+  });
+});
+
+// Completion invoice amount precedence: explicit visit price → per-app fee →
+// (legacy only) monthly_rate. A per-application customer must NEVER fall back
+// to monthly_rate: a multi-service accept intentionally leaves the fee and
+// row prices NULL, and monthly_rate is the whole-plan amount — the fallback
+// would bill the full package on every service row (Codex round-2 P1).
+describe('completionInvoiceAmount', () => {
+  const { completionInvoiceAmount } = require('../routes/admin-dispatch')._test;
+  const base = {
+    estimatedPrice: null,
+    isCallback: false,
+    perApplicationBilling: false,
+    perApplicationFee: null,
+    monthlyRate: null,
+  };
+
+  test('explicit visit price wins for everyone', () => {
+    expect(completionInvoiceAmount({ ...base, estimatedPrice: '129.00', monthlyRate: 55 })).toBe(129);
+    expect(completionInvoiceAmount({ ...base, estimatedPrice: 89, perApplicationBilling: true, perApplicationFee: 55.3 })).toBe(89);
+  });
+
+  test('per-application: acceptance fee when no explicit price', () => {
+    expect(completionInvoiceAmount({ ...base, perApplicationBilling: true, perApplicationFee: '55.30', monthlyRate: 55.3 })).toBe(55.3);
+  });
+
+  test('per-application multi-service (no fee, no row price) returns 0 — NEVER the whole-plan monthly_rate (Codex round-2 P1)', () => {
+    expect(completionInvoiceAmount({ ...base, perApplicationBilling: true, perApplicationFee: null, monthlyRate: 145 })).toBe(0);
+  });
+
+  test('per-application callback is $0 even with a fee on file', () => {
+    expect(completionInvoiceAmount({ ...base, perApplicationBilling: true, perApplicationFee: 55.3, isCallback: true })).toBe(0);
+  });
+
+  test('legacy customers keep the monthly_rate fallback (WaveGuard membership flows)', () => {
+    expect(completionInvoiceAmount({ ...base, monthlyRate: '49.00' })).toBe(49);
+  });
+
+  test('legacy callback never falls back to monthly_rate', () => {
+    expect(completionInvoiceAmount({ ...base, monthlyRate: 49, isCallback: true })).toBe(0);
+  });
+});
+
+// Annual-prepay customers are never auto-billed at completion for UNPRICED
+// plan visits (Codex round-5 P1): covered visits settle via prepaid stamps,
+// and an uncovered unpriced visit (expired term) belongs to the renewal flow
+// — the tier/monthly_rate branch must not invent an amount per visit. An
+// EXPLICITLY PRICED visit the term does not cover (add-on / one-time) keeps
+// the normal priced-visit billing paths (Codex round-11).
+describe('shouldAutoInvoiceCompletion — annual-prepay billing', () => {
+  const annualPrepay = {
+    ...base,
+    annualPrepayBilling: true,
+    waveguardTier: 'Gold',
+    invoiceAmount: 55.3,
+  };
+
+  test('unpriced annual-prepay visit never auto-invoices, even tiered with a positive amount', () => {
+    expect(shouldAutoInvoiceCompletion(annualPrepay)).toBe(false);
+  });
+
+  test('an uncovered PRICED visit (add-on / one-time) bills via the normal priced paths', () => {
+    // Tiered customer: the tier branch answers (pre-billing_mode behavior).
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(true);
+    // Tier-less customer: the gated priced-visits path answers.
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, waveguardTier: null, autoInvoicePricedVisits: true, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(true);
+    // Tier-less + gate off: nothing bills (legacy non-member behavior) —
+    // the caller's uncovered-completion warn flags it for manual billing.
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, waveguardTier: null, autoInvoicePricedVisits: false, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(false);
+  });
+
+  test('a COVERED priced visit stays suppressed (prepaid stamps own it)', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, hasVisitPrice: true, invoiceAmount: 89, prepaidCovered: true,
+    })).toBe(false);
+  });
+
+  test('the explicit scheduler flag still outranks (operator intent)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...annualPrepay, createInvoiceOnComplete: true })).toBe(true);
+  });
+
+  test('per-application decision is unaffected when the annual-prepay flag is off', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...base, perApplicationBilling: true, annualPrepayBilling: false, invoiceAmount: 55.3,
+    })).toBe(true);
+  });
+});
+
+// Per-application bills per performed APPLICATION (Codex round-8 P1): an
+// inspection_only / customer_declined outcome performed none — no invoice,
+// no auto-charge of the saved method.
+describe('shouldAutoInvoiceCompletion — per-application visit outcome', () => {
+  const perApp = { ...base, perApplicationBilling: true, invoiceAmount: 55.3 };
+
+  test('inspection_only / customer_declined outcomes never bill the fee', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: false })).toBe(false);
+  });
+
+  test('a performed visit still bills (default true preserves all other callers)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: true })).toBe(true);
+    expect(shouldAutoInvoiceCompletion(perApp)).toBe(true);
+  });
+
+  test('the explicit scheduler flag still outranks a non-performed outcome (operator intent)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: false, createInvoiceOnComplete: true })).toBe(true);
+  });
+});

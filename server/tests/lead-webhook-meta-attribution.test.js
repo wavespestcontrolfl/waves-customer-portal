@@ -59,6 +59,62 @@ describe('determineLeadSource — fbclid', () => {
   });
 });
 
+describe('determineLeadSource — UTM casing (normalized comparisons)', () => {
+  // Ad platforms commonly emit cased/whitespace UTM variants. The classifier
+  // computes trimmed/lowercased source+medium and (since the lead-source-classify
+  // extraction) compares THOSE — the original webhook code compared the raw
+  // strings, so 'Google'/'CPC' fell through to the organic/unknown fallback and
+  // was excluded from paid ROAS. These pin the fix (webhook path included).
+  test('utm_source=Google & utm_medium=CPC classifies google_ads paid', () => {
+    const r = determineLeadSource('', '', 'Google', 'CPC', 'brand', '', '');
+    expect(r.source).toBe('google_ads');
+    expect(r.channel).toBe('paid');
+  });
+
+  test('utm_source=Facebook & utm_medium=CPC classifies facebook paid', () => {
+    const r = determineLeadSource('', '', 'Facebook', 'CPC', 'spring', '', '');
+    expect(r.source).toBe('facebook');
+    expect(r.channel).toBe('paid');
+  });
+
+  test('whitespace-padded " fb " still classifies facebook; non-cpc medium stays organic', () => {
+    const r = determineLeadSource('', '', ' fb ', 'Social', 'page', '', '');
+    expect(r.source).toBe('facebook');
+    expect(r.channel).toBe('organic');
+  });
+
+  test('Nextdoor casing classifies the social channel', () => {
+    const r = determineLeadSource('', '', 'NextDoor', '', 'promo', '', '');
+    expect(r.source).toBe('nextdoor');
+    expect(r.channel).toBe('social');
+  });
+});
+
+describe('determineLeadSource — Meta click id wins inside the facebook branch', () => {
+  // The normalized facebook branch returns before the standalone fbclid/_fbc
+  // branch below it, so a paid Meta lead tagged utm_medium=paid_social (not
+  // exactly cpc) used to classify organic despite carrying a deterministic
+  // click id. The click id must force paid within the branch — fbclid/_fbc
+  // only ride ad clicks (organic visits carry only _fbp).
+  test('utm_source=Facebook & utm_medium=paid_social + fbclid classifies paid', () => {
+    const r = determineLeadSource('', '', 'Facebook', 'paid_social', 'spring', '', 'fb.click.123');
+    expect(r.source).toBe('facebook');
+    expect(r.channel).toBe('paid');
+  });
+
+  test('utm_source=fb & utm_medium=paid_social + _fbc classifies paid', () => {
+    const r = determineLeadSource('', '', 'fb', 'paid_social', 'spring', '', '', 'fb.1.171.clickid');
+    expect(r.source).toBe('facebook');
+    expect(r.channel).toBe('paid');
+  });
+
+  test('non-cpc medium with NO click id still classifies organic (unchanged)', () => {
+    const r = determineLeadSource('', '', 'facebook', 'paid_social', 'spring', '', '', '');
+    expect(r.source).toBe('facebook');
+    expect(r.channel).toBe('organic');
+  });
+});
+
 describe('determineLeadSource — gclid (Google auto-tagging)', () => {
   const GCLID = 'CjwKCAjw3ejRBhAdEiwA';
   // args: (pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid)

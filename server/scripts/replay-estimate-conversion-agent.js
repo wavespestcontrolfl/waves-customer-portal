@@ -11,6 +11,14 @@
  *   node server/scripts/replay-estimate-conversion-agent.js --all --days=30 --limit=1000
  */
 
+// Replays exercise the deterministic router only — the grounded LLM review
+// draft (one FLAGSHIP verify loop per message) would turn a 500-row replay
+// into 500 live Claude calls. Opt back in per-run with
+// AGENT_REVIEW_LLM_DRAFTS=replay if a batch of real drafts is the goal.
+if (process.env.AGENT_REVIEW_LLM_DRAFTS !== 'replay') {
+  process.env.AGENT_REVIEW_LLM_DRAFTS = 'false';
+}
+
 const db = require('../models/db');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { isSmsReaction } = require('../services/sms-intent');

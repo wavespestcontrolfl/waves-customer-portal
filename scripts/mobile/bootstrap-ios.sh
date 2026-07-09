@@ -24,20 +24,48 @@ echo "==> 1/5  Installing Capacitor deps (pinning to latest majors)…"
 npm install \
   @capacitor/core@latest @capacitor/cli@latest @capacitor/ios@latest \
   @capacitor/push-notifications@latest @capacitor/app@latest \
-  @capacitor/status-bar@latest @capacitor/splash-screen@latest
+  @capacitor/status-bar@latest @capacitor/splash-screen@latest \
+  @capacitor/filesystem@latest @capacitor/share@latest
 
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build
 
+# Capacitor 8 defaults new iOS projects to Swift Package Manager, but
+# @aparajita/capacitor-biometric-auth ships no Package.swift — under SPM it is
+# silently EXCLUDED from the build, and biometric.js fails open when the plugin
+# is missing, so a fresh SPM project produces an app with no Face ID lock at all.
+# Pin to CocoaPods until every plugin is SPM-compatible.
+if [ -d "ios/App/CapApp-SPM" ]; then
+  echo "==> 3/5  Existing project is SPM-based (drops the Face ID plugin) — moving it to client/ios-spm-backup and regenerating with CocoaPods…"
+  rm -rf ios-spm-backup
+  mv ios ios-spm-backup
+fi
 if [ ! -d "ios/App" ]; then
   echo "==> 3/5  Generating native iOS project (client/ios/App)…"
-  npx cap add ios
+  npx cap add ios --packagemanager Cocoapods
 else
   echo "==> 3/5  Native iOS project already exists — skipping cap add."
 fi
 
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
+
+# Replace the stock Capacitor launch screen (white background + Capacitor logo)
+# with the Waves splash checked in at client/resources/. The generated template's
+# LaunchScreen.storyboard renders the "Splash" imageset full-bleed (aspectFill),
+# so overwriting its PNGs is all that's needed. Idempotent: overwrites every
+# splash-*.png in the imageset each run, so `cap add ios` regenerations can never
+# resurrect the Capacitor-logo default.
+SPLASH_SRC="resources/splash-2732x2732.png"
+SPLASH_SET="ios/App/App/Assets.xcassets/Splash.imageset"
+if [ -f "$SPLASH_SRC" ] && [ -d "$SPLASH_SET" ]; then
+  for f in "$SPLASH_SET"/splash-*.png; do
+    [ -e "$f" ] && cp "$SPLASH_SRC" "$f"
+  done
+  echo "==> Waves splash installed into Splash.imageset ✓"
+else
+  echo "==> WARNING: splash source or imageset missing — launch screen keeps the Capacitor default."
+fi
 
 # Capacitor's iOS push plugin only fires the JS 'registration' event if
 # AppDelegate forwards the UIKit APNs callbacks to Capacitor's NotificationCenter
@@ -71,12 +99,86 @@ if [ -f "$PLIST" ]; then
   echo "==> Info.plist usage strings set (Face ID, camera, photo library R/W) ✓"
 fi
 
+# @capacitor/filesystem touches file-timestamp APIs — Apple requires the app
+# to declare NSPrivacyAccessedAPICategoryFileTimestamp (reason C617.1) in a
+# privacy manifest or App Review rejects the binary (Capacitor 7 docs).
+# Idempotent: written once; on the FIRST bootstrap after this was introduced
+# the file must also be added to the App target in Xcode (manual step below).
+PRIVACY="ios/App/App/PrivacyInfo.xcprivacy"
+if [ ! -f "$PRIVACY" ]; then
+  cat > "$PRIVACY" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSPrivacyAccessedAPITypes</key>
+  <array>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array>
+        <string>C617.1</string>
+      </array>
+    </dict>
+  </array>
+  <key>NSPrivacyCollectedDataTypes</key>
+  <array/>
+  <key>NSPrivacyTracking</key>
+  <false/>
+</dict>
+</plist>
+PLIST
+  echo "==> PrivacyInfo.xcprivacy written (Filesystem file-timestamp declaration) ✓"
+else
+  echo "==> PrivacyInfo.xcprivacy already present ✓"
+fi
+
+# Universal links: portal.wavespestcontrol.com URLs open the installed app
+# directly. Needs (a) this Associated Domains entitlement in the binary and
+# (b) the server serving /.well-known/apple-app-site-association
+# (GATE_UNIVERSAL_LINKS — see docs/mobile/universal-links.md). Idempotent:
+# creates the entitlements file if missing, appends the applinks entry if the
+# file exists without it. Xcode must reference the file (manual step below).
+ENTITLEMENTS="ios/App/App/App.entitlements"
+APPLINK_DOMAIN="applinks:portal.wavespestcontrol.com"
+if [ ! -f "$ENTITLEMENTS" ]; then
+  cat > "$ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.developer.associated-domains</key>
+  <array>
+    <string>${APPLINK_DOMAIN}</string>
+  </array>
+</dict>
+</plist>
+PLIST
+  echo "==> App.entitlements written (Associated Domains: ${APPLINK_DOMAIN}) ✓"
+elif /usr/libexec/PlistBuddy -c "Print :com.apple.developer.associated-domains" "$ENTITLEMENTS" 2>/dev/null | grep -q "$APPLINK_DOMAIN"; then
+  echo "==> App.entitlements already lists ${APPLINK_DOMAIN} ✓"
+else
+  /usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains array" "$ENTITLEMENTS" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :com.apple.developer.associated-domains:0 string ${APPLINK_DOMAIN}" "$ENTITLEMENTS"
+  echo "==> ${APPLINK_DOMAIN} appended to App.entitlements ✓"
+fi
+
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
 cat <<'NOTES'
+   • If PrivacyInfo.xcprivacy is new this run: File → Add Files to "App"…
+     → select App/PrivacyInfo.xcprivacy → check "App" target membership
+     (required for the Filesystem plugin's file-timestamp declaration).
    • Signing & Capabilities → select your Team (bundle id: com.wavespestcontrol.portal)
    • + Capability → Push Notifications
    • + Capability → Background Modes → check "Remote notifications"
+   • + Capability → Associated Domains → confirm applinks:portal.wavespestcontrol.com
+     is listed (this script pre-writes App/App.entitlements; if Xcode shows the
+     capability empty, Build Settings → Code Signing Entitlements must point at
+     App/App.entitlements). Automatic signing then enables Associated Domains
+     on the App ID for you. Server side, links only start opening in-app once
+     GATE_UNIVERSAL_LINKS=true is set on Railway — see docs/mobile/universal-links.md.
    • App Store Connect → Users and Access → Integrations → APNs Auth Key:
        create a .p8 key, note the Key ID + Team ID → these feed the backend
        APNs env vars (see docs/mobile/apns-backend-pr-plan.md).

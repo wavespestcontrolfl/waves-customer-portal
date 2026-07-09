@@ -72,9 +72,12 @@ describe('claimNext action-aware floor', () => {
 
     const [sql, bindings] = db.raw.mock.calls[0];
     expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' THEN \?::numeric ELSE \?::numeric END/);
-    // bindings: [claimed_at, blogFloor, minScore]
-    expect(bindings[1]).toBe(THRESHOLDS.blogMinScoreToAct);
-    expect(bindings[2]).toBe(THRESHOLDS.minScoreToAct);
+    // bindings: [claimed_at, maxAttempts, blogFloor, minScore] — the
+    // lifetime-claim-budget filter binds between the claim timestamp and
+    // the score floors.
+    expect(bindings[1]).toBe(5);
+    expect(bindings[2]).toBe(THRESHOLDS.blogMinScoreToAct);
+    expect(bindings[3]).toBe(THRESHOLDS.minScoreToAct);
   });
 
   test('an explicitly LOWER caller minScore applies to every action type', async () => {
@@ -84,8 +87,8 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({ minScore: 0 });
 
     const [, bindings] = db.raw.mock.calls[0];
-    expect(bindings[1]).toBe(0);
     expect(bindings[2]).toBe(0);
+    expect(bindings[3]).toBe(0);
   });
 
   test('an explicitly HIGHER caller minScore restricts blogs too (no blog-floor leak on --min-score=90)', async () => {
@@ -95,8 +98,8 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({ minScore: 90 });
 
     const [, bindings] = db.raw.mock.calls[0];
-    expect(bindings[1]).toBe(90);
     expect(bindings[2]).toBe(90);
+    expect(bindings[3]).toBe(90);
   });
 
   test('env-tuned blog floor flows into the claim bindings', async () => {
@@ -107,7 +110,7 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [, bindings] = db.raw.mock.calls[0];
-    expect(bindings[1]).toBe(50);
+    expect(bindings[2]).toBe(50);
   });
 });
 

@@ -3,7 +3,8 @@ const SmartRebooker = require('./rebooker');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 async function sendAppointmentSms({ to, body, customerId, messageType }) {
   const result = await sendCustomerMessage({
@@ -23,79 +24,10 @@ async function sendAppointmentSms({ to, body, customerId, messageType }) {
 }
 
 class RescheduleSMS {
-  async sendRescheduleRequest(serviceId, reasonCode, reasonText) {
-    const service = await db('scheduled_services')
-      .where('scheduled_services.id', serviceId)
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.id as cust_id')
-      .first();
-
-    if (!service) throw new Error('Service not found');
-
-    const options = await SmartRebooker.findRescheduleOptions(serviceId, reasonCode);
-    const opt1 = options[0];
-    const opt2 = options[1] || options[0];
-
-    // scheduled_date is a Postgres DATE — node-postgres returns it as a JS Date
-    // at UTC midnight, and formatting that in ET names the previous day.
-    // Recover the calendar date string and anchor at noon instead.
-    const originalDateStr = service.scheduled_date instanceof Date
-      ? service.scheduled_date.toISOString().split('T')[0]
-      : String(service.scheduled_date).split('T')[0];
-    const originalDate = new Date(originalDateStr + 'T12:00:00')
-      .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-    const serviceType = (service.service_type || 'service').toLowerCase();
-    const option1 = `${opt1.displayDate}, ${opt1.suggestedWindow.display}`;
-    const option2 = `${opt2.displayDate}, ${opt2.suggestedWindow.display}`;
-
-    const templateContext = { workflow: 'reschedule_options', entity_type: 'scheduled_service', entity_id: serviceId };
-    let smsBody;
-    let templateKey;
-    if (reasonCode.startsWith('weather')) {
-      templateKey = 'reschedule_options_weather';
-      smsBody = await renderSmsTemplate(templateKey, {
-        first_name: service.first_name, service_type: serviceType, original_date: originalDate, option_1: option1, option_2: option2,
-      }, templateContext);
-    } else if (reasonCode === 'customer_noshow' || reasonCode === 'gate_locked') {
-      const accessIssue = reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property";
-      templateKey = 'reschedule_options_access';
-      smsBody = await renderSmsTemplate(templateKey, {
-        first_name: service.first_name, service_type: serviceType, access_issue: accessIssue, option_1: option1, option_2: option2,
-      }, templateContext);
-    } else {
-      templateKey = 'reschedule_options_general';
-      smsBody = await renderSmsTemplate(templateKey, {
-        first_name: service.first_name, service_type: serviceType, original_date: originalDate, reason_text: reasonText ? ` ${reasonText}` : '', option_1: option1, option_2: option2,
-      }, templateContext);
-    }
-    if (!smsBody) {
-      logger.warn(`[reschedule-sms] template ${templateKey} missing/disabled — service ${serviceId}`);
-      return { success: false, reason: 'missing_template', templateKey };
-    }
-
-    await sendAppointmentSms({
-      to: service.phone,
-      body: smsBody,
-      customerId: service.cust_id || service.customer_id,
-      messageType: 'reschedule',
-    });
-
-    const [logEntry] = await db('reschedule_log').insert({
-      scheduled_service_id: serviceId,
-      customer_id: service.cust_id || service.customer_id,
-      original_date: service.scheduled_date,
-      reason_code: reasonCode,
-      initiated_by: reasonCode.startsWith('weather') ? 'weather_auto' : 'admin',
-      sms_sent_at: db.fn.now(),
-      notes: JSON.stringify({
-        option1: { date: opt1.date, window: opt1.suggestedWindow },
-        option2: { date: opt2.date, window: opt2.suggestedWindow },
-      }),
-    }).returning('id');
-
-    logger.info(`Reschedule SMS sent for customer ${service.cust_id || service.customer_id} for service ${serviceId}`);
-    return { success: true, options: [opt1, opt2], logId: logEntry.id || logEntry };
-  }
+  // sendRescheduleRequest removed 2026-07-06 — it had no callers and its
+  // reschedule_options_* templates never fired in prod; the rain-out engine
+  // owns weather moves with its own template. handleRescheduleReply below
+  // stays: it serves the live reply-1/2 webhook flow (rain-out, tech-track).
 
   async handleRescheduleReply(customerId, messageBody) {
     // Offers expire: with no age limit, a customer texting "1" weeks later
@@ -150,7 +82,52 @@ class RescheduleSMS {
       sms_responded_at: db.fn.now(),
     });
 
+    // Confirm-in-place: a rain-out already MOVED the appointment to option 1
+    // before texting the customer, so "1 to confirm" (or a "2" that lands on the
+    // same slot) is a pure confirmation — the visit is already booked there.
+    // Re-running SmartRebooker.reschedule would re-validate it and, for a
+    // same-day slot whose 1-hour internal window ticked past while the customer
+    // was deciding, wrongly reject it as elapsed even though the reply arrived
+    // inside the 2-hour window we quoted. Skip the re-book when the selection
+    // already matches the live booking. The general reschedule flow offers only
+    // FUTURE candidate dates the appointment isn't on yet, so this never short-
+    // circuits a genuine move.
+    let alreadyOnSlot = false;
     if (selectedOption) {
+      const svc = await db('scheduled_services')
+        .where({ id: pending.scheduled_service_id })
+        .first('scheduled_date', 'window_start', 'window_end', 'status');
+      // pg/Knex can return scheduled_date as a JS Date OR a 'YYYY-MM-DD' string —
+      // normalize both (mirrors track-transitions.isFutureScheduledDate) so a Date
+      // doesn't stringify to 'Sat Jul 04' and silently miss the match.
+      const toYmd = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
+      const normTime = (t) => (t == null ? null : String(t).slice(0, 5));
+      const toMin = (t) => {
+        const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+        return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+      };
+      // Confirm in place only while the reply is still inside the 2-hour arrival
+      // window we quoted the customer. A same-day reply after that window has
+      // passed must fall through to SmartRebooker.reschedule, which rejects the
+      // elapsed slot and routes to office follow-up — the pre-shortcut behavior.
+      const optStartMin = toMin(selectedOption.window?.start);
+      const sameDay = toYmd(selectedOption.date) === etDateString();
+      const now = etParts(new Date());
+      const withinQuotedWindow = !sameDay
+        || (optStartMin != null && (now.hour * 60 + now.minute) < optStartMin + ARRIVAL_WINDOW_MINUTES);
+      // Match date + FULL window (start AND end) so a slot that was manually
+      // widened/edited off the reply option still re-books to the tight target
+      // instead of being silently confirmed as-is. Exclude every non-live status
+      // (completed/cancelled/skipped) so a reply can't "confirm" a dead visit.
+      alreadyOnSlot = !!svc
+        && toYmd(svc.scheduled_date) === toYmd(selectedOption.date)
+        && normTime(svc.window_start) === normTime(selectedOption.window?.start)
+        && normTime(svc.window_end) === normTime(selectedOption.window?.end)
+        && !['completed', 'cancelled', 'skipped'].includes(svc.status)
+        && withinQuotedWindow;
+    }
+
+    if (selectedOption && !alreadyOnSlot) {
       try {
         await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
@@ -171,16 +148,61 @@ class RescheduleSMS {
           throw err;
         }
       }
+
+      // SmartRebooker moves the visit but never touches appointment_reminders,
+      // so without this sync the reminder row keeps the OLD slot's time and the
+      // day-before reminder for the new date never fires (the dispatch rain-out
+      // route does the same sync after its own moves — see
+      // syncRescheduleReminder in routes/admin-dispatch.js). sendNotification
+      // false: the confirmation SMS below is the customer notice;
+      // coverDueWindows keeps the 15-min cron from firing a duplicate
+      // day-before text for a window that notice already covers.
+      if (selectedOption) {
+        try {
+          const AppointmentReminders = require('./appointment-reminders');
+          await AppointmentReminders.handleReschedule(
+            pending.scheduled_service_id,
+            `${selectedOption.date}T${selectedOption.window?.start || '08:00'}`,
+            { sendNotification: false, coverDueWindows: true },
+          );
+        } catch (err) {
+          logger.warn(`[reschedule-sms] Reminder sync failed for ${pending.scheduled_service_id}: ${err.message}`);
+        }
+      }
     }
 
     if (selectedOption) {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
-      // Confirmation copy is inlined — the editable reschedule_confirmed_sms_reply
-      // template was retired, but the customer must still get a confirmation the
-      // moment their 1/2 reply lands (the appointment has already moved).
-      const confirmedBody = `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\nWe'll remind you the day before.`;
+      // The copy varies by how far out the confirmed slot is, because the
+      // closing line must only promise what the reminder cron will actually
+      // do: the day-before (24h) reminder only fires for appointments at least
+      // two days out, so for a same-day or next-day slot "we'll remind you the
+      // day before" is a promise that is already impossible to keep.
+      const todayEt = etDateString();
+      const tomorrowEt = etDateString(addETDays(new Date(), 1));
+      const optDate = String(selectedOption.date);
+      const closingLine = optDate === todayEt
+        ? 'See you today.'
+        : optDate === tomorrowEt
+          ? 'See you tomorrow.'
+          : "We'll remind you the day before.";
+      const templateKey = optDate === todayEt
+        ? 'reschedule_confirmed_today'
+        : optDate === tomorrowEt
+          ? 'reschedule_confirmed_tomorrow'
+          : 'reschedule_confirmed_future';
+
+      // Admin-editable template first (sms_templates, appointments category);
+      // the inlined copy is the fail-safe. This confirmation is transactional —
+      // the visit has already moved when the reply lands — so a missing or
+      // disabled template must revert to stock copy, never silence the send.
+      const confirmedBody = (await renderSmsTemplate(
+        templateKey,
+        { date: displayDate, time: selectedOption.window.display },
+        { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
+      )) || `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\n${closingLine}\n\nReply STOP to opt out.`;
       await sendAppointmentSms({
         to: customer.phone,
         body: confirmedBody,
@@ -203,9 +225,13 @@ class RescheduleSMS {
     // closed the pending offer.
     if (responseType === 'call_requested' || responseType === 'option_expired') {
       const customer = await db('customers').where({ id: customerId }).first();
-      // Inlined retired reschedule_call_requested copy so the customer still
-      // gets an acknowledgement that we'll call them.
-      const callBody = "No problem. We'll give you a call shortly.";
+      // Admin-editable template first; inlined copy is the fail-safe so the
+      // customer always gets an acknowledgement that we'll call them.
+      const callBody = (await renderSmsTemplate(
+        'reschedule_call_requested',
+        {},
+        { workflow: 'reschedule_reply', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id },
+      )) || "No problem. We'll give you a call shortly.\n\nReply STOP to opt out.";
       await sendAppointmentSms({
         to: customer.phone,
         body: callBody,

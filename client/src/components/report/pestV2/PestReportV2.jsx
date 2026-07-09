@@ -14,14 +14,16 @@
 
 import { useState, useEffect } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
+import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // ── Surface tokens (shared with the lawn V2 / public estimate surface) ──────────
-const TEXT = '#1B2C5B';
-const BODY = '#3F4A65';
-const MUTED = '#6B7280';
-const BORDER = '#E7E2D7';
+const TEXT = CUSTOMER_SURFACE.text;
+const BODY = CUSTOMER_SURFACE.body;
+// muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
+const MUTED = CUSTOMER_SURFACE.muted;
+const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 
 // Status tone → accent + soft wash. Drives the hero and the defense chips.
@@ -92,8 +94,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
   if (!status) return null;
   const t = tone(status.tone);
   return (
-    <section style={{ ...card, background: t.wash, border: `1px solid ${t.border}` }}>
-      <div style={eyebrow}>Today’s protection status</div>
+    <section data-glass="card" style={{ ...card, background: t.wash, border: `1px solid ${t.border}` }}>
+      <div data-gt="eyebrow" style={eyebrow}>Today’s protection status</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ width: 12, height: 12, borderRadius: '50%', background: t.color, flexShrink: 0, boxShadow: `0 0 0 4px ${t.color}22` }} />
         <h2 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 24, color: TEXT, margin: 0 }}>{status.label}</h2>
@@ -133,6 +135,7 @@ function SupportingMetric({ metric }) {
 function PestPressureRating({ metric, token, live }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
     return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
@@ -141,12 +144,16 @@ function PestPressureRating({ metric, token, live }) {
   const submit = async (n) => {
     if (busy) return;
     setBusy(true);
+    setFailed(false);
     try {
       const res = await fetch(`${API_BASE}/reports/${token}/pest-pressure/client-rating`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: n }),
       });
-      if (res.ok) setSubmitted(true);
-    } catch { /* leave the picker up for a retry */ } finally { setBusy(false); }
+      // 409 = already recorded (another tab/device) — show the thank-you,
+      // not a dead picker.
+      if (res.ok || res.status === 409) setSubmitted(true);
+      else setFailed(true);
+    } catch { setFailed(true); } finally { setBusy(false); }
   };
   return (
     <div style={{ marginTop: 14, padding: '12px 14px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
@@ -158,6 +165,11 @@ function PestPressureRating({ metric, token, live }) {
         ))}
       </div>
       <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
+      {failed && (
+        <div style={{ fontSize: 12, color: '#991B1B', marginTop: 8 }}>
+          Couldn&rsquo;t save your rating — please tap a number to try again.
+        </div>
+      )}
     </div>
   );
 }
@@ -188,8 +200,8 @@ export function PestProtectionMap({ defense, print = false }) {
   ];
 
   return (
-    <section style={card}>
-      <div style={eyebrow}>Where we protected</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Where we protected</div>
       <h3 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 17, color: TEXT, margin: '0 0 2px' }}>
         {perimeterActive ? 'A protective barrier is active around your home' : 'We’re building protection around your home'}
       </h3>
@@ -259,8 +271,8 @@ export function PestProtectionMap({ defense, print = false }) {
 export function PestPrimaryMove({ primaryMove }) {
   if (!primaryMove?.title) return null;
   return (
-    <section style={{ ...card, borderLeft: `4px solid ${COLORS.wavesBlue}` }}>
-      <div style={eyebrow}>Your next step</div>
+    <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.wavesBlue}` }}>
+      <div data-gt="eyebrow" style={eyebrow}>Your next step</div>
       <h3 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 17, color: TEXT, margin: '0 0 6px' }}>{primaryMove.title}</h3>
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
       {primaryMove.impact ? <p style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
@@ -275,8 +287,8 @@ export function PestPrimaryMove({ primaryMove }) {
 export function PestReceipt({ receipt }) {
   if (!receipt?.stats?.length) return null;
   return (
-    <section style={card}>
-      <div style={eyebrow}>{receipt.headline || 'Your service record'}</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>{receipt.headline || 'Your service record'}</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
         {receipt.stats.map((stat) => (
           <div key={stat.label} style={{ background: '#F8FAFC', border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 12px' }}>
@@ -294,8 +306,8 @@ export function PestReceipt({ receipt }) {
 export function PestBugFiles({ bugFiles = [], print = false }) {
   if (!bugFiles.length) return null;
   return (
-    <section style={card}>
-      <div style={eyebrow}>Pests we’re watching</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Pests we’re watching</div>
       <div style={{ display: 'grid', gap: 10 }}>
         {bugFiles.map((bug) => (
           <div key={bug.pestKey || bug.suspectLabel} style={{ border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 14px' }}>
@@ -337,8 +349,8 @@ export function PestSeasonForecast({ forecast }) {
   if (!forecast?.pests?.length) return null;
   const title = forecast.monthName ? `What to expect in ${forecast.monthName}` : 'What to expect this season';
   return (
-    <section style={card}>
-      <div style={eyebrow}>Seasonal outlook</div>
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Seasonal outlook</div>
       <h3 style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 17, color: TEXT, margin: '0 0 4px' }}>{title}</h3>
       {forecast.headline ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{forecast.headline}</p> : null}
       {forecast.weatherSummary ? <div style={{ fontSize: 12, color: MUTED, marginBottom: 10 }}>{forecast.weatherSummary}{forecast.locationLabel ? ` · ${forecast.locationLabel}` : ''}</div> : null}

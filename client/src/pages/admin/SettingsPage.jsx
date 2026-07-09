@@ -4,12 +4,14 @@ import {
   Activity,
   Building2,
   ChevronRight,
+  DollarSign,
   MapPinned,
   Plug,
   RotateCcw,
   Save,
   Server,
   Settings as SettingsIcon,
+  Target,
   ToggleLeft,
   Users,
 } from "lucide-react";
@@ -17,6 +19,10 @@ import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
+import {
+  DEFAULT_KPI_TARGETS,
+  KPI_METRIC_LABELS,
+} from "./dashboard/kpi-targets";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
@@ -127,6 +133,8 @@ const VALID_TABS = [
   "gates",
   "team",
   "service-reports",
+  "kpi-targets",
+  "operating-costs",
   "system",
 ];
 
@@ -137,6 +145,7 @@ const SETTINGS_TAB_GROUPS = [
   { key: "general", label: "General", Icon: Building2, tabs: ["general", "team"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
+  { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
   { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
 ];
 
@@ -146,6 +155,8 @@ const SETTINGS_LEAF_META = {
   team: { label: "Team", Icon: Users },
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Service Reports", Icon: MapPinned },
+  "kpi-targets": { label: "KPI Targets", Icon: Target },
+  "operating-costs": { label: "Operating Costs", Icon: DollarSign },
   gates: { label: "Feature Gates", Icon: ToggleLeft },
   system: { label: "System", Icon: Server },
 };
@@ -161,6 +172,14 @@ export default function SettingsPage() {
     ? searchParams.get("tab")
     : "general";
   const [tab, setTab] = useState(initialTab);
+
+  // Mobile section links change ?tab= on the already-mounted page (the mobile
+  // index and the tab panel share this route/component) — sync the param into
+  // state so those taps actually switch tabs instead of leaving the prior one.
+  useEffect(() => {
+    const qp = searchParams.get("tab");
+    if (qp && VALID_TABS.includes(qp)) setTab(qp);
+  }, [searchParams]);
 
   useEffect(() => {
     Promise.all([
@@ -526,6 +545,12 @@ export default function SettingsPage() {
         </Card>
       )}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
+      {tab === "kpi-targets" && (
+        <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />
+      )}
+      {tab === "operating-costs" && (
+        <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />
+      )}
       {/* ── SYSTEM ── */}
       {tab === "system" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -862,6 +887,390 @@ function VisitTimelineSettingsCard() {
       </div>
       {message && <div style={{ marginTop: 12, fontSize: 12, color: message.includes("Could not") ? D.red : D.green }}>{message}</div>}
     </Card>
+  );
+}
+
+// Editable red/amber/green thresholds for the dashboard KPI tiles
+// Owner-entered MONTHLY operating overhead (company_financials ovh_* — the
+// adjusted-EBITDA bridge's authoritative overhead once entered; until then the
+// bridge falls back to pricing assumptions and says so). Deliberately separate
+// from the pricing inputs: a pricing tweak must never rewrite the P&L view.
+const OVH_FIELDS_UI = [
+  { key: "ovhOfficePayroll", col: "ovh_office_payroll", label: "Office payroll", hint: "admin/CSR wages — NOT tech labor (that's in job costs)" },
+  { key: "ovhRent", col: "ovh_rent", label: "Rent / storage", hint: "office, warehouse, storage units" },
+  { key: "ovhInsurance", col: "ovh_insurance", label: "Business insurance", hint: "GL, workers' comp, umbrella" },
+  { key: "ovhSoftware", col: "ovh_software", label: "Software & subscriptions", hint: "portal hosting, phones, SaaS" },
+  { key: "ovhVehicleFixed", col: "ovh_vehicle_fixed", label: "Vehicles (fixed)", hint: "payments, insurance, registration — fuel rides in job drive costs" },
+  { key: "ovhOtherGa", col: "ovh_other_ga", label: "Other G&A", hint: "banking, professional fees, misc overhead" },
+];
+
+function OperatingCostsSettingsTab({ canAdmin }) {
+  const [row, setRow] = useState(null); // latest company_financials row
+  const [dirty, setDirty] = useState({}); // { ovhKey: string input value }
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null); // { text, error }
+
+  useEffect(() => {
+    adminFetch("/admin/revenue/settings")
+      .then((data) => {
+        if (!data || typeof data !== "object" || !("settings" in data)) {
+          throw new Error(data?.error || "Could not load operating costs.");
+        }
+        setRow(data.settings || {});
+      })
+      .catch((err) => setMessage({ text: err.message || "Could not load operating costs.", error: true }));
+  }, []);
+
+  const valueOf = (f) =>
+    dirty[f.key] !== undefined ? dirty[f.key] : row?.[f.col] != null ? String(parseFloat(row[f.col])) : "";
+
+  const save = async () => {
+    const body = {};
+    for (const f of OVH_FIELDS_UI) {
+      if (dirty[f.key] === undefined) continue;
+      const raw = String(dirty[f.key]).trim();
+      if (raw === "") { body[f.key] = null; continue; } // blank clears the figure
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0) {
+        setMessage({ text: `"${f.label}" must be a number ≥ 0 (or blank to clear).`, error: true });
+        return;
+      }
+      body[f.key] = v;
+    }
+    if (!Object.keys(body).length) {
+      setMessage({ text: "Nothing to save yet — edit a figure first.", error: true });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const result = await adminFetch("/admin/revenue/settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      if (result?.error) throw new Error(result.error);
+      if (result?.settings) setRow(result.settings);
+      setDirty({});
+      setMessage({ text: "Saved. The dashboard's EBITDA bridge switches to these entered costs on its next refresh.", error: false });
+    } catch (err) {
+      setMessage({ text: err.message || "Could not save operating costs.", error: true });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Fail closed — no inputs until the latest row actually loaded (editing on
+  // top of a failed load could clobber entered figures with blanks).
+  if (!row) {
+    return (
+      <Card>
+        <div style={{ color: message?.error ? D.red : D.muted, fontSize: 13 }}>
+          {message?.text || "Loading operating costs..."}
+        </div>
+      </Card>
+    );
+  }
+
+  const monthlyTotal = OVH_FIELDS_UI.reduce((t, f) => {
+    const v = Number(valueOf(f));
+    return t + (Number.isFinite(v) ? v : 0);
+  }, 0);
+  const enteredAt = row.overhead_entered_at ? String(row.overhead_entered_at).slice(0, 10) : null;
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Operating Costs</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+              Real monthly overhead for the dashboard's adjusted-EBITDA bridge. Separate from the
+              pricing assumptions on purpose — job pricing and the company P&amp;L must not rewrite
+              each other. Until these are entered, the bridge approximates from pricing settings
+              and labels itself accordingly.
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: D.muted }}>
+              {enteredAt ? `Last entered ${enteredAt}.` : "Never entered — the bridge is running on pricing assumptions."}
+            </div>
+          </div>
+          {canAdmin && (
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || Object.keys(dirty).length === 0}
+              style={{ ...settingsButtonStyle("primary"), opacity: saving || Object.keys(dirty).length === 0 ? 0.6 : 1 }}
+            >
+              <Save size={15} /> {saving ? "Saving..." : "Save costs"}
+            </button>
+          )}
+        </div>
+        {message && (
+          <div style={{ marginTop: 12, fontSize: 12, color: message.error ? D.red : D.green }}>
+            {message.text}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ display: "grid", gap: 12 }}>
+          {OVH_FIELDS_UI.map((f) => (
+            <div key={f.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: D.text }}>
+                  {f.label}
+                  {dirty[f.key] !== undefined && <span style={{ color: D.amber, marginLeft: 6 }}>•</span>}
+                </div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{f.hint}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <span style={{ fontSize: 13, color: D.muted }}>$</span>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={valueOf(f)}
+                  placeholder="0"
+                  disabled={!canAdmin}
+                  onChange={(ev) => setDirty((d) => ({ ...d, [f.key]: ev.target.value }))}
+                  style={{ width: 110, padding: "6px 8px", fontSize: 13, fontFamily: MONO, border: `1px solid ${D.inputBorder}`, borderRadius: 6, background: D.white, color: D.text }}
+                />
+                <span style={{ fontSize: 12, color: D.muted }}>/mo</span>
+              </div>
+            </div>
+          ))}
+          <div style={{ display: "flex", justifyContent: "space-between", borderTop: `1px solid ${D.border}`, paddingTop: 12, fontSize: 13 }}>
+            <span style={{ color: D.muted }}>Monthly overhead total</span>
+            <span style={{ fontFamily: MONO, color: D.heading, fontWeight: 700 }}>
+              ${monthlyTotal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+            </span>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// (/api/admin/kpi-targets, seeded from the old hardcoded values). Every
+// snapshot metric is listed — ones without a target simply have no tone until
+// the owner sets one. The dashboard falls back to DEFAULT_KPI_TARGETS when a
+// row is missing, so clearing a field here never blanks a tile.
+function KpiTargetsSettingsTab({ canAdmin }) {
+  const [rows, setRows] = useState(null); // { [metric]: stored row }
+  const [dirty, setDirty] = useState({}); // { [metric]: { target?, amberBandPct?, lowerIsBetter? } }
+  const [saving, setSaving] = useState(false);
+  // { text, error } — an explicit flag, not a substring heuristic, so server
+  // validation rejections can never render green as if the save succeeded.
+  const [message, setMessage] = useState(null);
+
+  useEffect(() => {
+    adminFetch("/admin/kpi-targets")
+      .then((data) => {
+        // adminFetch resolves non-2xx JSON bodies too — treat anything
+        // without a real targets array as a failed load. Editing off
+        // fallback defaults while the store didn't load would let a save
+        // overwrite owner-set targets with the defaults.
+        if (!Array.isArray(data?.targets)) {
+          throw new Error(data?.error || "Could not load KPI targets.");
+        }
+        const byMetric = {};
+        for (const row of data.targets) byMetric[row.metric] = row;
+        setRows(byMetric);
+      })
+      .catch((err) => setMessage({ text: err.message || "Could not load KPI targets.", error: true }));
+  }, []);
+
+  // Stored row, overlaid by unsaved edits, falling back to the tile default.
+  const effective = (metric) => ({
+    ...(DEFAULT_KPI_TARGETS[metric] || {}),
+    ...(rows?.[metric] || {}),
+    ...(dirty[metric] || {}),
+  });
+
+  const edit = (metric, patch) =>
+    setDirty((d) => ({ ...d, [metric]: { ...(d[metric] || {}), ...patch } }));
+
+  const save = async () => {
+    const changed = Object.keys(dirty);
+    const targets = [];
+    for (const metric of changed) {
+      const e = effective(metric);
+      // Blank must be rejected BEFORE coercion — Number("") is 0, which would
+      // silently save a 0 target (always-green for higher-is-better tiles).
+      const blank = e.target == null || (typeof e.target === "string" && e.target.trim() === "");
+      const target = Number(e.target);
+      if (blank || !Number.isFinite(target)) {
+        setMessage({ text: `Enter a numeric target for "${KPI_METRIC_LABELS[metric] || metric}" (or discard the edit).`, error: true });
+        return;
+      }
+      targets.push({
+        metric,
+        target,
+        amberBandPct: e.amberBandPct == null || e.amberBandPct === "" ? 10 : Number(e.amberBandPct),
+        lowerIsBetter: !!e.lowerIsBetter,
+      });
+    }
+    if (!targets.length) {
+      setMessage({ text: "Nothing to save yet — edit a target first.", error: true });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const result = await adminFetch("/admin/kpi-targets", {
+        method: "PUT",
+        body: JSON.stringify({ targets }),
+      });
+      if (result?.error) throw new Error(result.error);
+      // Re-fetch instead of merging locally: the server stamps
+      // updated_by/updated_at (and the save busted its GET cache), so the
+      // table shows the authoritative row, not stale "seeded"/old-editor
+      // metadata until a reload.
+      const fresh = await adminFetch("/admin/kpi-targets").catch(() => null);
+      if (Array.isArray(fresh?.targets)) {
+        const byMetric = {};
+        for (const row of fresh.targets) byMetric[row.metric] = row;
+        setRows(byMetric);
+      } else {
+        // Refresh hiccup after a successful save — keep the UI reflecting
+        // what was saved rather than blanking.
+        setRows((prev) => {
+          const next = { ...(prev || {}) };
+          for (const t of targets) next[t.metric] = { ...(next[t.metric] || {}), ...t };
+          return next;
+        });
+      }
+      setDirty({});
+      setMessage({ text: `Saved ${targets.length} target${targets.length === 1 ? "" : "s"}. Dashboard tiles pick this up on their next refresh.`, error: false });
+    } catch (err) {
+      setMessage({ text: err.message || "Could not save KPI targets.", error: true });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Fail closed: no editable table until a load actually succeeded — the
+  // fallback defaults are for the dashboard tiles, not for editing, and a
+  // save on top of them could clobber owner-set targets that failed to load.
+  if (!rows) {
+    return (
+      <Card>
+        <div style={{ color: message?.error ? D.red : D.muted, fontSize: 13 }}>
+          {message?.text || "Loading KPI targets..."}
+        </div>
+      </Card>
+    );
+  }
+
+  const inputStyle = {
+    width: 90,
+    padding: "6px 8px",
+    fontSize: 13,
+    fontFamily: MONO,
+    border: `1px solid ${D.inputBorder}`,
+    borderRadius: 6,
+    background: D.white,
+    color: D.text,
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>KPI Targets</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+              Dashboard tiles color against these: green at/above target, amber within the band, red beyond it.
+              "Lower is better" flips the comparison (callback rate, AR days, response speed).
+            </div>
+          </div>
+          {canAdmin && (
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || Object.keys(dirty).length === 0}
+              style={{ ...settingsButtonStyle("primary"), opacity: saving || Object.keys(dirty).length === 0 ? 0.6 : 1 }}
+            >
+              <Save size={15} /> {saving ? "Saving..." : "Save targets"}
+            </button>
+          )}
+        </div>
+        {message && (
+          <div style={{ marginTop: 12, fontSize: 12, color: message.error ? D.red : D.green }}>
+            {message.text}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: D.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                <th style={{ padding: "6px 10px 10px 0" }}>Metric</th>
+                <th style={{ padding: "6px 10px 10px 0" }}>Target</th>
+                <th style={{ padding: "6px 10px 10px 0" }}>Direction</th>
+                <th style={{ padding: "6px 10px 10px 0" }}>Amber band %</th>
+                <th style={{ padding: "6px 0 10px 0" }}>Last updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.keys(KPI_METRIC_LABELS).map((metric) => {
+                const e = effective(metric);
+                const stored = rows?.[metric];
+                const isDirty = !!dirty[metric];
+                return (
+                  <tr key={metric} style={{ borderTop: `1px solid ${D.border}` }}>
+                    <td style={{ padding: "10px 10px 10px 0", color: D.text }}>
+                      {KPI_METRIC_LABELS[metric]}
+                      {isDirty && <span style={{ color: D.amber, marginLeft: 6 }}>•</span>}
+                    </td>
+                    <td style={{ padding: "10px 10px 10px 0" }}>
+                      <input
+                        type="number"
+                        step="any"
+                        value={e.target ?? ""}
+                        placeholder="—"
+                        disabled={!canAdmin}
+                        onChange={(ev) => edit(metric, { target: ev.target.value })}
+                        style={inputStyle}
+                      />
+                    </td>
+                    <td style={{ padding: "10px 10px 10px 0" }}>
+                      <select
+                        value={e.lowerIsBetter ? "lower" : "higher"}
+                        disabled={!canAdmin}
+                        onChange={(ev) => edit(metric, { lowerIsBetter: ev.target.value === "lower" })}
+                        style={{ ...inputStyle, width: 130, fontFamily: "inherit" }}
+                      >
+                        <option value="higher">Higher is better</option>
+                        <option value="lower">Lower is better</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: "10px 10px 10px 0" }}>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="any"
+                        value={e.amberBandPct ?? 10}
+                        disabled={!canAdmin}
+                        onChange={(ev) => edit(metric, { amberBandPct: ev.target.value })}
+                        style={inputStyle}
+                      />
+                    </td>
+                    <td style={{ padding: "10px 0", color: D.muted, fontSize: 12 }}>
+                      {stored?.updatedAt
+                        ? `${new Date(stored.updatedAt).toLocaleDateString("en-US", { timeZone: "America/New_York" })}${stored.updatedBy ? ` · ${stored.updatedBy}` : ""}`
+                        : stored ? "seeded" : "no target set"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
   );
 }
 

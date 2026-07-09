@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Bookmark, ClipboardList, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
 import {
@@ -152,10 +152,15 @@ export default function UnifiedPipelineView() {
     const urlSource = searchParams.get("source") || "";
     if (urlFilter !== filter) setFilter(urlFilter);
     if (urlPage !== page) setPage(urlPage);
-    if (urlSearch !== search) setSearch(urlSearch);
+    // The URL stores the TRIMMED search/source (updatePipelineUrl trims on
+    // write), so compare trimmed forms — comparing raw made this effect
+    // delete a just-typed trailing space ("new " → "new") on every keystroke,
+    // which made multi-word searches untypeable. Real URL changes
+    // (back/forward, pasted links) still differ after trimming and sync.
+    if (urlSearch !== search.trim()) setSearch(urlSearch);
     if (urlSort !== sort) setSort(urlSort);
     if (urlDateRange !== dateRange) setDateRange(urlDateRange);
-    if (urlSource !== source) setSource(urlSource);
+    if (urlSource !== source.trim()) setSource(urlSource);
   }, [dateRange, filter, page, search, searchParams, sort, source]);
 
   const updatePipelineUrl = useCallback((overrides = {}, { replace = false } = {}) => {
@@ -284,14 +289,28 @@ export default function UnifiedPipelineView() {
     }
   }, [activeSavedView]);
 
+  // Search settles for 250ms before it drives a fetch — every keystroke was
+  // firing an unbounded /opportunities query. Filter/page/sort changes stay
+  // instant (they key off their own states below, not this one).
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 250);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Monotonic guard: with no sequencing, a slow response for an earlier
+  // query could land after a later one and replace the fresher list.
+  const loadSeqRef = useRef(0);
+
   const loadPipeline = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setLoadError(null);
     const params = new URLSearchParams();
     params.set("stage", filter);
     params.set("page", String(page));
     params.set("pageSize", filter === "duplicate_risk" ? "25" : "100");
-    if (search.trim()) params.set("search", search.trim());
+    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
     if (sort !== "default") params.set("sort", sort);
     if (source.trim()) params.set("source", source.trim());
     const dateFrom = dateFromForRange(dateRange);
@@ -299,12 +318,14 @@ export default function UnifiedPipelineView() {
 
     try {
       const data = await adminFetch(`/admin/pipeline/opportunities?${params.toString()}`);
+      if (seq !== loadSeqRef.current) return;
       setOpportunities(data.data || []);
       setCounts(data.counts || {});
       setPagination(data.pagination || { page: 1, pageSize: 100, total: 0 });
       setMeta(data.meta || null);
       setLoading(false);
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       setLoadError(err);
       setOpportunities([]);
       setCounts({});
@@ -312,7 +333,7 @@ export default function UnifiedPipelineView() {
       setMeta(null);
       setLoading(false);
     }
-  }, [dateRange, filter, page, search, sort, source]);
+  }, [dateRange, filter, page, debouncedSearch, sort, source]);
 
   useEffect(() => {
     loadPipeline();

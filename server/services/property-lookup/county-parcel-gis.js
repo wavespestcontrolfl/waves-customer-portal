@@ -125,7 +125,7 @@ const COUNTY_LAYERS = {
       'PARID', 'SITUS_ADDRESS', 'SITUS_POSTAL_CITY', 'SITUS_POSTAL_ZIP',
       'LAND_SQFT_CAMA', 'BLDGS_SQFT_LIVING', 'BLDG_R1_STORIES', 'BLDG_R1_YRBUILT',
       'BLDGS_LIVINGUNITS', 'CUR_DOR_LUC_CODE', 'CUR_MAN_LUC_DESC',
-      'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR',
+      'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR', 'FEATS_SQFT_IMPERV',
     ],
     parse: (g) => ({
       parcelId: cleanStr(g('PARID')),
@@ -142,6 +142,11 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('PAR_SUBDIV_NAME')),
       poolFlag: yesNoFlag(g('PAR_SWIMPOOL_FLAG')),
       rollYear: positiveOrNull(g('CUR_ROLL_YEAR')),
+      // Assessed impervious sqft (driveways, pool decks) — feeds the shadow
+      // footprint-turf computation when the GIS layer is the only county hit
+      // (new construction). 0 on the roll means not-yet-assessed, not "no
+      // hardscape" (live probe: a just-sold 2024 build carried 0) → null.
+      imperviousAreaSf: positiveOrNull(g('FEATS_SQFT_IMPERV')),
     }),
   },
   Sarasota: {
@@ -166,6 +171,7 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('subd')),
       poolFlag: yesNoFlag(g('pool')),
       rollYear: null,
+      imperviousAreaSf: null, // not in the Sarasota layer
     }),
   },
   Charlotte: {
@@ -189,6 +195,7 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('subneighborhood')),
       poolFlag: null,
       rollYear: null,
+      imperviousAreaSf: null, // not in the Charlotte ownership layer
     }),
   },
 };
@@ -398,8 +405,75 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   return null;
 }
 
+// Situs-address field(s) per county for street-level roll queries (the
+// house-number audit in ai-property-lookup). Same layers as the
+// point-in-polygon path above, so availability and casing stay in lockstep.
+// Charlotte populates either FullPropertyAddress or the lowercase fallback —
+// mirror the parser's dual-field read or fallback-only parcels vanish.
+const SITUS_QUERY_FIELDS = {
+  Manatee: ['SITUS_ADDRESS'],
+  Sarasota: ['fulladdress'],
+  Charlotte: ['FullPropertyAddress', 'propertyaddress'],
+};
+
+// All situs strings on the county roll whose address contains the given
+// street text ("TOBERMORY" → every parcel on Tobermory Way, including
+// multi-situs paired-villa rows). Returns { situs, truncated } — truncated
+// mirrors the ArcGIS exceededTransferLimit flag so the caller knows a "number
+// missing" verdict could be an artifact of the page cap on a long street.
+// Fail-open null on error/timeout — the audit is a diagnostic hint, never
+// worth sinking a lookup for. The street text is stripped to [A-Z0-9 ] before
+// interpolation, so no quoting is reachable.
+async function queryStreetSitusAddresses(county, streetText, options = {}) {
+  if (isDisabled()) return null;
+  const layer = COUNTY_LAYERS[county];
+  const fields = SITUS_QUERY_FIELDS[county];
+  const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!layer || !fields || text.length < 3) return null;
+
+  const params = new URLSearchParams({
+    f: 'json',
+    where: fields.map((f) => `UPPER(${f}) LIKE '%${text}%'`).join(' OR '),
+    outFields: fields.join(','),
+    returnGeometry: 'false',
+    resultRecordCount: '2000',
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
+  const t0 = Date.now();
+  try {
+    const resp = await fetch(`${layer.url}?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`${county} street GIS ${resp.status}`);
+    const data = await resp.json();
+    if (data?.error) throw new Error(`${county} street GIS error: ${data.error.message || data.error.code}`);
+    const features = Array.isArray(data?.features) ? data.features : [];
+    const situs = features
+      .map((f) => {
+        const g = ciAttr(f.attributes || {});
+        return fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
+      })
+      .filter(Boolean);
+    const truncated = !!data?.exceededTransferLimit;
+    logger.info('[county-parcel-gis] street situs query', {
+      county, matches: situs.length, truncated, elapsedMs: Date.now() - t0,
+    });
+    return { situs, truncated };
+  } catch (err) {
+    const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
+    // County + error only — no street/address values in logs (PII rule).
+    logger.warn('[county-parcel-gis] street situs query failed', {
+      county, aborted, error: err?.message || String(err), elapsedMs: Date.now() - t0,
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 module.exports = {
   lookupCountyParcelByPoint,
+  queryStreetSitusAddresses,
   countyUseDescToPropertyType,
   dorMajorCategory,
   normalizeCountyName,

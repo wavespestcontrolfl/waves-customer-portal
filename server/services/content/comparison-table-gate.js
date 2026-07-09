@@ -8,11 +8,18 @@
  * earns that demand by HELPING the reader choose, never by faking a ranking or
  * trashing competitors.
  *
- * SCOPE: only drafts that embed a <ComparisonTable> are scrutinized; others pass
- * untouched. For a comparison draft, the competitor / disparagement / ranking
- * checks scan the whole body PLUS the title/meta (the public legal surface), and
- * the option-column classification FAILS CLOSED on anything that is not a
- * recognized provider CATEGORY, Waves, or a curated allowlist competitor.
+ * SCOPE: drafts that embed a <ComparisonTable> get the FULL regime — the
+ * competitor / disparagement / ranking checks scan the whole body PLUS the
+ * title/meta (the public legal surface), and the option-column classification
+ * FAILS CLOSED on anything that is not a recognized provider CATEGORY, Waves,
+ * or a curated allowlist competitor.
+ *
+ * Drafts WITHOUT a table are no longer waved through: they get the NAMED-
+ * TARGET legal scan (evaluateProse below). Defamation needs a target, and a
+ * table-less draft was previously never scanned at all — "Acme Pest Solutions
+ * is dishonest" in ordinary prose passed every gate. Category negativity with
+ * no named business ("store-bought sprays are useless", consumer-protection
+ * prose like "avoid pest control scams") deliberately does NOT trip it.
  *
  * NAMED competitors are doubly guarded: the gate enforces allowlist + per-table
  * sourced attribution + only-curated-facts + no-disparagement/ranking, AND a
@@ -58,7 +65,34 @@ const PROVIDER_DISPARAGEMENT_RE = new RegExp([
 
 // Negative service-reliability claims about a provider. Flagged inside table
 // blocks OR in prose/title/meta when within PROXIMITY of a named competitor.
-const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|never (?:answers?|calls?|shows?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back|don'?t show up)\b/i;
+// The negated-verb arm covers every common auxiliary, not just "never"/
+// "won't call back": "does not answer the phone" / "doesn't call back" /
+// "don't show up" are the ordinary prose forms of the same claim and
+// previously produced no finding. The "call FOR" lookahead keeps the
+// require-idiom clean — "light infestations do not call for fumigation"
+// is treatment advice, not a reliability claim.
+const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|(?:never|doesn'?t|does\s+not|don'?t|do\s+not|won'?t|will\s+not)\s+(?:answers?(?:\s+(?:the\s+)?(?:phone|calls?))?|calls?(?!\s+for\b)(?:\s+(?:you\s+)?back)?|shows?(?:\s+up)?|responds?|replies|reply|returns?\s+calls?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back)\b/i;
+
+// ACTIVE disparaging predicates — verb-plus-victim shapes ("scams customers",
+// "charges hidden fees") for the generic-name directed scan. The victim object
+// (or the fee/bait idiom) is REQUIRED so title-case noun uses stay clean:
+// "How to Avoid Pest Control Scams in Sarasota" captures the business-shaped
+// "Avoid Pest Control" but "Scams in" has no victim, so it does not trip.
+const DISPARAGEMENT_VICTIM = "(?:its\\s+|their\\s+)?(?:customers?|clients?|homeowners?|residents?|seniors?|people|folks|you\\b)";
+const ACTIVE_DISPARAGEMENT_SRC = [
+  `scams?\\s+${DISPARAGEMENT_VICTIM}`,
+  `rips?\\s+${DISPARAGEMENT_VICTIM}\\s+off`,
+  `rips?\\s+off\\s+${DISPARAGEMENT_VICTIM}`,
+  `gouges?\\s+(?:${DISPARAGEMENT_VICTIM}|prices)`,
+  `overcharges?(?:\\s+(?:${DISPARAGEMENT_VICTIM}|for\\b))?`,
+  'charges?\\s+hidden\\s+fees?',
+  `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
+  `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
+  `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
+  `defrauds?\\s+${DISPARAGEMENT_VICTIM}`,
+  'pulls?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
+  'uses?\\s+bait[\\s-]and[\\s-]switch',
+].join('|');
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
 // Self-declared ranking / superlative framing. Scanned over body + title/meta,
@@ -259,19 +293,257 @@ function claimSupported(text, attrValues) {
   return false;
 }
 
+// Title/meta live at the draft TOP LEVEL in some producer shapes and in
+// frontmatter in others (the runner and sibling gates accept both) — every
+// scan that includes metadata must collect from BOTH places, or a
+// disparaging title on a metadata-only draft escapes entirely. Single
+// collector so the table-path prose scan and the table-less scan can never
+// drift apart on which shape they see.
+function draftMetaText(draft) {
+  const fm = draft?.frontmatter || {};
+  return ['title', 'meta_description', 'metaTitle', 'metaDescription']
+    .flatMap((k) => [draft?.[k], fm[k]])
+    .filter(Boolean).map(String).join('\n');
+}
+
+function draftScanTexts(draft, body) {
+  const metaText = draftMetaText(draft);
+  return metaText ? `${body}\n${metaText}` : body;
+}
+
 /**
- * evaluate(draft, { namedCompetitorEnabled }) → { pass, findings, requiresHumanReview }
+ * evaluateProse(draft, body, { operatorBriefText }) — the table-less legal
+ * scan. Flags:
+ *   P0 COMPARISON_DISPARAGEMENT   — a disparaging/negative term within
+ *      proximity of ANY business-looking name (curated competitor, provider-
+ *      suffix name, or legal-entity name)
+ *   P1 COMPARISON_NEGATIVE_RELIABILITY — a service-reliability negative near
+ *      a business-looking name
+ *   P0 COMPARISON_UNKNOWN_COMPETITOR   — a recognized competitor NOT on the
+ *      curated allowlist named anywhere (its claims can't be verified)
+ *   P1 COMPARISON_COMPETITOR_IN_PROSE  — an allowlisted competitor named
+ *      outside a comparison table (existing policy: table cells only, where
+ *      every claim is validated)
+ * A business-shaped name with NO nearby negativity is fine here (unlike the
+ * table path's fail-closed UNCLASSIFIED_OPTION) — "Sarasota Pest Control
+ * Guide" as a title must not block a normal post.
+ *
+ * operatorBriefText — the OPERATOR-authored intercept-brief text (title/
+ * keywords/thesis/outline). A recognized competitor the operator personally
+ * named there (e.g. the Aptive cancellation brief) is authorized content:
+ * instead of the hard UNKNOWN_COMPETITOR / COMPETITOR_IN_PROSE block, the
+ * draft sets requiresHumanReview so the runner parks it on the APPROVABLE
+ * named-competitor review path — a human still signs off every one, and
+ * the disparagement/reliability scans above still apply at full curated
+ * strictness. Names the operator did NOT write stay hard-blocked; mined
+ * briefs pass no text, so nothing changes for them.
  */
-function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
+function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
+  const findings = [];
+  const scanText = draftScanTexts(draft, body);
+  const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
+  const nameScanText = stripQuotesForNames(scanText);
+  // Authorized names come from running the SAME mention detector over the
+  // operator's brief text — both sides canonicalize identically, so a brief
+  // that says "Massey" authorizes a draft that writes the canonical "Massey
+  // Services" (a raw substring compare missed every alias↔canonical pair).
+  // Matching is word-boundary CONTAINMENT in either direction, not exact
+  // string: detection-only tokens canonicalize by surface form, so a brief
+  // that says "Aptive" and a draft that writes "Aptive Environmental"
+  // produce different unknown names for the same business — the operator's
+  // shorter token must still authorize the fuller one (and vice versa).
+  // Names on both sides come from findBusinessMentions' recognition corpus,
+  // so containment can't be gamed with arbitrary prose.
+  const authorizedNames = new Set();
+  if (operatorBriefText) {
+    for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(String(operatorBriefText)))) {
+      authorizedNames.add(String(m.name).toLowerCase());
+    }
+  }
+  const wordBoundaryContains = (haystack, needle) =>
+    new RegExp(`(?:^|\\s)${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}(?:\\s|$)`, 'i').test(haystack);
+  const operatorAuthorized = (name) => {
+    const nm = String(name).toLowerCase();
+    if (authorizedNames.has(nm)) return true;
+    for (const auth of authorizedNames) {
+      if (wordBoundaryContains(nm, auth) || wordBoundaryContains(auth, nm)) return true;
+    }
+    return false;
+  };
+
+  const known = new Set();
+  const unknown = new Set();
+  const genericNames = new Set();
+  for (const m of competitorFacts.findBusinessMentions(nameScanText)) {
+    (m.inAllowlist ? known : unknown).add(m.name);
+  }
+  // Case-INSENSITIVE provider/legal-entity passes: a disparaged target
+  // written lowercase or all-caps ("acme pest solutions is dishonest")
+  // otherwise never enters genericNames and the negativity scan passes.
+  // In the Title Case pass, capitalization is what stops ordinary prose
+  // from bridging into a "name"; the CI variant recreates that anchor by
+  // excluding common prose words (interrogatives, prepositions, comparison
+  // verbs) from EVERY token position, not just the lead — otherwise
+  // fragments like "compared with professional pest control" become
+  // genericNames and any nearby negativity ("useless compared with…")
+  // blocks a normal article. And because lowercase adjectives are valid
+  // CI tokens, a capture can still swallow its own preceding negativity
+  // ("dishonest acme pest solutions") — captures are SPLIT at their last
+  // interior negativity token so the adjective sits back OUTSIDE the name
+  // where the neg-before-name directed check sees it.
+  const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Need|Needs|Want|Wants|Consider|Considering|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better`;
+  const CI_TOKEN = `(?!(?:${CI_PROSE_EXCLUSIONS})\\b)[a-z][a-z0-9&'.\\-]*`;
+  const CI_PROVIDER_NAME_RE = new RegExp(`\\b(${CI_TOKEN}(?:\\s+(?:${CI_TOKEN}|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`, 'gi');
+  const NEG_INSIDE_RE_SRC = `(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+`;
+  const splitAtNegativity = (name) => {
+    const inner = new RegExp(NEG_INSIDE_RE_SRC, 'gi');
+    const nm = String(name).trim();
+    let cut = -1;
+    let mm;
+    while ((mm = inner.exec(nm)) !== null) cut = mm.index + mm[0].length;
+    return cut >= 0 ? nm.slice(cut).trim() : nm;
+  };
+  for (const m of nameScanText.matchAll(CI_PROVIDER_NAME_RE)) {
+    const nm = splitAtNegativity(m[1]);
+    if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
+  }
+  for (const m of nameScanText.matchAll(legalEntityRe('gi'))) {
+    const nm = splitAtNegativity(m[1]);
+    if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
+  }
+  const curatedNames = [...known, ...unknown];
+  for (const nm of curatedNames) genericNames.delete(nm);
+
+  // Curated competitor names: bare PROXIMITY is enough (a real brand plus
+  // negativity nearby is legal surface even without tidy grammar — mirrors
+  // the comparison path's prose scan). Generic business-SHAPED phrases need
+  // the negativity DIRECTED at the name — name-as-subject before a negative
+  // predicate, or the negative term immediately modifying the name. Bare
+  // proximity false-positives on titles like "Sarasota Pest Control Guide:
+  // Worst Roach Problems", where the negative describes the pest problem.
+  if (curatedNames.length) {
+    const nearCurated = (idx, len) => {
+      const window = nameScanText
+        .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+      return curatedNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+    };
+    const p0Re = new RegExp(`${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b`, 'gi');
+    let am;
+    while ((am = p0Re.exec(scanText)) !== null) {
+      if (nearCurated(am.index, am[0].length)) {
+        findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+          `Draft disparages a named competitor ("${am[0].trim()}" near a competitor name). State neutral attributes only — in prose, the title, and the meta.`));
+        break;
+      }
+    }
+    const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'gi');
+    let nm;
+    while ((nm = negRe.exec(scanText)) !== null) {
+      if (nearCurated(nm.index, nm[0].length)) {
+        findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+          `Draft makes a negative service-reliability claim near a named competitor ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));
+        break;
+      }
+    }
+  }
+
+  for (const name of genericNames) {
+    const escaped = escapeForNameRe(name);
+    // Name-as-subject: "<Name> [word word] is/never/keeps … <negative>" —
+    // within the same sentence, a linking/behavioral verb between the name
+    // and the negative term ties the negativity to the business.
+    const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seems?|looks?|sounds?|remains?|stays?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?|tend';
+    const directedP0 = new RegExp(
+      `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+    );
+    // Negative adjective immediately modifying the name ("the dishonest
+    // Acme Pest Solutions").
+    const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
+    // ACTIVE disparaging predicate right after the name ("<Name> scams
+    // customers", "<Name> charges hidden fees") — the linking-verb shape
+    // above misses transitive verbs, and these victim-anchored idioms only
+    // read with the name as subject. Up to two adverbs may intervene.
+    const activeP0 = new RegExp(
+      `${escaped}(?:'s)?\\s+(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i',
+    );
+    if (directedP0.test(nameScanText) || negBeforeName.test(nameScanText) || activeP0.test(nameScanText)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `Draft directs disparaging language at "${name}". State neutral attributes only — in prose, the title, and the meta.`));
+      break;
+    }
+    // Service-reliability negative predicated on the name — either as the
+    // DIRECT predicate ("<Name> never answers the phone", "<Name> no-shows")
+    // or linked through a subject verb ("<Name> is unreliable"). A bare
+    // reliability term merely NEAR the name is not enough: "Sarasota Pest
+    // Control Guide: Why DIY Sprays Are Unreliable" aims the negative at DIY
+    // sprays, not the business-shaped phrase, and must pass.
+    const directedReliability = new RegExp(
+      `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+    );
+    if (directedReliability.test(nameScanText)) {
+      findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+        `Draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
+      break;
+    }
+  }
+
+  let requiresHumanReview = false;
+  for (const nm of unknown) {
+    if (operatorAuthorized(nm)) {
+      // The operator named this competitor in the intercept brief — route
+      // to the approvable named-competitor review instead of hard-blocking.
+      requiresHumanReview = true;
+      continue;
+    }
+    findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
+      `Names "${nm}", a recognized competitor not on the curated competitor-facts allowlist — its claims cannot be verified. Remove the mention or add "${nm}" to competitor-facts.js with sourced, dated facts.`));
+  }
+  for (const nm of known) {
+    if (operatorAuthorized(nm)) {
+      requiresHumanReview = true;
+      continue;
+    }
+    findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
+      `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
+  }
+
+  const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
+  return { pass, findings, requiresHumanReview };
+}
+
+// Escape a detected business name for use inside a regex, tolerating the
+// collapsed whitespace stripQuotesForNames leaves behind.
+function escapeForNameRe(name) {
+  return String(name || '')
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\s+/g, '\\s+');
+}
+
+/**
+ * evaluate(draft, { namedCompetitorEnabled, operatorBriefText })
+ *   → { pass, findings, requiresHumanReview }
+ * operatorBriefText applies to the TABLE-LESS path only (see evaluateProse):
+ * table cells always validate against curated competitor-facts — operator
+ * authorship can't make an unverifiable table claim verifiable.
+ */
+function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '' } = {}) {
   const body = String(draft?.body || draft?.content || '');
   const findings = [];
   const blocks = extractComparisonBlocks(body);
-  if (!body || blocks.length === 0) return { pass: true, findings, requiresHumanReview: false };
+  // Empty body alone doesn't skip the scan — a metadata-only draft can
+  // still carry a disparaging title/meta (draftScanTexts covers both the
+  // top-level and frontmatter shapes).
+  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false };
+  if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText });
 
-  const fm = draft?.frontmatter || {};
-  const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
-    .map((k) => fm[k]).filter(Boolean).map(String).join('\n');
-  const scanText = metaText ? `${body}\n${metaText}` : body;
+  // Same collector as draftScanTexts: the prose-only competitor check below
+  // appends metaText to proseText, so a frontmatter-only rebuild here would
+  // let a TOP-LEVEL title like "Orkin vs Waves in Sarasota" ride alongside a
+  // sourced table with only requiresHumanReview instead of a prose finding.
+  const metaText = draftMetaText(draft);
+  const scanText = draftScanTexts(draft, body);
   // For NAME detection only, drop double quotes AND backslashes (so an embedded-
   // quote brand like All "U" Need Pest Control — or its escaped \"U\" form — is
   // read as one name, not a "Need Pest Control" fragment). Apostrophes are kept
@@ -504,6 +776,7 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
 
 module.exports = {
   evaluate,
+  evaluateProse,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

@@ -1405,50 +1405,28 @@ describe('public estimate one-time breakdown', () => {
     expect(profile.serviceLabel).toContain('Bora-Care');
   });
 
-  test('one-time slot is sized for the add-on: pest visit + Bora-Care reserves a longer slot', () => {
-    const base = {
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
-    };
-    // Pest visit alone keeps the 60-minute one-time length.
-    const pestOnly = estimateSlotAvailability.resolveEstimateSlotProfile(base, { serviceMode: 'one_time' });
-    expect(pestOnly.durationMinutes).toBe(60);
-
-    // Pest visit (60) + Bora-Care wood treatment (90) → a 150-minute slot.
-    const withBora = estimateSlotAvailability.resolveEstimateSlotProfile({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
-    }, { serviceMode: 'one_time' });
-    expect(withBora.durationMinutes).toBe(150);
-  });
-
-  test('one-time slot duration uses the raw service key, the termite key, and a 60-min default', () => {
+  test('one-time slots book the flat 60-minute default regardless of the service mix', () => {
+    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+    // techs adjust individual appointments afterward. Add-ons still surface in
+    // the label (previous test) but no longer stretch the reserved slot.
     const mk = (estimate) => estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
 
-    // Pest visit (60) + a German-roach cleanout specialty priced by its raw key (75,
-    // not the broad pest 60) = 135.
+    // Pest visit alone.
     expect(mk({
       show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 500 }] } } },
-    }).durationMinutes).toBe(135);
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [] } } },
+    }).durationMinutes).toBe(60);
 
-    // A standalone Termite Inspection (service 'termite') reserves 90, not the default.
+    // Pest visit + Bora-Care wood treatment: still 60.
+    expect(mk({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] } } },
+    }).durationMinutes).toBe(60);
+
+    // Standalone termite inspection: still 60.
     expect(mk({
       estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 175 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // A termite-install alias (termite_bait_installation, not in the table) classifies
-    // as termite_bait and falls back to the category's 90, not the generic default.
-    expect(mk({
-      estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite Bait Installation', price: 1200 }] } } },
-    }).durationMinutes).toBe(90);
-
-    // An unknown/residual row (positive "Other one-time services" adjustment) keeps
-    // the 60-minute default rather than being under-reserved: pest 60 + adjustment 60.
-    expect(mk({
-      show_one_time_option: true,
-      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 400, items: [] } } },
-    }).durationMinutes).toBe(120);
+    }).durationMinutes).toBe(60);
   });
 
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
@@ -1733,7 +1711,9 @@ describe('public estimate one-time breakdown', () => {
         scheduled_date: '2026-06-03',
         window_start: '09:00:00',
         window_end: '11:00:00',
-        window_display: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        // Prod window_display is only ever a bare start time (phone-booking
+        // writer) or NULL — the derived 2h arrival range must win over it.
+        window_display: '9:00 AM',
         service_type: 'Initial Pest Control',
         status: 'confirmed',
       },
@@ -1746,11 +1726,46 @@ describe('public estimate one-time breakdown', () => {
         scheduledDate: '2026-06-03',
         windowStart: '09:00',
         windowEnd: '11:00',
-        windowDisplay: 'Wednesday, June 3 · 9:00 AM-11:00 AM',
+        windowDisplay: '9:00 AM - 11:00 AM',
         serviceType: 'Initial Pest Control',
         status: 'confirmed',
       },
     });
+  });
+
+  test('stored window_display is the fallback only when window_start is unparseable', () => {
+    const { appointment } = buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'svc-789',
+        scheduled_date: '2026-07-12',
+        window_start: null,
+        window_end: null,
+        window_display: 'Morning visit',
+        service_type: 'Quarterly Pest Control',
+        status: 'pending',
+      },
+    });
+
+    expect(appointment.windowDisplay).toBe('Morning visit');
+  });
+
+  test('missing window_display falls back to the 2h arrival window, never raw 24h window_start', () => {
+    const { appointment } = buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'svc-456',
+        scheduled_date: '2026-07-11',
+        window_start: '15:00:00',
+        window_end: '16:00:00', // job-duration block — must NOT drive the display
+        window_display: null,
+        service_type: 'Quarterly Pest Control',
+        status: 'pending',
+      },
+    });
+
+    expect(appointment.windowDisplay).toBe('3:00 PM - 5:00 PM');
+    expect(appointment.windowStart).toBe('15:00');
   });
 
   test('server-rendered existing appointments route pay choices through existing appointment flow', () => {
@@ -1768,7 +1783,9 @@ describe('public estimate one-time breakdown', () => {
         scheduledDate: '2026-06-03',
         windowStart: '09:00',
         windowEnd: '11:00',
-        windowDisplay: 'Wednesday, June 3 - 9:00 AM-11:00 AM',
+        // Stored window_display values are time-only ("11:00 AM"-style);
+        // the SSR title composes the date in itself.
+        windowDisplay: '9:00 AM - 11:00 AM',
         serviceType: 'Initial Pest Control',
         status: 'confirmed',
       },
@@ -1780,6 +1797,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
+    expect(html).toContain('Wednesday, June 3 · 9:00 AM - 11:00 AM');
     expect(html).toContain('const EXISTING_APPOINTMENT_ID = "svc-123";');
     expect(html).toContain('if (EXISTING_APPOINTMENT_ID) pickExistingAppointmentPref(b.dataset.payPref);');
     expect(html).toContain('else pickPaymentPref(b.dataset.payPref);');
@@ -1884,7 +1902,8 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('manual-discount-row');
     expect(html).toContain('Military Discount');
-    expect(html).toContain('-$15 / quarter');
+    // Typographic minus (U+2212) — fmtMoneySigned convention (estimate audit 2026-07-07).
+    expect(html).toContain('−$15 / quarter');
   });
 
   test('public pricing bundle exposes annual prepay for lawn-only estimates', async () => {
@@ -2473,6 +2492,56 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Exterior yard area exceeds automatic quote threshold.');
   });
 
+  test('server-rendered hero follows the CTA state (estimate audit 2026-07-07 #5)', () => {
+    const base = {
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 120,
+      annualTotal: 720,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    };
+    const estData = {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+      },
+    };
+
+    const accepted = renderPage('hero-accepted-token', { ...base, status: 'accepted' }, estData);
+    expect(accepted).toContain('Hello Pat, your plan is booked!');
+    expect(accepted).toContain('Your Waves plan');
+    expect(accepted).not.toContain('your estimate is ready!');
+
+    const quote = renderPage('hero-quote-token', {
+      ...base, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0,
+    }, estData);
+    expect(quote).toContain('Hello Pat, your custom quote is in the works.');
+    expect(quote).toContain('Your custom quote');
+    expect(quote).not.toContain('your estimate is ready!');
+
+    // Declined keeps the neutral headline + the standard service kicker —
+    // and outranks a lingering quoteRequired flag.
+    const declined = renderPage('hero-declined-token', {
+      ...base, status: 'declined', quoteRequired: true,
+    }, estData);
+    expect(declined).toContain('Hello Pat, here’s your Waves estimate.');
+    expect(declined).toContain('Your estimate ·');
+    expect(declined).not.toContain('your estimate is ready!');
+    expect(declined).not.toContain('custom quote is in the works');
+
+    // A commercial proposal is quote-required by design but its banner says
+    // the formal proposal is ready — the hero must agree, not say "in the
+    // works".
+    const proposal = renderPage('hero-proposal-token', {
+      ...base, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0,
+    }, { ...estData, proposal: { enabled: true } });
+    expect(proposal).toContain('Hello Pat, your formal proposal is ready.');
+    expect(proposal).toContain('Your commercial proposal');
+    expect(proposal).not.toContain('custom quote is in the works');
+  });
+
   test('server-rendered termite trenching quote-required page avoids zero-price acceptance copy', () => {
     const html = renderPage('termite-trenching-quote-token', {
       status: 'quote_required',
@@ -2890,7 +2959,7 @@ describe('public estimate one-time breakdown', () => {
 
     // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
     // (The hero apostrophe is HTML-escaped, so match without it.)
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).toContain('the Bora-Care application rate to price this treatment.');
     expect(html).not.toContain('choose your pest control option');
@@ -2997,7 +3066,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
     expect(html).not.toContain('30-day callback period if pests return');
     expect(html).not.toContain('class="mini-guarantee"');
@@ -3051,7 +3120,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     // Hero treatment name comes from the normalized rows too, so the nested shape
@@ -3511,7 +3580,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('your estimate is ready!');
     expect(html).not.toContain('your termite trenching quote.');
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
   });
@@ -3770,7 +3839,7 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('Hey Dana, choose your pest control option.');
+    expect(html).toContain('Hello Dana, your estimate is ready!');
     expect(html).toContain('<span class="num" id="onetime-display">$202</span>');
     expect(html).toContain('One-Time Pest Control');
     expect(html).not.toContain('One-time items (billed separately)');
@@ -5378,7 +5447,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('your lawn care estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
     expect(html).toContain('Grass type');
     expect(html).toContain('St. Augustine');
@@ -5408,7 +5477,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Save 5%');
     expect(html).not.toContain('Net setup fee: $0');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
-    expect(html).not.toContain('<strong>-$99</strong>');
+    expect(html).not.toContain('<strong>−$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     // Annual plan total $660 → prepay invoice $627 (5% off the recurring annual).
     expect(html).toContain('data-prepay-discount-rate="0.05">$627</strong>');
@@ -5530,7 +5599,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5590,7 +5659,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5656,7 +5725,7 @@ describe('public estimate one-time breakdown', () => {
       satelliteUrl: 'https://maps.example/mosquito-onetime.png',
     }, estimateData);
 
-    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
     expect(html).toContain('Mosquito treatment area');
     expect(html).toContain('8,250 sq ft');
@@ -5730,7 +5799,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('termite protection estimate');
+    expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your termite perimeter before pricing this estimate');
     expect(html).toContain('Termite perimeter');
     expect(html).toContain('185 linear ft');
@@ -6834,6 +6903,42 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoicePayUrl: '/pay/setup-token',
     })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Setup + first application invoice created; optional pay link available.');
+  });
+
+  test('accept copy shows the as-proposed price when the customer selected a different plan', () => {
+    expect(buildAcceptOfficeFallback({
+      customerName: 'Jane Doe',
+      address: '123 Main St',
+      waveguardTier: 'Bronze',
+      monthlyTotal: 55.3,
+      proposedMonthlyTotal: 29.67,
+      invoiceMode: true,
+      invoicePayUrl: '/pay/setup-token',
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard $55.30/mo (proposed at $29.67/mo). Setup + first application invoice created; optional pay link available.');
+
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Bronze',
+      monthlyTotal: 55.3,
+      proposedMonthlyTotal: 29.67,
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/setup-token',
+    });
+    expect(payload.adminBody).toBe('Bronze WaveGuard $55.30/mo (proposed at $29.67/mo) approved. Invoice pay link sent.');
+    // Customer copy never gets the note — they only ever saw the plan they picked.
+    expect(payload.customerBody).not.toContain('proposed at');
+
+    // Unchanged price → no note, whole-dollar amounts keep the short format.
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Gold',
+      monthlyTotal: 89,
+      proposedMonthlyTotal: 89,
+      invoiceMode: true,
+      invoiceLinkDelivered: true,
+      invoicePayUrl: '/pay/gold-token',
+    }).adminBody).toBe('Gold WaveGuard $89/mo approved. Invoice pay link sent.');
   });
 
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {

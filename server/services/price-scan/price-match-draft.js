@@ -108,12 +108,21 @@ async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
     const n = row.included_count;
     const subject = `[Review] Price-match draft ready — ${n} ${n === 1 ? 'opportunity' : 'opportunities'} for Mark`;
     const banner = `A price-match draft was just staged. It has NOT been sent — review and send it from ${reviewUrl}. Below is the exact email that will go to Mark (${row.recipient}) once you approve it.`;
+    // composed.html is a full document (<!DOCTYPE html>…); prepending the
+    // banner before it produced invalid HTML (content above the doctype)
+    // that some clients render oddly. Inject the banner just inside <body>
+    // instead — with a plain-concat fallback if the body tag ever changes.
+    const bannerHtml = `<div style="padding:12px 16px;margin:0 0 4px 0;background:#FFF8E4;border-bottom:2px solid #F4B014;font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.5;color:#1B2C5B;">${banner}</div>`;
+    const bodyOpen = /<body[^>]*>/i;
+    const ownerHtml = bodyOpen.test(composed.html)
+      ? composed.html.replace(bodyOpen, (m) => `${m}${bannerHtml}`)
+      : `${bannerHtml}${composed.html}`;
     const sendPromise = mailer.sendOne({
       to,
       fromEmail: fromEmail(),
       fromName: FROM_NAME,
       subject,
-      html: `<p>${banner}</p><hr/>${composed.html}`,
+      html: ownerHtml,
       text: `${banner}\n\n----\n\n${composed.text}`,
       categories: ['price-match', 'price-match-owner-copy'],
       // PII: a SendGrid validation body echoes the address — suppress sendOne's raw-body

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import TurnstileWidget from '../components/TurnstileWidget';
+import { useTurnstile } from '../lib/useTurnstile';
 import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import { COLORS, FONTS, SHADOWS } from '../theme-brand';
@@ -284,6 +286,7 @@ function addressPartsFromGoogleResult(result, fallback = '') {
   return {
     formatted: result?.formatted_address || fallback,
     line1,
+    line2: get('subpremise'),
     city: get('locality') || get('sublocality') || get('postal_town'),
     state: getShort('administrative_area_level_1') || 'FL',
     zip: get('postal_code'),
@@ -309,7 +312,7 @@ export default function QuotePage({ serviceSlug = '' }) {
   const [intakeIdx, setIntakeIdx] = useState(minIntakeIdx);
   const [dir, setDir] = useState('next');
   const [intake, setIntake] = useState(startingIntake);
-  const [address, setAddress] = useState({ formatted: '', line1: '', city: '', state: 'FL', zip: '' });
+  const [address, setAddress] = useState({ formatted: '', line1: '', line2: '', city: '', state: 'FL', zip: '' });
 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -388,6 +391,18 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   const inputRef = useRef(null);
   const submitInFlightRef = useRef(false);
+  // Bot-spam guard for the /api/leads submits (submitOther / submitOneTime):
+  // a Turnstile token + an off-screen honeypot, mirroring the marketing forms.
+  // The hook awaits the async token before posting (so a fast click doesn't send
+  // an empty token) and remounts the widget on a failed submit for a fresh
+  // single-use token. It never blocks — server verification fails open while the
+  // gate is off, so a slow/blocked widget can't trap a real lead.
+  const honeypotRef = useRef(null);
+  // The honeypot input lives in the intake stage and unmounts before the
+  // confirm/calculate step, so submitIntake snapshots its value here for the
+  // later /public/quote/calculate POST.
+  const honeypotSnapshotRef = useRef('');
+  const turnstile = useTurnstile();
 
   useEffect(() => {
     setStage('intake');
@@ -477,10 +492,15 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   function applyAddressParts(parts) {
     const formatted = parts.formatted || parts.line1 || intake.address;
-    setIntakeField('address', formatted);
+    // Match /book: with a subpremise the street field DISPLAYS the street
+    // only — the unit lives in its own box, where it can be edited/cleared.
+    setIntakeField('address', parts.line2 ? (parts.line1 || formatted) : formatted);
     setAddress({
       formatted,
       line1: parts.line1 || formatted,
+      // Google subpremise (unit/apt) when the visitor typed one — carried as
+      // its own field so the street line stays clean for parcel matching.
+      line2: parts.line2 || '',
       city: parts.city || '',
       state: parts.state || 'FL',
       zip: parts.zip || '',
@@ -511,11 +531,16 @@ export default function QuotePage({ serviceSlug = '' }) {
       const next = {
         formatted: parts.formatted || typed,
         line1: parts.line1 || typed,
+        // The unit box is the USER'S editable source — a submit-time geocode
+        // that parses a subpremise out of the typed street must not override
+        // an explicit box value (only fill it when the box is empty). A
+        // Places PICK still resets the box (applyAddressParts) by design.
+        line2: address.line2 || parts.line2 || '',
         city: parts.city || '',
         state: parts.state || 'FL',
         zip: parts.zip || '',
       };
-      setIntakeField('address', next.formatted);
+      setIntakeField('address', next.line2 ? (next.line1 || next.formatted) : next.formatted);
       setAddress(next);
       return next;
     } catch {
@@ -580,6 +605,11 @@ export default function QuotePage({ serviceSlug = '' }) {
     const phoneDigits = intake.phone.replace(/\D/g, '');
     try {
       const resolvedAddress = await resolveAddressForSubmit();
+      // Read the honeypot + token BEFORE the stage switch — 'lookup' unmounts
+      // both inputs, and the single-use token must be solved while the widget
+      // is still on screen (same ordering bug as the astro EstimateForm fix).
+      honeypotSnapshotRef.current = honeypotRef.current?.value || '';
+      const turnstileToken = await turnstile.getToken();
 
       setStage('lookup');
       setLookupStatus('Measuring your property');
@@ -593,11 +623,24 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // Whenever we have PARSED parts (Places pick or geocode — city/zip
+          // present), send the street-only line1 + components so the unit
+          // rides ONLY in address_line2. Gating this on line2 would let a
+          // CLEARED unit box resurrect the old unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
+          address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
           attribution: attribution || undefined,
           ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotSnapshotRef.current,
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       const d = await r.json();
@@ -625,6 +668,8 @@ export default function QuotePage({ serviceSlug = '' }) {
       setError(e.message || 'Lookup failed.');
       setStage('intake');
       setIntakeIdx(INTAKE_STEPS.length - 1);
+      // The attempt consumed the single-use token; remount for a fresh solve.
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -643,6 +688,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const otherLabel = OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService;
       const resolvedAddress = await resolveAddressForSubmit();
+      const turnstileToken = await turnstile.getToken();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -653,18 +699,30 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // Same parsed-parts gate as the property-lookup submit — a cleared
+          // unit box must not resurrect the unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
+          address_line2: resolvedAddress.line2 || undefined,
           interest: 'other',
           otherService: intake.otherService,
           service_interest: otherLabel,
           source: normalizedServiceSlug ? `quote-page-${normalizedServiceSlug}` : 'quote-page-divert',
           attribution: attribution || undefined,
           ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotRef.current?.value || '',
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -683,6 +741,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const { firstName, lastName } = splitName(intake.name);
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const resolvedAddress = await resolveAddressForSubmit();
+      const turnstileToken = await turnstile.getToken();
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -693,18 +752,30 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
+          // Same parsed-parts gate as the property-lookup submit — a cleared
+          // unit box must not resurrect the unit still inline in formatted.
+          ...((resolvedAddress.city || resolvedAddress.zip) ? {
+            address_line1: resolvedAddress.line1 || undefined,
+            city: resolvedAddress.city || undefined,
+            state: resolvedAddress.state || undefined,
+            zip: resolvedAddress.zip || undefined,
+          } : {}),
+          address_line2: resolvedAddress.line2 || undefined,
           interest: intake.interest,
           frequency: intake.frequency,
           service_interest: selectedServiceInterest(intake),
           source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
           ...(prefillAuth ? { prefill_lead_id: prefillAuth.leadId, prefill_token: prefillAuth.token } : {}),
+          fax_number: honeypotRef.current?.value || '',
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStage('result-other');
     } catch (e) {
       setError(e?.message || 'Could not send your request. Please call us.');
+      turnstile.reset();
     } finally {
       submitInFlightRef.current = false;
       setLoading(false);
@@ -756,6 +827,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email,
           phone: intake.phone.replace(/\D/g, ''),
           address: address.line1 || address.formatted || intake.address,
+          address_line2: address.line2 || undefined,
           city: address.city,
           zip: address.zip,
           homeSqFt: sq,
@@ -771,6 +843,9 @@ export default function QuotePage({ serviceSlug = '' }) {
           },
           attribution: attribution || undefined,
           newsletter_opt_in: newsletterOptIn,
+          // No turnstile_token here — the single-use token was spent on
+          // property-lookup (step 1); this step rides the verified leadId.
+          fax_number: honeypotRef.current?.value || honeypotSnapshotRef.current || '',
         }),
       });
       const d = await r.json();
@@ -1079,16 +1154,53 @@ export default function QuotePage({ serviceSlug = '' }) {
                       value={intake.address}
                       onChange={(v) => {
                         setIntakeField('address', v);
-                        setAddress({ formatted: v, line1: v, city: '', state: 'FL', zip: '' });
+                        // A street edit invalidates any previous unit — a fresh
+                        // selection re-fills line2 when Google knows the subpremise.
+                        setAddress({ formatted: v, line1: v, line2: '', city: '', state: 'FL', zip: '' });
                       }}
                       onSelect={applyAddressParts}
                       placeholder="Start typing your address..."
+                      style={sInput}
+                    />
+                    <label style={{ ...sLabel, marginTop: 12 }}>Apt / Unit # (optional)</label>
+                    {/* Hand-typed units flow through the same address.line2 the
+                        Google subpremise uses, so every submit keeps the street
+                        line clean and persists the unit to address_line2. */}
+                    <input
+                      value={address.line2 || ''}
+                      onChange={(e) => setAddress(a => ({ ...a, line2: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
+                      placeholder="Apt 4B"
                       style={sInput}
                     />
                   </>
                 )}
 
                 {error && <div style={sError}>{error}</div>}
+
+                {/* Off-screen honeypot: bots that fill every field trip the
+                    server-side fax_number drop on /api/leads; real users never
+                    see it. */}
+                <input
+                  ref={honeypotRef}
+                  name="fax_number"
+                  type="text"
+                  tabIndex={-1}
+                  autoComplete="off"
+                  aria-hidden="true"
+                  style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
+                />
+
+                {/* Turnstile on the final intake step of EVERY flow: Other /
+                    one-time / not-sure POST to /api/leads, and the ongoing path
+                    POSTs to /public/estimator/property-lookup — both endpoints
+                    verify the token (gated). Renders nothing until
+                    VITE_TURNSTILE_SITE_KEY is set. */}
+                {intakeIdx === INTAKE_STEPS.length - 1 && (
+                  <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
+                    <TurnstileWidget key={`ts-${turnstile.nonce}`} onToken={turnstile.onToken} />
+                  </div>
+                )}
 
                 <div style={{
                   marginTop: 24,

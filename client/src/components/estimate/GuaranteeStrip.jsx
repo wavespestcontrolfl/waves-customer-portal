@@ -4,12 +4,8 @@
  * estimate license is present.
  */
 import { WAVES_FL_LICENSE_LINE, normalizeFdacsLicense } from '../../constants/business';
+import { W } from './tokens';
 
-const W = {
-  blue: '#065A8C', blueDeeper: '#1B2C5B',
-  navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
-  borderLight: '#F1F5F9', offWhite: '#F1F5F9',
-};
 
 export default function GuaranteeStrip({ licenseNumber }) {
   const licenseDetail = licenseNumber
@@ -29,8 +25,9 @@ export default function GuaranteeStrip({ licenseNumber }) {
     }}>
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-        gap: 16,
+        // Always three across — including phones (owner directive).
+        gridTemplateColumns: 'repeat(3, 1fr)',
+        gap: 12,
       }}>
         {items.map((it) => (
           <div key={it.label} style={{ textAlign: 'center' }}>

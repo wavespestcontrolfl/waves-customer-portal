@@ -16,6 +16,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-context');
+const { recomputeEntryReviewGate } = require('./agronomic-wiki');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -696,7 +697,23 @@ async function detectContradictions() {
               .first();
 
             if (!existing) {
-              await db('knowledge_contradictions').insert(contradiction);
+              const [inserted] = await db('knowledge_contradictions').insert(contradiction).returning('id');
+              const insertedId = inserted?.id ?? inserted;
+              // Trusted reads gate on the page's cached review_status — flip
+              // the page and its KB mirror now, not at the next regeneration.
+              // Passing the just-inserted id keeps the gate closed even if
+              // the recompute's own contradiction lookup transiently fails.
+              try {
+                await recomputeEntryReviewGate(contradiction.wiki_entry_id, {
+                  assumeOpenIds: [insertedId],
+                });
+              } catch (gateErr) {
+                // Roll the insert back: the existing-row dedupe would
+                // otherwise skip this contradiction on every later run,
+                // leaving the page trusted with no retry path.
+                try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                throw gateErr;
+              }
               found.push(contradiction);
             }
           }

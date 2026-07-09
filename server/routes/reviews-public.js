@@ -10,6 +10,11 @@ router.get('/featured', async (req, res, next) => {
     let query = db('google_reviews')
       .where('star_rating', '>=', 4)
       .whereNotNull('review_text')
+      // Exclude the Places aggregate pseudo-rows the stats sync upserts
+      // (reviewer_name='_stats', review_text='{"rating":...}') — they carry a
+      // 5-star rating and a fresh synced review_created_at, so without this
+      // they sort to the top and render raw JSON as the first "review".
+      .whereRaw("coalesce(reviewer_name, '') <> '_stats'")
       .orderBy('review_created_at', 'desc');
 
     if (location) {

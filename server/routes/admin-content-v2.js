@@ -580,7 +580,11 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] publish-astro failed: ${err.message}`);
-    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID' || err.code === 'BLOG_GUARDRAILS_FAILED';
+    // Content-policy rejections are the author's to fix — 400, not 500
+    // (a 500 here reads as a server failure and can trip error alerting).
+    const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID'
+      || err.code === 'BLOG_GUARDRAILS_FAILED'
+      || err.code === 'BLOG_COMPARISON_GATE_FAILED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
@@ -618,7 +622,12 @@ router.post('/blog/:id/refresh-astro', async (req, res, next) => {
     const PagesPoll = require('../services/content-astro/pages-poll');
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'post not found' });
-    const result = await PagesPoll.pollPost(post);
+    // allowMerge:false — this button is a STATUS refresh. pollPost's default
+    // otherwise runs the scheduler-lane auto-merge, so an admin click racing
+    // the 2-min cron tick could double-run a merge chain and sidestep the
+    // per-poll merge cap. Merging stays with the cron tick (or the explicit
+    // merge-astro endpoint).
+    const result = await PagesPoll.pollPost(post, { allowMerge: false });
     const refreshed = await db('blog_posts').where({ id: post.id }).first();
     res.json({ success: true, result, post: refreshed });
   } catch (err) {
@@ -632,6 +641,12 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
   try {
     const post = await db('blog_posts').where({ id: req.params.id }).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    // Live-status gate (shared with the content-agent's distribute tool):
+    // a non-live post shares a dead 404 link to every enabled platform.
+    const { blogPostShareability } = require('../services/content/blog-share-gate');
+    const shareable = blogPostShareability(post);
+    if (!shareable.ok) return res.status(409).json({ error: shareable.reason });
 
     const link = post.astro_live_url || post.url || `https://www.wavespestcontrol.com/${post.slug}`;
     const title = post.title;

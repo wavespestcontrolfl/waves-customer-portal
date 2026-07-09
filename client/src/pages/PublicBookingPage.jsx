@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
+import { fireGlassConfetti } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 
@@ -68,6 +70,8 @@ function captureBookingAttribution() {
 }
 
 export default function PublicBookingPage() {
+  // Marketing surface — standard wavespestcontrol.com warm chrome; the glass
+  // scene stays on the tokened/portal customer surfaces only.
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
@@ -95,7 +99,7 @@ export default function PublicBookingPage() {
 
   const [step, setStep] = useState(1);
   const [service, setService] = useState(initialService);
-  const [address, setAddress] = useState({ line1: '', formatted: '', city: '', state: 'FL', zip: '' });
+  const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -212,12 +216,17 @@ export default function PublicBookingPage() {
   }, []);
 
   const checkExistingCustomerByAddress = useCallback(async (nextAddress) => {
-    const lookupAddress = nextAddress.formatted || nextAddress.line1;
+    // Always look up by the street-only line1 when we have it: formatted can
+    // still carry a subpremise inline AFTER the visitor clears the unit box,
+    // and a lookup on it would re-submit the stale unit and link the wrong
+    // apartment's account. The unit travels only as its own param.
+    const lookupAddress = nextAddress.line1 || nextAddress.formatted;
     if (!lookupAddress) return;
     try {
       const params = new URLSearchParams({ address: lookupAddress });
       if (nextAddress.city) params.set('city', nextAddress.city);
       if (nextAddress.zip) params.set('zip', nextAddress.zip);
+      if (nextAddress.line2) params.set('unit', nextAddress.line2);
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (!res.ok) return;
       const data = await res.json();
@@ -251,10 +260,13 @@ export default function PublicBookingPage() {
     if (digits.length !== 10) return;
     try {
       const params = new URLSearchParams({ phone: digits });
-      const lookupAddress = address.formatted || address.line1;
+      // Same street-only preference as checkExistingCustomerByAddress — a
+      // cleared unit box must not resurrect the subpremise inside formatted.
+      const lookupAddress = address.line1 || address.formatted;
       if (lookupAddress) params.set('address', lookupAddress);
       if (address.city) params.set('city', address.city);
       if (address.zip) params.set('zip', address.zip);
+      if (address.line2) params.set('unit', address.line2);
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -299,6 +311,7 @@ export default function PublicBookingPage() {
             phone: digits,
             email: contact.email,
             address_line1: address.line1,
+            address_line2: address.line2 || undefined,
             city: address.city,
             state: address.state,
             zip: address.zip,
@@ -317,7 +330,7 @@ export default function PublicBookingPage() {
   useEffect(() => {
     if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1]);
+  }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
     ? null
@@ -357,6 +370,7 @@ export default function PublicBookingPage() {
             phone: contact.phone.replace(/\D/g, ''),
             email: contact.email,
             address_line1: address.line1,
+            address_line2: address.line2 || undefined,
             city: address.city,
             state: address.state,
             zip: address.zip,
@@ -374,6 +388,8 @@ export default function PublicBookingPage() {
         recurring: !!recurringPattern,
       });
       setStep(4);
+      // Celebration burst — no-ops when glass is off or reduced-motion.
+      fireGlassConfetti(window.innerWidth / 2, window.innerHeight / 3);
     } catch (err) {
       setError(err.message);
     }
@@ -545,10 +561,19 @@ export default function PublicBookingPage() {
                 <AddressAutocomplete
                   autoFocus
                   value={address.line1}
-                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, formatted: '' }))}
+                  onChange={(v) => updateAddress(a => ({ ...a, line1: v, line2: '', formatted: '' }))}
                   onSelect={(parts) => {
                     const nextAddress = {
-                      line1: parts.formatted || parts.line1 || address.line1,
+                      // When Google returns a subpremise, keep line1 street-only —
+                      // the unit lives in line2 and must not also ride inline in
+                      // the stored street line (double-persist).
+                      line1: parts.line2
+                        ? (parts.line1 || parts.formatted || address.line1)
+                        : (parts.formatted || parts.line1 || address.line1),
+                      // Never carry a previous unit across a street selection — a
+                      // stale apartment on an unrelated address would persist. A
+                      // fresh subpremise wins; otherwise the unit box resets.
+                      line2: parts.line2 || '',
                       formatted: parts.formatted || parts.line1 || address.formatted,
                       city: parts.city || address.city,
                       state: parts.state || address.state,
@@ -565,12 +590,35 @@ export default function PublicBookingPage() {
                   style={inputStyle}
                 />
               </div>
+              <div>
+                {/* Availability/slots key off the street line, so typing here
+                    must not reset them (plain setAddress, not updateAddress).
+                    The address-matched account AND any phone-looked-up contact
+                    MUST reset though — Apt B is not Apt A's household, and the
+                    prior household's name/email must not prefill the contact
+                    step. The match re-checks on blur with the unit included. */}
+                <input
+                  type="text"
+                  value={address.line2}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setAddress(a => ({ ...a, line2: v }));
+                    setExistingCustomerId(null);
+                    setAddressMayMatchCustomer(false);
+                    setContact({ firstName: '', lastName: '', phone: '', email: '' });
+                  }}
+                  onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
+                  placeholder="Apt / Unit # (optional)"
+                  style={inputStyle}
+                />
+              </div>
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <Button
                 variant="primary"
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
                 disabled={!address.line1}
+                data-glass-accent=""
                 style={{ width: '100%' }}
               >
                 Find my best times →
@@ -721,7 +769,7 @@ export default function PublicBookingPage() {
             {/* Secondary finders — only on the day list */}
             {!loading && !openDay && (
               <>
-                <div style={{ background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
+                <div data-glass="soft" style={{ position: 'relative', background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
                   <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
                     Need a date further out? Pick any day that works.
                   </label>
@@ -782,6 +830,7 @@ export default function PublicBookingPage() {
                 variant="primary"
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_CONTACT_STARTED, { is_existing_customer: !!existingCustomerId }); setStep(3); }}
                 disabled={continueDisabled}
+                data-glass-accent=""
                 style={{ flex: 1 }}
               >
                 Continue →
@@ -811,7 +860,7 @@ export default function PublicBookingPage() {
                 Your selected time
               </div>
               <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
-                {selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate} · {selectedSlot?.start_label}
+                {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
               </div>
               <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
@@ -854,9 +903,13 @@ export default function PublicBookingPage() {
             )}
 
             <div style={{ display: 'grid', gap: 14, marginBottom: 20 }}>
+              {/* htmlFor/id pairs: the sibling labels carried no programmatic
+                  association, so screen readers announced bare unnamed
+                  textboxes on the public booking funnel. */}
               {!existingCustomerId && <div>
-                <label style={labelStyle}>Phone number</label>
+                <label htmlFor="book-phone" style={labelStyle}>Phone number</label>
                 <input
+                  id="book-phone"
                   type="tel" autoFocus
                   placeholder="(941) 555-1234"
                   value={contact.phone}
@@ -868,8 +921,9 @@ export default function PublicBookingPage() {
               </div>}
               {!existingCustomerId && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div>
-                  <label style={labelStyle}>First name</label>
+                  <label htmlFor="book-first-name" style={labelStyle}>First name</label>
                   <input
+                    id="book-first-name"
                     type="text"
                     value={contact.firstName}
                     onChange={e => setContact(c => ({ ...c, firstName: e.target.value }))}
@@ -877,8 +931,9 @@ export default function PublicBookingPage() {
                   />
                 </div>
                 <div>
-                  <label style={labelStyle}>Last name</label>
+                  <label htmlFor="book-last-name" style={labelStyle}>Last name</label>
                   <input
+                    id="book-last-name"
                     type="text"
                     value={contact.lastName}
                     onChange={e => setContact(c => ({ ...c, lastName: e.target.value }))}
@@ -887,8 +942,9 @@ export default function PublicBookingPage() {
                 </div>
               </div>}
               {!existingCustomerId && <div>
-                <label style={labelStyle}>Email (optional)</label>
+                <label htmlFor="book-email" style={labelStyle}>Email (optional)</label>
                 <input
+                  id="book-email"
                   type="email"
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
@@ -897,8 +953,9 @@ export default function PublicBookingPage() {
                 />
               </div>}
               <div>
-                <label style={labelStyle}>Notes for the tech (optional)</label>
+                <label htmlFor="book-notes" style={labelStyle}>Notes for the tech (optional)</label>
                 <textarea
+                  id="book-notes"
                   rows={3}
                   placeholder="Gate code, pets, access instructions…"
                   value={notes}
@@ -921,6 +978,7 @@ export default function PublicBookingPage() {
                 variant="primary"
                 onClick={handleConfirm}
                 disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contact.phone.replace(/\D/g, '').length !== 10))}
+                data-glass-accent=""
                 style={{ flex: 1 }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
@@ -947,7 +1005,8 @@ export default function PublicBookingPage() {
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               We just texted a confirmation to {contact.phone || 'the phone number on file'}.
             </p>
-            <div style={{
+            <div data-glass="card" style={{
+              position: 'relative',
               background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
               borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
             }}>
@@ -959,9 +1018,9 @@ export default function PublicBookingPage() {
               </div>
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
-                <div>{selectedSlot?.fullDate || availability.find(d => d.date === selectedDate)?.fullDate}</div>
+                <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
-                <div style={{ marginTop: 6 }}>{address.line1}, {address.city} {address.zip}</div>
+                <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
             <p style={{ fontSize: 12, color: COLORS.slate400 }}>
@@ -970,6 +1029,7 @@ export default function PublicBookingPage() {
           </div>
         )}
 
+        <BrandFooter />
       </div>
     </WavesShell>
   );

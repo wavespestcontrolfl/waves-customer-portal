@@ -404,11 +404,22 @@ function answerFindings({ data = {} } = {}) {
   }).join('\n');
 }
 
+// Customer-facing arrival window = window_start + 2 hours. window_end is the
+// internal job block that drives scheduling and must never be spoken to the
+// customer (same rule as the confirmation SMS echoes).
+function arrivalWindowEnd(windowStart) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
+  if (!m) return null;
+  const total = ((Number(m[1]) * 60) + Number(m[2]) + 120) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}:00`;
+}
+
 function answerNextAppointment({ nextAppointment } = {}) {
   if (!nextAppointment) {
     return 'I do not see another appointment scheduled yet. Reply to the text message or call Waves if you want us to set one up.';
   }
-  const window = [nextAppointment.window_start, nextAppointment.window_end].filter(Boolean).map(serviceTimeText).join(' to ');
+  const windowEnd = arrivalWindowEnd(nextAppointment.window_start);
+  const window = [nextAppointment.window_start, windowEnd].filter(Boolean).map(serviceTimeText).join(' to ');
   return `Your next appointment is ${serviceDateText(nextAppointment.scheduled_date)} for ${nextAppointment.service_type || 'service'}${window ? `, window ${window}` : ''}.`;
 }
 

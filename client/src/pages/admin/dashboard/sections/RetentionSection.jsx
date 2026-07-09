@@ -10,14 +10,23 @@ import {
 import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile, signed } from "../KpiTile";
+import Verdict from "../Verdict";
+import { mrrVerdict } from "../scorecard-metrics";
+import MrrBridgeCard from "../MrrBridgeCard";
+import ChurnParetoCard from "../ChurnParetoCard";
 
 // RETENTION — are customers staying? Net recurring-revenue momentum, the MRR
-// trend, signup-cohort retention, and the customer-quality signals behind it.
+// trend + the bridge decomposing WHY it moved, signup-cohort retention, and
+// the customer-quality signals behind it.
 export default function RetentionSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   mrrTrend,
+  mrrBridge,
+  churnReasons,
   cohort,
   reviewTrend,
   isMobile,
@@ -32,6 +41,7 @@ export default function RetentionSection({
       id="retention"
       title="Retention"
       caption="Are customers staying?"
+      about="Recurring revenue is the business — this tab watches whether it compounds or leaks. Net MRR pits new recurring sales against churn, the trend shows 12 months of momentum, the cohort grid shows what % of each signup month is still active, and reviews/CSAT are the early-warning signals that predict the next churn wave."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
@@ -39,8 +49,14 @@ export default function RetentionSection({
             <>
               {kpis.momentum && (
                 <>
+                  {/* Net tiles keep their sign-based red; metricKey adds the
+                      sparkline (no default target for momentum metrics). */}
                   <KpiTile
                     label="Net MRR"
+                    metricKey="net_mrr"
+                    metricValue={kpis.momentum.mrr?.net}
+                    targets={kpiTargets}
+                    history={kpiHistory}
                     value={signed(kpis.momentum.mrr?.net, fmtMoney)}
                     sub={`+${fmtMoneyCompact(kpis.momentum.mrr?.new ?? 0)} new · ${fmtMoneyCompact(kpis.momentum.mrr?.churned ?? 0)} lost`}
                     alert={kpis.momentum.mrr?.net < 0}
@@ -52,6 +68,10 @@ export default function RetentionSection({
                   />
                   <KpiTile
                     label="Net Customers"
+                    metricKey="net_customers"
+                    metricValue={kpis.momentum.customers?.net}
+                    targets={kpiTargets}
+                    history={kpiHistory}
                     value={signed(kpis.momentum.customers?.net, fmtInt)}
                     sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
                     alert={kpis.momentum.customers?.net < 0}
@@ -65,15 +85,21 @@ export default function RetentionSection({
               )}
               <KpiTile
                 label="Retention"
+                metricKey="retention_pct"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
                 }
                 sub={`${kpis.retention.lost} lost`}
-                alert={kpis.retention.pct != null && kpis.retention.pct < 85}
-                chart={{ kind: "gauge", value: kpis.retention.pct, max: 100, target: 85 }}
+                chart={{ kind: "gauge", value: kpis.retention.pct, max: 100 }}
               />
               <KpiTile
                 label="CSAT"
+                metricKey="csat_avg"
+                targets={kpiTargets}
+                history={kpiHistory}
+                n={kpis.quality.csatResponses || null}
                 value={
                   kpis.quality.csatAvg != null
                     ? `${kpis.quality.csatAvg}/10`
@@ -84,15 +110,10 @@ export default function RetentionSection({
                     ? `${kpis.quality.csatResponses} rate-page responses`
                     : "no responses yet"
                 }
-                alert={
-                  kpis.quality.csatAvg != null &&
-                  parseFloat(kpis.quality.csatAvg) < 8
-                }
                 chart={{
                   kind: "gauge",
                   value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
                   max: 10,
-                  target: 8,
                 }}
               />
             </>
@@ -100,17 +121,31 @@ export default function RetentionSection({
         </KpiStrip>
       </div>
 
-      {/* MRR trend */}
+      {/* MRR trend + the bridge that explains each month's move (new /
+          reactivated / expansion / contraction / churn from per-customer
+          snapshots; pre-snapshot months degrade to an approximation). */}
       {isMobile ? (
-        <MobileFold title="MRR Trend" sub={mrrTrendSub}>
-          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
-            <MrrTrendChart trend={mrrTrend?.trend || []} />
-          </ChartCard>
-        </MobileFold>
+        <>
+          <MobileFold title="MRR Trend" sub={mrrTrendSub}>
+            <div className="px-1 pt-1">
+              <MrrTrendChart trend={mrrTrend?.trend || []} />
+              <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
+            </div>
+          </MobileFold>
+          <MobileFold title="MRR Bridge" sub="why recurring revenue moved">
+            <div className="px-1 pt-1">
+              <MrrBridgeCard bridge={mrrBridge} />
+            </div>
+          </MobileFold>
+        </>
       ) : (
-        <div className="mb-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
           <ChartCard title="MRR Trend" sub={mrrTrendSub}>
             <MrrTrendChart trend={mrrTrend?.trend || []} />
+            <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
+          </ChartCard>
+          <ChartCard title="MRR Bridge" sub="why recurring revenue moved · month by month">
+            <MrrBridgeCard bridge={mrrBridge} />
           </ChartCard>
         </div>
       )}
@@ -122,15 +157,12 @@ export default function RetentionSection({
           title="Retention by Cohort"
           sub="% still active by signup month"
         >
-          <ChartCard
-            title="Retention by Cohort"
-            sub="% still active by signup month"
-          >
+          <div className="px-1 pt-1">
             <RetentionCohortGrid
               cohorts={cohort?.cohorts || []}
               maxOffset={cohort?.maxOffset || 0}
             />
-          </ChartCard>
+          </div>
         </MobileFold>
       ) : (
         <div className="mb-5">
@@ -142,6 +174,22 @@ export default function RetentionSection({
               cohorts={cohort?.cohorts || []}
               maxOffset={cohort?.maxOffset || 0}
             />
+          </ChartCard>
+        </div>
+      )}
+
+      {/* Churn Pareto — WHY customers leave, by lost MRR (codes live from
+          Jul 2026; earlier rows unclassified until the backfill runs). */}
+      {isMobile ? (
+        <MobileFold title="Why Customers Leave" sub="churn reasons · last 12 months">
+          <div className="px-1 pt-1">
+            <ChurnParetoCard data={churnReasons} />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          <ChartCard title="Why Customers Leave" sub="churn reasons by lost MRR · last 12 months">
+            <ChurnParetoCard data={churnReasons} />
           </ChartCard>
         </div>
       )}

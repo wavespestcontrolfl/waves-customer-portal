@@ -89,6 +89,30 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     expect(screen.getByText('$1,200')).toBeInTheDocument();
   });
 
+  it('never derives a cadence-key visit count over multiple treatment rows', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly',
+          monthly: 400,
+          perServiceTreatments: [
+            { service: 'lawn', label: 'Turf application', displayPrice: 120, visitsPerYear: 8 },
+            { service: 'mosquito', label: 'Mosquito treatment', displayPrice: 60, visitsPerYear: 12 },
+          ],
+        }}
+      />,
+    );
+
+    // Rows differ (8 vs 12) — no single "N applications per year" line.
+    expect(screen.queryByText(/applications per year included/i)).toBeNull();
+  });
+
+  it('keeps the cadence-key visit count when there are no treatment rows', () => {
+    render(<PriceCard frequency={{ key: 'quarterly', monthly: 50 }} />);
+
+    expect(screen.getByText(/4 applications per year included/i)).toBeInTheDocument();
+  });
+
   it('renders the exact price (no range) when the marker is absent', () => {
     render(<PriceCard frequency={{ key: 'monthly', monthly: 400, annual: 4800 }} />);
 
@@ -106,5 +130,91 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
 
     expect(screen.getByText('Quote required')).toBeInTheDocument();
     expect(screen.queryByText(/confirm your exact price/i)).toBeNull();
+  });
+});
+
+describe('PriceCard — WaveGuard savings display', () => {
+  it('suppresses a rounding-noise "savings" on a 0%-discount tier (Bronze quarterly)', () => {
+    // $94/visit quarterly stored as $31.33/mo → cadence 93.99 vs anchor 94:
+    // the $0.01 delta is monthly-rounding noise, not a member discount.
+    render(
+      <PriceCard
+        frequency={{ key: 'quarterly', monthly: 31.33, annual: 375.96, perVisit: 94 }}
+        waveGuardTier="Bronze"
+      />,
+    );
+
+    expect(screen.queryByText(/You save/)).toBeNull();
+    // No strike-through anchor either — just the billed price.
+    expect(screen.queryByText('$94/quarter')).toBeNull();
+    expect(screen.getByText('$93.99')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Bronze')).toBeInTheDocument();
+    // No annual figure on a standard exact price (owner directive).
+    expect(screen.queryByText(/\/ year/)).toBeNull();
+  });
+
+  it('shows a real tier discount as the struck-through anchor, with no savings line', () => {
+    // Anchor $100/visit, member pays $90/quarter (10% Silver).
+    render(
+      <PriceCard
+        frequency={{ key: 'quarterly', monthly: 30, annual: 360, perVisit: 100 }}
+        waveGuardTier="Silver"
+      />,
+    );
+
+    // The "You save" line was removed globally (anchor-vs-cadence delta
+    // misattributed to the tier) — the struck anchor is the discount signal.
+    expect(screen.queryByText(/You save/)).toBeNull();
+    expect(screen.getByText('$100/quarter')).toBeInTheDocument();
+  });
+
+  it('derives the anchor from monthlyBase when perVisit is absent (non-pest bundle rows)', () => {
+    // Lawn in a Silver bundle: $83/mo base → $74.70/mo member price. Own-cadence
+    // ladder rows never carry perVisit, only monthlyBase.
+    render(
+      <PriceCard
+        frequency={{ key: 'premium', label: 'Monthly', monthly: 74.7, monthlyBase: 83, visitsPerYear: 12 }}
+        waveGuardTier="Silver"
+      />,
+    );
+
+    expect(screen.getByText('$83/mo')).toBeInTheDocument();
+    expect(screen.queryByText(/You save/)).toBeNull();
+  });
+
+  it('shows no anchor or savings when monthlyBase equals the billed monthly (0% tier)', () => {
+    render(
+      <PriceCard
+        frequency={{ key: 'premium', label: 'Monthly', monthly: 83, monthlyBase: 83, visitsPerYear: 12 }}
+        waveGuardTier="Bronze"
+      />,
+    );
+
+    expect(screen.queryByText(/You save/)).toBeNull();
+    expect(screen.queryByText('$83/mo')).toBeNull();
+    expect(screen.getByText('$83')).toBeInTheDocument();
+  });
+});
+
+
+describe('PriceCard — manual discount is not double-reported in-card', () => {
+  it('shows the promo row but no anchor/savings when the gap is the manual discount alone', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'premium',
+          label: 'Monthly',
+          monthly: 73,
+          monthlyBase: 83,
+          visitsPerYear: 12,
+          manualDiscount: { amount: 120, recurringAmount: 120, label: 'Spring promo' },
+        }}
+        waveGuardTier="Silver"
+      />,
+    );
+
+    expect(screen.getByText('Spring promo')).toBeInTheDocument();
+    expect(screen.queryByText(/You save/)).toBeNull();
+    expect(screen.queryByText('$83/mo')).toBeNull();
   });
 });

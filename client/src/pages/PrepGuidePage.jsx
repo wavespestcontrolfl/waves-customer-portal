@@ -1,7 +1,12 @@
 import { useState, useEffect } from 'react';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
+import { useGlassSurface } from '../glass/glass-engine';
+import { isNativeApp } from '../native/platform';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -14,9 +19,11 @@ const SURFACE = {
   border: '#E7E2D7',
   text: '#1B2C5B',
   body: '#3F4A65',
-  muted: '#6B7280',
+  muted: CUSTOMER_SURFACE.muted,
   calloutBg: '#FDF6EC',
-  calloutBorder: '#FFD700',
+  // Glass gold, not the old marketing #FFD700 — border colors aren't
+  // repainted by the glass theme CSS, so the literal must be spec-correct.
+  calloutBorder: '#F0A500',
   detailBg: '#F9F8F5',
 };
 
@@ -49,7 +56,7 @@ function BlockRenderer({ blocks }) {
         );
       case 'details':
         return (
-          <div key={i} style={{
+          <div key={i} data-glass="soft" style={{
             background: SURFACE.detailBg, borderRadius: 8,
             padding: '14px 18px', margin: '0 0 20px',
           }}>
@@ -110,6 +117,7 @@ function NotFound() {
       </p>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
+        data-glass-accent=""
         style={{
           display: 'inline-block', padding: '12px 28px',
           background: SURFACE.text, color: '#fff', borderRadius: 8,
@@ -124,6 +132,7 @@ function NotFound() {
 
 export default function PrepGuidePage() {
   const { token } = useParams();
+  useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -154,6 +163,7 @@ export default function PrepGuidePage() {
         <div style={{ padding: '24px 16px 40px', maxWidth: 560, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: SURFACE.text }}>
           <div
             className="prep-card"
+            data-glass="card"
             style={{
               background: SURFACE.card, borderRadius: 12,
               border: `1px solid ${SURFACE.border}`,
@@ -185,9 +195,13 @@ export default function PrepGuidePage() {
             </div>
           </div>
 
+          {/* window.print() is a no-op in the Capacitor webview (F-046) —
+              a dead button is worse than no button, so hide it in-app. */}
+          {isNativeApp() ? null : (
           <div className="prep-no-print" style={{ textAlign: 'center', marginTop: 20 }}>
             <button
               onClick={() => window.print()}
+              data-glass="chip"
               style={{
                 background: 'transparent', border: `1px solid ${SURFACE.border}`,
                 borderRadius: 8, padding: '10px 24px', cursor: 'pointer',
@@ -198,6 +212,7 @@ export default function PrepGuidePage() {
               Print this page
             </button>
           </div>
+          )}
         </div>
       );
 
@@ -206,8 +221,13 @@ export default function PrepGuidePage() {
       <style>{PRINT_STYLE}</style>
       <meta name="robots" content="noindex, nofollow" />
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
+        <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
+          <div className="prep-no-print" style={{ maxWidth: 560, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+            {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
+            <GlassNewsletterCard source="prep_footer" />
+            <BrandFooter />
+          </div>
         </div>
       </WavesShell>
     </>

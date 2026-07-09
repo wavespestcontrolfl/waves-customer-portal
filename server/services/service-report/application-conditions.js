@@ -174,6 +174,63 @@ function rainCacheKey(lat, lon, end) {
   return `${Number(lat).toFixed(2)},${Number(lon).toFixed(2)},${end}`;
 }
 
+// ── City-collective rainfall (single-cell model-spike guard) ────────────────────
+// Open-Meteo's daily precipitation_sum is a per-grid-cell modelled value. On summer
+// convective days a single cell can carry a spurious 3–8" bullseye its own neighbours
+// (and the real rain gauges) don't share — e.g. a Nokomis property reading 8.29" when
+// the town got ~0.5". We can't trust one pinpoint cell for that, so we sample a small
+// grid across the customer's CITY (the property cell + an 8-neighbour ring) and, when
+// the property cell is a sharp outlier vs the city median on any day, fall back to the
+// city-collective series for the whole week and flag it 'limited data'. Normal weeks —
+// where the property cell agrees with its neighbours — keep the precise property read.
+const CITY_SAMPLE_RING_DEG = 0.045; // ≈3 mi cell spacing → property cell + ring ≈ "the city"
+const RAIN_OUTLIER_MIN_INCHES = 1.0; // ignore small days; only large single-cell spikes matter
+const RAIN_OUTLIER_FACTOR = 2.5; // property-cell day ≥ this × the city median = a model spike
+const RAIN_MEDIAN_FLOOR_INCHES = 0.25; // divisor floor so a near-zero median can't blow up the ratio
+
+// property cell first (index 0), then an 8-point ring one CITY_SAMPLE_RING_DEG step out.
+function citySampleGrid(lat, lon) {
+  const d = CITY_SAMPLE_RING_DEG;
+  const offsets = [
+    [0, 0],
+    [d, 0], [-d, 0], [0, d], [0, -d],
+    [d, d], [d, -d], [-d, d], [-d, -d],
+  ];
+  return offsets.map(([dLat, dLon]) => ({ lat: lat + dLat, lon: lon + dLon }));
+}
+
+function medianOf(values) {
+  const arr = values.filter((n) => Number.isFinite(n)).slice().sort((a, b) => a - b);
+  if (!arr.length) return null;
+  const mid = Math.floor(arr.length / 2);
+  return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+}
+
+// Decide the trusted weekly rain series. Given the property cell's daily inches and the
+// per-day series for every sampled cell (INCLUDING the property cell), return the
+// property series unchanged when it tracks its neighbours, else the city-median series
+// flagged as a fallback. Pure + exported for tests — no I/O.
+function resolveWeekRain(propSeries = [], cellSeriesList = []) {
+  const days = propSeries.length;
+  const cityMedian = [];
+  for (let i = 0; i < days; i += 1) {
+    cityMedian.push(medianOf(cellSeriesList.map((s) => Number(s?.[i]))));
+  }
+  const isOutlierDay = (i) => {
+    const p = Number(propSeries[i]);
+    const m = cityMedian[i];
+    if (!Number.isFinite(p) || m == null) return false;
+    return p >= RAIN_OUTLIER_MIN_INCHES && p >= RAIN_OUTLIER_FACTOR * Math.max(m, RAIN_MEDIAN_FLOOR_INCHES);
+  };
+  const suspect = propSeries.some((_, i) => isOutlierDay(i));
+  if (!suspect) {
+    return { suspect: false, source: 'property_point', series: propSeries.map(Number) };
+  }
+  // Use the city-collective; keep the property value only on a day the median is unknown.
+  const series = cityMedian.map((m, i) => (m == null ? Number(propSeries[i]) : m));
+  return { suspect: true, source: 'city_collective', series };
+}
+
 // Trailing-7-day weather totals (inches) for the week ENDING ON the service date
 // — keyed to the visit, never "now", so a long-lived report token always renders
 // the same season-consistent water balance. Returns { rainInches, et0Inches }
@@ -185,7 +242,7 @@ function rainCacheKey(lat, lon, end) {
 // (inches here). Eyeball a real report once — a ~25× value would mean it came
 // back in mm.
 async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}) {
-  const empty = { rainInches: null, et0Inches: null, dailyRain: null };
+  const empty = { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null };
   const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
   const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
   const range = rainWindowEndingOn(serviceDate, 7);
@@ -194,9 +251,12 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   const cached = _rainCache.get(key);
   if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
 
+  // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
+  // so a single spiked grid cell can be caught against the city median (see notes above).
+  const grid = citySampleGrid(lat, lon);
   const url = new URL('https://api.open-meteo.com/v1/forecast');
-  url.searchParams.set('latitude', String(lat));
-  url.searchParams.set('longitude', String(lon));
+  url.searchParams.set('latitude', grid.map((p) => p.lat.toFixed(4)).join(','));
+  url.searchParams.set('longitude', grid.map((p) => p.lon.toFixed(4)).join(','));
   url.searchParams.set('daily', 'precipitation_sum,et0_fao_evapotranspiration');
   url.searchParams.set('start_date', range.start);
   url.searchParams.set('end_date', range.end);
@@ -209,36 +269,62 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) return empty;
     const payload = await response.json();
-    const daily = payload?.daily || {};
-    const times = daily.time;
+    // A multi-location request returns an array in input order (property cell first);
+    // a single-location fall-through returns a bare object.
+    const results = Array.isArray(payload) ? payload : [payload];
     const expectedDays = Math.round(
       (Date.parse(`${range.end}T00:00:00Z`) - Date.parse(`${range.start}T00:00:00Z`)) / 86400000,
     ) + 1;
-    // Each metric is trusted only when its array spans the full window dates AND
-    // every day has a real value (sumPrecipInches rejects partial/short arrays).
-    const windowOk = Array.isArray(times) && times.length === expectedDays
-      && times[0] === range.start && times[times.length - 1] === range.end;
-    const sumIfFull = (arr) => (windowOk && Array.isArray(arr) && arr.length === expectedDays)
-      ? sumPrecipInches(arr) : null;
     const round2 = (n) => (Number.isFinite(Number(n)) ? Math.round(Number(n) * 100) / 100 : null);
-    const rainInches = sumIfFull(daily.precipitation_sum);
+    // A cell is usable only when its window spans the full date range AND every day is
+    // a real number (a partial/short window can't be trusted as a weekly total).
+    const cellFrom = (result) => {
+      const daily = result?.daily || {};
+      const times = daily.time;
+      const windowOk = Array.isArray(times) && times.length === expectedDays
+        && times[0] === range.start && times[times.length - 1] === range.end;
+      if (!windowOk) return null;
+      const precip = daily.precipitation_sum;
+      if (!Array.isArray(precip) || precip.length !== expectedDays) return null;
+      // Reject the whole cell if ANY day is missing — a partial window can't be trusted
+      // as a weekly total (matches sumPrecipInches: null/'' is a gap, not a zero, and
+      // Number(null) === 0 would silently undercount).
+      const nums = [];
+      for (const v of precip) {
+        if (v == null || v === '') return null;
+        const n = Number(v);
+        if (!Number.isFinite(n)) return null;
+        nums.push(n);
+      }
+      return { times, precip: nums, et0: daily.et0_fao_evapotranspiration, et0Unit: result?.daily_units?.et0_fao_evapotranspiration };
+    };
+    const cells = results.map(cellFrom);
+    const property = cells[0];
+    // No trustworthy property window → degrade exactly as before (no chart, rain_unknown).
+    if (!property) return empty;
+
+    const cellSeriesList = cells.filter(Boolean).map((c) => c.precip);
+    const { series, source, suspect } = resolveWeekRain(property.precip, cellSeriesList);
+    const dailyInches = series.map(round2);
+    const rainInches = round2(dailyInches.reduce((sum, n) => sum + (n || 0), 0));
     const value = {
       rainInches,
-      et0Inches: et0SumToInches(
-        sumIfFull(daily.et0_fao_evapotranspiration),
-        payload?.daily_units?.et0_fao_evapotranspiration,
-      ),
-      // Per-day rainfall (inches) over the trusted window, at the SAME client
-      // lat/lng as rainInches. Lets the report's 7-day chart be sourced from the
-      // customer's actual coordinates (not a regional area centroid) and always
-      // reconcile with the weekly total. Gated on rainInches being non-null — NOT
-      // just window length — because sumIfFull/sumPrecipInches return null when any
-      // single day is missing or non-numeric. Without this, a full-length window
-      // with one null day would null out the weekly total while still emitting a
-      // daily array with a null bar, rendering a misleading partial chart.
-      dailyRain: rainInches != null
-        ? times.map((date, i) => ({ date, inches: round2(daily.precipitation_sum[i]) }))
+      // ET₀ stays the property-cell value — it's a smooth field, not prone to the
+      // single-cell convective spikes the rain guard targets. Require the FULL window
+      // (like the old sumIfFull guard): sumPrecipInches only rejects gaps, not a short
+      // array, so a truncated et0 series would otherwise understate ET₀ and drag the
+      // water target down for that week. Short/missing → null → grass×season fallback.
+      et0Inches: (Array.isArray(property.et0) && property.et0.length === expectedDays)
+        ? et0SumToInches(sumPrecipInches(property.et0), property.et0Unit)
         : null,
+      // Per-day rainfall (inches) over the trusted window. On a normal week this is the
+      // property cell; on a spiked week it's the city-collective (median) series, so the
+      // 7-day chart and the weekly total always reconcile and never show a phantom spike.
+      dailyRain: property.times.map((date, i) => ({ date, inches: dailyInches[i] })),
+      // 'low' → the UI shows "Limited data this week"; the value came from the city, not
+      // the address cell. null on normal weeks (precise property read, normal confidence).
+      rainConfidence: suspect ? 'low' : null,
+      rainSource: source,
     };
     _rainCache.set(key, { at: Date.now(), value });
     return value;
@@ -296,6 +382,7 @@ module.exports = {
   sumPrecipInches,
   et0SumToInches,
   rainWindowEndingOn,
+  resolveWeekRain,
   normalizeFawnConditions,
   weatherCodeLabel,
 };

@@ -7,6 +7,8 @@ import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import BillingHealthPanel from "../BillingHealthPanel";
 import { KpiStrip, KpiTile } from "../KpiTile";
+import Verdict from "../Verdict";
+import { agingVerdict } from "../scorecard-metrics";
 
 // CASH — are we collecting what we earned? Collections, AR aging, and the
 // autopay/billing machinery that turns MRR into money.
@@ -14,6 +16,8 @@ export default function CashSection({
   kpis,
   kpisLoading,
   kpisError,
+  kpiTargets,
+  kpiHistory,
   aging,
   billing,
   isMobile,
@@ -23,13 +27,21 @@ export default function CashSection({
       id="cash"
       title="Cash"
       caption="Are we collecting what we earned?"
+      about="Earned revenue isn't cash until it's collected. Collection rate shows how much billed work actually got paid, AR aging shows what's outstanding and for how long (chase the 90+ buckets first — collectability falls off a cliff), and Billing Health shows the autopay coverage that prevents AR from forming at all."
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
           {kpis && (
             <>
+              {/* Threshold tones come from the kpi_targets store via
+                  metricKey; Collection Rate's old issuedCount>=5 alert guard
+                  is now the tile's generic small-N fade (`n`). */}
               <KpiTile
                 label="Collection Rate"
+                metricKey="collection_rate"
+                targets={kpiTargets}
+                history={kpiHistory}
+                n={kpis.billing?.issuedCount || null}
                 value={
                   kpis.billing?.collectionRate != null
                     ? `${kpis.billing.collectionRate}%`
@@ -40,22 +52,22 @@ export default function CashSection({
                     ? `${fmtMoneyCompact(kpis.billing.collected)} / ${fmtMoneyCompact(kpis.billing.billed)} · ${kpis.billing.collectedCount}/${kpis.billing.issuedCount} paid`
                     : "no invoices issued"
                 }
-                alert={
-                  kpis.billing?.collectionRate != null &&
-                  kpis.billing.issuedCount >= 5 &&
-                  kpis.billing.collectionRate < 70
-                }
-                chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100, target: 70 }}
+                chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100 }}
               />
               <KpiTile
                 label="AR Days"
+                metricKey="ar_days"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
                 sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
-                alert={kpis.ar.days != null && kpis.ar.days > 30}
-                chart={{ kind: "bullet", value: kpis.ar.days, target: 30, lowerIsBetter: true }}
+                chart={{ kind: "bullet", value: kpis.ar.days }}
               />
               <KpiTile
                 label="Autopay Coverage"
+                metricKey="autopay_pct"
+                targets={kpiTargets}
+                history={kpiHistory}
                 value={
                   kpis.billing?.autopayPct != null
                     ? `${kpis.billing.autopayPct}%`
@@ -67,6 +79,23 @@ export default function CashSection({
                     : "no customers"
                 }
                 chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
+              />
+              {/* Deposits live in their own ledger (estimate_deposits) and
+                  never appear as invoices/payments rows, so without this tile
+                  collected-at-accept money is invisible on every cash view.
+                  On hand = received, not yet credited to a first invoice. */}
+              <KpiTile
+                label="Deposits on Hand"
+                value={
+                  kpis.deposits
+                    ? fmtMoneyCompact(kpis.deposits.onHand)
+                    : "—"
+                }
+                sub={
+                  kpis.deposits
+                    ? `${kpis.deposits.onHandCount} awaiting first invoice · ${fmtMoneyCompact(kpis.deposits.collectedPeriod)} collected this period`
+                    : "unavailable"
+                }
               />
             </>
           )}
@@ -88,6 +117,7 @@ export default function CashSection({
             totalOutstanding={aging?.total_outstanding}
             totalOverdue={aging?.total_overdue}
           />
+          <Verdict verdict={agingVerdict(aging)} />
         </ChartCard>
       </div>
 

@@ -79,12 +79,14 @@ describe('appointment reminder registration deduplication', () => {
   test('registerVisitReminderInTx suppresses a same-customer/same-time collision', async () => {
     const lookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const sameTime = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-primary', service_type: 'Lawn Care' }) });
+    // buildMergedServiceLabel's source-row query (pristine sibling labels)
+    const labelRows = chain({ select: jest.fn().mockResolvedValue([{ label: 'Lawn Care' }]) });
     const mergeUpdate = chain();
     const insertSuppressed = chain({
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'rem-suppressed' }]),
     });
-    const queue = [lookup, sameTime, mergeUpdate, insertSuppressed];
+    const queue = [lookup, sameTime, labelRows, mergeUpdate, insertSuppressed];
     const conn = jest.fn(() => queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 
@@ -101,6 +103,12 @@ describe('appointment reminder registration deduplication', () => {
     expect(insertSuppressed.insert).toHaveBeenCalledWith(expect.objectContaining({
       reminder_72h_sent: true,
       reminder_24h_sent: true,
+      // Suppressed rows keep their pristine label — buildMergedServiceLabel
+      // rebuilds from per-row names, never from a merged string.
+      service_type: 'Quarterly Pest Control',
+    }));
+    expect(mergeUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      service_type: 'Lawn Care & Quarterly Pest Control',
     }));
   });
 
@@ -149,15 +157,17 @@ describe('appointment reminder registration deduplication', () => {
     const byCustomerAndTime = chain({
       first: jest.fn().mockResolvedValue(existingReminder),
     });
+    // buildMergedServiceLabel's source-row query (aliased table)
+    const labelRows = chain({ select: jest.fn().mockResolvedValue([{ label: 'Termite Inspection' }]) });
     const updateExisting = chain();
     const insertSuppressed = chain({
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([suppressedReminder]),
     });
-    const reminderQueries = [byScheduledService, byCustomerAndTime, updateExisting, insertSuppressed];
+    const reminderQueries = [byScheduledService, byCustomerAndTime, labelRows, updateExisting, insertSuppressed];
 
     db.mockImplementation((table) => {
-      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (String(table).startsWith('appointment_reminders')) return reminderQueries.shift();
       if (table === 'scheduled_service_addons') return addons;
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -190,7 +200,8 @@ describe('appointment reminder registration deduplication', () => {
     expect(insertSuppressed.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_service_id: 'svc-wdo',
       customer_id: 'customer-1',
-      service_type: 'Termite Inspection & WDO Inspection',
+      // Pristine per-row label (rebuild source), not the merged display string.
+      service_type: 'WDO Inspection',
       confirmation_sent: true,
       reminder_72h_sent: true,
       reminder_24h_sent: true,

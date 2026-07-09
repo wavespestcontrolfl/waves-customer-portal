@@ -8,7 +8,8 @@ shipping. Each rule cites the file it protects.
 Codex integration reference:
 <https://developers.openai.com/codex/integrations/github>
 
-The pre-push hook in `.git/hooks/pre-push` blocks pushes that contain any P0
+The pre-push hook at `scripts/hooks/pre-push` (wired via `core.hooksPath` by
+the npm `prepare` script) blocks pushes that contain any P0
 finding and warns on P1. Reviewers must return JSON matching
 `.github/codex-review-schema.json`. Cite `file:line` for every finding.
 
@@ -316,6 +317,54 @@ finding and warns on P1. Reviewers must return JSON matching
   lead per diagnostic via an atomic `whereNull('lead_id')` guard returning 409
   on repeat, no raw PII logging, never mutates diagnostic scoring or any
   customer/assessment table).
+  `/api/public/lawn-assessment/analyze` (write; prospect lawn-photo upload for
+  the wavespestcontrol.com lead-magnet funnel — no auth, no token. Paid
+  dual-model vision per accepted request, so it carries the full abuse triad:
+  entire surface 404s unless GATE_LAWN_ASSESSMENT is on, honeypot drop,
+  Turnstile verified and enforced with GATE_LEAD_TURNSTILE, 5 req/hour per-IP
+  in-route limit plus the shared 40/day photoAssessmentDailyLimiter at mount,
+  ≤5 photos with per-photo size cap. Persists a `lawn_diagnostics` row
+  (mode=prospect, source=public_funnel) via the SAME shared analysis ladder as
+  the tech flow; the response is a TEASER ONLY — a strict subset of the public
+  report egress allowlist (status label, one gated finding, counts) plus a
+  32-hex claim token. The full report payload never leaves the server before
+  claim. Prospect free-text note is stored for admin view only — never fed to
+  models or customer copy. Privacy headers on all responses.)
+  `/api/public/lawn-assessment/:id/claim` (write; contact capture that unlocks
+  the full report — same gate-404 + honeypot + privacy headers, 10 req/min
+  limit, UUID + 32-hex claim-token format gates with generic 404 so tokens
+  can't be probed, strict body validation before coercion — name plus a valid
+  email or phone. Creates ONE lead per assessment inside a transaction with an
+  atomic status+`whereNull('lead_id')` guard (409 on replay), mints the
+  30-day report token served by `/api/public/lawn-diagnostic/:token`, and
+  stores a server-computed pricing snapshot from the pricing engine (size-band
+  basis, engine-authoritative — pricing failure never blocks the claim). After
+  the claim commits it best-effort inserts ONE ad_service_attribution funnel
+  row (lead_source=lawn_assessment, is_paid=false, idempotent on the unique
+  lead_id index) so the magnet reports in funnel-by-source like every other
+  channel. Optional `attribution` body is sanitized/allowlisted
+  (sanitizeAttribution) into leads.extracted_data + the row's click-id/utm
+  columns — first-touch evidence only, never a channel/is_paid reassignment.)
+  `/api/public/pest-identifier/analyze` (write; prospect pest-photo upload —
+  exact mirror of `/api/public/lawn-assessment/analyze` behind
+  GATE_PEST_IDENTIFIER, writing `pest_identifications`. Customer-visible copy
+  comes ONLY from the fixed PEST_LIBRARY allowlist in
+  services/pest-identification.js — model output never reaches a prospect, and
+  low-confidence/conflicting IDs degrade to generic category labels.)
+  `/api/public/pest-identifier/:id/claim` (write; mirror of the lawn claim —
+  same one-shot lead+token transaction, 409 on replay, same best-effort
+  ad_service_attribution row (lead_source=pest_identifier), typical-home
+  pricing snapshot only for engine-priceable service lines; termite/rodent/
+  bed-bug style IDs stay inspection-first with fixed suggestive-only copy that
+  must never read like a WDO/confirmed finding.)
+  `/api/public/pest-identifier/:token` (read-only tokenized pest report;
+  same contract as `/api/public/lawn-diagnostic/:token` — 32-hex format gate,
+  60 req/min, privacy headers, only sent/unexpired rows, strictly allowlisted
+  payload via buildPublicPestReport, generic 404, plus a set-once
+  `report_first_viewed_at` funnel stamp. Deliberately NOT behind
+  GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
+  (admin manual send works pre-launch), and an invalid token 404s exactly
+  like the dark surface — only analyze/claim are gated.)
   `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
   no auth, no DB writes, no PII — returns a deterministic Florida
   pest-pressure model keyed only on a curated city slug / FL ZIP plus
@@ -327,6 +376,14 @@ finding and warns on P1. Reviewers must return JSON matching
   is deliberately cacheable and indexable — it exposes only modeled,
   non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
   NOT apply here).
+  `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
+  access, no PII — returns only client release-switch booleans (currently
+  `{ portalGlass }` from the GATE_PORTAL_GLASS feature gate) so the portal
+  SPA shell and login page, which have no per-page token payload, can learn
+  a glass release. `Cache-Control: no-store` so gate flips propagate on the
+  next page load; inherits the global `/api/` IP rate limit. Invariant: this
+  surface must never grow beyond boolean/enum release flags — anything
+  per-customer, secret, or configurable belongs on an authenticated payload).
   `/api/public/social-feed` (read-only aggregate of already-public social
   posts for the marketing /social page — Instagram + Facebook Graph API,
   Google Business Profile localPosts, YouTube channel RSS; no tokens, no
@@ -367,6 +424,47 @@ finding and warns on P1. Reviewers must return JSON matching
   instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
   limit. Persists a quote/lead and may text the quote via a Twilio short-link;
   returns pricing only).
+  `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
+  marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
+  (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
+  /message + a 120 req/day per-IP cap at the mount scoped to plausible POST
+  /message bodies only (paid-LLM surface, same rationale as
+  paidEstimatorDailyLimiter; GET /status, non-POST probes, gate-off probes,
+  and empty/oversized bodies are all LLM-free — they 503/400 without spending
+  the cap, so shared-IP noise can't lock out real chat turns). PII contract:
+  requires NO PII and
+  asks for none — visitor free-text + client-echoed history (both length- and
+  turn-clamped, roles allowlisted) is sent to the LLM and logged best-effort to
+  agent_sessions/agent_messages (channel `ask_waves`); treat message content as
+  untrusted input, never as identity. HARD INVARIANT: this surface can never
+  emit a price — prompt rule + PRICE_TALK_RE post-scrub + no pricing endpoint;
+  the chat's quote step posts to the existing `/api/public/quote/calculate`
+  above, which owns the four-field contact gate, lead minting, and attribution.
+  All deterministic guards (price scrub, emergency + account-support fallback
+  when both LLM providers miss) read English AND Spanish — the prompt answers
+  Spanish visitors in Spanish. NOT CORS-open — credentialed allowlist origins
+  only (hub site)).
+  `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
+  GrowthBook experimentation surface — no auth, anonymous visitors are the
+  unit. **POST /exposure is gated behind GATE_GROWTHBOOK** (404 when off) with
+  a 30 req/min per-route rate limit on top of the global limiter. Invariants:
+  strict shape validation (experiment/unit/variation regexes, scalar-only
+  value clamped to 100 chars); the experiment key must be a currently-live
+  tracking key in the cached GrowthBook feature payload; SERVER-owned
+  experiment keys (`estimate-view`, `booking-abandon-recovery`) are ALWAYS
+  refused — server-side sticky replay trusts `experiment_exposures`, so a
+  public post must never be able to pre-assign a real unit's arm;
+  `unit_type='anon'` + `metadata.source='client'` are forced server-side; the
+  response is 204 for stored AND dropped posts (no experiment-enumeration
+  oracle); the first-exposure-wins unique constraint dedups repeats. No PII —
+  anonymous visitor id only. The rate limit is scoped to gate-ON /exposure
+  posts — gate-off probes always see the 404 without spending it, and
+  `GET /status` is limiter-free (kill-switch probe must never starve).
+  `GET /status` returns only `{enabled}` (boolean, never 404s) = master gate
+  AND server feature-cache warm — the client SDK fetches feature definitions
+  only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
+  real rollback for client experiments too (and keeps clients dark while the
+  server can't validate exposure keys)).
   `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
   token, public `Cache-Control`. Consumed by the Astro build and the admin blog
   UI; no PII).
@@ -379,6 +477,13 @@ finding and warns on P1. Reviewers must return JSON matching
   data — for operator preview/share. Token in path, `noindex`).
   `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
   target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
+  `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
+  (static universal-link association JSON for the native app shell — no auth,
+  no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
+  AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
+  also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
+  `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
+  API/PDF responses must never be claimed by the app).
   `/api/public/track/:token` (read-only live service tracker; the
   `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
   rate limit. In ANY state it returns the customer property block — first name,
@@ -390,6 +495,34 @@ finding and warns on P1. Reviewers must return JSON matching
   `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
+  `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
+  customer self-serve single-visit reschedule linked from appointment
+  confirmation/72h/24h texts + reminder emails.
+  `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
+  is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
+  GET returns the appointment summary (customer first name, service type,
+  current date/window, recurring flag) + live open slots from the /book
+  availability engine. POST is a WRITE: it moves the single visit — never the
+  recurring series, never live/terminal visits (409) — and only to a slot the
+  availability engine still offers for that day (route feasibility, lunch
+  reserve, self-book day caps re-checked server-side); the commit goes through
+  `SmartRebooker.reschedule` (advisory lock + tech-route overlap conflict
+  check + `reschedule_log` audit as `customer_self_serve` + escalation
+  flagging). Generic 404 for bad/unknown tokens.
+  `POST /:token/find-slots` is the Waves AI date/time search for this page:
+  model-backed (free-text "when" → date window via `parseWhen`, the same
+  parser the /book and estimate searches use) and READ-ONLY — it returns
+  availability in the same shape as the GET and never books or mutates. Same
+  64-hex token format gate + generic 404, same eligibility guards as the
+  commit POST (409 for non-reschedulable visits), its own 15 req/min limiter
+  (mirrors the estimate find-slots budget), and no raw query logging (the
+  route logs only service id + error message; parse-when logs only failure
+  messages). The parse window is clamped on BOTH ends to the booking_config
+  reschedule range (`advance_days_min..advance_days_max`) with no
+  expandOpenDays, so it can never offer a date or synthetic slot the GET list
+  and the POST commit revalidation would not themselves offer.
+  Treat the reschedule token and any change to this route family's payload
+  or commit path as security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).

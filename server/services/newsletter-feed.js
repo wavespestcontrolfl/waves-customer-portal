@@ -30,6 +30,30 @@ function stripHtml(html) {
     .trim();
 }
 
+// Sent bodies embed three kinds of <img>: the generated hero (S3/CDN jpg,
+// first in the body when present), the Waves divider GIF between sections,
+// and Giphy reaction GIFs (Beehiiv-imported issues proxy theirs through
+// media.beehiiv.com but keep the .gif filename). The card thumbnail is the
+// first NON-GIF image — skipping .gif drops the divider and the memes in one
+// rule, and event photos still provide a thumbnail for hero-less issues.
+// The client renders this inside CSS background:url(...), so mirror feed.js's
+// safeImage hygiene: http(s) only, no characters that can break out of url().
+function extractCardImage(htmlBody) {
+  if (!htmlBody) return null;
+  const imgSrcRe = /<img[^>]+src=["']([^"']+)["']/gi;
+  let match;
+  while ((match = imgSrcRe.exec(String(htmlBody))) !== null) {
+    const src = match[1].replace(/&amp;/g, '&');
+    let url;
+    try { url = new URL(src); } catch { continue; }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+    if (url.pathname.toLowerCase().endsWith('.gif')) continue;
+    if (/[\s"'<>\\)]/.test(src)) continue;
+    return src;
+  }
+  return null;
+}
+
 async function getPublishedPosts({ limit = 6 } = {}) {
   const cap = Math.max(1, Math.min(50, Number(limit) || 6));
   const rows = await db('newsletter_sends')
@@ -48,7 +72,7 @@ async function getPublishedPosts({ limit = 6 } = {}) {
     // {{city}} / {{grass-type}} tokens; feed descriptions have no recipient
     // identity, so neutralize them all (city/grass → neutral defaults).
     description: stripPersonalizationTokens(s.preview_text || '') || stripHtml(stripPersonalizationTokens(s.html_body || '')).slice(0, 200),
-    image: null,
+    image: extractCardImage(s.html_body),
     source: 'newsletter',
     sourceName: 'Waves Newsletter',
     newsletterType: s.newsletter_type || null,

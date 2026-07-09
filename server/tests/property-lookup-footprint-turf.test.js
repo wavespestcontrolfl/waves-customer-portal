@@ -143,6 +143,138 @@ describe('computeFootprintTurf', () => {
   });
 });
 
+describe('county turf prior (vision-missing seed)', () => {
+  const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+
+  // County-complete residential record: ceiling = 10000 − 1200 − 800 = 8000.
+  // The lot/building dims carry county evidence — the prior requires the
+  // dimensions THEMSELVES to be county-sourced, not just the impervious.
+  function countyRecord(overrides = {}) {
+    return {
+      propertyType: 'Single Family',
+      lotSize: 10000,
+      squareFootage: 2400,
+      stories: 2,
+      imperviousAreaSf: 800,
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+      },
+      ...overrides,
+    };
+  }
+
+  afterEach(() => { delete process.env.TURF_COUNTY_PRIOR_DISABLED; });
+
+  test('vision missing → seeds 50% of the county ceiling, flagged for verification', () => {
+    const profile = buildEnrichedProfile(countyRecord(), null, 27.4, -82.4);
+    expect(profile.footprintTurfSf).toBe(8000);
+    expect(profile.estimatedTurfSf).toBe(4000);
+    expect(profile.turfSource).toBe('county_prior');
+    expect(profile.countyTurfPriorSf).toBe(4000);
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'estimatedTurfSf',
+        priority: 'HIGH',
+        reason: expect.stringContaining('seeded 4,000 sq ft from county records'),
+      }),
+    ]));
+    // The shadow series stays vision-only — a prior seed must not compare
+    // the ceiling with itself.
+    expect(logger.info).not.toHaveBeenCalledWith('[turf-footprint] shadow comparison', expect.anything());
+  });
+
+  test('vision present → vision wins untouched, no prior, shadow log fires', () => {
+    const profile = buildEnrichedProfile(countyRecord(), { estimatedTurfSf: 5200, confidenceScore: 80 }, 27.4, -82.4);
+    expect(profile.estimatedTurfSf).toBe(5200);
+    expect(profile.turfSource).toBe('vision');
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(logger.info).toHaveBeenCalledWith('[turf-footprint] shadow comparison', expect.objectContaining({
+      estimatedTurfSf: 5200,
+      footprintTurfSf: 8000,
+    }));
+  });
+
+  test('kill switch TURF_COUNTY_PRIOR_DISABLED=1 → no seed', () => {
+    process.env.TURF_COUNTY_PRIOR_DISABLED = '1';
+    const profile = buildEnrichedProfile(countyRecord(), null, 27.4, -82.4);
+    expect(profile.estimatedTurfSf).toBe(0);
+    expect(profile.turfSource).toBe('none');
+    expect(profile.countyTurfPriorSf).toBeNull();
+  });
+
+  test('shared-turf types never seed from their own parcel', () => {
+    const profile = buildEnrichedProfile(countyRecord({ propertyType: 'Townhome' }), null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('a sub-minimum ceiling (tiny/implausible yard) never seeds', () => {
+    // ceiling = 3000 − 2400 − 400 = 200 < 500 floor
+    const profile = buildEnrichedProfile(
+      countyRecord({ lotSize: 3000, squareFootage: 2400, stories: 1, imperviousAreaSf: 400 }),
+      null, 27.4, -82.4,
+    );
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('no county facts (record-less lookup) → no seed', () => {
+    const profile = buildEnrichedProfile(null, null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+    expect(profile.turfSource).toBe('none');
+  });
+
+  test('an EXPLICIT vision 0 (measured no-lawn property) is never overwritten (codex P2)', () => {
+    const profile = buildEnrichedProfile(countyRecord(), { estimatedTurfSf: 0, confidenceScore: 85 }, 27.4, -82.4);
+    expect(profile.estimatedTurfSf).toBe(0);
+    expect(profile.turfSource).toBe('vision');
+    expect(profile.countyTurfPriorSf).toBeNull();
+  });
+
+  test('unparsed extra-features roll (imperviousKnown=false) → no seed (codex P2)', () => {
+    const profile = buildEnrichedProfile(countyRecord({ imperviousAreaSf: undefined }), null, 27.4, -82.4);
+    expect(profile.footprintTurfParts?.imperviousKnown).toBe(false);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('missing story count (footprint unreliable) → no seed (codex P2)', () => {
+    const profile = buildEnrichedProfile(countyRecord({ stories: null }), null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('listing-sourced dimensions never seed, even with GIS impervious backfilled (codex P2)', () => {
+    // Hybrid merge shape: lot won from a listing, impervious backfilled
+    // from county GIS — the ceiling is not county-grade.
+    const profile = buildEnrichedProfile(countyRecord({
+      _fieldEvidence: {
+        lotSize: { sourceType: 'listing' },
+        squareFootage: { sourceType: 'county' },
+      },
+    }), null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBeNull();
+    expect(profile.estimatedTurfSf).toBe(0);
+    // …and the untrusted ceiling never feeds the review reason either.
+    expect(profile.countyTurfCeilingSf).toBeNull();
+    // The shadow fields still ride along untrusted, for the log series.
+    expect(profile.footprintTurfSf).toBe(8000);
+  });
+
+  test('trusted ceiling is exposed for the review reason on county-complete records', () => {
+    const profile = buildEnrichedProfile(countyRecord(), { estimatedTurfSf: 9500, confidenceScore: 80 }, 27.4, -82.4);
+    expect(profile.countyTurfCeilingSf).toBe(8000);
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'estimatedTurfSf',
+        reason: expect.stringContaining('county-facts ceiling of 8,000 sq ft'),
+      }),
+    ]));
+  });
+});
+
 describe('shadow wiring (no pricing impact)', () => {
   // computeTurfArea is the engine's only turf reader — pin that it ignores
   // footprintTurfSf so the shadow field can never move a price.

@@ -26,6 +26,11 @@ const SCAN_DIRS = [
   path.join(ROOT, 'client/src/components/billing'),
   path.join(ROOT, 'client/src/components/customer'),
   path.join(ROOT, 'client/src/components/brand'),
+  // Customer-facing /book widgets — the 13px chips fixed on the 07-07 portal
+  // audit (F-057) lived here unscanned. components/estimate is NOT listed:
+  // it carries ~35 legacy violations (13px labels, star glyphs, W tokens)
+  // that need their own cleanup pass before the gate can cover it.
+  path.join(ROOT, 'client/src/components/booking'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([

@@ -98,7 +98,7 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     res.json({
       sent: true,
-      reviewUrl: `${publicPortalUrl()}/review/${request.token}`,
+      reviewUrl: `${publicPortalUrl()}/rate/${request.token}`,
     });
   } catch (err) { next(err); }
 });

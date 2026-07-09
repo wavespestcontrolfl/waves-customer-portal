@@ -61,7 +61,9 @@ export default function PublicFunnelTracking() {
         right: 0,
         bottom: 0,
         zIndex: 1000,
-        background: 'rgba(27, 44, 91, 0.97)',
+        // Glass navy — the old marketing #1B2C5B panel read as the old
+        // theme over the glassed funnel pages (/book, /pay).
+        background: 'rgba(4, 57, 94, 0.96)',
         backdropFilter: 'blur(4px)',
         borderTop: '1px solid rgba(255,255,255,0.12)',
         padding: '12px 18px',
@@ -84,7 +86,7 @@ export default function PublicFunnelTracking() {
             href="https://wavespestcontrol.com/privacy-policy/"
             target="_blank"
             rel="noopener noreferrer"
-            style={{ color: '#FFD700', textDecoration: 'underline' }}
+            style={{ color: '#FFDE78', textDecoration: 'underline' }}
           >
             Privacy Policy
           </a>
@@ -94,9 +96,9 @@ export default function PublicFunnelTracking() {
           onClick={accept}
           style={{
             flex: '0 0 auto',
-            background: '#FFD700',
+            background: 'linear-gradient(135deg, #FFDE78, #F4B014)',
             color: '#1B2C5B',
-            border: 'none',
+            border: '1px solid rgba(255, 238, 180, 0.92)',
             borderRadius: 8,
             padding: '9px 18px',
             fontSize: 14,

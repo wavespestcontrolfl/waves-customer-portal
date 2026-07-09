@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { BookOpen, Brain, Gauge, Plus, ShieldCheck } from "lucide-react";
+import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -143,6 +143,11 @@ export default function KnowledgeBasePage() {
       Icon: BookOpen,
     },
     { key: "create", label: isMobile ? "New" : "New Entry", Icon: Plus },
+    {
+      key: "field",
+      label: isMobile ? "Field Intel" : "Field Intelligence",
+      Icon: Sprout,
+    },
     { key: "audit", label: "AI Audit", Icon: ShieldCheck },
     { key: "tokens", label: isMobile ? "Tokens" : "Token Health", Icon: Gauge },
   ];
@@ -156,7 +161,7 @@ export default function KnowledgeBasePage() {
         sections={tabs}
         activeKey={tab}
         onSectionChange={setTab}
-        navGridClassName="grid-cols-2 md:grid-cols-4"
+        navGridClassName="grid-cols-2 md:grid-cols-5"
       />
       {/* Stats Row */}
       {stats && (
@@ -239,6 +244,9 @@ export default function KnowledgeBasePage() {
           onRefresh={loadStats}
           isMobile={isMobile}
         />
+      )}
+      {tab === "field" && (
+        <FieldIntelligenceTab showToast={showToast} isMobile={isMobile} />
       )}
       {tab === "tokens" && (
         <TokensTab showToast={showToast} isMobile={isMobile} />
@@ -1355,6 +1363,369 @@ function TokensTab({ showToast, isMobile }) {
           </div>
         )}
       </div>{" "}
+    </div>
+  );
+}
+
+// ── Field Intelligence — AI-maintained agronomic wiki with exception-based
+// review: green auto-updates silently, yellow auto-updates and lists here,
+// red is excluded from agent use until approved. Only exceptions need Adam.
+const TIER_COLORS = { green: D.green, yellow: D.amber, red: D.red };
+const REVIEW_STATUS_LABELS = {
+  auto: "Auto",
+  pending_review: "Needs Review",
+  approved: "Approved",
+  blocked: "Blocked",
+};
+
+function parseRiskFlags(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function TierChip({ tier }) {
+  const color = TIER_COLORS[tier] || D.muted;
+  return (
+    <span style={sBadge(`${color}22`, color)}>
+      {(tier || "untiered").toUpperCase()}
+    </span>
+  );
+}
+
+function FieldIntelligenceTab({ showToast, isMobile }) {
+  const [queue, setQueue] = useState({ pending: [], blocked: [], recentYellow: [] });
+  const [pages, setPages] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [busySlug, setBusySlug] = useState(null);
+
+  const load = useCallback(async () => {
+    const q = await adminFetch("/admin/wiki/review/queue").catch(() => ({
+      pending: [],
+      blocked: [],
+      recentYellow: [],
+    }));
+    setQueue(q);
+    const data = await adminFetch("/admin/wiki?limit=200").catch(() => ({ pages: [] }));
+    setPages(data.pages || []);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const openPage = async (slug) => {
+    const data = await adminFetch(`/admin/wiki/${slug}`).catch(() => null);
+    if (data?.page) setSelected(data.page);
+  };
+
+  const handleReview = async (slug, action) => {
+    let notes;
+    if (action === "block") {
+      const answer = prompt("Why is this page blocked? (stored as review notes)");
+      if (answer === null) return; // cancelled — never block on a misclick
+      notes = answer || undefined;
+    }
+    setBusySlug(slug);
+    try {
+      await adminFetch(`/admin/wiki/review/${slug}`, {
+        method: "POST",
+        body: JSON.stringify({ action, notes }),
+      });
+      showToast(action === "approve" ? "Page approved — now agent-visible" : "Page blocked");
+      setSelected(null);
+      load();
+    } catch {
+      showToast("Review action failed");
+    } finally {
+      setBusySlug(null);
+    }
+  };
+
+  const handleTierPin = async (slug, tier) => {
+    if (!tier) return;
+    setBusySlug(slug);
+    try {
+      await adminFetch(`/admin/wiki/tier/${slug}`, {
+        method: "PUT",
+        body: JSON.stringify({ tier }),
+      });
+      showToast(`Tier pinned to ${tier}`);
+      setSelected(null);
+      load();
+    } catch {
+      showToast("Tier update failed");
+    } finally {
+      setBusySlug(null);
+    }
+  };
+
+  const handleRegenerate = async (slug) => {
+    setBusySlug(slug);
+    try {
+      await adminFetch(`/admin/wiki/update/${slug}`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showToast("Page regenerated");
+      load();
+    } catch {
+      showToast("Regeneration failed — see update log");
+    } finally {
+      setBusySlug(null);
+    }
+  };
+
+  const exceptionRow = (page) => (
+    <div
+      key={page.id}
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 8,
+        padding: "10px 0",
+        borderBottom: `1px solid ${D.border}`,
+        flexWrap: isMobile ? "wrap" : "nowrap",
+      }}
+    >
+      <div style={{ cursor: "pointer", minWidth: 0 }} onClick={() => openPage(page.slug)}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>{page.title}</div>
+        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+          {page.data_point_count} data points - {page.confidence} confidence
+          {parseRiskFlags(page.risk_flags).map((f) => (
+            <span key={f} style={{ ...sBadge(`${D.red}15`, D.red), marginLeft: 6 }}>
+              {f.replace(/_/g, " ")}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        <button
+          disabled={busySlug === page.slug}
+          onClick={() => handleReview(page.slug, "approve")}
+          style={sBtn(D.green, D.white)}
+        >
+          Approve
+        </button>
+        <button
+          disabled={busySlug === page.slug}
+          onClick={() => handleReview(page.slug, "block")}
+          style={sBtn(D.border, D.text)}
+        >
+          Block
+        </button>
+      </div>
+    </div>
+  );
+
+  const detail = selected && (
+    <div style={sCard}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>{selected.title}</div>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+            <TierChip tier={selected.review_tier} />{" "}
+            <span style={sBadge(`${D.teal}15`, D.text)}>
+              {REVIEW_STATUS_LABELS[selected.review_status] || selected.review_status}
+            </span>{" "}
+            {selected.data_point_count} data points - {selected.confidence} confidence
+            {selected.last_human_review && (
+              <span style={{ marginLeft: 6 }}>
+                - reviewed {new Date(selected.last_human_review).toLocaleDateString()}
+              </span>
+            )}
+          </div>
+        </div>
+        <button onClick={() => setSelected(null)} style={sBtn(D.border, D.muted)}>
+          Close
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 6, margin: "12px 0", flexWrap: "wrap" }}>
+        {selected.review_status !== "approved" && (
+          <button
+            disabled={busySlug === selected.slug}
+            onClick={() => handleReview(selected.slug, "approve")}
+            style={sBtn(D.green, D.white)}
+          >
+            Approve
+          </button>
+        )}
+        {selected.review_status !== "blocked" && (
+          <button
+            disabled={busySlug === selected.slug}
+            onClick={() => handleReview(selected.slug, "block")}
+            style={sBtn(D.border, D.text)}
+          >
+            Block
+          </button>
+        )}
+        <button
+          disabled={busySlug === selected.slug}
+          onClick={() => handleRegenerate(selected.slug)}
+          style={sBtn(D.border, D.text)}
+        >
+          Regenerate
+        </button>
+        <select
+          value=""
+          onChange={(e) => handleTierPin(selected.slug, e.target.value)}
+          style={{ ...sInput, width: 150 }}
+        >
+          <option value="">Pin tier...</option>
+          <option value="green">green (auto)</option>
+          <option value="yellow">yellow (digest)</option>
+          <option value="red">red (review)</option>
+        </select>
+      </div>
+      {selected.human_notes && (
+        <div style={{ fontSize: 12, color: D.amber, marginBottom: 8 }}>
+          Notes: {selected.human_notes}
+        </div>
+      )}
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          fontSize: 12,
+          lineHeight: 1.6,
+          color: D.text,
+          background: D.bg,
+          borderRadius: 8,
+          padding: 12,
+          maxHeight: 480,
+          overflowY: "auto",
+        }}
+      >
+        {selected.content}
+      </pre>
+    </div>
+  );
+
+  if (isMobile && selected) {
+    return <div>{detail}</div>;
+  }
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: selected && !isMobile ? "1fr 1fr" : "1fr",
+        gap: 16,
+      }}
+    >
+      <div>
+        {/* Exception queue — the only part that needs judgment */}
+        <div style={{ ...sCard, borderLeft: `3px solid ${queue.pending.length ? D.red : D.green}` }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 4 }}>
+            Needs Review ({queue.pending.length})
+          </div>
+          <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>
+            Red-tier pages are excluded from estimates, recommendations and agents until approved.
+            Everything else maintains itself.
+          </div>
+          {queue.pending.length === 0 && (
+            <div style={{ fontSize: 12, color: D.green }}>
+              Nothing needs your judgment right now.
+            </div>
+          )}
+          {queue.pending.map(exceptionRow)}
+        </div>
+
+        {queue.blocked.length > 0 && (
+          <div style={{ ...sCard, borderLeft: `3px solid ${D.muted}` }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, marginBottom: 6 }}>
+              Blocked ({queue.blocked.length})
+            </div>
+            {queue.blocked.map((page) => (
+              <div
+                key={page.id}
+                onClick={() => openPage(page.slug)}
+                style={{ fontSize: 12, color: D.muted, padding: "4px 0", cursor: "pointer" }}
+              >
+                {page.title}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {queue.recentYellow.length > 0 && (
+          <div style={{ ...sCard, borderLeft: `3px solid ${D.amber}` }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, marginBottom: 6 }}>
+              Updated This Week — optional review ({queue.recentYellow.length})
+            </div>
+            {queue.recentYellow.map((page) => (
+              <div
+                key={page.id}
+                onClick={() => openPage(page.slug)}
+                style={{ fontSize: 12, color: D.text, padding: "4px 0", cursor: "pointer" }}
+              >
+                {page.title}
+                <span style={{ color: D.muted, marginLeft: 6, fontSize: 11 }}>
+                  {page.data_point_count} pts
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Full corpus */}
+        <div style={sCard}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, marginBottom: 8 }}>
+            All Wiki Pages ({pages.length})
+          </div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {pages.map((page) => (
+              <div
+                key={page.id}
+                onClick={() => openPage(page.slug)}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 10px",
+                  border: `1px solid ${D.border}`,
+                  borderLeft: `3px solid ${TIER_COLORS[page.review_tier] || D.muted}`,
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  background: selected?.id === page.id ? `${D.teal}10` : D.card,
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {page.title}
+                  </div>
+                  <div style={{ fontSize: 11, color: D.muted }}>
+                    {page.category} - {page.data_point_count} pts - {page.confidence}
+                  </div>
+                </div>
+                <div style={{ flexShrink: 0, display: "flex", gap: 4, alignItems: "center" }}>
+                  <TierChip tier={page.review_tier} />
+                  {page.review_status === "pending_review" && (
+                    <span style={sBadge(`${D.red}15`, D.red)}>REVIEW</span>
+                  )}
+                  {page.review_status === "blocked" && (
+                    <span style={sBadge(`${D.muted}25`, D.muted)}>BLOCKED</span>
+                  )}
+                </div>
+              </div>
+            ))}
+            {pages.length === 0 && (
+              <div style={{ fontSize: 12, color: D.muted }}>
+                No wiki pages yet — pages generate automatically from confirmed lawn assessments.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {!isMobile && selected && <div>{detail}</div>}
     </div>
   );
 }

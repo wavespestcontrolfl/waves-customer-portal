@@ -11,6 +11,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 const { aiTriageLead } = require('../services/lead-triage');
+const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 // Service-line inference is shared with the call attribution path so both
@@ -26,6 +27,8 @@ const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
+const { verifyTurnstileToken } = require('../utils/turnstile');
+const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -67,26 +70,12 @@ function capitalizeName(name) {
   return properCase(name);
 }
 const leadAttribution = require('../services/lead-attribution');
-const { SPOKE_SITES } = require('../services/content-astro/spoke-sites');
-
-// Single source of truth for the spoke fleet: the domains determineLeadSource()
-// matches for organic domain_website attribution are derived from SPOKE_SITES (the
-// same canonical list the Astro build + content filter use) — so adding a spoke
-// there auto-attributes its inbound form leads here instead of dropping to the
-// 'Unattributed (web)' fallback. The hub (group 'Hub') is excluded — it resolves
-// to waves_website. `area` is optional display/location enrichment (used for
-// location resolution + stored on the lead); a spoke absent from SPOKE_AREA still
-// attributes correctly as domain_website, just with a null area.
-const SPOKE_DOMAIN_KEYS = SPOKE_SITES.filter((s) => s.group !== 'Hub').map((s) => s.key);
-const SPOKE_AREA = {
-  'bradentonflexterminator.com': 'Bradenton', 'bradentonflpestcontrol.com': 'Bradenton', 'bradentonfllawncare.com': 'Bradenton',
-  'palmettoexterminator.com': 'Palmetto', 'palmettoflpestcontrol.com': 'Palmetto',
-  'parrishexterminator.com': 'Parrish', 'parrishpestcontrol.com': 'Parrish', 'parrishfllawncare.com': 'Parrish',
-  'sarasotaflexterminator.com': 'Sarasota', 'sarasotaflpestcontrol.com': 'Sarasota', 'sarasotafllawncare.com': 'Sarasota',
-  'veniceexterminator.com': 'Venice', 'veniceflpestcontrol.com': 'Venice', 'venicelawncare.com': 'Venice',
-  'northportflpestcontrol.com': 'North Port',
-  'waveslawncare.com': 'SW Florida',
-};
+// The canonical URL/UTM/click-id → lead_source classifier (and its
+// SPOKE_SITES-derived domain list) moved VERBATIM to
+// services/lead-source-classify.js so the self-booking attribution path
+// (lead-estimate-link.js) classifies with the exact same semantics. This route
+// keeps using — and re-exporting via `_test` — the shared implementation.
+const { determineLeadSource } = require('../services/lead-source-classify');
 
 // Adam's personal cell for new-lead alerts — must be a real cell, never one
 // of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
@@ -140,10 +129,49 @@ const leadWebhookPhoneLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV !== 'production' || !leadSubmittedPhoneKey(req),
 });
 
+
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
   try {
     const body = req.body;
+
+    // --- Abuse guards, BEFORE any DB write / draft estimate / owner SMS ---
+    // Every accepted POST fans out to real-money side effects (customer +
+    // draft estimate + a text to the owner's cell), so bot submissions are
+    // stopped here, before the fan-out.
+    //
+    // 1) Honeypot (always on). 200-OK — not 4xx — so the bot believes it
+    //    succeeded and doesn't adapt, but nothing is created. Old cached pages
+    //    omit the field (undefined → passes), so this is safe unconditionally.
+    if (isHoneypotTripped(body)) {
+      logger.info('[lead-webhook] honeypot tripped — silently dropping submission');
+      return res.status(200).json({ success: true });
+    }
+
+    // 2) Cloudflare Turnstile (gated behind GATE_LEAD_TURNSTILE). Verified
+    //    server-side. While the gate is OFF we still verify-and-log (shadow) so
+    //    we can see how many real submissions WOULD be blocked before flipping,
+    //    but never block. Enforcement (403) begins only once the owner sets the
+    //    secret AND the Astro widget has propagated AND the gate is flipped on.
+    //    Misconfiguration / Cloudflare errors fail OPEN (see utils/turnstile).
+    // Accept both our explicit field and the stock Turnstile field name the
+    // widget posts (cf-turnstile-response), so a form that renders the widget
+    // without remapping still verifies instead of 403-ing after rollout (codex P1).
+    const turnstileToken = body && (body.turnstile_token || body['cf-turnstile-response']);
+    // resolveSubmitHost lets verify() select the token's OWNING widget secret and
+    // call siteverify exactly once — tokens are single-use, so probing other
+    // widgets' secrets would spend it (codex P1). See utils/lead-abuse.
+    const turnstile = await verifyTurnstileToken(turnstileToken, req.ip, resolveSubmitHost(req));
+    if (!turnstile.ok) {
+      logger.info(
+        `[lead-webhook] turnstile ${turnstile.reason} ` +
+          `(enforced=${turnstile.enforced}, gate=${isEnabled('leadTurnstile')})`
+      );
+      if (isEnabled('leadTurnstile') && turnstile.enforced) {
+        return res.status(403).json({ error: 'Verification failed. Please try again.' });
+      }
+    }
+
     const intake = buildLeadWebhookIntake(body);
     const {
       email,
@@ -166,11 +194,20 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       fbclid,
       fbc,
       fbp,
+      anonId,
       firstName,
       lastName,
       serviceInterest,
       leadSource,
     } = intake;
+
+    // Inline street unit and dedicated unit field disagree — ambiguous. Fail
+    // closed BEFORE any lead/customer mutation (same guard as
+    // /public/quote/calculate and /property-lookup) rather than capture the
+    // lead on the wrong unit.
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'The street address and unit number disagree — please re-enter your address.' });
+    }
 
     // City fallback. Forms only capture a structured city when the visitor
     // picks a Google Places suggestion; free-text submissions arrive with no
@@ -314,7 +351,15 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (!existing.lead_source) updates.lead_source = leadSource.source;
       if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
       if (!existing.email && email) updates.email = email;
-      if (!existing.address_line1 && address) updates.address_line1 = address;
+      if (!existing.address_line1 && address) {
+        updates.address_line1 = address;
+        if (normalizedAddress.line2) updates.address_line2 = normalizedAddress.line2;
+      }
+      // No unit backfill onto an EXISTING address here: this public webhook
+      // resolves the customer from the submitted phone alone, so a
+      // street-matching post could write an arbitrary unit onto someone's
+      // service address (dispatch corruption). The submitted unit still
+      // reaches staff via leads.address / extracted_data for review.
       if (!existing.city && (normalizedAddress.city || zipCity)) updates.city = normalizedAddress.city || zipCity;
       if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
@@ -339,6 +384,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address_line1: address || '',
+        address_line2: normalizedAddress.line2 || null,
         city: resolvedCity,
         state: normalizedAddress.state || 'FL',
         zip: normalizedAddress.zip || '',
@@ -416,6 +462,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       city: resolvedCity,
       service_interest: serviceInterest || null,
       customer_id: customer.id,
+      // The visitor just submitted from a browser carrying this unit id — a
+      // call-pipeline lead attaching to a web submission gains the join too.
+      ...(anonId ? { anon_id: anonId } : {}),
     });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
@@ -768,6 +817,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           fbclid: fbclid || null,
           fbc: fbc || null,
           fbp: fbp || null,
+          anon_id: anonId || null,
           is_residential: true,
         }).returning('*');
         leadRecord = newLead;
@@ -1090,6 +1140,11 @@ function getLeadWebhookAttribution(body = {}) {
     fbclid: truncateClickId(body.fbclid || body['Fbclid'] || body.FBCLID || attr.fbclid || ''),
     fbc: truncateClickId(body.fbc || body['Fbc'] || attr.fbc || ''),
     fbp: truncateClickId(body.fbp || body['Fbp'] || attr.fbp || ''),
+    // Anonymous experiment unit id (waves_exp_uid) — joins the lead to any A/B
+    // assignments in experiment_exposures. Validated (not just truncated): it
+    // must satisfy the exposure intake's unit-id contract or the join is dead
+    // weight. null (not '') when absent/malformed.
+    anonId: sanitizeAnonUnitId(body.anon_id || attr.anon_id),
   };
 }
 
@@ -1105,6 +1160,7 @@ function buildLeadWebhookIntake(body = {}) {
   const normalizedAddress = normalizeLeadAddress({
     raw: rawAddress,
     line1: body.address_line1 || body.addressLine1,
+    line2: body.address_line2 || body.addressLine2 || body.unit,
     city: body.city,
     state: body.state,
     zip: body.zip,
@@ -1302,71 +1358,9 @@ function cleanPhone(value) {
   return String(value).replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
 }
 
-function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid) {
-  const url = landingUrl || pageUrl || '';
-  const source = String(utmSource || '').trim().toLowerCase();
-  const medium = String(utmMedium || '').trim().toLowerCase();
-  const campaign = String(utmCampaign || '').trim().toLowerCase();
-
-  // UTM-based attribution (most specific)
-  if (source === 'gbp' || (source === 'google' && medium === 'organic' && campaign === 'gbp')) {
-    const gbpLocation = findGbpLocationByUtmContent(utmContent);
-    return {
-      source: 'google_business',
-      detail: gbpLocation ? `GBP ${gbpLocation.name}` : 'GBP unattributed',
-      channel: 'organic',
-      area: gbpLocation?.id || null,
-    };
-  }
-  if (utmSource === 'google' && utmMedium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
-  if (utmSource === 'facebook' || utmSource === 'fb') return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: utmMedium === 'cpc' ? 'paid' : 'organic' };
-  if (utmSource === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
-  // Google auto-tagging (the default) appends gclid — or wbraid/gbraid for
-  // iOS/web-to-app — to ad-click landing URLs WITHOUT utm_source/medium, so an
-  // auto-tagged paid click would otherwise fall through to the organic/referrer
-  // default and never count as Google Ads. The Google analog of the Meta fbclid
-  // branch below. (Explicit utm_source=google&cpc above still wins, with richer detail.)
-  if (gclid || wbraid || gbraid) {
-    return { source: 'google_ads', detail: utmCampaign ? `Campaign: ${utmCampaign}` : 'Google Ads click (gclid)', channel: 'paid', area: utmContent };
-  }
-  // Meta auto-appends fbclid to ad-click landing URLs even without explicit UTMs;
-  // _fbc is its cookie form (survives navigation when the URL fbclid is lost). A
-  // lead carrying either, with no clearer source above, is a paid Meta click.
-  // (_fbp alone is NOT counted — Meta sets it on every visit, organic included.)
-  if (fbclid || fbc) return { source: 'facebook', detail: fbclid ? 'Meta click (fbclid)' : 'Meta click (_fbc)', channel: 'paid' };
-
-  // Domain-based attribution. The spoke fleet is single-sourced from SPOKE_SITES
-  // (see SPOKE_DOMAIN_KEYS / SPOKE_AREA above) so it can't drift from the Astro
-  // build's domain list — a spoke added there attributes here automatically. A
-  // domain not in the fleet falls through to the 'website' fallback below, which
-  // the dashboard surfaces as "Unattributed (web)" — a visible signal to map it,
-  // not a silent miss (the class of bug PR #264 fixed piecemeal).
-  const spokeDomain = SPOKE_DOMAIN_KEYS.find((domain) => url.includes(domain));
-  if (spokeDomain) return { source: 'domain_website', detail: spokeDomain, channel: 'organic', area: SPOKE_AREA[spokeDomain] || null };
-
-  // Waves main site (hub) pages. Detect the CITY anywhere in the URL path — not just
-  // a fixed /pest-control-<city> list — so quote pages (/pest-control-quote-parrish-fl/),
-  // lawn/mosquito city pages, etc. get the right area instead of falling to a generic
-  // "Main site". Channel is always waves_website (organic hub); the page slug is the
-  // detail so it stays specific for any page type.
-  if (url.includes('wavespestcontrol.com')) {
-    const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
-    const seg = path.split('/').filter(Boolean).pop() || '';
-    // Anchor single-word cities to the "-fl" city/quote-page suffix so an incidental
-    // mention in a slug isn't read as a city — most importantly "palmetto-bug" (a FL
-    // cockroach) must NOT resolve to Palmetto and skew office routing. Compound names
-    // (north-port, lakewood-ranch) are unambiguous on their own and need no anchor.
-    const HUB_CITIES = [
-      [/north[-_ ]?port/i, 'North Port'], [/lakewood[-_ ]?ranch/i, 'Lakewood Ranch'],
-      [/bradenton-fl/i, 'Bradenton'], [/parrish-fl/i, 'Parrish'], [/sarasota-fl/i, 'Sarasota'],
-      [/venice-fl/i, 'Venice'], [/palmetto-fl/i, 'Palmetto'], [/ellenton-fl/i, 'Ellenton'],
-    ];
-    const hit = HUB_CITIES.find(([re]) => re.test(path));
-    return { source: 'waves_website', detail: seg ? `${seg} page` : 'Main site', channel: 'organic', area: hit ? hit[1] : undefined };
-  }
-
-  return { source: utmSource || 'website', detail: utmMedium || '', channel: 'unknown' };
-}
+// determineLeadSource lives in services/lead-source-classify.js (extracted
+// verbatim — see the import above). Re-exported through `_test` below so the
+// existing test surface and callers are unchanged.
 
 module.exports = router;
 module.exports._test = {
@@ -1382,4 +1376,5 @@ module.exports._test = {
   shouldRunLeadAcquisition,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
+  isHoneypotTripped,
 };

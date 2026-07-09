@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { COLORS as B, FONTS } from '../theme-brand';
+import { FONTS } from '../theme-brand';
 
 export default function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
@@ -67,24 +67,31 @@ export default function InstallPrompt() {
       padding: '0 12px 12px',
       pointerEvents: 'none',
     }}>
+      {/* Glass card (owner 2026-07-07: match the glass UI) — frosted white
+          gradient + blur, gold accent CTA, navy text; same recipe as the
+          glass-components.css chips/CTAs, inlined because the login page
+          isn't mounted under [data-glass-theme]. */}
       <div style={{
         maxWidth: 480,
         margin: '0 auto',
-        background: B.white,
-        border: '1px solid #E7E2D7',
-        borderRadius: 14,
+        background: 'linear-gradient(135deg, rgba(255,255,255,0.62), rgba(255,255,255,0.34)), rgba(255,255,255,0.3)',
+        border: '1px solid rgba(255,255,255,0.65)',
+        backdropFilter: 'blur(14px) saturate(170%)',
+        WebkitBackdropFilter: 'blur(14px) saturate(170%)',
+        borderRadius: 16,
         padding: '14px 16px',
         display: 'flex',
         alignItems: 'center',
         gap: 12,
-        boxShadow: '0 -4px 24px rgba(27,44,91,0.14)',
+        boxShadow: '0 12px 32px rgba(4,57,94,0.18), inset 0 1px 0 rgba(255,255,255,0.5)',
         pointerEvents: 'auto',
       }}>
         {/* Waves logo tile */}
         <div style={{
           width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-          background: '#F8FCFE',
-          border: '1px solid #CFE7F5',
+          background: 'rgba(255,255,255,0.55)',
+          border: '1px solid rgba(255,255,255,0.7)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.6)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24, maxWidth: 28, objectFit: 'contain' }} />
@@ -93,12 +100,12 @@ export default function InstallPrompt() {
         {/* Text */}
         <div style={{ flex: 1 }}>
           <p style={{
-            margin: 0, fontSize: 14, fontWeight: 700, color: B.blueDeeper,
+            margin: 0, fontSize: 14, fontWeight: 700, color: '#04395E',
             fontFamily: FONTS.heading,
           }}>Add Waves to Home Screen</p>
           <p style={{
-            margin: '2px 0 0', fontSize: 12, fontWeight: 500,
-            color: B.textCaption,
+            margin: '2px 0 0', fontSize: 14, fontWeight: 500,
+            color: '#1B2C5B',
             fontFamily: FONTS.heading,
           }}>
             Quick access to your portal
@@ -106,24 +113,25 @@ export default function InstallPrompt() {
         </div>
 
         <button onClick={handleInstall} style={{
-          background: B.blueDeeper,
-          color: B.white,
-          border: 'none',
-          borderRadius: 8,
-          padding: '8px 14px',
-          fontSize: 13,
+          background: 'linear-gradient(135deg, rgba(255,222,120,0.85), rgba(244,176,20,0.75)), rgba(240,165,0,0.5)',
+          color: '#1B2C5B',
+          border: '1px solid rgba(255,238,180,0.92)',
+          borderRadius: 999,
+          padding: '9px 16px',
+          fontSize: 14,
           fontWeight: 800,
           cursor: 'pointer',
           fontFamily: FONTS.heading,
           letterSpacing: 0,
           whiteSpace: 'nowrap',
+          boxShadow: '0 8px 20px rgba(180,110,0,0.22), inset 0 1px 0 rgba(255,255,255,0.4)',
         }}>Install</button>
 
         {/* Dismiss */}
-        <button onClick={dismiss} style={{
+        <button onClick={dismiss} aria-label="Dismiss install prompt" style={{
           background: 'none',
           border: 'none',
-          color: B.textCaption,
+          color: '#1B2C5B',
           fontSize: 18,
           cursor: 'pointer',
           padding: '0 4px',

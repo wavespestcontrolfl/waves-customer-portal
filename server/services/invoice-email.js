@@ -13,7 +13,7 @@ const db = require('../models/db');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
-const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./email-template');
+const { wrapEmail, ctaButton, currency, formatDate, plainText, colors, stripeFooterLine } = require('./email-template');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
@@ -193,12 +193,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const extraAttachmentCount = Number(attachmentCountRow?.count || 0);
 
   const first = recipient.name || customer.first_name || 'there';
-  const svcType = invoice.service_type || 'your recent service';
+  // Phrase the service as "your <type> service" so a concrete type reads
+  // naturally ("take care of your Quarterly Pest Control service", not
+  // "take care of Quarterly Pest Control"); the no-type fallback already
+  // carries its own "your".
+  const svcPhrase = invoice.service_type ? `your ${invoice.service_type} service` : 'your recent service';
   const heading = 'Your invoice from Waves';
   const attachmentNote = extraAttachmentCount > 0
     ? ` ${extraAttachmentCount} additional attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the online invoice.`
     : '';
-  const intro = `Hi ${first}, thank you for letting us take care of ${svcType}. Your invoice for ${currency(amountDue)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
+  const intro = `Hi ${first}, thank you for letting us take care of ${svcPhrase}. Your invoice for ${currency(amountDue)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
   // Customer-facing service summary (the AI-written / operator-edited note that
   // already shows on the invoice PDF). Render it as its own paragraph so the
   // summary reaches the customer in the email body, not just the attachment.
@@ -206,7 +210,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const summaryEscaped = summaryNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const summaryHtml = summaryNote
-    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${summaryEscaped}</div>`
+    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${summaryEscaped}</div>`
     : '';
   // Operator-written personal thank-you note (invoice.email_message), rendered
   // after the service summary and above the line-item table. Plain paragraph
@@ -216,7 +220,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const thankYouEscaped = thankYouNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const thankYouHtml = thankYouNote
-    ? `<div style="margin-top:16px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${thankYouEscaped}</div>`
+    ? `<div style="margin-top:16px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${thankYouEscaped}</div>`
     : '';
   const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}`;
   const lines = [
@@ -233,9 +237,10 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     lines,
     ctaHref: payUrl,
     ctaLabel: `Pay ${currency(amountDue)}`,
-    footerNote: extraAttachmentCount > 0
+    footerNote: (extraAttachmentCount > 0
       ? `Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
-      : `Your PDF invoice is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
+      : `Your PDF invoice is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`)
+      + stripeFooterLine(),
   });
   const text = plainText([
     `Hi ${first},`,
@@ -408,7 +413,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const memoEscaped = memo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const memoHtml = memo
-    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${memoEscaped}</div>`
+    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
   const intro = `Hi ${first}, we received your payment of ${currency(amountDue)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
   const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
