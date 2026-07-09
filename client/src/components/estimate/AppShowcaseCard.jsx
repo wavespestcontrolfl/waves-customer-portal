@@ -149,8 +149,11 @@ export default function AppShowcaseCard({ onBookToday = null }) {
             ))}
           </div>
           {native ? null : (
-          /* Badges centered under the copy column (owner ask 07-07). */
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+          /* Badges centered under the copy column (owner ask 07-07), always
+             SIDE BY SIDE (owner 2026-07-09) — the pair is ~280px, so nowrap
+             fits even a 390px phone; wrap made them stack in the narrow
+             copy column. */
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', flexWrap: 'nowrap' }}>
             <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
             <StoreBadge url={PLAY_STORE_URL} label="Get Waves on Google Play"><GooglePlayBadge /></StoreBadge>
           </div>
