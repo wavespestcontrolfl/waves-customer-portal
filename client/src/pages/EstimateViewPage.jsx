@@ -445,10 +445,11 @@ function Page({ children }) {
       <EstimateGlassTheme active />
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
-      {/* Bottom padding: enough that the floating book bar doesn't sit on
-          the last card, without the old 110px dead zone above the footer
-          (owner 2026-07-07: "leave a smaller gap"). */}
-      <div style={{ flex: 1, padding: '32px 20px 48px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Bottom padding: minimal — the pre-footer newsletter card is the
+          buffer under the last content card now (owner 2026-07-09: "close
+          the gap"), and it also gives the floating book bar something
+          non-critical to overlap at full scroll. */}
+      <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
       {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
