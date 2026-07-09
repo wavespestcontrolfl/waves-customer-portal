@@ -102,7 +102,6 @@ router.get('/', async (req, res, next) => {
       })
       .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
     const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
-    const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
     // Per-application customers pay per completed visit — their autopay card
     // is HOW each visit charge collects, not a monthly subscription, and the
     // monthly cron skips them (GUARD 3b). Never project a monthly next-charge
@@ -114,6 +113,15 @@ router.get('/', async (req, res, next) => {
       billingMode = modeRow?.billing_mode || null;
     } catch { /* billing_mode column absent pre-migration */ }
     const perApplicationBilling = billingMode === 'per_application';
+    // Per-application collection is card-only (the completion collector and
+    // chargeInvoiceWithSavedCard refuse ACH): an ACH default must read as
+    // Auto Pay OFF for a per-application customer, or the portal claims
+    // "charged after each visit" while every visit actually falls back to a
+    // pay-link invoice (Codex round-3). Monthly/legacy customers keep ACH
+    // autopay — the monthly cron charges bank methods.
+    const perAppMethodChargeable = !perApplicationBilling
+      || chargeableAutopayMethod?.method_type === 'card';
+    const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod && perAppMethodChargeable;
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;

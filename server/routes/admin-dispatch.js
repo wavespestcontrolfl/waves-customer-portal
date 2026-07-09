@@ -4819,7 +4819,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // ledger — never re-collectible from this completion (Codex P1).
           invoiceCreated = false;
           payUrl = null;
-          logger.error(`[dispatch] per-application autopay charge ORPHANED for invoice ${invoice?.id} (PI ${chargeErr.stripePaymentIntentId || 'unknown'}) — pay link suppressed, see stripe_orphan_charges`);
+          // Suppressing THIS pay link isn't enough: the invoice would stay
+          // open, so /api/billing/balance and any later pay surface still
+          // offer it for payment (Codex round-3). Park it as 'processing' —
+          // the established money-in-flight status: excluded from balance
+          // sums (INVOICE_UNCOLLECTIBLE_STATUSES), pay routes 409 it,
+          // assertInvoiceCollectible refuses manual/auto collection. The
+          // PI's payment_intent.succeeded webhook still resolves the invoice
+          // via metadata waves_invoice_id (findInvoiceForPaymentIntent) and
+          // settles processing→paid — the designed ACH-style self-heal; if
+          // that write fails too, the stripe_orphan_charges row is the
+          // operator's reconcile queue. Best-effort: if parking fails, the
+          // loud error below still flags the invoice id.
+          try {
+            await db('invoices').where({ id: invoice.id }).update({ status: 'processing', updated_at: new Date() });
+            invoice = { ...invoice, status: 'processing' };
+          } catch (parkErr) {
+            logger.error(`[dispatch] failed to park orphaned invoice ${invoice?.id} as processing: ${parkErr.message}`);
+          }
+          logger.error(`[dispatch] per-application autopay charge ORPHANED for invoice ${invoice?.id} (PI ${chargeErr.stripePaymentIntentId || 'unknown'}) — pay link suppressed, invoice parked 'processing', see stripe_orphan_charges`);
         } else {
           logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
         }

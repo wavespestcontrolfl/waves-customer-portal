@@ -1181,11 +1181,13 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       // explicit portal (AutopayCard) enrollment. Column-guarded read —
       // pre-migration environments keep enrolling nothing.
       let enrollAutopay = false;
+      let signupBillingMode = null;
       try {
         const custRow = await db('customers')
           .where({ id: wavesCustomerId })
           .first('billing_mode');
-        enrollAutopay = ['per_application', 'annual_prepay'].includes(custRow?.billing_mode);
+        signupBillingMode = custRow?.billing_mode || null;
+        enrollAutopay = ['per_application', 'annual_prepay'].includes(signupBillingMode);
       } catch (modeErr) { /* billing_mode column absent — keep false */ }
       let saved = existing;
       if (!saved) {
@@ -1193,7 +1195,21 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           enableAutopay: enrollAutopay,
           makeDefault: !currentAutopayMethod,
         });
-      } else if (enrollAutopay && !currentAutopayMethod && existing.customer_id === wavesCustomerId) {
+        // Per-application collection is card-only (chargeInvoiceWithSavedCard
+        // + the completion collector both refuse ACH): an ACH method flagged
+        // autopay for a per-application customer would advertise auto-collect
+        // that never runs (Codex round-3). savePaymentMethod only learns the
+        // method type from Stripe, so correct the flag after the fact; the
+        // customer keeps the pay-link flow. annual_prepay stays
+        // method-agnostic — the legacy monthly/renewal chargers handle ACH.
+        if (enrollAutopay && signupBillingMode === 'per_application'
+          && saved?.autopay_enabled && saved.method_type !== 'card') {
+          await db('payment_methods').where({ id: saved.id }).update({ autopay_enabled: false });
+          saved = { ...saved, autopay_enabled: false };
+          logger.info(`[stripe-webhook] Autopay NOT enrolled for per-application customer ${wavesCustomerId}: pm ${stripePmId} is ${saved.method_type}, collection is card-only (pay-link flow)`);
+        }
+      } else if (enrollAutopay && !currentAutopayMethod && existing.customer_id === wavesCustomerId
+        && !(signupBillingMode === 'per_application' && existing.method_type !== 'card')) {
         // The pm was already on file (saved card-on-file before this signup,
         // or a duplicate webhook) — the short-circuit skips savePaymentMethod,
         // so enroll here or the signup's autopay consent is silently dropped
@@ -1201,7 +1217,8 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         // AND autopay_enabled) never finds a card (Codex round-2). Same
         // semantics as the fresh-save path: only claim default when no
         // chargeable autopay method exists; an existing one stays in charge.
-        // Ownership guard: `existing` is looked up by pm id alone.
+        // Ownership guard: `existing` is looked up by pm id alone. Card-only
+        // for per_application (see the fresh-save branch note).
         await db('payment_methods')
           .where({ customer_id: wavesCustomerId })
           .whereNot({ id: existing.id })
@@ -1211,6 +1228,29 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           .update({ autopay_enabled: true, is_default: true });
         saved = { ...existing, autopay_enabled: true, is_default: true };
         logger.info(`[stripe-webhook] Autopay enrolled on existing pm ${stripePmId} for customer ${wavesCustomerId} (estimate-flow signup)`);
+      }
+      // Row-level enrollment is inert while the CUSTOMER flag is off:
+      // customerOnAutopay short-circuits on customers.autopay_enabled=false
+      // (e.g. a returning customer who turned Auto Pay off), so the consented
+      // card would never be auto-charged and the portal would keep reporting
+      // Auto Pay as off (Codex round-3). The signup consent re-authorizes —
+      // flip the customer flag and point it at whichever method is actually
+      // in charge (a pre-existing chargeable default keeps that role).
+      const enrolledChargeable = enrollAutopay
+        && (currentAutopayMethod || (saved && saved.autopay_enabled && saved.is_default));
+      if (enrolledChargeable) {
+        await db('customers')
+          .where({ id: wavesCustomerId })
+          .update({
+            autopay_enabled: true,
+            autopay_payment_method_id: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
+          });
+        try {
+          await require('../services/autopay-log').logAutopay(wavesCustomerId, 'autopay_enabled', {
+            paymentMethodId: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
+            details: { source: 'estimate_flow_signup', billing_mode: signupBillingMode },
+          });
+        } catch (logErr) { /* log-only */ }
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       if (!existing) {
