@@ -134,7 +134,6 @@ function validFrontmatter(overrides = {}) {
       name: 'Adam Benetti',
       role: 'Owner',
       fdacs_license: 'JB1234',
-      years_swfl: 10,
       bio_url: '/about/authors/adam-benetti',
     },
     technically_reviewed_by: {
