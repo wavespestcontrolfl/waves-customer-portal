@@ -1207,8 +1207,8 @@ function SharePostButton({ url, title }) {
 function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
-    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 18 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: compact ? 14 : 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: compact ? 8 : 12, marginBottom: compact ? 10 : 14, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           {iconTile}
           <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
@@ -1220,8 +1220,8 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
             rel="noopener noreferrer"
             data-glass="chip"
             style={{
-              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 36,
-              padding: '0 14px', borderRadius: 999, textDecoration: 'none',
+              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: compact ? 30 : 36,
+              padding: compact ? '0 11px' : '0 14px', borderRadius: 999, textDecoration: 'none',
               background: '#fff', border: '1px solid #E7E2D7',
               color: B.blueDeeper, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
               whiteSpace: 'nowrap',
@@ -1243,7 +1243,7 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
               // Exactly three cards fill the rail on desktop (owner
               // 2026-07-09); extra posts overflow into the horizontal
               // scroll. Mobile keeps a fixed swipe width.
-              flex: compact ? '0 0 230px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
+              flex: compact ? '0 0 180px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
               display: 'flex', flexDirection: 'column',
               background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
               overflow: 'hidden', position: 'relative',
@@ -1255,11 +1255,11 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
                   src={post.image}
                   alt=""
                   loading="lazy"
-                  style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
+                  style={{ width: '100%', aspectRatio: compact ? '16 / 10' : '4 / 3', objectFit: 'cover', display: 'block' }}
                 />
               ) : (
                 <div style={{
-                  width: '100%', aspectRatio: '4 / 3', display: 'flex',
+                  width: '100%', aspectRatio: compact ? '16 / 10' : '4 / 3', display: 'flex',
                   alignItems: 'center', justifyContent: 'center',
                   background: PORTAL_SHELL.soft, color: B.blueDeeper,
                 }}>
@@ -1267,7 +1267,7 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
                 </div>
               )}
             </a>
-            <div style={{ padding: '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+            <div style={{ padding: compact ? '8px 10px 10px' : '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6, flex: 1 }}>
               {post.title && (
                 <div style={{
                   fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
@@ -1277,7 +1277,7 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
               {post.text && (
                 <div style={{
                   fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.45,
-                  display: '-webkit-box', WebkitLineClamp: post.title ? 2 : 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                  display: '-webkit-box', WebkitLineClamp: post.title ? 2 : (compact ? 2 : 3), WebkitBoxOrient: 'vertical', overflow: 'hidden',
                 }}>{post.text}</div>
               )}
               <div style={{ marginTop: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -1913,11 +1913,11 @@ function DashboardTab({ customer, onSwitchTab }) {
         ctaLabel="View Post"
         iconTile={(
           <span style={{
-            width: 38, height: 38, borderRadius: 10, flexShrink: 0,
+            width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
             background: '#1877F2', color: '#fff',
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           }}>
-            <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+            <svg viewBox="0 0 24 24" width={compact ? 15 : 18} height={compact ? 15 : 18} fill="currentColor" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
           </span>
         )}
         posts={facebookPosts.map((p) => ({
@@ -1930,7 +1930,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         followHref="https://www.wavespestcontrol.com/blog/"
         followLabel="Visit the Waves Blog"
         ctaLabel="Read Post"
-        iconTile={<ShellIconTile icon="bulb" size={38} />}
+        iconTile={<ShellIconTile icon="bulb" size={compact ? 30 : 38} />}
         posts={blogPosts.map((p) => ({
           url: p.link, image: p.image, title: p.title, text: p.description, external: true,
         }))}
@@ -1941,7 +1941,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         followHref="https://www.wavespestcontrol.com/newsletter/"
         followLabel="Subscribe to the Waves Newsletter"
         ctaLabel="Read Issue"
-        iconTile={<ShellIconTile icon="newspaper" size={38} />}
+        iconTile={<ShellIconTile icon="newspaper" size={compact ? 30 : 38} />}
         posts={newsletterPosts.map((p) => ({
           url: p.link, image: p.image, title: p.title, text: p.description,
           external: !String(p.link || '').startsWith('/'),
