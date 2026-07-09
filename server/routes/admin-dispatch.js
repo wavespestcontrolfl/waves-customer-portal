@@ -5237,17 +5237,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           completionSmsWasTruncated = false;
         } else {
           if (usePaidCompletionTemplate) {
-            const body = await renderTemplate('service_complete_prepaid', {
+            // Annual-prepay coverage means the plan paid for this visit when
+            // it was bought, not today — service_complete_prepaid's "Thanks
+            // for your payment today" reads wrong there (owner report
+            // 2026-07-09). Plan-covered visits get the annual-prepay variant;
+            // a disabled/missing variant falls back to the base paid template
+            // so the toggle can never cost the customer their completion text.
+            const paidTemplateVars = {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
-            }, {
+            };
+            const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
               entity_id: record.id,
-            });
+            };
+            let body = null;
+            if (annualPrepayCovered) {
+              sentSmsType = 'service_complete_annual_prepay';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
+            if (!body) {
+              sentSmsType = 'service_complete_prepaid';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
             if (!body) throw new Error('SMS template service_complete_prepaid is missing or inactive');
-            sentSmsType = 'service_complete_prepaid';
             sentSmsBody = `${body}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
