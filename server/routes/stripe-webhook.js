@@ -1177,8 +1177,10 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       // non-default and point the customer at a method collection refuses —
       // the visit would never auto-charge (Codex round-5 P1). Same predicate
       // as customerOnAutopay: a non-empty, non-'active' ach_status blocks
-      // bank methods only.
-      if (currentAutopayMethod?.method_type === 'ach') {
+      // bank methods only. Bank rows carry either alias ('ach' from manual
+      // entry, 'us_bank_account' from Stripe's pm.type) — match both, like
+      // chargeInvoiceWithSavedCard.
+      if (['ach', 'us_bank_account'].includes(currentAutopayMethod?.method_type)) {
         const achRow = await db('customers').where({ id: wavesCustomerId }).first('ach_status');
         if (achRow?.ach_status && achRow.ach_status !== 'active') {
           currentAutopayMethod = null;

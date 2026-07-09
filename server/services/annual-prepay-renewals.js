@@ -1448,10 +1448,16 @@ async function resetBillingModeAfterTermCancel(term, conn) {
     // nothing-bills limbo — cron skips the mode, completion refuses it,
     // and the pending invoice may never be paid (Codex round-8 P1). When
     // the pending term DOES pay, syncTermForInvoicePayment re-stamps.
+    // Same for an EXPIRED active/renewal_pending row (a lapsed renewal
+    // never decided): coveredTermsAsOf only covers dates inside
+    // [term_start, term_end], so a past-window term is not real coverage —
+    // keeping the stamp for it is the same nothing-bills limbo (Codex
+    // round-11). Live window only, ET date convention.
     const replacement = await conn('annual_prepay_terms')
       .where({ customer_id: term.customer_id })
       .whereNot({ id: term.id })
       .whereIn('status', ACTIVE_STATUSES)
+      .where('term_end', '>=', etDateString())
       .first('id');
     if (replacement) return;
     // Restore the EXACT prior mode when the stamp recorded it ('none' =

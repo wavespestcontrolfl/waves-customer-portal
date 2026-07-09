@@ -1750,6 +1750,42 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
     );
   });
 
+  test('the replacement lookup filters to a LIVE window — an expired active row is not coverage (Codex round-11)', async () => {
+    // coveredTermsAsOf only covers dates inside [term_start, term_end], so a
+    // lapsed never-decided 'active' row with a past term_end must not keep
+    // the annual_prepay stamp. The mock returns no replacement; assert the
+    // query itself carried the term_end >= today (ET) predicate that
+    // excludes expired rows, and the mode still reset.
+    const DECIDED = { id: 'term-d', customer_id: 'customer-1', source_estimate_id: 'est-1' };
+    const replacementQ = query({ first: undefined });
+    const resetQ = query({});
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ rows: [] }),
+        query({ rows: [DECIDED] }),
+        replacementQ, // replacement-coverage check (live-window filtered)
+        query({ first: undefined }), // prior_billing_mode read → heuristic
+      ],
+      scheduled_services: [
+        query({ columnInfo: { scheduled_date: {} } }),
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', account_credits: 0 } }),
+        resetQ,
+      ],
+      customer_credit_ledger: [query({ rows: [] })],
+    });
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    );
+
+    expect(replacementQ.where).toHaveBeenCalledWith('term_end', '>=', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    expect(resetQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: 'per_application' }),
+    );
+  });
+
   test('a replacement live term keeps the customer annual_prepay (renewed-then-old-refunded)', async () => {
     const DECIDED = { id: 'term-d', customer_id: 'customer-1', source_estimate_id: 'est-1' };
     setDbQueues({

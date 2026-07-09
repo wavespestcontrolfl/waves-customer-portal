@@ -167,11 +167,12 @@ describe('completionInvoiceAmount', () => {
   });
 });
 
-// Annual-prepay customers are never auto-billed at completion (Codex round-5
-// P1): covered visits settle via prepaid stamps, and an uncovered visit
-// (expired term) belongs to the renewal flow — the tier/monthly_rate branch
-// must not bill monthly dues per visit. Only the explicit scheduler flag
-// outranks.
+// Annual-prepay customers are never auto-billed at completion for UNPRICED
+// plan visits (Codex round-5 P1): covered visits settle via prepaid stamps,
+// and an uncovered unpriced visit (expired term) belongs to the renewal flow
+// — the tier/monthly_rate branch must not invent an amount per visit. An
+// EXPLICITLY PRICED visit the term does not cover (add-on / one-time) keeps
+// the normal priced-visit billing paths (Codex round-11).
 describe('shouldAutoInvoiceCompletion — annual-prepay billing', () => {
   const annualPrepay = {
     ...base,
@@ -180,13 +181,29 @@ describe('shouldAutoInvoiceCompletion — annual-prepay billing', () => {
     invoiceAmount: 55.3,
   };
 
-  test('annual-prepay visit never auto-invoices, even tiered with a positive amount', () => {
+  test('unpriced annual-prepay visit never auto-invoices, even tiered with a positive amount', () => {
     expect(shouldAutoInvoiceCompletion(annualPrepay)).toBe(false);
   });
 
-  test('an uncovered (expired-term) priced visit still does not bill via the priced-visits gate', () => {
+  test('an uncovered PRICED visit (add-on / one-time) bills via the normal priced paths', () => {
+    // Tiered customer: the tier branch answers (pre-billing_mode behavior).
     expect(shouldAutoInvoiceCompletion({
-      ...annualPrepay, autoInvoicePricedVisits: true, hasVisitPrice: true, invoiceAmount: 89,
+      ...annualPrepay, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(true);
+    // Tier-less customer: the gated priced-visits path answers.
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, waveguardTier: null, autoInvoicePricedVisits: true, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(true);
+    // Tier-less + gate off: nothing bills (legacy non-member behavior) —
+    // the caller's uncovered-completion warn flags it for manual billing.
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, waveguardTier: null, autoInvoicePricedVisits: false, hasVisitPrice: true, invoiceAmount: 89,
+    })).toBe(false);
+  });
+
+  test('a COVERED priced visit stays suppressed (prepaid stamps own it)', () => {
+    expect(shouldAutoInvoiceCompletion({
+      ...annualPrepay, hasVisitPrice: true, invoiceAmount: 89, prepaidCovered: true,
     })).toBe(false);
   });
 

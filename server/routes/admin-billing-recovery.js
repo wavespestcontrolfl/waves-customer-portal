@@ -304,6 +304,23 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       return res.status(422).json({ error: 'Visit completion record is incomplete (office-handoff) — cannot invoice.' });
     }
 
+    // Per-application pricing lives at the CUSTOMER level when the visit row
+    // carries no price (follow-up rows seed estimated_price NULL by design),
+    // so probe mode + fee once up front: the autopay guard below and the
+    // price fallback both key off it, and the fallback must apply whether or
+    // not the customer's autopay is currently healthy (a per-app visit whose
+    // saved method died still needs a recoverable price). Column-guarded —
+    // pre-migration environments keep exact legacy behavior.
+    let recoveryBillingMode = null;
+    let recoveryPerApplicationFee = 0;
+    try {
+      const modeRow = await db('customers')
+        .where({ id: visit.customer_id })
+        .first('billing_mode', 'per_application_fee');
+      recoveryBillingMode = modeRow?.billing_mode || null;
+      recoveryPerApplicationFee = parseFloat(modeRow?.per_application_fee || 0);
+    } catch { /* billing_mode column absent — keep legacy behavior */ }
+
     // Conservative v1 double-bill guard (owner priority): reject active-autopay
     // customers outright. The completion predicate only treats autopay as covering
     // NO-price visits, so an autopay one-off priced visit is technically billable —
@@ -323,12 +340,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       // them: a per-app visit that completion failed to invoice/charge is
       // THE case this workbench exists to recover (Codex round-7).
       // annual_prepay stays blocked (uncovered visits belong to the renewal
-      // flow, covered ones to the prepaid stamps). Column-guarded.
-      let recoveryBillingMode = null;
-      try {
-        const modeRow = await db('customers').where({ id: visit.customer_id }).first('billing_mode');
-        recoveryBillingMode = modeRow?.billing_mode || null;
-      } catch { /* billing_mode column absent — keep legacy block */ }
+      // flow, covered ones to the prepaid stamps).
       if (recoveryBillingMode !== 'per_application') {
         return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
       }
@@ -359,7 +371,14 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     const prepaid = visit.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
       ? 0
       : parseFloat(visit.prepaid_amount || 0);
-    const price = parseFloat(visit.estimated_price || 0);
+    // Mirror completion billing's per-application precedence (row price →
+    // customers.per_application_fee, NEVER monthly_rate): a leaked per-app
+    // visit whose amount lives at the customer level must be recoverable
+    // here, not bounce as "no price" (Codex round-11).
+    const rowPrice = parseFloat(visit.estimated_price || 0);
+    const price = rowPrice > 0
+      ? rowPrice
+      : (recoveryBillingMode === 'per_application' ? recoveryPerApplicationFee : 0);
     if (!(price > 0)) {
       return res.status(422).json({ error: 'Visit has no price to invoice.' });
     }
@@ -410,7 +429,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       // invoice recheck excludes the visit from future leaks on retry — never a
       // double-charge.
       const created = await InvoiceService.createFromService(visit.service_record_id, {
-        amount: parseFloat(visit.estimated_price),
+        amount: price,
         description: visit.service_type,
         taxRate: visit.property_type === 'commercial' ? 0.07 : 0,
         useScheduledReplay: true,

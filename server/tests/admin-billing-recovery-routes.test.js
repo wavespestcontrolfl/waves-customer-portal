@@ -145,6 +145,70 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  // Per-application customers are on autopay BY DESIGN (the saved card is HOW
+  // per-visit charges collect), so the autopay guard exempts them (Codex
+  // round-7) — and their follow-up rows seed estimated_price NULL by design,
+  // so pricing falls back to customers.per_application_fee, mirroring
+  // completion billing's precedence (Codex round-11; never monthly_rate).
+  test('a per-application autopay visit with no row price bills the customer-level fee', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: null, monthly_rate: '55.30' } });
+      if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: '55.30' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(true); // per-app = on autopay by design
+    const dispositionQB = makeQB({ first: null });
+    installTransaction((arg) => {
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error(`unexpected trx table ${arg}`);
+    });
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-2', total: '55.30', status: 'draft', token: 'tok', customer_id: 'cust-1' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(200);
+      expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ amount: 55.3 }));
+      expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({ disposition: 'billed', invoice_id: 'inv-2' }));
+    });
+  });
+
+  test('a per-application visit with neither row price nor fee still 422s (no invented amount)', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: null, monthly_rate: '55.30' } });
+      if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: null } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.error).toMatch(/no price/i);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a LEGACY (no billing_mode) customer with no row price still 422s — the fee fallback is per-app only', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: null } });
+      if (arg === 'customers') return makeQB({ first: { billing_mode: null, per_application_fee: null } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(422);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
   test('billing a payer-billed visit is blocked (self-pay only v1)', async () => {
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, payer_id: 'payer-1' } });

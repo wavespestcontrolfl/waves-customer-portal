@@ -4454,14 +4454,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
     // where priced, self-pay, non-WaveGuard visits completed uninvoiced.
     // Default OFF = behaviour identical to before.
-    // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
-    // not already paid) means the term expired and renewal hasn't happened —
-    // the gate above deliberately refuses to bill it, so flag it loudly for
-    // the renewal flow / manual invoicing instead of leaking a free visit.
-    if (annualPrepayBilling && !recapReviewOnly && !prepaidCovered && !alreadyPaid
-      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
-      logger.warn(`[dispatch] annual-prepay visit ${svc.id} (customer ${svc.customer_id}) completed WITHOUT prepay coverage — term expired/refunded? Renewal or manual invoice needed`);
-    }
     const shouldInvoice = shouldAutoInvoiceCompletion({
       recapReviewOnly,
       alreadyPaid,
@@ -4482,6 +4474,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // (mirrors referralVisitPerformed; 'incomplete' returned earlier).
       visitPerformed,
     });
+    // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
+    // not already paid) that the gate ALSO declined to bill (an explicitly
+    // priced add-on invoices normally — Codex round-11) means the term
+    // expired and renewal hasn't happened — flag it loudly for the renewal
+    // flow / manual invoicing instead of leaking a free visit.
+    if (annualPrepayBilling && !shouldInvoice && !recapReviewOnly && !prepaidCovered && !alreadyPaid
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      logger.warn(`[dispatch] annual-prepay visit ${svc.id} (customer ${svc.customer_id}) completed WITHOUT prepay coverage — term expired/refunded? Renewal or manual invoice needed`);
+    }
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
     // prod for app-internal redirects). publicPortalUrl() reads
@@ -7480,14 +7481,19 @@ function shouldAutoInvoiceCompletion({
   if (!(Number(invoiceAmount) > 0)) return false;
   // Explicit scheduler flag stays the strongest signal (operator intent).
   if (createInvoiceOnComplete) return true;
-  // Annual-prepay customers are never auto-billed at completion: covered
-  // visits settle through the prepaid stamps / coverage guards above, and
-  // an UNCOVERED visit (naturally expired term awaiting renewal) must not
-  // fall into the tier/monthly_rate branch — the renewal flow (notice +
-  // annual invoice; roll-to-per-app is the follow-up build) owns collection
-  // (Codex round-5 P1). The caller logs uncovered completions for manual
-  // billing so nothing leaks silently.
-  if (annualPrepayBilling) return false;
+  // Annual-prepay customers are never auto-billed at completion for their
+  // UNPRICED plan visits: covered ones settle through the prepaid stamps /
+  // coverage guards above, and an uncovered unpriced visit (naturally
+  // expired term awaiting renewal) must not fall into the tier/monthly_rate
+  // branch and invent an amount — the renewal flow (notice + annual
+  // invoice; roll-to-per-app is the follow-up build) owns collection (Codex
+  // round-5 P1). An EXPLICITLY PRICED visit the term does not cover
+  // (separately scheduled add-on / one-time — real coverage was already
+  // separated into prepaidCovered above) keeps the normal priced-visit
+  // billing paths below, exactly as it billed pre-billing_mode (Codex
+  // round-11). The caller logs uncovered completions that still end up
+  // uninvoiced so nothing leaks silently.
+  if (annualPrepayBilling && !hasVisitPrice) return false;
   // Per-application customers bill every completed APPLICATION — never a
   // callback/re-treat or an always-free type (re-service, follow-up,
   // estimate). Decided BEFORE the WaveGuard-tier shortcut: converted
