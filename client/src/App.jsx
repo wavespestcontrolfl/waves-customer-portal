@@ -126,7 +126,6 @@ function NewsletterExternalRedirect() {
 
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
-import PortalPage from './pages/PortalPage';
 import AdminLoginPage from './pages/AdminLoginPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
@@ -134,15 +133,6 @@ import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import { isNativeApp } from './native/platform';
-import AdminReviewsPage from './pages/admin/ReviewsPage';
-import AdminDispatchPage from './pages/admin/AdminDispatchPage';
-import AdminInventoryPage from './pages/admin/InventoryPage';
-import AdminRevenuePage from './pages/admin/RevenuePage';
-import AdminCommunicationsPage from './pages/admin/CommunicationsPageV2';
-import AdminCustomersPage from './pages/admin/CustomersPageV2';
-import AdminReferralsPage from './pages/admin/ReferralsPageV2';
-import ReportViewPage from './pages/ReportViewPage';
-import ProjectReportViewPage from './pages/ProjectReportViewPage';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
 
@@ -217,6 +207,20 @@ function lazyWithRetry(factory) {
     }
   });
 }
+// Perf (owner ask 2026-07-09): these were EAGER imports riding the entry
+// bundle — a customer opening an estimate/report link downloaded the whole
+// admin platform plus the 500KB+ PortalPage before first paint. Same
+// lazyWithRetry + per-route Suspense treatment as the rest of the pages;
+// no rendered-output change.
+const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
+const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
+const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
+const AdminReviewsPage = lazyWithRetry(() => import('./pages/admin/ReviewsPage'));
+const AdminDispatchPage = lazyWithRetry(() => import('./pages/admin/AdminDispatchPage'));
+const AdminInventoryPage = lazyWithRetry(() => import('./pages/admin/InventoryPage'));
+const AdminCommunicationsPage = lazyWithRetry(() => import('./pages/admin/CommunicationsPageV2'));
+const AdminCustomersPage = lazyWithRetry(() => import('./pages/admin/CustomersPageV2'));
+const AdminReferralsPage = lazyWithRetry(() => import('./pages/admin/ReferralsPageV2'));
 const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
 const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
@@ -374,8 +378,8 @@ export default function App() {
           {/* WavesShell wraps (owner 2026-07-06): every customer page gets
               the standard top bar + trust footer. */}
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
-          <Route path="/report/project/:token" element={<WavesShell><ProjectReportViewPage /></WavesShell>} />
-          <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
+          <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
@@ -413,7 +417,7 @@ export default function App() {
           <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
             <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
-            <Route path="customers" element={<AdminCustomersPage />} />
+            <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
             <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface
@@ -421,11 +425,11 @@ export default function App() {
                 DispatchPageV2). /admin/schedule still works (redirects
                 to the Schedule tab) so existing bookmarks and internal
                 links aren't broken. */}
-            <Route path="dispatch" element={<AdminDispatchPage />} />
+            <Route path="dispatch" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dispatch...</div>}><AdminDispatchPage /></Suspense>} />
             <Route path="schedule" element={<ScheduleRedirect />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
-            <Route path="communications" element={<AdminCommunicationsPage />} />
-            <Route path="reviews" element={<AdminReviewsPage />} />
+            <Route path="communications" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading communications...</div>}><AdminCommunicationsPage /></Suspense>} />
+            <Route path="reviews" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading reviews...</div>}><AdminReviewsPage /></Suspense>} />
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
             <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
@@ -437,7 +441,7 @@ export default function App() {
             <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
-            <Route path="referrals" element={<AdminReferralsPage />} />
+            <Route path="referrals" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading referrals...</div>}><AdminReferralsPage /></Suspense>} />
             <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
@@ -451,7 +455,7 @@ export default function App() {
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
             <Route path="billing-recovery" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading billing recovery...</div>}><BillingRecoveryPage /></Suspense>} />
             <Route path="payers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading payers...</div>}><PayersPage /></Suspense>} />
-            <Route path="inventory" element={<AdminInventoryPage />} />
+            <Route path="inventory" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading inventory...</div>}><AdminInventoryPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
             <Route path="settings/pest-pressure" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading Pest Pressure settings...</div>}><PestPressureSettingsPage /></Suspense>} />
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
@@ -484,7 +488,9 @@ export default function App() {
             path="/*"
             element={
               <ProtectedRoute>
-                <PortalPage />
+                <Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}>
+                  <PortalPage />
+                </Suspense>
               </ProtectedRoute>
             }
           />

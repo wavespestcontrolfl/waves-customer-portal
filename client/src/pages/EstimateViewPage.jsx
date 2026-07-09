@@ -2674,8 +2674,17 @@ export default function EstimateViewPage() {
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
   const addServiceOffer = useMemo(
-    () => estimateAddServiceOffer(services, serviceMode, data?.estimate?.membership),
-    [services, serviceMode, data?.estimate?.membership]
+    // Accepted estimates always evaluate the offer in recurring terms (owner
+    // ask 2026-07-09): the accepted page upsells the next recurring service
+    // regardless of which mode the customer originally booked. data?.cta —
+    // the destructured `cta` binding doesn't exist until after the early
+    // returns below.
+    () => estimateAddServiceOffer(
+      services,
+      data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
+      data?.estimate?.membership,
+    ),
+    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership]
   );
   const reportShowcaseVariant = useMemo(() => reportShowcaseVariantForServices(services), [services]);
   // Download PDF / Share / Print / Portal Login at the top of every estimate
@@ -3522,24 +3531,52 @@ export default function EstimateViewPage() {
     // non-default-frequency booking — better to show just the terminal card
     // than a wrong recap. (New accepts always persist it.) Declined/expired
     // keep just the terminal card too.
-    const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
     // A commercial proposal is quote_required by design but its terminal card
     // says "Your formal proposal is ready." — the generic "in the works" hero
     // would contradict it, so proposals get their own status statement.
     const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
       ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
       : TERMINAL_HERO[cta.terminalState] || null;
+    if (cta.terminalState === 'accepted') {
+      // Accepted = concise onboarding page (owner ask 2026-07-09): booked
+      // hero, the booked-visit card, the Waves app invite, and the
+      // add-service upsell. The sales machinery — contact/estimate-# block,
+      // AI price-intelligence, pricing recap, report showcase, reviews, GBP
+      // proof — is deliberately GONE: they already said yes, and the PDF in
+      // the action bar carries the what-did-I-agree-to reference.
+      return (
+        <Page>
+          {adminDraftPreview ? <DraftPreviewBanner /> : null}
+          <Header
+            customerFirstName={estimate.customerFirstName}
+            serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, estimate.acceptedServiceMode || null)}
+            headline={stateHero?.h1 || headline}
+            eyebrowOverride={stateHero ? stateHero.eyebrow : null}
+          />
+          {estimateActionBar}
+          <TerminalStateCard
+            state="accepted"
+            customerFirstName={estimate.customerFirstName}
+            address={estimate.address}
+            // Booked + upcoming visit → show the date, not "we'll follow up".
+            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            appointmentServiceType={existingAppointment?.serviceType || null}
+          />
+          <AppShowcaseCard />
+          <EstimateAddServiceRequestCard
+            offer={addServiceOffer}
+            requestState={addServiceRequestState}
+            onRequest={handleAddServiceRequest}
+          />
+        </Page>
+      );
+    }
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
         <Header
           {...headerContactProps}
-          serviceLabel={getServiceLabel(
-            currentFrequency,
-            estimate,
-            pricing,
-            cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
-          )}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
@@ -3562,13 +3599,7 @@ export default function EstimateViewPage() {
           quoteReason={quoteRequiredReason}
           isProposal={isCommercialProposal}
           proposalPdfEmailed={proposalPdfEmailed}
-          // Booked + upcoming visit → show the date, not "we'll follow up".
-          appointmentLabel={cta.terminalState === 'accepted' && existingAppointment
-            ? formatAppointmentLabel(existingAppointment)
-            : null}
-          appointmentServiceType={cta.terminalState === 'accepted' ? existingAppointment?.serviceType || null : null}
         />
-        {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
         <AppShowcaseCard />
         <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
