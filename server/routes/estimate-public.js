@@ -4679,6 +4679,7 @@ ${shellTopBar()}
   <div class="hero">
     <div class="eyebrow">${heroEyebrow}</div>
     <h1>${heroH1}</h1>
+    ${est.estimateSlug ? `<div class="hero-contact">Estimate ${escapeHtml(est.estimateSlug)}</div>` : ''}
     ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
@@ -4827,45 +4828,6 @@ ${shellTopBar()}
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
-
-  <div class="card transparency-card">
-    <h2>Watch every visit &mdash; right from your phone</h2>
-    <p class="ai-blurb">Live GPS, visit reports, and alerts you control &mdash; the Waves app keeps you in the loop from booking to done.</p>
-    <div class="app-shots">
-      <figure class="app-shot">
-        <div class="phone"><img src="/images/app/app-tracking.webp" width="760" height="1647" loading="lazy" alt="Waves app visit screen with a live-GPS tech-en-route update before arrival"></div>
-        <figcaption><strong>See your tech coming</strong><span>Live GPS, the hour before arrival</span></figcaption>
-      </figure>
-      <figure class="app-shot">
-        <div class="phone"><img src="/images/app/app-visits.webp" width="760" height="1647" loading="lazy" alt="Waves app Visits screen listing upcoming and completed service visits"></div>
-        <figcaption><strong>Every visit &amp; report</strong><span>Upcoming, past, and what we did</span></figcaption>
-      </figure>
-      <figure class="app-shot">
-        <div class="phone"><img src="/images/app/app-alerts.webp" width="760" height="1647" loading="lazy" alt="Waves app notification settings, with each alert set to text, email, or both"></div>
-        <figcaption><strong>Alerts you control</strong><span>Text, email, or both</span></figcaption>
-      </figure>
-      <figure class="app-shot">
-        <div class="phone"><img src="/images/app/app-contacts.webp" width="760" height="1647" loading="lazy" alt="Waves app on-location contacts screen to add a spouse, tenant, or property manager"></div>
-        <figcaption><strong>Loop in your family</strong><span>Spouse, tenant, or property manager</span></figcaption>
-      </figure>
-    </div>
-    <div class="app-promo">
-      <span class="app-promo-head"><strong>It&rsquo;s all in the Waves app</strong><span>One login for your whole household &mdash; everything in one place.</span></span>
-      <div class="app-features">
-        <div class="app-feature"><span class="af-ico">${ICON_PIN}</span><span>Live tech tracking</span></div>
-        <div class="app-feature"><span class="af-ico">${ICON_CHAT}</span><span>Text your tech</span></div>
-        <div class="app-feature"><span class="af-ico">${ICON_DOC}</span><span>Photo &amp; video reports</span></div>
-        <div class="app-feature"><span class="af-ico">${ICON_FAMILY}</span><span>Add family to alerts</span></div>
-        <div class="app-feature"><span class="af-ico">${ICON_CARD}</span><span>Billing &amp; autopay</span></div>
-        <div class="app-feature"><span class="af-ico">${ICON_CAL}</span><span>Reschedule &amp; history</span></div>
-      </div>
-      <span class="app-badges${APP_STORE_URL || PLAY_STORE_URL ? '' : ' is-coming-soon'}">
-        ${APP_STORE_URL || !PLAY_STORE_URL ? appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store') : ''}
-        ${PLAY_STORE_URL || !APP_STORE_URL ? appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play') : ''}
-        ${APP_STORE_URL || PLAY_STORE_URL ? '' : '<span class="app-badge-caption">Coming soon to iPhone &amp; Android</span>'}
-      </span>
-    </div>
-  </div>
 
   <div class="card">
     <h2>Customer reviews</h2>
@@ -6673,6 +6635,7 @@ async function handleEstimateView(req, res, next) {
       customerEmail: estimate.customer_email,
       customerPhone: estimate.customer_phone,
       address: estimate.address,
+      estimateSlug: estimate.estimate_slug || null,
       monthlyTotal: parseFloat(estimate.monthly_total || 0),
       annualTotal: parseFloat(estimate.annual_total || 0),
       onetimeTotal: parseFloat(estimate.onetime_total || 0),

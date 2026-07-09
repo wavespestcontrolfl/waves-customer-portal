@@ -28,6 +28,22 @@ exports.up = async function up(knex) {
 
   await knex.raw("CREATE SEQUENCE IF NOT EXISTS estimate_slug_seq START 1");
 
+  // Reseed BEFORE any nextval consumer (codex P1 round 3): after a rollback
+  // the stamped EST-* slugs survive while the sequence is dropped; if the
+  // old deployment inserted rows during the gap, the re-run backfill would
+  // otherwise start numbering those at 1 and collide with numbers customers
+  // already saw (failing the unique index and blocking the deploy).
+  await knex.raw(`
+    SELECT setval('estimate_slug_seq', GREATEST(
+      (SELECT last_value FROM estimate_slug_seq),
+      COALESCE((
+        SELECT max((regexp_match(estimate_slug, '^EST-\\d{4}-(\\d+)$'))[1]::bigint)
+        FROM estimates
+        WHERE estimate_slug ~ '^EST-\\d{4}-\\d+$'
+      ), 1)
+    ))
+  `);
+
   await knex.raw(`
     CREATE OR REPLACE FUNCTION waves_stamp_estimate_slug()
     RETURNS trigger AS $$
@@ -74,20 +90,6 @@ exports.up = async function up(knex) {
       ) ordered
     ) n
     WHERE e.id = n.id AND e.estimate_slug IS NULL
-  `);
-
-  // Re-run safety (codex P1): rollback drops the sequence but keeps stamped
-  // slugs, so a recreated sequence would restart at 1 and duplicate numbers
-  // customers already saw. Continue from the highest existing EST-* suffix.
-  await knex.raw(`
-    SELECT setval('estimate_slug_seq', GREATEST(
-      (SELECT last_value FROM estimate_slug_seq),
-      COALESCE((
-        SELECT max((regexp_match(estimate_slug, '^EST-\\d{4}-(\\d+)$'))[1]::bigint)
-        FROM estimates
-        WHERE estimate_slug ~ '^EST-\\d{4}-\\d+$'
-      ), 1)
-    ))
   `);
 
   // Duplicates are a P1 in their own right — make them impossible at the
