@@ -73,3 +73,43 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, invoiceAmount: 0 })).toBe(false);
   });
 });
+
+// Per-application billing (billing_mode 'per_application' — owner ruling
+// 2026-07-09): every completed application bills the acceptance fee even
+// without a scheduler flag, a WaveGuard tier, or the priced-visits gate —
+// but never a callback or an always-free type, and never through the
+// monthly-membership autopay suppression (the caller excludes per-application
+// customers from autopayCoversVisit; billing is HOW their autopay card is
+// used, not a reason to skip).
+describe('shouldAutoInvoiceCompletion — per-application billing', () => {
+  const perApp = { ...base, perApplicationBilling: true, invoiceAmount: 98 };
+
+  test('per-application visit invoices with no flag, no tier, gate off', () => {
+    expect(shouldAutoInvoiceCompletion(perApp)).toBe(true);
+  });
+
+  test('tier-less commercial per-application visit still invoices', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, waveguardTier: null })).toBe(true);
+  });
+
+  test('per-application callback / re-treat is never billed', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, isCallback: true })).toBe(false);
+  });
+
+  test('per-application always-free types are never billed', () => {
+    ['Waves Pest Control Appointment Service', 'Estimate service', 'Pest Control Re-Service', 'Follow-up visit']
+      .forEach((serviceType) => {
+        expect(shouldAutoInvoiceCompletion({ ...perApp, serviceType })).toBe(false);
+      });
+  });
+
+  test('coverage guards still block a per-application bill (first visit paid at acceptance)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, alreadyPaid: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...perApp, existingCompletionInvoice: { id: 'inv' } })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...perApp, prepaidCovered: true })).toBe(false);
+  });
+
+  test('zero fee never bills', () => {
+    expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount: 0 })).toBe(false);
+  });
+});

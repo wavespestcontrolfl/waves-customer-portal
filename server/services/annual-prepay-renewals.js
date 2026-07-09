@@ -1353,6 +1353,25 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 
+// Owner ruling 2026-07-09: annual-prepay customers carry billing_mode
+// 'annual_prepay' so the monthly billing cron's mode guard skips them
+// (belt-and-suspenders on the existing term-based guards) and the completion
+// path knows they are NOT per-application customers. The estimate converter
+// stamps every recurring accept 'per_application'; the term choke point here
+// (portal accept, prepay-on-book, Customer 360 record-prepay all run through
+// it) re-stamps the prepay ones. Best-effort + column-guarded: term creation
+// must never fail on this stamp.
+async function stampAnnualPrepayBillingMode(customerId, conn) {
+  try {
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    await conn('customers')
+      .where({ id: customerId })
+      .update({ billing_mode: 'annual_prepay', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[annual-prepay] billing_mode stamp skipped for customer ${customerId}: ${err.message}`);
+  }
+}
+
 async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
@@ -1545,6 +1564,7 @@ async function createTermForAnnualPrepay({
       // payment sync are unaffected.
       await reconcileBornPaidTerm(refreshed, conn);
     }
+    await stampAnnualPrepayBillingMode(customerId, conn);
     return refreshed;
   }
 
@@ -1581,6 +1601,7 @@ async function createTermForAnnualPrepay({
     // completed visits stay double-billed.
     await reconcileBornPaidTerm(refreshed, conn);
   }
+  await stampAnnualPrepayBillingMode(customerId, conn);
   return refreshed;
 }
 

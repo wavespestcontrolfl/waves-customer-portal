@@ -1200,6 +1200,22 @@ const EstimateConverter = {
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
           monthly_rate: monthlyRate,
+          // Estimate-flow recurring customers bill PER VISIT (owner ruling
+          // 2026-07-09), never as a monthly membership subscription: the
+          // monthly billing cron skips non-membership modes and completion
+          // collects per_application_fee each visit. Annual-prepay accepts are
+          // re-stamped 'annual_prepay' at their term choke point
+          // (createTermForAnnualPrepay), which every prepay path runs through,
+          // so the converter always writes 'per_application' here.
+          billing_mode: 'per_application',
+          // Exact per-visit charge at the accepted billing cadence (quarterly
+          // derives from the exact annual: $98.00, not 3 x rounded-monthly
+          // $98.01 — resolveBillingCadence). Monthly-rate fallback only when
+          // no cadence resolved; NULL = no fee on file (completion keeps its
+          // existing rate precedence).
+          per_application_fee: (billingCadence && Number(billingCadence.amount) > 0)
+            ? Number(billingCadence.amount)
+            : (Number(monthlyRate) > 0 ? Number(monthlyRate) : null),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former

@@ -115,7 +115,7 @@ const BillingCron = {
       .select(
         'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
-        'billing_day',
+        'billing_day', 'billing_mode',
       );
 
     // Annual-prepay customers paid for the whole period up front. The paid
@@ -162,6 +162,22 @@ const BillingCron = {
         // of their billing_day. See isBillingDayMatch for the NULL-default
         // contract.
         if (!isBillingDayMatch(customer.billing_day, todayDay)) {
+          continue;
+        }
+
+        // GUARD 3b: billing mode — this cron is the MONTHLY MEMBERSHIP
+        // subscription biller only. Estimate-flow customers bill per visit
+        // (billing_mode 'per_application' — completion collects the
+        // application fee; owner ruling 2026-07-09) and annual-prepay
+        // customers paid up front ('annual_prepay'; also caught by the
+        // term guards below). NULL/'monthly_membership' = legacy behavior
+        // unchanged. Charging a per-application customer here would bill a
+        // monthly subscription ON TOP of their per-visit invoices.
+        if (customer.billing_mode && customer.billing_mode !== 'monthly_membership') {
+          await logAutopay(customer.id, 'skipped_billing_mode', {
+            details: { billing_mode: customer.billing_mode },
+          });
+          skipped++;
           continue;
         }
 
@@ -611,6 +627,34 @@ const BillingCron = {
           details: { source: 'autopay_retry', ladder_stopped: true },
         }).catch(() => {});
         logger.info(`[billing-cron] Retry for payment ${payment.id} absorbed by annual prepay coverage`);
+        continue;
+      }
+
+      // RESOLUTION GUARD (mirrors monthly GUARD 3b): the customer is not a
+      // monthly-membership subscriber (billing_mode 'per_application' bills
+      // per completed visit; 'annual_prepay' paid up front), so a MONTHLY
+      // obligation row was mis-created for them — most commonly a failed
+      // charge from before the customer was classified. Nothing is owed on
+      // a monthly basis: resolve the row non-collectible (disarm + the same
+      // self-superseding convention as the parked states) instead of burning
+      // retry rungs / decline SMS on a debt that does not exist. Per-visit
+      // money is collected by completion billing; prepay by the term.
+      if (isMonthlyObligation && customer.billing_mode
+        && customer.billing_mode !== 'monthly_membership') {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            superseded_by_payment_id: payment.id,
+            failure_reason: db.raw(
+              "COALESCE(failure_reason, '') || ' — resolved: customer bills per application, monthly obligation not owed'",
+            ),
+          }).catch((updErr) => logger.error(`[billing-cron] retry absorb (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
+        await logAutopay(payment.customer_id, 'skipped_billing_mode', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', billing_mode: customer.billing_mode, ladder_stopped: true },
+        }).catch(() => {});
+        logger.info(`[billing-cron] Retry for payment ${payment.id} resolved — billing_mode ${customer.billing_mode} owes no monthly obligation`);
         continue;
       }
 

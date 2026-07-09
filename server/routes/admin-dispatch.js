@@ -2233,6 +2233,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.billing_mode as cust_billing_mode',
+        'customers.per_application_fee as cust_per_application_fee',
         'customers.autopay_enabled as cust_autopay_enabled',
         'customers.autopay_paused_until as cust_autopay_paused_until',
         'customers.autopay_payment_method_id as cust_autopay_payment_method_id',
@@ -4267,13 +4269,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     //     unless the visit is already covered by prepay/paid invoice/autopay.
     //   - Otherwise send the plain service-complete SMS (report link only).
     const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
+    // Estimate-flow customers bill PER VISIT (owner ruling 2026-07-09):
+    // completion collects the exact per-application fee stamped at acceptance
+    // — auto-charged to the saved autopay card further below, invoiced
+    // otherwise. The monthly-membership model (autopayCoversVisit suppression
+    // + the 8AM cron) never applies to them.
+    const perApplicationBilling = svc.cust_billing_mode === 'per_application';
     // Callbacks (re-services) are free by definition for recurring/WaveGuard
     // customers — they must NOT fall back to the customer's monthly_rate, or a
     // no-charge re-service would bill a full month's dues. Honour an explicit
     // positive price if the operator set one; otherwise the visit is $0.
+    // Per-application precedence: explicit visit price → acceptance fee →
+    // legacy monthly_rate fallback (a per-application customer with no fee on
+    // file, e.g. classified before the fee backfill).
     const invoiceAmount = hasVisitPrice
       ? Number(svc.estimated_price)
-      : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+      : (perApplicationBilling && !svc.is_callback && Number(svc.cust_per_application_fee) > 0)
+        ? Number(svc.cust_per_application_fee)
+        : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
     // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
     // so the service customer's autopay/prepay must neither suppress the AP
     // invoice (autopayCoversVisit / prepaidCovered) nor be credited against it
@@ -4301,7 +4314,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     });
     // Never let the homeowner's autopay cover a payer-billed WaveGuard visit —
     // the AP invoice must still be cut and sent to the payer.
+    // autopayCoversVisit is the MONTHLY-MEMBERSHIP suppression ("the 8AM cron
+    // collects the dues, the visit itself is free") — it must never suppress a
+    // per-application customer's visit bill: their autopay card is HOW the
+    // per-visit charge collects, not a reason to skip it.
     const autopayCoversVisit = !visitIsPayerBilled
+      && !perApplicationBilling
       && customerAutopayActive
       && !hasVisitPrice
       && !!svc.cust_waveguard_tier
@@ -4413,6 +4431,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       existingCompletionInvoice,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
+      perApplicationBilling,
       hasVisitPrice,
       invoiceAmount,
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
@@ -4742,6 +4761,52 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       } catch (creditErr) {
         logger.warn(`[referral] account-credit auto-apply failed for invoice=${invoice?.id}: ${creditErr.message}`);
+      }
+    }
+
+    // Per-application autopay collection (owner ruling 2026-07-09): a
+    // billing_mode='per_application' customer's visit bill auto-charges their
+    // saved default autopay CARD via chargeInvoiceWithSavedCard — the same
+    // surcharge/tax/ledger/receipt rail the card-on-file flows use (single
+    // surcharge authority, invoice-locked against double collection). Runs
+    // AFTER account credit (charges the reduced residual), only on a
+    // collectible self-pay invoice, and only for a card method — an ACH
+    // default keeps the pay-link flow (chargeInvoiceWithSavedCard is
+    // card-only). Failure is non-blocking by design: the invoice stays open
+    // and the completion SMS carries the pay link exactly as before, so the
+    // customer experience degrades to manual pay — never a blocked completion
+    // and never a double charge (the helper fail-closes on a live
+    // PaymentIntent). On success the SMS branch flips to receipt (no pay
+    // link), mirroring the card-hold convention below.
+    if (perApplicationBilling && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
+      && customerAutopayActive) {
+      try {
+        const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
+        const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
+        if (isChargeableAutopayMethod(autopayPm) && autopayPm.method_type === 'card') {
+          const StripeService = require('../services/stripe');
+          await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id);
+          const fresh = await db('invoices').where({ id: invoice.id }).first();
+          if (fresh) invoice = fresh;
+          if (['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
+            alreadyPaid = true;
+            invoiceCreated = false;
+            payUrl = null;
+            try {
+              await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
+                details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id },
+              });
+            } catch (e) { /* log-only */ }
+          }
+        }
+      } catch (chargeErr) {
+        logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
+        try {
+          await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, error: String(chargeErr.message || '').slice(0, 300) },
+          });
+        } catch (e) { /* log-only */ }
       }
     }
 
@@ -7248,6 +7313,7 @@ function shouldAutoInvoiceCompletion({
   existingCompletionInvoice,
   createInvoiceOnComplete,
   waveguardTier,
+  perApplicationBilling,
   hasVisitPrice,
   invoiceAmount,
   autoInvoicePricedVisits,
@@ -7259,8 +7325,14 @@ function shouldAutoInvoiceCompletion({
     return false;
   }
   if (!(Number(invoiceAmount) > 0)) return false;
-  // Explicit scheduler flag / WaveGuard tier are the existing, unchanged paths.
+  // Explicit scheduler flag / WaveGuard tier are the existing, unchanged
+  // paths. perApplicationBilling (billing_mode 'per_application') bills every
+  // completed application by definition — including tier-less/commercial rows
+  // the waveguardTier branch would miss — but never a callback/re-treat or an
+  // always-free type (re-service, follow-up, estimate): those are free for
+  // recurring customers regardless of billing mode.
   if (createInvoiceOnComplete || waveguardTier) return true;
+  if (perApplicationBilling && !isCallback && !isAlwaysFreeServiceType(serviceType)) return true;
   // GATED new path: a priced visit qualifies — but NEVER an always-free type
   // (appointment / estimate / re-service / follow-up) or a callback/re-treat,
   // even if a stale or inherited price is present. Keeps this gate in lockstep
