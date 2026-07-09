@@ -7808,14 +7808,26 @@ router.put('/:token/accept', async (req, res, next) => {
         // active term + a second auto-delivered full-year invoice, while
         // term-agnostic coverage selection silently shorted the new term's
         // visits. Same lock + assertion as estimate-manual-acceptance, inside
-        // this accept transaction; termStart = today is conservative (any
-        // active term still running today overlaps a term minted now).
+        // this accept transaction.
+        // termStart mirrors the converter's own anchor: convertEstimate reads
+        // the committed reservation rows in this same trx and starts the term
+        // on the earliest one (falling back to today for no-slot accepts,
+        // where createTermForAnnualPrepay defaults the start). Guarding with
+        // bare "today" 409'd a legitimate next-term renewal whose current
+        // term ends before the booked first visit.
+        const reservedStartRow = await trx('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNotNull('customer_id')
+          .whereNull('reservation_expires_at')
+          .orderBy('scheduled_date', 'asc')
+          .first('scheduled_date');
+        const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
         try {
           await lockAndAssertNoAnnualPrepayOverlap(
             trx,
             customerId,
-            etDateString(),
+            overlapTermStart,
             false,
             'Customer already has an annual prepay term through',
           );

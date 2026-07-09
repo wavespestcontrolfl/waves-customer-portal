@@ -2185,7 +2185,17 @@ async function createTermForAnnualPrepay({
             .andWhere(detachOutOfWindow)
             .update({ annual_prepay_term_id: null, updated_at: new Date() });
         } catch (err) {
-          logger.warn(`[annual-prepay] scheduled service detach skipped: ${err.message}`);
+          // The completion-billing gate (annualPrepayCoversVisit) is
+          // calendar-independent: a stamped visit is covered while its term
+          // stays paid, wherever the visit sits on the calendar. That is only
+          // sound because THIS detach is the one place a window edit strips
+          // stamps from the visits it removed from coverage — a best-effort
+          // log-and-continue here left the shrunken window silently
+          // suppressing billing for those visits. Fail the edit loudly
+          // instead; the operator retries and the detach re-runs. (Partial
+          // failure is billing-safe: the stamp clear runs before the
+          // term-link detach and the gate requires BOTH fields.)
+          throw new Error(`annual prepay window edit for term ${existing.id} could not detach out-of-window visits — edit aborted: ${err.message}`);
         }
       }
     }
