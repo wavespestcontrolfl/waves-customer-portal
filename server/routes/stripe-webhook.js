@@ -1188,20 +1188,18 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       }
       // Autopay enrollment is CONSENT-gated, not billing-mode-gated (owner
       // ruling 2026-07-09: Auto Pay is enabled for every customer who saves
-      // a method, regardless of per-app / prepay / monthly). The consent
-      // signal is the PI's Stripe-signed save_card_opt_in metadata — the
-      // flag this whole mirror block is already gated on, minted only when
-      // the customer checked the v8+ consent copy the pay page renders,
-      // whose text explicitly authorizes charging the method "for future
-      // service visits and invoices as agreed" (card) / per-invoice ACH
-      // debits (bank). Deliberately NOT the payment_method_consents row:
-      // Stripe can deliver payment_intent.succeeded before the browser's
-      // consent POST lands, and a row-based check would lose that race and
-      // never re-evaluate (Codex #2507 P1) — the row remains the immutable
-      // audit artifact (linkPaymentMethodId backfills its FK below).
-      // billing_mode only decides WHAT charges the method (per-visit
-      // completion, annual renewal, or the monthly cron).
-      const enrollAutopay = true;
+      // a method, regardless of per-app / prepay / monthly) — and the gate
+      // is the immutable payment_method_consents ROW, never PI metadata
+      // alone (Codex #2507 P1 round-2): if the browser's consent POST never
+      // lands (closed tab, network failure), enabling off-session charges
+      // from metadata would leave us charging with no authorization
+      // snapshot on file. The race runs BOTH directions and both are
+      // covered: consent row first → this webhook enrolls below; webhook
+      // first → the method is saved card-on-file only and the /consent
+      // endpoint completes enrollment when it records the row
+      // (enrollConsentedMethod is shared + idempotent). billing_mode only
+      // decides WHAT charges the method (per-visit completion, annual
+      // renewal, or the monthly cron).
       let signupBillingMode = null;
       try {
         const custRow = await db('customers')
@@ -1211,59 +1209,35 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       } catch (modeErr) { /* billing_mode column absent — log detail only */ }
       let saved = existing;
       if (!saved) {
-        // ANY tender enrolls (owner ruling 2026-07-09: capture a payment
-        // method at signup — card or bank — and auto-charge it after each
-        // visit / at renewal): chargeInvoiceWithSavedCard locks the PI to
-        // the saved method's family, and the ach_status guard in
-        // customerOnAutopay handles unhealthy bank accounts.
+        // ANY tender saves (owner ruling 2026-07-09: capture a payment
+        // method at signup — card or bank): chargeInvoiceWithSavedCard
+        // locks the PI to the saved method's family, and the ach_status
+        // guard in customerOnAutopay handles unhealthy bank accounts.
+        // Saved autopay-OFF; the consent-row check below enrolls. Default
+        // claim keeps the round-5 semantics: only when no healthy
+        // incumbent is in charge.
         saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
-          enableAutopay: enrollAutopay,
+          enableAutopay: false,
           makeDefault: !currentAutopayMethod,
         });
-      } else if (enrollAutopay && !currentAutopayMethod && existing.customer_id === wavesCustomerId) {
-        // The pm was already on file (saved card-on-file before this signup,
-        // or a duplicate webhook) — the short-circuit skips savePaymentMethod,
-        // so enroll here or the signup's autopay consent is silently dropped
-        // and completion collection (getChargeableAutopayMethod: is_default
-        // AND autopay_enabled) never finds a card (Codex round-2). Same
-        // semantics as the fresh-save path: only claim default when no
-        // chargeable autopay method exists; an existing one stays in charge.
-        // Ownership guard: `existing` is looked up by pm id alone. Any
-        // tender enrolls (see the fresh-save branch note).
-        await db('payment_methods')
-          .where({ customer_id: wavesCustomerId })
-          .whereNot({ id: existing.id })
-          .update({ is_default: false });
-        await db('payment_methods')
-          .where({ id: existing.id })
-          .update({ autopay_enabled: true, is_default: true });
-        saved = { ...existing, autopay_enabled: true, is_default: true };
-        logger.info(`[stripe-webhook] Autopay enrolled on existing pm ${stripePmId} for customer ${wavesCustomerId} (save-card consent)`);
-      }
-      // Row-level enrollment is inert while the CUSTOMER flag is off:
-      // customerOnAutopay short-circuits on customers.autopay_enabled=false
-      // (e.g. a returning customer who turned Auto Pay off), so the consented
-      // card would never be auto-charged and the portal would keep reporting
-      // Auto Pay as off (Codex round-3). The signup consent re-authorizes —
-      // flip the customer flag and point it at whichever method is actually
-      // in charge (a pre-existing chargeable default keeps that role).
-      const enrolledChargeable = enrollAutopay
-        && (currentAutopayMethod || (saved && saved.autopay_enabled && saved.is_default));
-      if (enrolledChargeable) {
-        await db('customers')
-          .where({ id: wavesCustomerId })
-          .update({
-            autopay_enabled: true,
-            autopay_payment_method_id: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
-          });
-        try {
-          await require('../services/autopay-log').logAutopay(wavesCustomerId, 'autopay_enabled', {
-            paymentMethodId: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
-            details: { source: 'save_card_consent', billing_mode: signupBillingMode },
-          });
-        } catch (logErr) { /* log-only */ }
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      // Ownership guard: `existing` was looked up by pm id alone — never
+      // enroll a method that belongs to another customer (Codex round-2
+      // short-circuit note).
+      if (!existing || existing.customer_id === wavesCustomerId) {
+        if (await ConsentService.hasConsentFor(wavesCustomerId, stripePmId)) {
+          const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+          await enrollConsentedMethod({
+            customerId: wavesCustomerId,
+            paymentMethodId: saved.id,
+            source: 'save_card_consent',
+            details: { billing_mode: signupBillingMode },
+          });
+        } else {
+          logger.info(`[stripe-webhook] Save-card mirror: consent row not yet recorded for pm ${stripePmId} (customer ${wavesCustomerId}) — autopay enrollment deferred to the /consent endpoint`);
+        }
+      }
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
           customerId: wavesCustomerId,

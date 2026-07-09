@@ -1244,6 +1244,128 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   );
 }
 
+// ── Covered-by-credit method capture ───────────────────────────────
+// Account credit fully paid a required-save invoice, so no PaymentIntent
+// exists and the normal save-card path never runs — this compact form
+// confirms the SetupIntent /setup minted and persists the method via
+// /setup-complete. Money is already settled; the consent box renders
+// locked exactly like every required save.
+function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, onDone }) {
+  const mountRef = useRef(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [formError, setFormError] = useState(null);
+  const [methodType, setMethodType] = useState('card');
+
+  useEffect(() => {
+    if (!publishableKey || !clientSecret) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const stripe = await getStripe(publishableKey);
+        if (cancelled) return;
+        stripeRef.current = stripe;
+        const elements = stripe.elements({
+          clientSecret,
+          appearance: {
+            theme: 'stripe',
+            variables: {
+              colorPrimary: COLORS.blueDeeper,
+              colorBackground: COLORS.white,
+              colorText: COLORS.navy,
+              colorDanger: COLORS.red,
+              fontFamily: FONTS.body,
+              borderRadius: '8px',
+            },
+          },
+        });
+        if (cancelled) return;
+        elementsRef.current = elements;
+        const payment = elements.create('payment');
+        payment.on('ready', () => { if (!cancelled) setReady(true); });
+        payment.on('change', (e) => {
+          if (!cancelled) setMethodType(e?.value?.type === 'us_bank_account' ? 'us_bank_account' : 'card');
+        });
+        if (mountRef.current) payment.mount(mountRef.current);
+      } catch (err) {
+        if (!cancelled) setFormError(err.message || 'Could not load the payment form');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [publishableKey, clientSecret]);
+
+  const submit = async () => {
+    if (!stripeRef.current || !elementsRef.current || processing) return;
+    setProcessing(true);
+    setFormError(null);
+    try {
+      const { error: confirmError } = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        confirmParams: { return_url: window.location.href },
+        redirect: 'if_required',
+      });
+      if (confirmError) throw new Error(confirmError.message || 'Could not save the payment method');
+      const res = await fetch(`${API_BASE}/pay/${token}/setup-complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ setupIntentId }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Could not save the payment method');
+      onDone?.();
+    } catch (err) {
+      setFormError(err.message || 'Could not save the payment method');
+      setProcessing(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div ref={mountRef} style={{ minHeight: 90 }} />
+      <SaveCardConsent
+        checked
+        locked
+        headline="Payment method on file — required for recurring service"
+        onChange={() => {}}
+        methodType={methodType}
+      />
+      {formError && (
+        <div style={{
+          background: 'rgba(200,16,46,0.06)',
+          border: '1px solid var(--danger)',
+          borderRadius: 8,
+          padding: '10px 12px',
+          fontSize: 14,
+          color: 'var(--danger)',
+        }}>
+          {formError}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!ready || processing}
+        style={{
+          padding: '14px 18px',
+          borderRadius: 10,
+          border: 'none',
+          background: COLORS.blueDeeper,
+          color: '#fff',
+          fontFamily: FONTS.body,
+          fontSize: 16,
+          fontWeight: 700,
+          cursor: !ready || processing ? 'default' : 'pointer',
+          opacity: !ready || processing ? 0.6 : 1,
+        }}
+      >
+        {processing ? 'Saving…' : 'Save payment method'}
+      </button>
+    </div>
+  );
+}
+
 // ── Main /pay/:token V2 page ───────────────────────────────────────
 export default function PayPageV2() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
@@ -1274,6 +1396,11 @@ export default function PayPageV2() {
   // wrongly imply there's nothing left to do. When set, the same in-flight panel
   // shows verification guidance instead.
   const [microdepositVerifying, setMicrodepositVerifying] = useState(false);
+  // Account credit fully covered a REQUIRED-SAVE invoice: money is settled,
+  // but the plan still needs a payment method on file (no PI was minted, so
+  // the normal save-card path never ran). /setup returns a SetupIntent and
+  // this state drives the capture step shown before the "nothing due" card.
+  const [setupCapture, setSetupCapture] = useState(null);
   // Guards POST /setup to once per (token, saveCard): the partial-credit display
   // sync below mutates `data`, which would otherwise re-run the setup effect and
   // re-POST /setup — churning the just-minted PaymentIntent (the second call sees
@@ -1376,8 +1503,18 @@ export default function PayPageV2() {
         // Account credit fully covered the invoice at setup (no PI minted, null
         // clientSecret) — flip to the existing "covered, nothing due" prepaid
         // state instead of mounting a card form that would hang on "Loading
-        // payment form…" with a null secret.
+        // payment form…" with a null secret. A required-save invoice with
+        // nothing chargeable on file additionally returns a SetupIntent —
+        // capture the method first (recurring plans need one on file even
+        // when credit paid this invoice).
         if (setup.coveredByCredit || setup.status === 'prepaid') {
+          if (setup.setupRequired && setup.setupClientSecret) {
+            setSetupCapture({
+              clientSecret: setup.setupClientSecret,
+              setupIntentId: setup.setupIntentId,
+              publishableKey: setup.publishableKey || data.stripe.publishableKey,
+            });
+          }
           setData((prev) => (prev ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid' } } : prev));
           setPaymentState('idle');
           return;
@@ -1569,18 +1706,41 @@ export default function PayPageV2() {
 
   // Prepaid = covered by account credit. No payment is due and we don't show
   // a payment receipt (the credit may be goodwill, not a cash payment) — just
-  // a friendly confirmation that nothing is owed.
+  // a friendly confirmation that nothing is owed. A required-save invoice
+  // with nothing chargeable on file first runs the method-capture step:
+  // credit paid THIS invoice, but the recurring plan still needs a method
+  // for future visits/renewal (Codex #2507 P1).
   if (data.invoice?.status === 'prepaid') {
     return (
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            <SerifHeading style={{ marginBottom: 12 }}>You're all set — nothing due</SerifHeading>
-            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
-              Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
-              covered by your account credit, so there's no payment to make. Thanks for being a
-              Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
-            </p>
+            {setupCapture ? (
+              <>
+                <SerifHeading style={{ marginBottom: 12 }}>Covered by credit — one more step</SerifHeading>
+                <p style={{ margin: '0 0 16px', fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                  Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
+                  covered by your account credit — there's no payment today. Your recurring plan
+                  does need a payment method on file for future visits, so add one below to finish up.
+                </p>
+                <SetupMethodForm
+                  publishableKey={setupCapture.publishableKey}
+                  clientSecret={setupCapture.clientSecret}
+                  setupIntentId={setupCapture.setupIntentId}
+                  token={token}
+                  onDone={() => setSetupCapture(null)}
+                />
+              </>
+            ) : (
+              <>
+                <SerifHeading style={{ marginBottom: 12 }}>You're all set — nothing due</SerifHeading>
+                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                  Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
+                  covered by your account credit, so there's no payment to make. Thanks for being a
+                  Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+                </p>
+              </>
+            )}
           </BrandCard>
         </div>
       </WavesShell>

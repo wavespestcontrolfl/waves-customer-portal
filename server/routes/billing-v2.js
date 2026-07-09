@@ -202,10 +202,6 @@ router.post('/cards', async (req, res, next) => {
       .whereNotNull('stripe_payment_method_id')
       .first('id');
 
-    // Adding a saved card is not the same as enrolling in Auto Pay. The
-    // customer-facing Auto Pay card explicitly selects and enables the
-    // payment method through /api/billing/autopay after save. If another
-    // method already powers autopay, keep it as the default until then.
     const card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
       enableAutopay: false,
       makeDefault: !currentAutopayMethod,
@@ -213,7 +209,14 @@ router.post('/cards', async (req, res, next) => {
 
     // Record consent — the portal add-card modal shows SaveCardConsent
     // as locked + checked because saving is the whole point of the
-    // modal. Arriving here means the customer saw the copy.
+    // modal. Arriving here means the customer saw the copy. Enrollment is
+    // consent-gated and UNIVERSAL across save surfaces (Codex #2507): the
+    // same locked copy that enrolls a pay-page save enrolls a portal save,
+    // so a customer who adds a method here is on Auto Pay too — a healthy
+    // method already powering autopay keeps the default role
+    // (enrollConsentedMethod's incumbent semantics), matching the old
+    // "don't displace the current autopay card" behavior. If the consent
+    // insert fails, NO enrollment happens (the gate is the row).
     try {
       const ConsentService = require('../services/payment-method-consents');
       await ConsentService.recordConsent({
@@ -225,8 +228,14 @@ router.post('/cards', async (req, res, next) => {
         ip: req.ip,
         userAgent: req.get('user-agent') || null,
       });
+      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      await enrollConsentedMethod({
+        customerId: req.customerId,
+        paymentMethodId: card.id,
+        source: 'portal_add_card',
+      });
     } catch (consentErr) {
-      logger.error(`[billing-v2] Consent record failed: ${consentErr.message}`);
+      logger.error(`[billing-v2] Consent record/enrollment failed: ${consentErr.message}`);
     }
 
     res.json({

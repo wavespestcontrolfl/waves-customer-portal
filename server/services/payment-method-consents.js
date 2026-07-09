@@ -52,6 +52,20 @@ async function recordConsent({
 }
 
 /**
+ * Does an immutable consent row exist for this customer + Stripe pm?
+ * The autopay-enrollment gate (Codex #2507 P1): enrollment happens only
+ * when the audit artifact exists — PI metadata alone is a signal that the
+ * box was ticked, but the snapshot row is the authorization of record.
+ */
+async function hasConsentFor(customerId, stripePaymentMethodId) {
+  if (!customerId || !stripePaymentMethodId) return false;
+  const row = await db('payment_method_consents')
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
+    .first('id');
+  return !!row;
+}
+
+/**
  * Backfill the FK to payment_methods when the webhook finally writes the
  * row. Called from stripe-webhook.js handleSetupIntentSucceeded.
  */
@@ -108,6 +122,7 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 
 module.exports = {
   recordConsent,
+  hasConsentFor,
   linkPaymentMethodId,
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),
