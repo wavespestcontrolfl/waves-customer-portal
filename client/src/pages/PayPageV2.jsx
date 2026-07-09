@@ -109,6 +109,19 @@ function shouldDefaultSaveCard(search = '') {
   }
 }
 
+// Recurring acceptance pay links arrive with saveRequired=1
+// (estimateInvoicePayUrlParams): a payment method on file is a signup
+// precondition (owner ruling 2026-07-09 — per-application visits and prepay
+// renewals auto-charge it), so the consent box renders checked + locked.
+function shouldRequireSaveCard(search = '') {
+  try {
+    const params = new URLSearchParams(search);
+    return /^(1|true|yes)$/i.test(String(params.get('saveRequired') || ''));
+  } catch {
+    return false;
+  }
+}
+
 function paymentErrorPayload(err, extra = {}) {
   return {
     message: err?.message || extra.message || 'Payment error',
@@ -388,7 +401,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -1114,6 +1127,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         <div>
           <SaveCardConsent
             checked={!!saveCard}
+            locked={saveCardLocked}
+            headline={saveCardLocked
+              ? 'Payment method on file — required for recurring service'
+              : undefined}
             onChange={(v) => onSaveCardChange?.(v)}
             methodType={selectedMethod}
           />
@@ -1232,7 +1249,8 @@ export default function PayPageV2() {
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const saveCardDefault = shouldDefaultSaveCard(location.search);
+  const saveCardRequired = shouldRequireSaveCard(location.search);
+  const saveCardDefault = shouldDefaultSaveCard(location.search) || saveCardRequired;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1962,6 +1980,7 @@ export default function PayPageV2() {
                 onSuccess={handlePaymentSuccess}
                 onError={(msg) => setPaymentError(msg)}
                 saveCard={payer ? false : saveCard}
+                saveCardLocked={!payer && saveCardRequired}
                 onSaveCardChange={setSaveCard}
                 thirdPartyBilled={!!payer}
                 customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}

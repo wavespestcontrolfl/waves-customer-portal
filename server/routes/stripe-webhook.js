@@ -1186,25 +1186,33 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           currentAutopayMethod = null;
         }
       }
-      // Estimate-flow signups (billing_mode 'per_application' /
-      // 'annual_prepay') enroll in autopay at signup (owner ruling
-      // 2026-07-09): the v8 save-card consent the customer just checked
-      // explicitly authorizes charging this card "for future service visits
-      // and invoices as agreed", and their acceptance-invoice pay links
-      // arrive with saveCard=1 (estimateInvoicePayUrlParams) so the consent
-      // box is presented by default. Legacy / unclassified customers keep
-      // the old behavior: saved for card-on-file only, autopay stays an
-      // explicit portal (AutopayCard) enrollment. Column-guarded read —
-      // pre-migration environments keep enrolling nothing.
+      // Autopay enrollment is CONSENT-gated, not billing-mode-gated (owner
+      // ruling 2026-07-09: Auto Pay is enabled for every customer who saves
+      // a method, regardless of per-app / prepay / monthly). The v8+ consent
+      // text the customer just checked explicitly authorizes charging the
+      // method "for future service visits and invoices as agreed" (card) /
+      // per-invoice ACH debits (bank) — so the durable consent row is the
+      // enrollment signal, and billing_mode only decides WHAT charges it
+      // (per-visit completion, annual renewal, or the monthly cron). Pre-v8
+      // consent copy did not carry the autopay authorization, so older rows
+      // (and a missing/raced row) fail closed to card-on-file only — the
+      // pre-ruling behavior.
       let enrollAutopay = false;
       let signupBillingMode = null;
+      try {
+        const consentRow = await db('payment_method_consents')
+          .where({ stripe_payment_method_id: stripePmId, customer_id: wavesCustomerId })
+          .orderBy('created_at', 'desc')
+          .first('consent_text_version');
+        const versionMatch = String(consentRow?.consent_text_version || '').match(/^v(\d+)/i);
+        enrollAutopay = !!versionMatch && Number(versionMatch[1]) >= 8;
+      } catch (consentErr) { /* fail closed — card-on-file only */ }
       try {
         const custRow = await db('customers')
           .where({ id: wavesCustomerId })
           .first('billing_mode');
         signupBillingMode = custRow?.billing_mode || null;
-        enrollAutopay = ['per_application', 'annual_prepay'].includes(signupBillingMode);
-      } catch (modeErr) { /* billing_mode column absent — keep false */ }
+      } catch (modeErr) { /* billing_mode column absent — log detail only */ }
       let saved = existing;
       if (!saved) {
         // ANY tender enrolls (owner ruling 2026-07-09: capture a payment
@@ -1234,7 +1242,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           .where({ id: existing.id })
           .update({ autopay_enabled: true, is_default: true });
         saved = { ...existing, autopay_enabled: true, is_default: true };
-        logger.info(`[stripe-webhook] Autopay enrolled on existing pm ${stripePmId} for customer ${wavesCustomerId} (estimate-flow signup)`);
+        logger.info(`[stripe-webhook] Autopay enrolled on existing pm ${stripePmId} for customer ${wavesCustomerId} (save-card consent)`);
       }
       // Row-level enrollment is inert while the CUSTOMER flag is off:
       // customerOnAutopay short-circuits on customers.autopay_enabled=false
@@ -1255,7 +1263,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         try {
           await require('../services/autopay-log').logAutopay(wavesCustomerId, 'autopay_enabled', {
             paymentMethodId: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
-            details: { source: 'estimate_flow_signup', billing_mode: signupBillingMode },
+            details: { source: 'save_card_consent', billing_mode: signupBillingMode },
           });
         } catch (logErr) { /* log-only */ }
       }

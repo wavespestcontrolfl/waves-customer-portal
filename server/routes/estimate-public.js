@@ -9917,7 +9917,10 @@ function decorateEstimateInvoicePayUrl(rawUrl, { billingTerm = 'standard', saveC
     const parsed = new URL(value, 'https://portal.wavespestcontrol.com');
     const params = estimateInvoicePayUrlParams({ billingTerm, saveCard });
     Object.entries(params).forEach(([key, paramValue]) => parsed.searchParams.set(key, paramValue));
-    if (!saveCard) parsed.searchParams.delete('saveCard');
+    if (!saveCard) {
+      parsed.searchParams.delete('saveCard');
+      parsed.searchParams.delete('saveRequired');
+    }
     return isAbsolute
       ? parsed.toString()
       : `${parsed.pathname}${parsed.search}${parsed.hash}`;
@@ -9933,7 +9936,17 @@ function estimateInvoicePayUrlParams({ billingTerm = 'standard', saveCard = true
   const params = {
     source: 'estimate',
   };
-  if (saveCard) params.saveCard = '1';
+  if (saveCard) {
+    params.saveCard = '1';
+    // Recurring accepts REQUIRE a payment method on file (owner ruling
+    // 2026-07-09: capture at signup so per-application visits / prepay
+    // renewals can auto-charge). saveCard is already false only for
+    // one-time jobs (treatAsOneTime), so lock the consent box on every
+    // recurring acceptance pay link — the pay page renders it checked +
+    // disabled with the authorization copy still shown for the consent
+    // record.
+    params.saveRequired = '1';
+  }
   if (billingTerm) params.billingTerm = String(billingTerm);
   return params;
 }
