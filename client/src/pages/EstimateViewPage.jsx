@@ -132,6 +132,8 @@ const SECTION_KICKER_STYLE = {
 
 const BOOKING_SECTION_ID = 'estimate-booking-section';
 const PRICE_SECTION_ID = 'estimate-price-section';
+const PAYMENT_SECTION_ID = 'estimate-payment-section';
+const REVIEW_SECTION_ID = 'estimate-review-section';
 
 function scrollToPriceSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(PRICE_SECTION_ID) : null;
@@ -141,6 +143,18 @@ function scrollToPriceSection() {
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Once a slot is picked the approve CTAs land on the payment step (the actual
+// next action) instead of the top of the slot list — scrolling to the slot
+// list leaves the payment card below the fold, still opacity-0 under the
+// glass scroll-reveal, and the tap reads as doing nothing. Falls back to the
+// booking section when the payment card isn't mounted (no slot picked yet).
+function scrollToPaymentSection() {
+  if (typeof document === 'undefined') return;
+  const el = document.getElementById(PAYMENT_SECTION_ID);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  else scrollToBookingSection();
 }
 
 // Primary booking CTA — same navy treatment as the add-service button;
@@ -156,7 +170,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
-        onClick={scrollToBookingSection}
+        onClick={slotMeta ? scrollToPaymentSection : scrollToBookingSection}
         style={{
           minHeight: 44,
           minWidth: 220,
@@ -3099,6 +3113,22 @@ export default function EstimateViewPage() {
     // is idempotent.
   }, []);
 
+  // Entering review (and success) swaps the tall configure page for a much
+  // shorter layout, but the browser keeps the old scroll offset — the
+  // customer who tapped a payment option ~2000px down was left staring at
+  // the footer while "Confirm booking" rendered far above the viewport, a
+  // dead end they read as "approve does nothing". Bring the active step to
+  // them on each phase entry (re-entry after an accept error re-surfaces
+  // the confirm card too).
+  useEffect(() => {
+    if (ctaPhase === 'review' && reservation) {
+      const el = document.getElementById(REVIEW_SECTION_ID);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (ctaPhase === 'success') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [ctaPhase, reservation]);
+
   const handleAddServiceRequest = useCallback(async () => {
     // Draft preview: don't file a real bundle inquiry (it notifies the team)
     // from a staff preview click — show what the customer would get instead.
@@ -3569,6 +3599,7 @@ export default function EstimateViewPage() {
 
       {ctaPhase === 'review' && reservation ? (
         <>
+          <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
           {existingAppointment ? (
             <>
               <ExistingAppointmentCard appointment={existingAppointment} />
@@ -3609,6 +3640,7 @@ export default function EstimateViewPage() {
                     : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
                 : null)}
           />
+          </div>
           {depositIntent ? (
             <DepositModal
               intent={depositIntent}
@@ -3720,24 +3752,26 @@ export default function EstimateViewPage() {
           ) : null}
 
           {(existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
-            <PaymentPreferenceButtons
-              onSelect={handlePaymentChoice}
-              // Draft preview: dead from first render (Codex rd 1), not just
-              // guarded on click — but rendered, so staff still see the exact
-              // payment options the customer will get. Forcing cta.canAccept
-              // false server-side would fall through to the null-terminal
-              // "expired" card and destroy the preview's purpose.
-              disabled={adminDraftPreview || ctaPhase === 'submitting'}
-              serviceMode={serviceMode}
-              oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-              setupFee={pricing.setupFee || null}
-              annualPrepayEligible={pricing.annualPrepayEligible === true}
-              invoiceMode={!!estimate.billByInvoice}
-              invoiceOnly={invoiceOnlyAccept}
-              siteConfirmationHold={!!estimate.siteConfirmationHold}
-              selectedFrequency={combinedFrequency}
-              cardHold={data?.cardHoldPolicy || null}
-            />
+            <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+              <PaymentPreferenceButtons
+                onSelect={handlePaymentChoice}
+                // Draft preview: dead from first render (Codex rd 1), not just
+                // guarded on click — but rendered, so staff still see the exact
+                // payment options the customer will get. Forcing cta.canAccept
+                // false server-side would fall through to the null-terminal
+                // "expired" card and destroy the preview's purpose.
+                disabled={adminDraftPreview || ctaPhase === 'submitting'}
+                serviceMode={serviceMode}
+                oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                setupFee={pricing.setupFee || null}
+                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                invoiceMode={!!estimate.billByInvoice}
+                invoiceOnly={invoiceOnlyAccept}
+                siteConfirmationHold={!!estimate.siteConfirmationHold}
+                selectedFrequency={combinedFrequency}
+                cardHold={data?.cardHoldPolicy || null}
+              />
+            </div>
           ) : null}
 
           {error ? (
@@ -3804,7 +3838,7 @@ export default function EstimateViewPage() {
           priceLabel={stickyBarPrice.label}
           periodLabel={stickyBarPrice.period}
           slotMeta={selectedSlotMeta}
-          onApprove={scrollToBookingSection}
+          onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
         />
       ) : null}
     </Page>
