@@ -36,12 +36,16 @@ const tableResults = {
   upcomingRows: [],
   unpaidTotal: '0',
   recentAttempts: [],
+  // Invoices referenced by failed rows that are NOT draft (the whereIn +
+  // whereNot('draft') status lookup) — i.e. invoices that carry their own
+  // balance, so their failed rows are excluded from failedTotal.
+  linkedNonDraftInvoices: [],
 };
 
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'offset'];
+    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'offset'];
     for (const m of passthrough) q[m] = (...args) => { q._calls = q._calls || []; q._calls.push([m, args]); return q; };
     q.select = (...args) => { q._selected = args; return q; };
     q.first = async () => resolveFn(q, true);
@@ -54,7 +58,10 @@ jest.mock('../models/db', () => {
     const whereArg = (calls.find(([m]) => m === 'where') || [null, [{}]])[1][0] || {};
     if (table === 'invoices') {
       if (calls.some(([m]) => m === 'whereNotNull')) return tableResults.payerInvoices;
+      // unpaidInvoices uses whereIn('status', …) but terminates with .first();
+      // the failed-row status lookup uses whereIn('id', …) with no .first().
       if (wantFirst) return { total: tableResults.unpaidTotal };
+      if (calls.some(([m]) => m === 'whereIn')) return tableResults.linkedNonDraftInvoices;
       return tableResults.unpaidTotal;
     }
     if (table === 'payments') {
@@ -97,6 +104,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     tableResults.upcomingRows = [];
     tableResults.unpaidTotal = '0';
     tableResults.recentAttempts = [];
+    tableResults.linkedNonDraftInvoices = [];
   });
 
   test('invoice-linked failed row does not double-count the open invoice', async () => {
@@ -105,6 +113,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
       amount: '110.11',
       metadata: JSON.stringify({ invoice_id: 'inv-1', source: 'card_on_file_failed_attempt' }),
     }];
+    tableResults.linkedNonDraftInvoices = [{ id: 'inv-1' }];
     tableResults.recentAttempts = [{ status: 'failed', metadata: null }];
 
     const body = await getBalance();
@@ -120,6 +129,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
       amount: '110.11',
       metadata: JSON.stringify({ invoice_id: 'inv-1' }),
     }];
+    tableResults.linkedNonDraftInvoices = [{ id: 'inv-1' }]; // settled = paid, still non-draft
     tableResults.recentAttempts = [{ status: 'paid', metadata: null }];
 
     const body = await getBalance();
@@ -132,5 +142,21 @@ describe('GET /balance — phantom failed-row exclusion', () => {
 
     const body = await getBalance();
     expect(body.currentBalance).toBe(55);
+  });
+
+  test('a failure linked to a DRAFT invoice still counts — drafts are not in unpaidInvoices', async () => {
+    // Per-application completion path: createFromService mints a draft, the
+    // auto-charge fails. unpaidInvoices only sums sent/viewed/overdue, so
+    // excluding this failed row too would show $0 owed while the draft
+    // invoice/pay-link is still collectible (Codex P2).
+    tableResults.unpaidTotal = '0';
+    tableResults.failedRows = [{
+      amount: '89.00',
+      metadata: JSON.stringify({ invoice_id: 'inv-draft', source: 'card_on_file_failed_attempt' }),
+    }];
+    tableResults.linkedNonDraftInvoices = []; // inv-draft is draft → not returned
+
+    const body = await getBalance();
+    expect(body.currentBalance).toBe(89);
   });
 });

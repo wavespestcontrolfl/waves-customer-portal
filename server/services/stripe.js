@@ -1301,19 +1301,22 @@ const StripeService = {
         }
         logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
         try {
-          // Stamp the invoice link (and the declined PI when Stripe returned
-          // one): the obligation this attempt was collecting lives on the
-          // invoice row, which stays 'sent' — an unlinked failed row would be
-          // double-counted by billing-v2 /balance (invoice + failed attempt for
-          // the same debt) with nothing ever superseding it, since this path
-          // sets no next_retry_at for the retry sweep and no PI for /confirm
-          // to match.
-          const declinedPiId = err?.payment_intent?.id || err?.raw?.payment_intent?.id || null;
+          // Stamp the invoice link: the obligation this attempt was collecting
+          // lives on the invoice row, which stays 'sent' — an unlinked failed
+          // row would be double-counted by billing-v2 /balance (invoice +
+          // failed attempt for the same debt) with nothing ever superseding
+          // it, since this path sets no next_retry_at for the retry sweep.
+          // Deliberately NO stripe_payment_intent_id on this row: a declined
+          // off-session PI (e.g. authentication_required) can still succeed
+          // later, and the webhook's succeeded-handler would then flip THIS
+          // row to paid by PI match and return before linking the invoice
+          // (which this failure path never stamped a PI onto) — a paid row
+          // beside a still-collectible invoice, with dunning continuing after
+          // the money arrived (Codex P1 on this PR).
           await db('payments').insert({
             customer_id: invoice.customer_id,
             payment_method_id: card.id,
             processor: 'stripe',
-            stripe_payment_intent_id: declinedPiId,
             payment_date: etDateString(),
             amount: total,
             status: 'failed',
@@ -3330,16 +3333,20 @@ const StripeService = {
           .orderBy('created_at', 'desc')
           .first();
         if (existingPayment) {
-          // Never clobber a terminal money row (webhook parity): paid/refunded/
-          // disputed rows are settled history. A miss here means the row flipped
-          // terminal between the dispute pre-check above and this write (a
-          // dispute/refund webhook landing mid-flight) — THROW so the whole
+          // Never clobber a money-LEFT row: refunded/disputed rows record cash
+          // that went back to the customer. A miss here means the row flipped
+          // to one of those between the dispute pre-check above and this write
+          // (a dispute/refund webhook landing mid-flight) — THROW so the whole
           // transaction rolls back, including the invoice update above;
           // returning would let /confirm settle the invoice as paid beside a
-          // row recording that the money just left.
+          // row recording that the money just left. A 'paid' row is the
+          // OPPOSITE case and passes through deliberately: the webhook writes
+          // the payments row before it settles the invoice, so /confirm racing
+          // (or repairing after) a half-applied webhook must still be able to
+          // mark the open invoice paid — money genuinely arrived (Codex P2).
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
-            .whereNotIn('status', ['paid', 'refunded', 'disputed'])
+            .whereNotIn('status', ['refunded', 'disputed'])
             .update(paymentPayload)
             .returning('*');
           if (!record) {

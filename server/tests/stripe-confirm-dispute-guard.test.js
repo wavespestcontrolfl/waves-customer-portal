@@ -168,15 +168,30 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
 
-  test('a row that flipped terminal mid-flight aborts the settle (transaction rolls back)', async () => {
+  test('a row that flipped to refunded mid-flight aborts the settle (transaction rolls back)', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'refunded', refund_amount: '110.11' };
-    paymentsUpdateResult = []; // whereNotIn filtered the terminal row out
+    paymentsUpdateResult = []; // whereNotIn filtered the money-left row out
     const StripeService = require('../services/stripe');
 
     // The throw rolls back the trx — the invoice update above it never
-    // commits, so /confirm cannot settle the invoice beside a terminal row.
+    // commits, so /confirm cannot settle the invoice beside a money-left row.
     await expect(StripeService.confirmInvoicePayment('inv_123', PI_ID))
       .rejects.toThrow(/could not process your payment/i);
+    expect(paymentsInsert).not.toHaveBeenCalled();
+  });
+
+  test('a paid row beside a still-open invoice lets /confirm repair the invoice', async () => {
+    // The webhook writes the payments row before it settles the invoice — if
+    // /confirm races (or repairs after) that half-applied state, the money
+    // genuinely arrived and the open invoice must still flip to paid (Codex
+    // P2: a paid-row abort here would leave collected money showing as due).
+    existingPaymentRow = { id: 'pay_existing', status: 'paid' };
+    const StripeService = require('../services/stripe');
+    const record = await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    expect(record).toEqual({ id: 'pay_existing', status: 'paid' });
+    expect(invoiceUpdate).toHaveBeenCalledTimes(1);
+    expect(invoiceUpdate.mock.calls[0][0]).toMatchObject({ status: 'paid' });
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
 });
