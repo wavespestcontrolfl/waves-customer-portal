@@ -65,11 +65,15 @@ describe('runSunbizAnnualReportReminder', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('between the window and the deadline (Feb–May 1): no-op', async () => {
+  test('between the window and the deadline (Feb–May 1): no bell, but still self-heals the row', async () => {
+    const ensureQ = chain({ first: undefined }); // no row for the year
+    const insertQ = chain();
+    db.mockReturnValueOnce(ensureQ).mockReturnValueOnce(insertQ);
+
     const result = await runSunbizAnnualReportReminder(new Date('2027-03-15T12:00:00Z'));
 
-    expect(result).toEqual({ fired: false, reason: 'outside_window' });
-    expect(db).not.toHaveBeenCalled();
+    expect(result).toEqual({ fired: false, filingRowCreated: true, reason: 'outside_window' });
+    expect(insertQ.insert).toHaveBeenCalledWith(expect.objectContaining({ period_label: '2027', due_date: '2027-05-01' }));
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 

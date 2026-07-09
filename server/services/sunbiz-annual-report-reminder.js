@@ -98,19 +98,21 @@ async function applyLateFee(year) {
 async function runSunbizAnnualReportReminder(now = new Date()) {
   const { year, month, day } = etParts(now);
 
-  // Past the May 1 deadline: self-heal the row even if January never ran
-  // (fresh environment, job down all month), then reflect the late fee on a
-  // still-unfiled row.
+  // Every tick self-heals the year's calendar row, whatever the month — if
+  // January never ran (fresh environment, cron outage), a January-only
+  // ensure would leave the deadline invisible in tax_filing_calendar (and
+  // silent in the tax-deadline SMS sweep, which only reminds on existing
+  // rows) until after May 1 — exactly the window where the reminder matters.
+  const filingRowCreated = await ensureFilingRow(year);
+
+  // Past the May 1 deadline: a still-unfiled row now owes the $400 late fee.
   if (month > 5 || (month === 5 && day > 1)) {
-    const filingRowCreated = await ensureFilingRow(year);
     const lateFeeApplied = await applyLateFee(year);
     return { fired: false, filingRowCreated, lateFeeApplied, reason: 'past_due_sweep' };
   }
 
   // The bell only rings during the January filing-window open.
-  if (month !== 1) return { fired: false, reason: 'outside_window' };
-
-  const filingRowCreated = await ensureFilingRow(year);
+  if (month !== 1) return { fired: false, filingRowCreated, reason: 'outside_window' };
 
   if (await alreadyNotified(year)) {
     return { fired: false, filingRowCreated, reason: 'already_notified' };
