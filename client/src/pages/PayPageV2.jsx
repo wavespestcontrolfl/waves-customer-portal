@@ -1250,7 +1250,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 // confirms the SetupIntent /setup minted and persists the method via
 // /setup-complete. Money is already settled; the consent box renders
 // locked exactly like every required save.
-function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, onDone }) {
+function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, onDone, onBankPending }) {
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -1301,19 +1301,32 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
     setProcessing(true);
     setFormError(null);
     try {
-      const { error: confirmError } = await stripeRef.current.confirmSetup({
+      // redirect:'if_required' — a 3DS/bank-auth redirect returns to this
+      // page with setup_intent params (handled by the page-level return
+      // effect; the setup_intent.succeeded webhook is the backstop when
+      // the browser never comes back).
+      const { error: confirmError, setupIntent } = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
         confirmParams: { return_url: window.location.href },
         redirect: 'if_required',
       });
       if (confirmError) throw new Error(confirmError.message || 'Could not save the payment method');
+      // ACH micro-deposit verification finishes days later — the webhook
+      // completes enrollment then; show the pending guidance now.
+      if (setupIntent && setupIntent.status !== 'succeeded') {
+        onBankPending?.();
+        return;
+      }
       const res = await fetch(`${API_BASE}/pay/${token}/setup-complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ setupIntentId }),
       });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || 'Could not save the payment method');
+      if (!res.ok) {
+        if (body.microdepositPending) { onBankPending?.(); return; }
+        throw new Error(body.error || 'Could not save the payment method');
+      }
       onDone?.();
     } catch (err) {
       setFormError(err.message || 'Could not save the payment method');
@@ -1398,8 +1411,13 @@ export default function PayPageV2() {
   const [microdepositVerifying, setMicrodepositVerifying] = useState(false);
   // Account credit fully covered a REQUIRED-SAVE invoice: money is settled,
   // but the plan still needs a payment method on file (no PI was minted, so
-  // the normal save-card path never ran). /setup returns a SetupIntent and
-  // this state drives the capture step shown before the "nothing due" card.
+  // the normal save-card path never ran). invoice.captureNeeded (from the
+  // GET or the /setup response) drives a mint of the capture SetupIntent
+  // via POST /capture-setup — re-derived on every load so the step is
+  // resumable across reloads, mint failures, and Stripe redirects.
+  // States: null | {status:'minting'} | {status:'mint-error',message} |
+  // {status:'ready',clientSecret,setupIntentId,publishableKey} |
+  // {status:'done'} | {status:'bank-pending'}
   const [setupCapture, setSetupCapture] = useState(null);
   // Guards POST /setup to once per (token, saveCard): the partial-credit display
   // sync below mutates `data`, which would otherwise re-run the setup effect and
@@ -1435,13 +1453,100 @@ export default function PayPageV2() {
   // handled server-authoritatively by the /setup effect below — its 409 carries
   // an `inProgress` flag (set only when Stripe confirms the PI is actually
   // processing/succeeded), and only then do we route to the receipt.
+  //
+  // Two save-related jobs happen here (Codex #2507 P1 round-3):
+  //  - setup_intent params = a covered-by-credit CAPTURE return — complete it
+  //    server-side (/setup-complete verifies the SI; the webhook is the
+  //    backstop if this never runs) and never bounce to a receipt that
+  //    doesn't exist for credit coverage.
+  //  - a save-card PAYMENT redirect (bank auth / 3DS) unloaded the page
+  //    before the normal post-confirm consent POST — fire it now with an
+  //    empty body (the server derives the method from the invoice's own
+  //    PaymentIntent and fails closed when save wasn't opted in).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const redirectStatus = params.get('redirect_status');
+    const returnedSetupIntentId = params.get('setup_intent');
+    if (returnedSetupIntentId) {
+      window.history.replaceState({}, '', window.location.pathname);
+      if (redirectStatus === 'succeeded') {
+        fetch(`${API_BASE}/pay/${token}/setup-complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ setupIntentId: returnedSetupIntentId }),
+        })
+          .then(async (r) => {
+            if (r.ok) {
+              setSetupCapture({ status: 'done' });
+              setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
+            } else {
+              const body = await r.json().catch(() => ({}));
+              setSetupCapture(body.microdepositPending ? { status: 'bank-pending' } : { status: 'minting' });
+            }
+          })
+          .catch(() => setSetupCapture({ status: 'minting' }));
+      } else {
+        // Failed/abandoned setup return — restart capture (state re-derives
+        // from the GET's captureNeeded either way).
+        setSetupCapture({ status: 'minting' });
+      }
+      return;
+    }
     if (redirectStatus === 'succeeded') {
+      fetch(`${API_BASE}/pay/${token}/consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }).catch(() => {});
       navigate(`/receipt/${token}?fresh=1`, { replace: true });
     }
   }, [navigate, token]);
+
+  // Promote "capture needed, nothing started" → the minting state. Entry
+  // points: the /setup response and a fresh GET (reload / redirect return).
+  useEffect(() => {
+    if (data?.invoice?.status === 'prepaid' && data?.invoice?.captureNeeded && !setupCapture) {
+      setSetupCapture({ status: 'minting' });
+    }
+  }, [data?.invoice?.status, data?.invoice?.captureNeeded, setupCapture]);
+
+  // Mint the covered-by-credit capture SetupIntent — fires exactly once per
+  // entry into the 'minting' state (explicit retry re-enters it). The mint
+  // is retryable and the need is re-derived server-side on every call, so a
+  // transient Stripe failure can never permanently bypass required capture.
+  useEffect(() => {
+    if (setupCapture?.status !== 'minting') return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/pay/${token}/capture-setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.error || 'Could not start the payment method setup');
+        return body;
+      })
+      .then((body) => {
+        if (cancelled) return;
+        if (body.alreadyChargeable) {
+          setSetupCapture({ status: 'done' });
+          setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
+          return;
+        }
+        setSetupCapture({
+          status: 'ready',
+          clientSecret: body.clientSecret,
+          setupIntentId: body.setupIntentId,
+          publishableKey: body.publishableKey || data?.stripe?.publishableKey,
+        });
+      })
+      .catch((e) => {
+        if (!cancelled) setSetupCapture({ status: 'mint-error', message: e.message });
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setupCapture?.status, token]);
 
   // Already paid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit).
   // Prepaid (covered by account credit) does NOT redirect — it renders its own
@@ -1504,18 +1609,14 @@ export default function PayPageV2() {
         // clientSecret) — flip to the existing "covered, nothing due" prepaid
         // state instead of mounting a card form that would hang on "Loading
         // payment form…" with a null secret. A required-save invoice with
-        // nothing chargeable on file additionally returns a SetupIntent —
-        // capture the method first (recurring plans need one on file even
-        // when credit paid this invoice).
+        // nothing chargeable on file additionally flags captureNeeded — the
+        // mint effect below POSTs /capture-setup (retryable; the same state
+        // is re-derived from the GET on any reload, so a transient mint
+        // failure can never permanently bypass the required capture).
         if (setup.coveredByCredit || setup.status === 'prepaid') {
-          if (setup.setupRequired && setup.setupClientSecret) {
-            setSetupCapture({
-              clientSecret: setup.setupClientSecret,
-              setupIntentId: setup.setupIntentId,
-              publishableKey: setup.publishableKey || data.stripe.publishableKey,
-            });
-          }
-          setData((prev) => (prev ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid' } } : prev));
+          setData((prev) => (prev
+            ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
+            : prev));
           setPaymentState('idle');
           return;
         }
@@ -1715,7 +1816,7 @@ export default function PayPageV2() {
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            {setupCapture ? (
+            {setupCapture && setupCapture.status !== 'done' ? (
               <>
                 <SerifHeading style={{ marginBottom: 12 }}>Covered by credit — one more step</SerifHeading>
                 <p style={{ margin: '0 0 16px', fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
@@ -1723,13 +1824,55 @@ export default function PayPageV2() {
                   covered by your account credit — there's no payment today. Your recurring plan
                   does need a payment method on file for future visits, so add one below to finish up.
                 </p>
-                <SetupMethodForm
-                  publishableKey={setupCapture.publishableKey}
-                  clientSecret={setupCapture.clientSecret}
-                  setupIntentId={setupCapture.setupIntentId}
-                  token={token}
-                  onDone={() => setSetupCapture(null)}
-                />
+                {setupCapture.status === 'minting' && (
+                  <p style={{ margin: 0, fontSize: 14, color: 'var(--text-muted)' }}>Loading secure form…</p>
+                )}
+                {setupCapture.status === 'mint-error' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{
+                      background: 'rgba(200,16,46,0.06)',
+                      border: '1px solid var(--danger)',
+                      borderRadius: 8,
+                      padding: '10px 12px',
+                      fontSize: 14,
+                      color: 'var(--danger)',
+                    }}>
+                      {setupCapture.message || 'Could not start the payment method setup.'}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSetupCapture({ status: 'minting' })}
+                      style={{
+                        padding: '12px 16px', borderRadius: 10, border: 'none',
+                        background: COLORS.blueDeeper, color: '#fff',
+                        fontFamily: FONTS.body, fontSize: 15, fontWeight: 700, cursor: 'pointer',
+                      }}
+                    >
+                      Try again
+                    </button>
+                  </div>
+                )}
+                {setupCapture.status === 'bank-pending' && (
+                  <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.55 }}>
+                    Your bank needs to be verified first: in the next 1–2 business days your bank
+                    statement will show two small deposits from Stripe — confirm those amounts using
+                    the link in the email Stripe sent you, and your payment method will be saved and
+                    enabled automatically. Nothing else to do here.
+                  </p>
+                )}
+                {setupCapture.status === 'ready' && (
+                  <SetupMethodForm
+                    publishableKey={setupCapture.publishableKey}
+                    clientSecret={setupCapture.clientSecret}
+                    setupIntentId={setupCapture.setupIntentId}
+                    token={token}
+                    onDone={() => {
+                      setSetupCapture({ status: 'done' });
+                      setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
+                    }}
+                    onBankPending={() => setSetupCapture({ status: 'bank-pending' })}
+                  />
+                )}
               </>
             ) : (
               <>

@@ -51,18 +51,32 @@ async function recordConsent({
   return row;
 }
 
+// Only consent copy from v8 on authorizes charging the method "for future
+// service visits and invoices as agreed" — earlier versions were plain
+// card-on-file copy and the backfill's v0_implicit_pre_consent rows are
+// explicitly NOT evidence of informed authorization (Codex #2507 P1
+// round-3). Version strings are 'v<major>_<date>'.
+const MIN_ENROLLMENT_CONSENT_MAJOR = 8;
+function consentVersionQualifiesForEnrollment(version) {
+  const m = /^v(\d+)(?:[_-]|$)/.exec(String(version || ''));
+  return !!m && Number(m[1]) >= MIN_ENROLLMENT_CONSENT_MAJOR;
+}
+
 /**
- * Does an immutable consent row exist for this customer + Stripe pm?
- * The autopay-enrollment gate (Codex #2507 P1): enrollment happens only
- * when the audit artifact exists — PI metadata alone is a signal that the
- * box was ticked, but the snapshot row is the authorization of record.
+ * Does an ENROLLMENT-QUALIFYING consent row exist for this customer +
+ * Stripe pm? The autopay-enrollment gate (Codex #2507 P1): enrollment
+ * happens only when the audit artifact exists — PI metadata alone is a
+ * signal that the box was ticked, but the snapshot row is the
+ * authorization of record — and only when that row's copy version
+ * actually authorizes recurring charges (v8+; legacy/implicit rows are
+ * audit anchors, not authority).
  */
 async function hasConsentFor(customerId, stripePaymentMethodId) {
   if (!customerId || !stripePaymentMethodId) return false;
-  const row = await db('payment_method_consents')
+  const rows = await db('payment_method_consents')
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
-    .first('id');
-  return !!row;
+    .select('consent_text_version');
+  return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version));
 }
 
 /**
@@ -123,6 +137,7 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 module.exports = {
   recordConsent,
   hasConsentFor,
+  consentVersionQualifiesForEnrollment,
   linkPaymentMethodId,
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),

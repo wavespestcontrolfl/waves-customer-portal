@@ -116,9 +116,14 @@ function respondWithPaymentError(req, res, {
 //     unlocks the box and setup/finalize honor saveCard=false (Codex
 //     #2507 round-2). Detected mode-independently: the invoice's
 //     scheduled service traces to an accepted estimate
-//     (source_estimate_id) AND the customer has a recurring relationship
-//     (monthly_rate > 0). One-time accepts (monthly_rate NULL) and
-//     schedule-created visits (no source estimate) stay exempt.
+//     (source_estimate_id), the customer has a recurring relationship
+//     (monthly_rate > 0), AND the visit itself is a RECURRING one — the
+//     same marker trio project-completion treats as canonical
+//     (is_recurring / recurring_parent_id / recurring_pattern), so a
+//     monthly member's ONE-TIME estimate accept stays exempt (Codex
+//     #2507 round-3: one-time links are sent saveCard: !treatAsOneTime,
+//     not save-required). Schedule-created visits (no source estimate)
+//     stay exempt too.
 // Payer-billed invoices never save on the homeowner account.
 // Column-guarded: pre-migration environments require nothing.
 async function invoiceRequiresSavedMethod(invoice) {
@@ -132,8 +137,22 @@ async function invoiceRequiresSavedMethod(invoice) {
     if (!scheduledServiceId) return false;
     const ss = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('source_estimate_id');
-    return !!ss?.source_estimate_id;
+      .first('source_estimate_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    if (!ss?.source_estimate_id) return false;
+    return !!(ss.is_recurring || ss.recurring_parent_id || ss.recurring_pattern);
+  } catch { return false; }
+}
+
+// Nothing chargeable is on file for this required-save customer — the
+// canonical customerOnAutopay (flag, pause, default chargeable row, ACH
+// health). Used by /setup, GET (invoice.captureNeeded) and /capture-setup
+// so the covered-by-credit capture state is derivable on EVERY load, not
+// only from the one /setup response (Codex #2507 P1 round-3).
+async function invoiceCaptureNeeded(invoice) {
+  try {
+    const { customerOnAutopay } = require('../services/autopay-eligibility');
+    const customerRow = await db('customers').where({ id: invoice.customer_id }).first();
+    return !!customerRow && !(await customerOnAutopay(customerRow));
   } catch { return false; }
 }
 
@@ -170,15 +189,24 @@ router.get('/:token', async (req, res, next) => {
       return [];
     });
 
+    // Server-authoritative "payment method on file is required" flag —
+    // the client locks the consent box from THIS, not the URL. For a
+    // credit-covered (prepaid) required-save invoice, captureNeeded makes
+    // the method-capture step RESUMABLE: any reload / redirect return
+    // re-derives it from live state instead of trusting the one /setup
+    // response (Codex #2507 P1 round-3).
+    const getSaveRequired = await invoiceRequiresSavedMethod(data);
+    const getCaptureNeeded = getSaveRequired && data.status === 'prepaid'
+      && (await invoiceCaptureNeeded(data));
+
     res.json({
       invoice: {
         id: data.id,
         invoiceNumber: data.invoice_number,
         title: data.title,
         status: data.status,
-        // Server-authoritative "payment method on file is required" flag —
-        // the client locks the consent box from THIS, not the URL.
-        saveRequired: await invoiceRequiresSavedMethod(data),
+        saveRequired: getSaveRequired,
+        captureNeeded: getCaptureNeeded,
         lineItems,
         subtotal: parseFloat(data.subtotal),
         discountAmount: parseFloat(data.discount_amount),
@@ -319,25 +347,13 @@ router.post('/:token/setup', async (req, res, next) => {
     // method capture (Codex #2507 P1 round-2): covered_by_credit returns
     // before any PI is minted, so a signup with enough credit would
     // complete with nothing chargeable on file and later per-visit /
-    // renewal collection has nothing to charge. When no method can
-    // currently collect (canonical customerOnAutopay: flag, pause, default
-    // chargeable row, ACH health), mint a SetupIntent so the client runs
-    // the capture flow — money behavior is unchanged (the credit still
-    // pays the invoice); only the method-on-file requirement is kept.
-    let setupCapture = null;
-    if (result.covered_by_credit && requireSave) {
-      try {
-        const { customerOnAutopay } = require('../services/autopay-eligibility');
-        const customerRow = await db('customers').where({ id: invoice.customer_id }).first();
-        if (customerRow && !(await customerOnAutopay(customerRow))) {
-          setupCapture = await StripeService.createSetupIntent(invoice.customer_id, 'card_or_bank');
-        }
-      } catch (setupErr) {
-        // Never block the covered state on capture plumbing — log loudly;
-        // the account stays collectible-by-nudge rather than failing the pay page.
-        logger.error(`[pay-v2] covered-by-credit SetupIntent mint failed for invoice ${invoice.id}: ${setupErr.message}`);
-      }
-    }
+    // renewal collection has nothing to charge. Only the FLAG is computed
+    // here — the SetupIntent is minted by POST /:token/capture-setup so a
+    // transient mint failure is retryable and the state is re-derivable on
+    // every page load (GET's invoice.captureNeeded), never permanently
+    // bypassed by a swallowed error (Codex #2507 P1 round-3).
+    const captureNeeded = !!result.covered_by_credit && requireSave
+      && (await invoiceCaptureNeeded(invoice));
 
     res.json({
       clientSecret: result.clientSecret,
@@ -351,12 +367,8 @@ router.post('/:token/setup', async (req, res, next) => {
       coveredByCredit: !!result.covered_by_credit,
       status: result.status,
       // Required-save + covered + nothing chargeable on file → the client
-      // renders the payment-method capture step before the covered state.
-      ...(setupCapture ? {
-        setupRequired: true,
-        setupClientSecret: setupCapture.clientSecret,
-        setupIntentId: setupCapture.setupIntentId,
-      } : {}),
+      // runs the capture step (POST /capture-setup) before the covered state.
+      captureNeeded,
     });
   } catch (err) {
     // A 409 means the invoice already has a live PaymentIntent that setup could
@@ -629,8 +641,12 @@ router.post('/:token/confirm', async (req, res, next) => {
 router.post('/:token/consent', async (req, res, next) => {
   let invoice = null;
   try {
+    // stripePaymentMethodId is OPTIONAL (Codex #2507 P1 round-3): every
+    // verification below keys off the invoice's OWN PaymentIntent, so the
+    // body value is only a tamper cross-check when supplied. Redirect-return
+    // payments (ACH bank auth, 3DS) post an empty body — the page that held
+    // the pm id unloaded at redirect, but the PI is the authority anyway.
     const { stripePaymentMethodId, methodCategory } = req.body || {};
-    if (!stripePaymentMethodId) return res.status(400).json({ error: 'stripePaymentMethodId required' });
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -682,7 +698,17 @@ router.post('/:token/consent', async (req, res, next) => {
       });
     }
 
-    if (pi.payment_method !== stripePaymentMethodId) {
+    if (!pi.payment_method) {
+      return respondWithPaymentError(req, res, {
+        invoice,
+        phase: 'consent',
+        methodCategory,
+        paymentIntentId: invoice.stripe_payment_intent_id,
+        message: 'PaymentIntent has no payment method to record consent for',
+        statusCode: 409,
+      });
+    }
+    if (stripePaymentMethodId && pi.payment_method !== stripePaymentMethodId) {
       logger.warn(`[pay-v2] Consent PM mismatch: client=${stripePaymentMethodId} pi.payment_method=${pi.payment_method} invoice=${invoice.id}`);
       return respondWithPaymentError(req, res, {
         invoice,
@@ -694,6 +720,9 @@ router.post('/:token/consent', async (req, res, next) => {
         metadata: { stripe_payment_method_id: stripePaymentMethodId },
       });
     }
+    // The verified pm is the PI's own — the body value (when present) was
+    // only a cross-check.
+    const verifiedStripePmId = pi.payment_method;
 
     // PI status acceptable for consent: succeeded (cards / wallets) or
     // processing (ACH, which clears asynchronously). Anything else means
@@ -753,7 +782,7 @@ router.post('/:token/consent', async (req, res, next) => {
 
     const row = await ConsentService.recordConsent({
       customerId: invoice.customer_id,
-      stripePaymentMethodId,
+      stripePaymentMethodId: verifiedStripePmId,
       source: 'pay_page',
       methodType: verifiedMethodType,
       ip: req.ip,
@@ -772,7 +801,7 @@ router.post('/:token/consent', async (req, res, next) => {
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       await enrollConsentedMethod({
         customerId: invoice.customer_id,
-        stripePaymentMethodId,
+        stripePaymentMethodId: verifiedStripePmId,
         source: 'save_card_consent',
       });
     } catch (enrollErr) {
@@ -795,16 +824,69 @@ router.post('/:token/consent', async (req, res, next) => {
 });
 
 // =========================================================================
+// POST /api/pay/:token/capture-setup — Mint the covered-by-credit capture
+// SetupIntent (Codex #2507 P1 round-3: minted on demand + retryable, never
+// inline-swallowed in /setup; the need is re-derived server-side on every
+// call so a stale client can't force capture that's no longer needed).
+// =========================================================================
+router.post('/:token/capture-setup', async (req, res) => {
+  let invoice = null;
+  try {
+    invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    // Fail closed: capture exists solely for the required-save +
+    // credit-covered state — any other invoice/token must not be usable to
+    // start attaching methods to the account.
+    if (!(await invoiceRequiresSavedMethod(invoice))) {
+      return res.status(409).json({ error: 'This invoice does not require a saved payment method' });
+    }
+    if (invoice.status !== 'prepaid') {
+      return res.status(409).json({ error: 'Capture applies only to credit-covered invoices' });
+    }
+    if (!(await invoiceCaptureNeeded(invoice))) {
+      return res.json({ alreadyChargeable: true });
+    }
+    // An unhealthy customer-level ACH state (needs_verification/suspended)
+    // blocks bank collection regardless of a fresh bank method — offering
+    // us_bank_account here would capture a method customerOnAutopay keeps
+    // refusing (Codex #2507 P1 round-3). Card-only until the bank state
+    // clears.
+    let methodTypes = 'card_or_bank';
+    try {
+      const achRow = await db('customers').where({ id: invoice.customer_id }).first('ach_status');
+      if (achRow?.ach_status && achRow.ach_status !== 'active') methodTypes = 'card';
+    } catch { /* fail toward card_or_bank */ }
+    const setup = await StripeService.createSetupIntent(invoice.customer_id, methodTypes, {
+      metadata: { purpose: 'covered_capture', invoice_id: String(invoice.id) },
+    });
+    res.json({
+      clientSecret: setup.clientSecret,
+      setupIntentId: setup.setupIntentId,
+      publishableKey: stripeConfig.publishableKey,
+    });
+  } catch (err) {
+    logger.error(`[pay-v2] capture-setup failed for invoice ${invoice?.id || 'unknown'}: ${err.message}`);
+    res.status(502).json({ error: 'Could not start the payment method setup — please try again' });
+  }
+});
+
+// =========================================================================
 // POST /api/pay/:token/setup-complete — Persist a method captured via the
 // covered-by-credit SetupIntent flow (Codex #2507 P1 round-2).
 //
-// Only meaningful for required-save invoices: /setup minted the SetupIntent
-// because account credit fully covered the invoice (no PI, so the normal
-// webhook save-card mirror never fires) and nothing chargeable was on file.
-// Verification is server-side and fails closed: the SetupIntent must have
-// succeeded, must belong to this invoice's customer (waves_customer_id
-// metadata stamped at mint), and must carry a payment method. Mirrors the
-// portal add-card route: save → consent snapshot → consent-gated enrollment.
+// Only meaningful for required-save invoices: /capture-setup minted the
+// SetupIntent because account credit fully covered the invoice (no PI, so
+// the normal webhook save-card mirror never fires) and nothing chargeable
+// was on file. Verification is server-side and fails closed: the
+// SetupIntent must have succeeded, must belong to this invoice's customer
+// (waves_customer_id metadata stamped at mint), and must carry a payment
+// method. Mirrors the portal add-card route: save → consent snapshot →
+// consent-gated enrollment. IDEMPOTENT (Codex #2507 P2 round-3): a retry
+// after a partial first attempt reuses the already-mirrored
+// payment_methods row instead of re-inserting into a unique column. The
+// setup_intent.succeeded webhook runs the same completion for redirects /
+// async bank verification the browser never finishes.
 // =========================================================================
 router.post('/:token/setup-complete', async (req, res) => {
   let invoice = null;
@@ -830,6 +912,7 @@ router.post('/:token/setup-complete', async (req, res) => {
       return res.status(409).json({
         error: 'Payment method setup is not complete.',
         setupIntentStatus: setupIntent?.status || 'unknown',
+        microdepositPending: setupIntent?.next_action?.type === 'verify_with_microdeposits',
       });
     }
     if (setupIntent.metadata?.waves_customer_id !== String(invoice.customer_id)) {
@@ -837,22 +920,34 @@ router.post('/:token/setup-complete', async (req, res) => {
       return res.status(409).json({ error: 'Setup does not belong to this invoice' });
     }
 
-    const saved = await StripeService.savePaymentMethod(invoice.customer_id, stripePmId, {
-      enableAutopay: false,
-      // enrollConsentedMethod owns the default decision (claims it only
-      // when no healthy method is already in charge).
-      makeDefault: false,
-    });
+    // Idempotent save: stripe_payment_method_id is unique — a retry after a
+    // partial first attempt (saved but consent/enrollment failed) must
+    // continue with the existing row, never re-insert.
+    let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
+    if (saved && saved.customer_id !== invoice.customer_id) {
+      logger.warn(`[pay-v2] setup-complete pm ownership mismatch: pm ${stripePmId} belongs to ${saved.customer_id}, invoice customer ${invoice.customer_id}`);
+      return res.status(409).json({ error: 'Payment method belongs to another account' });
+    }
+    if (!saved) {
+      saved = await StripeService.savePaymentMethod(invoice.customer_id, stripePmId, {
+        enableAutopay: false,
+        // enrollConsentedMethod owns the default decision (claims it only
+        // when no healthy method is already in charge).
+        makeDefault: false,
+      });
+    }
     const methodType = (typeof pmObject === 'object' && pmObject?.type) || saved.method_type || 'card';
-    await ConsentService.recordConsent({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      stripePaymentMethodId: stripePmId,
-      source: 'pay_page',
-      methodType,
-      ip: req.ip,
-      userAgent: req.get('user-agent') || null,
-    });
+    if (!(await ConsentService.hasConsentFor(invoice.customer_id, stripePmId))) {
+      await ConsentService.recordConsent({
+        customerId: invoice.customer_id,
+        paymentMethodId: saved.id,
+        stripePaymentMethodId: stripePmId,
+        source: 'pay_page',
+        methodType,
+        ip: req.ip,
+        userAgent: req.get('user-agent') || null,
+      });
+    }
     const { enrollConsentedMethod } = require('../services/autopay-enrollment');
     await enrollConsentedMethod({
       customerId: invoice.customer_id,

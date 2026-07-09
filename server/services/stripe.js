@@ -235,7 +235,7 @@ const StripeService = {
    * @param {string} [paymentMethodType] — 'card', 'us_bank_account', or 'card_or_bank'
    * @returns {{ clientSecret: string, setupIntentId: string }}
    */
-  async createSetupIntent(customerId, paymentMethodType = 'card') {
+  async createSetupIntent(customerId, paymentMethodType = 'card', opts = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -251,7 +251,11 @@ const StripeService = {
       const setupIntent = await stripe.setupIntents.create({
         customer: stripeCustomerId,
         payment_method_types: paymentMethodTypes,
+        // Callers may tag a purpose (e.g. 'covered_capture') so the
+        // setup_intent.succeeded webhook can route completion; the
+        // waves_customer_id key always wins over caller metadata.
         metadata: {
+          ...(opts.metadata || {}),
           waves_customer_id: customerId,
         },
       });

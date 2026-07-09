@@ -1820,6 +1820,60 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // Covered-by-credit capture (Codex #2507 P1 round-3): the SetupIntent the
+  // pay page minted for a required-save, credit-covered invoice can finish
+  // AFTER the browser is gone — a 3DS/bank-auth redirect that never returns,
+  // or ACH micro-deposits verified days later. Complete the same save →
+  // consent → enrollment the /setup-complete endpoint runs (all steps
+  // idempotent; the endpoint and this handler may both fire). The capture
+  // page rendered the LOCKED v8 consent before confirmSetup — this SI only
+  // exists because the server required a method on file — so recording the
+  // snapshot here (no IP/UA, like other server-side completions) is the
+  // faithful record of what the customer agreed to.
+  if (setupIntent.metadata?.purpose === 'covered_capture'
+    && setupIntent.metadata?.waves_customer_id
+    && setupIntent.payment_method) {
+    const wavesCustomerId = setupIntent.metadata.waves_customer_id;
+    const stripePmId = typeof setupIntent.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent.payment_method.id;
+    try {
+      const StripeService = require('../services/stripe');
+      const ConsentService = require('../services/payment-method-consents');
+      let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
+      if (saved && saved.customer_id !== wavesCustomerId) {
+        logger.warn(`[stripe-webhook] covered-capture pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
+        return;
+      }
+      if (!saved) {
+        saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+          enableAutopay: false,
+          makeDefault: false,
+        });
+      }
+      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+        await ConsentService.recordConsent({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: stripePmId,
+          source: 'pay_page',
+          methodType: saved.method_type || 'card',
+        });
+      }
+      await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      await enrollConsentedMethod({
+        customerId: wavesCustomerId,
+        paymentMethodId: saved.id,
+        source: 'save_card_consent',
+        details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
+      });
+      logger.info(`[stripe-webhook] covered-capture completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
+    } catch (err) {
+      logger.error(`[stripe-webhook] covered-capture completion failed for SI ${setupIntent.id}: ${err.message}`);
+    }
+    return;
+  }
   const customerId = setupIntent.metadata?.waves_customer_id || 'unknown';
   logger.info(`[stripe-webhook] SetupIntent succeeded for customer ${customerId}: ${setupIntent.id}`);
 }
