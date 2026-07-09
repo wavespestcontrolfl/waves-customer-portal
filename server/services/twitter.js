@@ -75,7 +75,14 @@ class TwitterService {
     }
     const data = await this._zernio('accounts');
     const accounts = Array.isArray(data) ? data : (data?.accounts || []);
-    const matches = accounts.filter((a) => a?.platform === 'twitter' && a?.isActive !== false && a?._id);
+    // Healthy-connection filter (fields observed on the live accounts API):
+    // an expired/reconnected profile leaves a stale sibling entry behind with
+    // platformStatus off 'active', enabled=false, or intentionalDisconnectAt
+    // set — those must never be selected or counted toward ambiguity.
+    const matches = accounts.filter((a) => a?.platform === 'twitter' && a?._id
+      && a?.isActive !== false && a?.enabled !== false
+      && (a?.platformStatus == null || a.platformStatus === 'active')
+      && !a?.intentionalDisconnectAt);
     if (!matches.length) {
       throw new Error('No active X (twitter) account connected in Zernio — connect one in the Zernio dashboard');
     }
@@ -91,7 +98,8 @@ class TwitterService {
   _parseExistingPostId(bodyText) {
     try {
       const body = JSON.parse(bodyText);
-      const id = body?.existingPostId || body?.post?._id || body?.error?.existingPostId;
+      const id = body?.existingPostId || body?.details?.existingPostId
+        || body?.post?._id || body?.error?.existingPostId;
       return typeof id === 'string' && id ? id : null;
     } catch {
       return null;

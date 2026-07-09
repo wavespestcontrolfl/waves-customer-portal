@@ -137,6 +137,42 @@ describe('twitter service', () => {
       expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
     }, 20000);
 
+    test('409 dedupe id under details.existingPostId also converges', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/posts` && opts.method === 'POST') {
+          return { ok: false, status: 409, text: async () => JSON.stringify({ details: { existingPostId: 'zp1' } }) };
+        }
+        return base(url, opts);
+      });
+      const res = await twitter.createPost({ text: 'T', link: LINK });
+      expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
+    }, 20000);
+
+    test('stale/disconnected sibling X entries are ignored — healthy account selected, no false ambiguity', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/accounts`) {
+          return {
+            ok: true,
+            json: async () => ({ accounts: [
+              { _id: 'x-stale-status', platform: 'twitter', isActive: true, platformStatus: 'expired' },
+              { _id: 'x-disabled', platform: 'twitter', isActive: true, enabled: false },
+              { _id: 'x-disconnected', platform: 'twitter', isActive: true, intentionalDisconnectAt: '2026-07-01T00:00:00Z' },
+              { _id: ACCOUNT_ID, platform: 'twitter', isActive: true, enabled: true, platformStatus: 'active' },
+            ] }),
+            text: async () => '',
+          };
+        }
+        return base(url, opts);
+      });
+      await twitter.createPost({ text: 'T', link: LINK });
+      const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(JSON.parse(createCall[1].body).platforms).toEqual([{ platform: 'twitter', accountId: ACCOUNT_ID }]);
+    }, 20000);
+
     test('multiple active X accounts without a pin → fail closed', async () => {
       setCreds();
       global.fetch = jest.fn(async () => ({
