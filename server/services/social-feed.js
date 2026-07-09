@@ -181,11 +181,17 @@ async function resolveFacebookPageHandle() {
 
 async function fetchFacebook() {
   if (!token() || !FACEBOOK_PAGE_ID) return { status: 'skipped', posts: [] };
-  const data = await graphGet(`${FACEBOOK_PAGE_ID}/posts`, {
-    fields: 'id,message,full_picture,permalink_url,created_time',
-    limit: String(FB_LIMIT),
-  });
-  const pageHandle = await resolveFacebookPageHandle();
+  // The username lookup is an optional nicety and must never eat into the
+  // per-source budget build() enforces: run it alongside the posts fetch
+  // under its own short deadline, falling back to the true-owner id (from
+  // each post's own id) when it is slow or fails.
+  const [data, pageHandle] = await Promise.all([
+    graphGet(`${FACEBOOK_PAGE_ID}/posts`, {
+      fields: 'id,message,full_picture,permalink_url,created_time',
+      limit: String(FB_LIMIT),
+    }),
+    withTimeout(resolveFacebookPageHandle(), 'facebook username lookup', 2500).catch(() => null),
+  ]);
   const posts = (data.data || [])
     .filter((p) => (p.message || p.full_picture) && p.permalink_url)
     .map((p) => ({
