@@ -1324,7 +1324,13 @@ router.get('/:date?', async (req, res, next) => {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific address (stamped at booking for property-aware
+        // visits, e.g. a customer's rental) wins over the customer's primary
+        // mirror — same output field names, so every consumer keeps working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.autopay_enabled', 'customers.autopay_paused_until',
         'customers.autopay_payment_method_id',
@@ -6696,11 +6702,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.window_end,
         c.first_name,
         c.last_name,
-        c.address_line1,
-        c.address_line2,
-        c.city,
-        c.state,
-        c.zip
+        COALESCE(s.service_address_line1, c.address_line1) AS address_line1,
+        COALESCE(s.service_address_line2, c.address_line2) AS address_line2,
+        COALESCE(s.service_address_city, c.city) AS city,
+        COALESCE(s.service_address_state, c.state) AS state,
+        COALESCE(s.service_address_zip, c.zip) AS zip
       FROM scheduled_services s
       INNER JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date = ?
@@ -6829,11 +6835,11 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         'c.last_name as cust_last_name',
         'c.phone as cust_phone',
         'c.email as cust_email',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw('COALESCE(s.service_address_line2, c.address_line2) as address_line2'),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
         'c.latitude as cust_lat',
         'c.longitude as cust_lng'
       );
@@ -6927,11 +6933,11 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
         's.window_end',
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip'
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw('COALESCE(s.service_address_line2, c.address_line2) as address_line2'),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip')
       );
 
     const completed = routeRows.filter((r) => r.status === 'completed').length;

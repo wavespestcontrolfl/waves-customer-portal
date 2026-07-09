@@ -28,7 +28,7 @@
           "description": "Foreign key to call_log.id. Server-owned — injected after model response."
         },
         "schema_version": {
-          "enum": ["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
+          "enum": ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"],
           "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings) — older payloads remain valid."
         },
         "extracted_at": {
@@ -109,6 +109,34 @@
         },
         "wants_notifications": { "type": "boolean" },
         "notes": { "type": ["string", "null"] }
+      }
+    },
+
+    "secondary_contacts": {
+      "type": ["array", "null"],
+      "maxItems": 3,
+      "description": "ALL other people named as parties to the service, most notification-central first (up to 3). The FIRST entry must also mirror into secondary_contact for older readers. []/null when no other party was named. 1.4.0 additive - absent in older payloads.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "wants_notifications"],
+        "properties": {
+          "name_full": { "type": ["string", "null"] },
+          "first_name": { "type": ["string", "null"] },
+          "last_name": { "type": ["string", "null"] },
+          "phone_e164": { "type": ["string", "null"], "description": "Callback number stated for this person, E.164 preferred. Server re-validates." },
+          "phone_raw_spoken": { "type": ["string", "null"] },
+          "email": { "type": ["string", "null"], "description": "Only when clearly said or spelled in full. Server re-validates." },
+          "role": {
+            "type": "string",
+            "enum": [
+              "home_buyer", "home_seller", "tenant", "landlord", "spouse_partner",
+              "family_member", "real_estate_agent", "property_manager", "other", "unknown"
+            ]
+          },
+          "wants_notifications": { "type": "boolean", "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person." },
+          "notes": { "type": ["string", "null"] }
+        }
       }
     },
 

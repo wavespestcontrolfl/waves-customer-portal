@@ -284,11 +284,172 @@ function normalizeNamePart(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Common NANP nickname/diminutive groups — "Bob" calling from a line whose
+// record says "Robert" is the same person for phone-scoped matching (the
+// phone already narrows candidates to one household/office; last-name
+// agreement is still enforced where both are known).
+const NICKNAME_GROUPS = [
+  ['robert', 'rob', 'bob', 'bobby', 'robbie'],
+  ['william', 'will', 'bill', 'billy', 'willie', 'liam'],
+  ['michael', 'mike', 'mikey', 'mick'],
+  ['james', 'jim', 'jimmy', 'jamie'],
+  ['thomas', 'tom', 'tommy'],
+  ['david', 'dave', 'davey'],
+  ['daniel', 'dan', 'danny'],
+  ['christopher', 'chris', 'topher'],
+  ['christine', 'christina', 'chris', 'chrissy', 'tina'],
+  ['katherine', 'catherine', 'kate', 'kathy', 'cathy', 'katie', 'kat', 'kitty'],
+  ['elizabeth', 'liz', 'beth', 'lizzie', 'eliza', 'betsy'],
+  ['margaret', 'peggy', 'meg', 'maggie', 'marge'],
+  ['john', 'jack', 'johnny', 'jon'],
+  ['jonathan', 'jon', 'johnny'],
+  ['richard', 'rick', 'rich', 'dick', 'ricky'],
+  ['anthony', 'tony'],
+  ['steven', 'stephen', 'steve'],
+  ['joseph', 'joe', 'joey'],
+  ['samuel', 'sam', 'sammy'],
+  ['samantha', 'sam', 'sammy'],
+  ['alexander', 'alex', 'al'],
+  ['alexandra', 'alex', 'lexi', 'sandra'],
+  ['matthew', 'matt'],
+  ['andrew', 'andy', 'drew'],
+  ['gregory', 'greg'],
+  ['jeffrey', 'jeff'],
+  ['edward', 'ed', 'eddie', 'ted', 'ned'],
+  ['ronald', 'ron', 'ronnie'],
+  ['donald', 'don', 'donnie'],
+  ['kenneth', 'ken', 'kenny'],
+  ['lawrence', 'larry'],
+  ['gerald', 'jerry'],
+  ['terrence', 'terry'],
+  ['patrick', 'pat', 'paddy'],
+  ['patricia', 'pat', 'patty', 'trish', 'tricia'],
+  ['susan', 'sue', 'susie', 'suzy'],
+  ['deborah', 'debra', 'deb', 'debbie'],
+  ['barbara', 'barb', 'babs'],
+  ['jennifer', 'jen', 'jenny'],
+  ['jessica', 'jess', 'jessie'],
+  ['victoria', 'vicky', 'tori'],
+  ['nicholas', 'nick', 'nicky'],
+  ['timothy', 'tim', 'timmy'],
+  ['benjamin', 'ben', 'benny'],
+  ['charles', 'charlie', 'chuck', 'chas'],
+  ['frederick', 'fred', 'freddie'],
+  ['raymond', 'ray'],
+  ['walter', 'walt', 'wally'],
+  ['harold', 'hal', 'harry'],
+  ['henry', 'hank', 'harry'],
+  ['francis', 'frank', 'frankie'],
+  ['frances', 'fran', 'frannie'],
+  ['dorothy', 'dot', 'dottie'],
+  ['florence', 'flo'],
+  ['virginia', 'ginny', 'ginger'],
+  ['pamela', 'pam'],
+  ['cynthia', 'cindy'],
+  ['sandra', 'sandy'],
+  ['linda', 'lindy'],
+  ['rebecca', 'becky', 'becca'],
+  ['kimberly', 'kim'],
+  ['michelle', 'shelly'],
+  ['stephanie', 'steph'],
+  ['melissa', 'mel', 'missy'],
+  ['amanda', 'mandy'],
+  ['abigail', 'abby'],
+  ['gabriel', 'gabe'],
+  ['gabriella', 'gabby'],
+  ['isabella', 'izzy', 'bella'],
+  ['zachary', 'zach', 'zack'],
+  ['joshua', 'josh'],
+  ['nathaniel', 'nathan', 'nate', 'nat'],
+  ['leonard', 'leo', 'lenny'],
+  ['theodore', 'ted', 'theo', 'teddy'],
+  ['albert', 'al', 'bert'],
+  ['arthur', 'art', 'artie'],
+  ['eugene', 'gene'],
+  ['vincent', 'vince', 'vinny'],
+  ['peter', 'pete'],
+  ['philip', 'phil'],
+  ['douglas', 'doug'],
+  ['russell', 'russ', 'rusty'],
+  ['martin', 'marty'],
+  ['stanley', 'stan'],
+  ['norman', 'norm'],
+  ['dennis', 'denny'],
+  ['glenn', 'glen'],
+  ['carolyn', 'caroline', 'carol', 'carrie'],
+  ['eleanor', 'ellie', 'nora'],
+  ['emily', 'em', 'emmy'],
+  ['natalie', 'nat'],
+  ['angela', 'angie'],
+  ['brenda', 'bren'],
+  ['sharon', 'shari'],
+  ['diane', 'diana', 'di'],
+  ['janet', 'jan'],
+  ['janice', 'jan'],
+  ['judith', 'judy'],
+  ['carol', 'carole'],
+  ['ann', 'anne', 'annie', 'anna'],
+  ['mary', 'marie', 'maria', 'molly', 'polly'],
+  ['martha', 'marty', 'mattie'],
+  ['helen', 'nell', 'nellie'],
+  ['ruth', 'ruthie'],
+  ['gerald', 'gerry'],
+  ['gordon', 'gordy'],
+  ['leslie', 'les'],
+  ['wesley', 'wes'],
+  ['curtis', 'curt'],
+  ['calvin', 'cal'],
+  ['bernard', 'bernie'],
+  ['clifford', 'cliff'],
+  ['duane', 'dwayne'],
+  ['randall', 'randy'],
+  ['rodney', 'rod'],
+  ['roger', 'rodge'],
+  ['bradley', 'brad'],
+  ['brandon', 'bran'],
+  ['jacob', 'jake'],
+  ['lucas', 'luke'],
+  ['maxwell', 'max'],
+  ['oliver', 'ollie'],
+  ['sebastian', 'seb'],
+  ['veronica', 'ronnie'],
+  ['gwendolyn', 'gwen'],
+  ['jacqueline', 'jackie'],
+  ['josephine', 'jo', 'josie'],
+  ['kathleen', 'kathy', 'kate'],
+  ['lillian', 'lily'],
+  ['madeline', 'maddie'],
+  ['penelope', 'penny'],
+  ['priscilla', 'cilla'],
+  ['rosemary', 'rose', 'rosie'],
+  ['suzanne', 'sue', 'suzy'],
+  ['valerie', 'val'],
+  ['yvonne', 'vonnie'],
+];
+const NICKNAME_LOOKUP = new Map();
+for (const group of NICKNAME_GROUPS) {
+  for (const name of group) {
+    const set = NICKNAME_LOOKUP.get(name) || new Set();
+    for (const variant of group) set.add(variant);
+    NICKNAME_LOOKUP.set(name, set);
+  }
+}
+function firstNameVariants(normalizedFirst) {
+  const variants = NICKNAME_LOOKUP.get(normalizedFirst);
+  return variants ? [...variants] : [normalizedFirst];
+}
+function sameFirstName(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const variants = NICKNAME_LOOKUP.get(a);
+  return !!variants && variants.has(b);
+}
+
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (extractedFirst !== customerFirst) return false;
+  if (!sameFirstName(extractedFirst, customerFirst)) return false;
 
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
@@ -458,6 +619,35 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
   };
 }
 
+// Ordered, deduped list of ALL other parties on the call (up to 3, the slot
+// budget). Entry 1 = the single-contact V1/V2 resolution above (identity-
+// conflict rule intact); entries 2+ = the V2 array's additional people (V1
+// only ever emits one). Dedupe key: phone last-10, else email, else full name.
+function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
+  const { mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+  const primary = resolveCallSecondaryContact(extracted, v2Extraction);
+  const v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
+  const keyOf = (c) => {
+    const digits = String(c.phone || '').replace(/\D/g, '').slice(-10);
+    if (digits) return `p:${digits}`;
+    const email = String(c.email || '').trim().toLowerCase();
+    if (email) return `e:${email}`;
+    const name = [c.first_name, c.last_name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ');
+    return name ? `n:${name}` : null;
+  };
+  const out = [];
+  const seen = new Set();
+  for (const candidate of [primary, ...v2List]) {
+    if (!candidate) continue;
+    const key = keyOf(candidate);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(candidate);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 // Persist a call's secondary contact into the customer's first EMPTY
 // service-contact slot so the existing appointment fan-out
 // (customer-contact.js getAppointmentContacts: confirmation, en-route,
@@ -562,10 +752,14 @@ async function persistCallSecondaryContact(customerId, contact) {
   for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
+  const contactRole = String(contact.role || '').trim().toLowerCase();
   const updated = await write.update({
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
     [emptySlot.phone]: contact.phone || null,
     [emptySlot.email]: slotEmail,
+    // The extracted relationship (home_buyer/tenant/...) — recorded so
+    // role-aware recipient selection is possible later; 'unknown' stays null.
+    [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
   });
   if (!updated) return 'skipped_slot_race';
   return 'written';
@@ -612,17 +806,28 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
 
+// Phone columns consulted for inbound identity: the customer's own number
+// PLUS the three service-contact slot phones — the pipeline itself records
+// spouses/tenants into those slots, and matching that ignored them forked a
+// duplicate customer the next time that person called (audit #7/F1).
+const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
 
+  const predicateFor = (col) => (contactKey.length === 10
+    ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+    : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
   const base = () => {
     const query = db('customers').whereNull('deleted_at');
-    if (contactKey.length === 10) {
-      return query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [contactKey]);
-    }
-    return query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [contactKey]);
+    return query.where(function orPhones() {
+      for (const col of CONTACT_MATCH_PHONE_COLS) {
+        this.orWhereRaw(predicateFor(col), [contactKey]);
+      }
+    });
   };
+  const matchedViaPrimary = (c) => samePhone(phone, c.phone);
 
   if (opts.preferredCustomerId) {
     const preferred = await db('customers')
@@ -634,8 +839,14 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
 
   const firstName = normalizeNamePart(extracted.first_name);
   if (firstName) {
+    // Nickname-tolerant: "Bob" matches a record filed as "Robert" — the phone
+    // already scopes candidates to one household/office, and the last-name
+    // ordering below still prefers a full-name agreement.
     let namedQuery = base()
-      .whereRaw("LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [firstName]);
+      .whereRaw(
+        `LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ANY(?)`,
+        [firstNameVariants(firstName)]
+      );
 
     const lastName = normalizeNamePart(extracted.last_name);
     if (lastName) {
@@ -656,16 +867,77 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     // active customer") and keeps the genuine shared-phone case (2+ matches) safe.
   }
 
-  const matches = await base().orderBy('updated_at', 'desc').limit(2);
+  const matches = await base().orderBy('updated_at', 'desc').limit(6);
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
-    // Exact count, not the limit(2)-capped fetch — a number forked five ways
+    // ── Multi-match disambiguation cascade (audit #7) — each leg is a
+    // deterministic second signal; anything weaker stays ambiguous. ──
+    // (a) The number is exactly ONE candidate's own primary phone (the others
+    //     merely hold it in a service-contact slot): the primary owns it.
+    const primaryOwners = matches.filter(matchedViaPrimary);
+    if (primaryOwners.length === 1) return primaryOwners[0];
+    // (A unique slot-only hit already returned at matches.length === 1 —
+    // the slot columns are part of base(). Two customers holding the same
+    // number in slots stays ambiguous on purpose: realtors/property managers
+    // sit in many customers' slots.)
+    // (b) AV-validated call address matches exactly one candidate (their
+    //     mirror address or one of their active properties). Gated on a
+    //     decisive AV verdict so a raw mis-transcribed street can't link.
+    if (opts.avDecisive && opts.callAddress?.address_line1) {
+      try {
+        const { addressKey } = require('./customer-properties');
+        const callKey = addressKey(opts.callAddress);
+        if (callKey) {
+          const candidateIds = matches.map((m) => m.id);
+          const props = await db('customer_properties')
+            .whereIn('customer_id', candidateIds)
+            .where({ active: true })
+            .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
+          const owners = new Set();
+          for (const m of matches) {
+            if (addressKey(m) === callKey) owners.add(m.id);
+          }
+          for (const p of props) {
+            if (addressKey(p) === callKey) owners.add(p.customer_id);
+          }
+          if (owners.size === 1) {
+            const ownerId = [...owners][0];
+            const owner = matches.find((m) => m.id === ownerId);
+            if (owner) return owner;
+          }
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
+      }
+    }
+    // (c) All candidates share one address key — a household sharing a line;
+    //     any of them is the household, most-recently-active wins.
+    try {
+      const { addressKey } = require('./customer-properties');
+      const keys = new Set(matches.map((m) => addressKey(m)).filter(Boolean));
+      if (keys.size === 1 && matches.every((m) => addressKey(m))) {
+        logger.info(`[call-proc] Shared phone maps to one household (${matches.length} records); linking most recent`);
+        return matches[0];
+      }
+    } catch { /* fall through to ambiguous */ }
+
+    // Exact count, not the limit-capped fetch — a number forked five ways
     // used to log as "2", hiding the badly-shared phones from ops review.
     const shareCount = await Promise.resolve()
       .then(() => base().count('* as n').first())
       .then((r) => parseInt(r?.n || 0, 10) || matches.length)
       .catch(() => matches.length);
-    logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
+    logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without a second deterministic signal`);
+    // Surface the ambiguity to callers that can act on it (Step 3 suppresses
+    // the new-customer create and opens a review card) without changing the
+    // null contract for the ones that can't.
+    if (opts.multiMatchOut && typeof opts.multiMatchOut === 'object') {
+      opts.multiMatchOut.candidates = matches.map((m) => ({
+        id: m.id,
+        name: [m.first_name, m.last_name].filter(Boolean).join(' ') || null,
+      }));
+      opts.multiMatchOut.shareCount = shareCount;
+    }
   }
   return null;
 }
@@ -924,6 +1196,43 @@ function v2IsoToEtWallClock(value) {
     }
   }
   return raw.slice(0, 16);
+}
+
+// Resolve the booked visit's OWN address (the call's post-AV service address)
+// and, when it exactly key-matches one of the customer's known properties,
+// that property's id. Exact addressKey match only — a booking must never be
+// GUESSED onto a property. Returns nulls when the call carried no address
+// (readers COALESCE back to the customer mirror, i.e. today's behavior).
+async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db) {
+  const clean = (v, max) => {
+    const s = String(v == null ? '' : v).trim();
+    return s ? s.slice(0, max) : null;
+  };
+  const address = {
+    line1: clean(extracted.address_line1, 200),
+    line2: clean(extracted.address_line2, 100),
+    city: clean(extracted.city, 50),
+    state: clean(extracted.state, 2),
+    zip: clean(extracted.zip, 10),
+  };
+  if (!address.line1) return { propertyId: null, address: null };
+  let propertyId = null;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const callKey = addressKey({
+      address_line1: address.line1, address_line2: address.line2, city: address.city, zip: address.zip,
+    });
+    if (callKey) {
+      const props = await trx('customer_properties')
+        .where({ customer_id: customerId, active: true })
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+      const matches = props.filter((p) => addressKey(p) === callKey);
+      if (matches.length === 1) propertyId = matches[0].id;
+    }
+  } catch (e) {
+    logger.warn(`[call-proc] property-linkage resolution failed (booking proceeds unlinked): ${e.code || e.message}`);
+  }
+  return { propertyId, address };
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -3156,7 +3465,8 @@ const CallRecordingProcessor = {
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
-    const callSecondaryContact = resolveCallSecondaryContact(extracted, v2CanonicalExtraction);
+    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    const callSecondaryContact = callSecondaryContacts[0] || null;
 
     // Deterministic backstop for the exact chimera this feature exists to
     // prevent: when the model leaves the SECOND person's email/phone in the
@@ -3173,19 +3483,21 @@ const CallRecordingProcessor = {
     // exact realtor-books-for-buyer booking this feature targets as
     // missing_required_customer_fields. Kill state = honest full revert to
     // pre-feature behavior (chimera risk returns while the gate is off).
-    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && callSecondaryContact) {
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && callSecondaryContacts.length) {
       const scrubLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      if (extracted.email && callSecondaryContact.email
-          && String(extracted.email).toLowerCase() === String(callSecondaryContact.email).toLowerCase()) {
-        extracted.email = null;
-        logger.info(`[call-proc] Scrubbed secondary contact's email off the caller fields for ${maskSid(callSid)}`);
-      }
       const aniLast10 = scrubLast10(call.from_phone);
-      if (extracted.phone && callSecondaryContact.phone
-          && scrubLast10(extracted.phone) === scrubLast10(callSecondaryContact.phone)
-          && aniLast10 && scrubLast10(extracted.phone) !== aniLast10) {
-        extracted.phone = null;
-        logger.info(`[call-proc] Scrubbed secondary contact's phone off the caller fields for ${maskSid(callSid)}`);
+      for (const secondary of callSecondaryContacts) {
+        if (extracted.email && secondary.email
+            && String(extracted.email).toLowerCase() === String(secondary.email).toLowerCase()) {
+          extracted.email = null;
+          logger.info(`[call-proc] Scrubbed secondary contact's email off the caller fields for ${maskSid(callSid)}`);
+        }
+        if (extracted.phone && secondary.phone
+            && scrubLast10(extracted.phone) === scrubLast10(secondary.phone)
+            && aniLast10 && scrubLast10(extracted.phone) !== aniLast10) {
+          extracted.phone = null;
+          logger.info(`[call-proc] Scrubbed secondary contact's phone off the caller fields for ${maskSid(callSid)}`);
+        }
       }
     }
 
@@ -3213,11 +3525,21 @@ const CallRecordingProcessor = {
       }
     }
 
+    const sharedPhoneAmbiguity = {};
     if (!customerId && phone) {
       // Try to find an existing customer by the external contact phone.
-      // Name match wins; phone-only matching is allowed only when the number
-      // maps to a single active customer.
-      const existing = await findCustomerForCallContact(phone, extracted);
+      // Name match wins; phone-only matching needs a second deterministic
+      // signal (single owner / AV-address / household) — see the cascade.
+      const existing = await findCustomerForCallContact(phone, extracted, {
+        multiMatchOut: sharedPhoneAmbiguity,
+        callAddress: {
+          address_line1: extracted.address_line1,
+          address_line2: extracted.address_line2 || null,
+          city: extracted.city,
+          zip: extracted.zip,
+        },
+        avDecisive: ['validated_accept', 'corrected'].includes(v2AddressValidation?.status),
+      });
       if (existing) {
         customerId = existing.id;
         // Update with any new info
@@ -3231,6 +3553,27 @@ const CallRecordingProcessor = {
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
+      } else if (sharedPhoneAmbiguity.candidates) {
+        // Shared phone, no deterministic tiebreak: minting ANOTHER customer
+        // on this number would make it permanently multi-match (the duplicate
+        // flywheel, audit #7). Keep the call customer-less — the workable-lead
+        // path below still captures the prospect — and open a blocking review
+        // card so the office attaches it to the right record (or a new one).
+        logger.warn(`[call-proc] Suppressing customer create for ${maskSid(callSid)}: shared phone matches ${sharedPhoneAmbiguity.shareCount} customers`);
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'shared_phone_ambiguous',
+            extraction: v2CanonicalExtraction || undefined,
+            extraPayload: {
+              share_count: sharedPhoneAmbiguity.shareCount,
+              candidates: sharedPhoneAmbiguity.candidates,
+              extracted_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+            },
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore()
+          .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
       } else if (extracted.first_name && phone && !extracted.is_voicemail) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -3562,9 +3905,13 @@ const CallRecordingProcessor = {
     // BEFORE the appointment step so a booking made on this same call already
     // fans its confirmation out to the new contact. Kill switch = unset the gate;
     // the triage item + lead extracted_data still carry the contact either way.
-    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContact) {
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
+      // Every extracted party (up to 3), in notification-centrality order —
+      // each entry passes the SAME per-contact gates (wants_notifications,
+      // dedup, cross-customer, empty slot). Stop early when slots run out.
+      for (const secondaryEntry of callSecondaryContacts) {
       try {
-        const result = await persistCallSecondaryContact(customerId, callSecondaryContact);
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry);
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
@@ -3575,15 +3922,17 @@ const CallRecordingProcessor = {
               callLogId: call.id,
               flag: 'secondary_contact_is_existing_customer',
               extraction: v2CanonicalExtraction || undefined,
-              extraPayload: { secondary_contact: callSecondaryContact },
+              extraPayload: { secondary_contact: secondaryEntry },
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore()
             .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
         }
+        if (result === 'skipped_slots_full') break;
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+      }
       }
     }
 
@@ -4425,6 +4774,13 @@ const CallRecordingProcessor = {
                         .insert({
                           customer_id: customerId,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          // Visit 2 treats the same property as visit 1.
+                          property_id: primaryRow.property_id || null,
+                          service_address_line1: primaryRow.service_address_line1 || null,
+                          service_address_line2: primaryRow.service_address_line2 || null,
+                          service_address_city: primaryRow.service_address_city || null,
+                          service_address_state: primaryRow.service_address_state || null,
+                          service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
                           window_start: fuStart,
                           window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
@@ -4550,9 +4906,21 @@ const CallRecordingProcessor = {
                     },
                   };
                 }
+                // Which property is this visit FOR? Stamp the call's own
+                // (post-AV) address + the exact-match property id so dispatch
+                // and the tech portal render the booked property, not the
+                // customer's primary mirror (a rental booking used to
+                // dispatch to the customer's home).
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, extracted, trx);
                 const insertData = {
                   customer_id: customerId,
                   technician_id: defaultTechnicianId,
+                  property_id: propertyLinkage.propertyId,
+                  service_address_line1: propertyLinkage.address?.line1 || null,
+                  service_address_line2: propertyLinkage.address?.line2 || null,
+                  service_address_city: propertyLinkage.address?.city || null,
+                  service_address_state: propertyLinkage.address?.state || null,
+                  service_address_zip: propertyLinkage.address?.zip || null,
                   scheduled_date: scheduledDate,
                   window_start: windowStart || '09:00',
                   window_end: windowEnd || '10:00',
@@ -5445,7 +5813,11 @@ CallRecordingProcessor._test = {
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,
+  resolveCallSecondaryContacts,
   persistCallSecondaryContact,
+  resolveCallBookingPropertyLinkage,
+  sameFirstName,
+  firstNameVariants,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,

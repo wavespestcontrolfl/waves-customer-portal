@@ -243,8 +243,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.3.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.3.0');
+  test('current SCHEMA_VERSION is 1.4.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.4.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -354,6 +354,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: 'joseph.haught89431@gmail.com',
+      service_contact_role: 'home_buyer',
     }]);
     // Emptiness re-asserted in the UPDATE's WHERE (race guard) — one
     // predicate per slot column.
@@ -381,6 +382,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_name: 'Joseph Haught',
       service_contact_phone: '+19542901693',
       service_contact_email: null,
+      service_contact_role: 'home_buyer',
     }]);
   });
 
@@ -437,6 +439,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact2_name: 'Joseph Haught',
       service_contact2_phone: '+19542901693',
       service_contact2_email: 'joseph.haught89431@gmail.com',
+      service_contact2_role: 'home_buyer',
     }]);
     // Slot phones already existed → the admin's appointment notify-primary
     // choice stands. No slot EMAIL existed → report emails flip now.
@@ -462,6 +465,7 @@ describe('persistCallSecondaryContact', () => {
       service_contact_name: 'Joseph Haught',
       service_contact_phone: null,
       service_contact_email: 'joseph.haught89431@gmail.com',
+      service_contact_role: 'home_buyer',
     }]);
     expect(writes.prefsMerges).toHaveLength(1);
     expect(writes.prefsMerges[0].mergePayload).toEqual({ service_report_notify_primary: true });

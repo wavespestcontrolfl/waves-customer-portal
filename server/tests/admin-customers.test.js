@@ -232,12 +232,15 @@ describe('admin customers route helpers', () => {
       service_contact_name: 'Grace Hopper',
       service_contact_phone: '+19415550199',
       service_contact_email: 'grace@example.com',
+      service_contact_role: null,
       service_contact2_name: 'Sam Spouse',
       service_contact2_phone: '+19415550112',
       service_contact2_email: 'sam@example.com',
+      service_contact2_role: 'spouse_partner',
       service_contact3_name: null,
       service_contact3_phone: null,
       service_contact3_email: null,
+      service_contact3_role: null,
     };
     const updates = {
       service_contact_name: '',
@@ -251,12 +254,16 @@ describe('admin customers route helpers', () => {
       service_contact_name: 'Sam Spouse',
       service_contact_phone: '+19415550112',
       service_contact_email: 'sam@example.com',
+      // The person's role travels WITH them through the promotion.
+      service_contact_role: 'spouse_partner',
       service_contact2_name: null,
       service_contact2_phone: null,
       service_contact2_email: null,
+      service_contact2_role: null,
       service_contact3_name: null,
       service_contact3_phone: null,
       service_contact3_email: null,
+      service_contact3_role: null,
     });
   });
 
