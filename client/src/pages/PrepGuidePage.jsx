@@ -3,6 +3,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
 import { isNativeApp } from '../native/platform';
@@ -223,6 +224,8 @@ export default function PrepGuidePage() {
         <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
           {content}
           <div className="prep-no-print" style={{ maxWidth: 560, width: '100%', margin: '0 auto', padding: '0 16px 40px', fontFamily: FONT_BODY }}>
+            {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
+            <GlassNewsletterCard source="prep_footer" />
             <BrandFooter />
           </div>
         </div>

@@ -10,10 +10,11 @@
 // the content.
 
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
+import { WavesShell } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -80,6 +81,9 @@ function ArchiveBody({ html }) {
 
 export default function NewsletterArchivePage() {
   const { id } = useParams();
+  // Glass scene (owner 2026-07-09) — customers read the archive from inside
+  // the portal (Learn tab + portal /newsletter landing), so it renders like
+  // the other glass surfaces. The public/SEO archive lives on the astro site.
   useGlassSurface(true, 'full');
   const [post, setPost] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | notfound
@@ -99,11 +103,19 @@ export default function NewsletterArchivePage() {
     return () => { cancelled = true; };
   }, [id]);
 
+  // Standard shell top bar — same header as /track (owner 2026-07-09):
+  // store links · centered logo · help icons. The navy issue strip stays
+  // as a sub-header beneath it.
   if (status === 'loading') {
-    return <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />;
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />
+      </WavesShell>
+    );
   }
   if (status === 'notfound') {
     return (
+      <WavesShell variant="customer" topBar="solid">
       <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh', padding: '56px 24px', textAlign: 'center' }}>
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, letterSpacing: 0, color: TEXT, margin: '0 0 8px' }}>
           We couldn't find that issue.
@@ -111,8 +123,8 @@ export default function NewsletterArchivePage() {
         <p style={{ fontFamily: FONTS.body, color: BODY, marginBottom: 24 }}>
           It may have been removed or the link is incorrect.
         </p>
-        <Link
-          to="/newsletter"
+        <a
+          href="https://www.wavespestcontrol.com/newsletter/"
           data-glass-accent=""
           style={{
             fontFamily: FONTS.ui,
@@ -129,8 +141,9 @@ export default function NewsletterArchivePage() {
           }}
         >
           See the latest issues
-        </Link>
+        </a>
       </div>
+      </WavesShell>
     );
   }
 
@@ -139,12 +152,15 @@ export default function NewsletterArchivePage() {
     : '';
 
   return (
+    <WavesShell variant="customer" topBar="solid">
     <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }}>
       {/* Header strip */}
       <div style={{ background: B.blueDeeper, color: '#fff', padding: '16px 24px' }}>
         <div style={{ maxWidth: 760, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-          <Link
-            to="/newsletter"
+          {/* Portal /newsletter landing retired 2026-07-09 — the astro site
+              is the single newsletter landing. */}
+          <a
+            href="https://www.wavespestcontrol.com/newsletter/"
             style={{
               fontFamily: FONTS.ui,
               fontSize: 12,
@@ -154,7 +170,7 @@ export default function NewsletterArchivePage() {
               color: '#fff',
               textDecoration: 'none',
             }}
-          >← The Waves Newsletter</Link>
+          >← The Waves Newsletter</a>
           {dateLabel && (
             <span style={{ fontFamily: FONTS.body, fontSize: 12, color: 'rgba(255,255,255,0.78)' }}>
               {dateLabel}
@@ -221,5 +237,6 @@ export default function NewsletterArchivePage() {
         <BrandFooter />
       </div>
     </div>
+    </WavesShell>
   );
 }

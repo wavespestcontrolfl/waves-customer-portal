@@ -362,10 +362,10 @@ router.get('/confirm/:token', async (req, res) => {
       bodyHtml = `<p>This email${email ? ` (<span class="email">${email}</span>)` : ''} is already confirmed and on the list.</p>`;
     } else if (result.action === 'unsubscribed') {
       heading = "You're unsubscribed.";
-      bodyHtml = `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+      bodyHtml = `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`;
     } else {
       heading = 'Link expired or invalid.';
-      bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+      bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`;
     }
 
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
@@ -410,10 +410,10 @@ router.post('/confirm/:token', async (req, res) => {
       bodyHtml = `<p>We'll send the next issue${email ? ` to <span class="email">${email}</span>` : ''}.</p><p style="margin-bottom:0">Local SWFL events, seasonal pest tips, and lawn-care timing — straight from our trucks.</p>`;
     } else if (result.action === 'unsubscribed') {
       heading = "You're unsubscribed.";
-      bodyHtml = `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+      bodyHtml = `<p>This email is currently unsubscribed${email ? ` (<span class="email">${email}</span>)` : ''}. To start receiving the newsletter again, sign up at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`;
     } else {
       heading = 'Link expired or invalid.';
-      bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://portal.wavespestcontrol.com/newsletter">/newsletter</a>.</p>`;
+      bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`;
     }
 
     res.type('html').send(renderConfirmPage(heading, bodyHtml));

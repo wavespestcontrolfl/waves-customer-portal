@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
 import BrandFooter from "../components/BrandFooter";
+import GlassNewsletterCard from "../components/GlassNewsletterCard";
 import { useGlassSurface } from "../glass/glass-engine";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -218,6 +219,8 @@ export default function ServiceOutlinePage() {
         </section>
 
         <div className="mx-auto max-w-6xl px-4 pb-10">
+          {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
+          <GlassNewsletterCard source="service_outline_footer" />
           <BrandFooter />
         </div>
       </main>

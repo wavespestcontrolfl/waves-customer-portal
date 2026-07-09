@@ -22,6 +22,8 @@ import { useGlassSurface } from '../glass/glass-engine';
 import { useParams } from "react-router-dom";
 import { COLORS, FONTS } from "../theme-brand";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
+import BrandFooter from "../components/BrandFooter";
+import GlassNewsletterCard from "../components/GlassNewsletterCard";
 import { getStripe } from "../lib/stripeLoader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -269,9 +271,10 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 }
 
 export default function StatementPayPage() {
-  // Liquid-glass 'pro' variant (visual only).
+  // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
+  // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'pro');
+  useGlassSurface(true, 'full');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -411,7 +414,14 @@ export default function StatementPayPage() {
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 560, margin: "48px auto", padding: "0 16px" }}>{children}</div>
+      <div style={{ maxWidth: 560, margin: "48px auto", padding: "0 16px" }}>
+        {children}
+        {/* Standard pre-footer newsletter card + identity footer — every
+            glass surface carries the same footer as /track (owner
+            2026-07-08/09). */}
+        <GlassNewsletterCard source="statement_footer" />
+        <BrandFooter />
+      </div>
     </WavesShell>
   );
 

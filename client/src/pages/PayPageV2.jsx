@@ -90,6 +90,8 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
@@ -1223,9 +1225,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
 // ── Main /pay/:token V2 page ───────────────────────────────────────
 export default function PayPageV2() {
-  // Liquid-glass 'pro' variant (visual only).
+  // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
+  // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'pro');
+  useGlassSurface(true, 'full');
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -1607,6 +1610,17 @@ export default function PayPageV2() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
+      {/* The Print button below calls window.print() — back the
+          waves-no-print marker with an actual print rule (ReceiptPage
+          defines its own local copy) so the newsletter card + identity
+          footer and shell chrome stay out of the invoice printout. */}
+      <style>{`
+        @media print {
+          @page { margin: 0.5in; }
+          body { background: #FFFFFF !important; }
+          header, footer, .waves-no-print { display: none !important; }
+        }
+      `}</style>
       <div className="waves-customer-page waves-receipt-page">
         {isOverdue && (
           <div style={{
@@ -2025,6 +2039,14 @@ export default function PayPageV2() {
 
         <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
           Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
+        </div>
+        {/* Standard pre-footer newsletter card + identity footer — every
+            glass surface carries the same footer as /track (owner
+            2026-07-08/09). Hidden from the invoice printout via
+            waves-no-print. */}
+        <div className="waves-no-print">
+          <GlassNewsletterCard source="pay_footer" />
+          <BrandFooter />
         </div>
       </div>
     </WavesShell>

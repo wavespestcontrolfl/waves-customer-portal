@@ -29,6 +29,7 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -1796,10 +1797,11 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
 }
 
 // "Your Visit, in Motion" — the tech-approved recap clip embedded in the
-// report (owner ask 2026-07-05; previously reachable only from the SMS
-// /recap/:token link). The server only attaches `recap` on live views when an
-// approved clip exists, so this self-gates everywhere else (pdf/static/
-// sms_preview and visits without a recap).
+// report (owner ask 2026-07-05; the standalone /recap/:token player was
+// retired 2026-07-09 — this card is the only surface, and old SMS links
+// redirect here). The server only attaches `recap` on live views of PEST
+// reports when an approved clip exists, so this self-gates everywhere else
+// (pdf/static/sms_preview, non-pest lines, and visits without a recap).
 function RecapVideoCard({ recap, token }) {
   // ready:true only reflects the DB row — the video read can still 404/5xx
   // (pruned clip, S3 error), which used to strand a dead black player. Hide
@@ -4689,7 +4691,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
-  // records no event (mirrors RecapViewPage.share).
+  // records no event.
   const share = async () => {
     try {
       if (navigator.share) {
@@ -7766,7 +7768,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        <BrandFooter variant="document" />
+        {/* Live (glass) view carries the standard newsletter card + identity
+            footer — same as /track (owner 2026-07-08/09). PDF/static/
+            sms_preview keep the quiet document sign-off so the print
+            pipeline stays byte-identical. */}
+        {mode === 'live' && <GlassNewsletterCard source="report_footer" />}
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>
   );
@@ -7824,6 +7831,50 @@ export default function ReportViewPage() {
   useEffect(() => {
     if (!data || data.error) return;
     applyReportDocumentMetadata(data);
+  }, [data]);
+
+  // The browser resolves the URL fragment against the loading skeleton —
+  // anchor targets (e.g. #visit-recap from recap SMS links) don't exist
+  // until /data resolves and the report tree commits, so re-run the scroll
+  // here. Cards above the anchor keep settling after that first commit
+  // (self-gating sections unmount, images load) and shift the target, so
+  // re-anchor for a short window — stopping the moment the reader scrolls
+  // or the window elapses. No-op when the hash is absent or the target
+  // never renders (recap not ready), which leaves the reader at the top.
+  useEffect(() => {
+    if (!data || data.error) return undefined;
+    const anchorId = window.location.hash.slice(1);
+    if (!anchorId) return undefined;
+
+    let readerTookOver = false;
+    const markTakeover = () => { readerTookOver = true; };
+    const inputEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+    inputEvents.forEach((e) => window.addEventListener(e, markTakeover, { passive: true }));
+
+    const align = () => {
+      const target = document.getElementById(anchorId);
+      if (!target) return;
+      // The WavesShell top bar is sticky — without a scroll margin the
+      // card's top edge lands underneath it.
+      const header = document.querySelector('[data-waves-shell-header]');
+      const margin = (header?.offsetHeight || 64) + 12;
+      target.style.scrollMarginTop = `${margin}px`;
+      if (Math.abs(target.getBoundingClientRect().top - margin) > 4) {
+        target.scrollIntoView({ block: 'start' });
+      }
+    };
+
+    align();
+    const interval = setInterval(() => {
+      if (readerTookOver) { clearInterval(interval); return; }
+      align();
+    }, 250);
+    const stop = setTimeout(() => clearInterval(interval), 2000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(stop);
+      inputEvents.forEach((e) => window.removeEventListener(e, markTakeover));
+    };
   }, [data]);
 
   if (loading) return <LoadingState glass={glassActive} />;

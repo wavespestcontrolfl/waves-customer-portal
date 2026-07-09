@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
+import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import {
   WavesShell,
   BrandCard,
@@ -440,6 +441,8 @@ export default function ContractSignPage() {
           </BrandCard>
         </div>
 
+        {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
+        <GlassNewsletterCard source="contract_footer" />
         <BrandFooter />
       </div>
     </WavesShell>
