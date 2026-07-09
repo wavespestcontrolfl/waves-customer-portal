@@ -10,6 +10,7 @@ const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
+const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -430,6 +431,92 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   if (!row) return null;
   if (requestedId && String(row.id) !== requestedId) return null;
   return row;
+}
+
+// Legacy name concatenations ("${first} ${last}") baked literal "undefined"/
+// "null" into some stored names ("Deborah undefined"). Strip those tokens so
+// they never reach a customer-facing page; a name that IS only such a token
+// collapses to '' so the caller's fallback chain takes over.
+function cleanStoredName(value) {
+  return String(value == null ? '' : value)
+    .trim()
+    .replace(/(?:^|\s)(?:undefined|null)(?=\s|$)/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+// The estimate hero lists the customer's own contact block (name / email /
+// phone / service address), but estimate rows are minted by several paths
+// (admin UI, Intelligence Bar, lead webhook) that only stamp the fields they
+// were given — a row created with just a name + phone renders an incomplete
+// block even when the linked customer or lead record has the rest on file.
+// Fill the gaps at read time, display-only: the estimate's own columns stay
+// authoritative when set, then the linked customer (customer_id), then the
+// linked lead (leads.estimate_id). Never throws — on any lookup failure the
+// page simply renders what the estimate row has (today's behavior).
+async function resolveEstimateContactFields(estimate = {}, opts = {}) {
+  const conn = opts.database || db;
+  const out = {
+    customerName: cleanStoredName(estimate.customer_name) || null,
+    customerEmail: String(estimate.customer_email || '').trim() || null,
+    customerPhone: String(estimate.customer_phone || '').trim() || null,
+    address: String(estimate.address || '').trim() || null,
+  };
+  const complete = () => out.customerName && out.customerEmail && out.customerPhone && out.address;
+  if (complete()) return out;
+
+  const fillFrom = ({ name, email, phone, address }) => {
+    out.customerName = out.customerName || cleanStoredName(name) || null;
+    out.customerEmail = out.customerEmail || String(email || '').trim() || null;
+    out.customerPhone = out.customerPhone || String(phone || '').trim() || null;
+    out.address = out.address || String(address || '').trim() || null;
+  };
+
+  try {
+    if (estimate.customer_id) {
+      const customer = await conn('customers')
+        .where({ id: estimate.customer_id })
+        .first('first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+      if (customer) {
+        // Region-only output ("Venice, FL 34285" with no street) is worse
+        // than leaving the gap for the lead fallback below — customers rows
+        // minted with default city/state but a blank street must not block
+        // the lead's complete address. Street line required.
+        const customerStreet = String(customer.address_line1 || '').trim();
+        fillFrom({
+          name: [cleanStoredName(customer.first_name), cleanStoredName(customer.last_name)].filter(Boolean).join(' '),
+          email: customer.email,
+          phone: customer.phone,
+          address: customerStreet
+            ? formatAddress({
+              line1: [customerStreet, String(customer.address_line2 || '').trim()].filter(Boolean).join(', '),
+              city: customer.city,
+              state: customer.state,
+              zip: customer.zip,
+            })
+            : null,
+        });
+      }
+    }
+    if (!complete() && estimate.id) {
+      const lead = await conn('leads')
+        .where({ estimate_id: estimate.id })
+        .whereNull('deleted_at')
+        .orderBy('created_at', 'desc')
+        .first('first_name', 'last_name', 'email', 'phone', 'address');
+      if (lead) {
+        fillFrom({
+          name: [cleanStoredName(lead.first_name), cleanStoredName(lead.last_name)].filter(Boolean).join(' '),
+          email: lead.email,
+          phone: lead.phone,
+          address: lead.address,
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn(`[estimate-public] contact fallback lookup failed for estimate ${estimate.id}: ${err.message}`);
+  }
+  return out;
 }
 
 async function renderTemplate(templateKey, vars, fallback, context = {}) {
@@ -6624,6 +6711,10 @@ async function handleEstimateView(req, res, next) {
       ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
       : 0;
 
+    // Display-only: fill contact gaps from the linked customer/lead so the
+    // hero always lists email/phone/address when Waves has them on file.
+    const contact = await resolveEstimateContactFields(estimate);
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status === 'accepted'
@@ -6631,10 +6722,10 @@ async function handleEstimateView(req, res, next) {
         : (quoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
       quoteRequired: quoteRequirement.quoteRequired,
       quoteRequiredReason: quoteRequirement.reason || null,
-      customerName: estimate.customer_name,
-      customerEmail: estimate.customer_email,
-      customerPhone: estimate.customer_phone,
-      address: estimate.address,
+      customerName: contact.customerName,
+      customerEmail: contact.customerEmail,
+      customerPhone: contact.customerPhone,
+      address: contact.address,
       estimateSlug: estimate.estimate_slug || null,
       monthlyTotal: parseFloat(estimate.monthly_total || 0),
       annualTotal: parseFloat(estimate.annual_total || 0),
@@ -13078,6 +13169,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ? await buildShowYourWork(estimate, estimateDataForIntelligence)
       : null;
 
+    // Display-only: fill contact gaps from the linked customer/lead so the
+    // hero always lists email/phone/address when Waves has them on file.
+    const contact = await resolveEstimateContactFields(estimate);
+
     res.json({
       // Only present on a verified staff draft preview — the React page keys
       // its "draft preview, not sent" banner + accept guards off this. Absent
@@ -13125,11 +13220,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         id: estimate.id,
         token: estimate.token,
         slug: estimate.estimate_slug || null,
-        customerFirstName: (estimate.customer_name || '').split(' ')[0] || null,
-        customerName: estimate.customer_name || null,
-        customerPhone: estimate.customer_phone || null,
-        customerEmail: estimate.customer_email || null,
-        address: estimate.address || null,
+        customerFirstName: (contact.customerName || '').split(' ')[0] || null,
+        customerName: contact.customerName,
+        customerPhone: contact.customerPhone,
+        customerEmail: contact.customerEmail,
+        address: contact.address,
         askToken: signEstimateAskToken(estimate),
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
@@ -13354,3 +13449,5 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
+module.exports.cleanStoredName = cleanStoredName;
+module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
