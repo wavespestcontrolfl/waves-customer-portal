@@ -567,9 +567,13 @@ function compactServiceContactSlots(updates, before = {}) {
     .map((fields) => {
       // The admin PUT / prefs editors submit only name/phone/email — when a
       // slot's IDENTITY changes without an explicit role, the old role must
-      // not attach itself to the new person (codex P2).
+      // not attach itself to the new person (codex P2). "Changes" means the
+      // VALUE differs from what's stored: the edit form echoes every field
+      // on every save, so key presence alone would wipe roles on unrelated
+      // edits and starve the call pipeline's role matching (codex round-3 P1).
       const identityChanged = fields.slice(0, 3)
-        .some((field) => Object.prototype.hasOwnProperty.call(updates, field));
+        .some((field) => Object.prototype.hasOwnProperty.call(updates, field)
+          && normalizedValue(updates[field]) !== normalizedValue(before[field]));
       return fields.map((field, fieldIndex) => {
         if (Object.prototype.hasOwnProperty.call(updates, field)) return normalizedValue(updates[field]);
         if (fieldIndex === 3 && identityChanged) return null;

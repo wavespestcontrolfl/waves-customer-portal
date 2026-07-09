@@ -1210,6 +1210,9 @@ router.get('/', async (req, res, next) => {
         // rental property) wins over the customer's primary mirror — same
         // field names, so the schedule/tech-home consumers keep working.
         db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // A stamped visit's unit line must never be swapped for the primary
+        // address's unit — condo/duplex bookings need THEIR door (codex P2).
+        db.raw('CASE WHEN scheduled_services.service_address_line1 IS NOT NULL THEN scheduled_services.service_address_line2 ELSE customers.address_line2 END as address_line2'),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -1312,7 +1315,7 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,

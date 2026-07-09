@@ -32,26 +32,31 @@ function serviceContactsPayload(customerRow) {
 
 // Map an ordered contact list (≤3, already trimmed of empty entries) onto the
 // slot columns, nulling everything past the last filled slot.
-function serviceContactSlotUpdates(contacts = []) {
+function serviceContactSlotUpdates(contacts = [], before = {}) {
   const updates = {};
   const slotColumns = [
-    ['service_contact_name', 'service_contact_phone', 'service_contact_email'],
-    ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'],
-    ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email'],
+    ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
+    ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
+    ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
   ];
-  slotColumns.forEach(([nameCol, phoneCol, emailCol], i) => {
+  const norm = (v) => String(v || '').trim();
+  slotColumns.forEach(([nameCol, phoneCol, emailCol, roleCol], i) => {
     const contact = contacts[i];
     updates[nameCol] = contact?.name || null;
     updates[phoneCol] = contact?.phone || null;
     updates[emailCol] = contact?.email || null;
+    // The editor rewrites slot IDENTITIES without knowing about roles — a
+    // stale role left behind would attach itself to the new person (and the
+    // call pipeline's household-role matching would trust it). But the role
+    // is only stale when the identity actually CHANGED: the portal echoes
+    // the full list on save, and clearing unconditionally would wipe the
+    // pipeline's role signal on every unrelated save (codex round-3 P1
+    // class). Untouched slots keep their role.
+    const identityChanged = norm(updates[nameCol]) !== norm(before[nameCol])
+      || norm(updates[phoneCol]) !== norm(before[phoneCol])
+      || norm(updates[emailCol]) !== norm(before[emailCol]);
+    if (identityChanged) updates[roleCol] = null;
   });
-  // The editor rewrites slot IDENTITIES without knowing about roles — a
-  // stale role left behind would attach itself to the new person (and the
-  // call pipeline's household-role matching would trust it). Clear all
-  // three; the pipeline re-records roles on its own writes.
-  updates.service_contact_role = null;
-  updates.service_contact2_role = null;
-  updates.service_contact3_role = null;
   return updates;
 }
 
@@ -577,20 +582,27 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         .map(normalizeContactInput)
         .filter((c) => c.name || c.phone || c.email)
         .slice(0, MAX_SERVICE_CONTACTS);
+      const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
       await db('customers').where({ id: req.params.customerId }).update({
-        ...serviceContactSlotUpdates(contacts),
+        ...serviceContactSlotUpdates(contacts, beforeRow),
         updated_at: new Date(),
       });
       savedContacts = contacts.map(serviceContactPayload);
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only.
       const contact = normalizeContactInput(updates.serviceContact);
+      const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
+      const norm = (v) => String(v || '').trim();
+      const identityChanged = norm(contact.name) !== norm(beforeRow.service_contact_name)
+        || norm(contact.phone) !== norm(beforeRow.service_contact_phone)
+        || norm(contact.email) !== norm(beforeRow.service_contact_email);
       await db('customers').where({ id: req.params.customerId }).update({
         service_contact_name: contact.name || null,
         service_contact_phone: contact.phone || null,
         service_contact_email: contact.email || null,
         // Identity rewritten without a role — never leave the old one behind.
-        service_contact_role: null,
+        // An unchanged identity keeps its role (codex round-3 P1 class).
+        ...(identityChanged ? { service_contact_role: null } : {}),
         updated_at: new Date(),
       });
     }

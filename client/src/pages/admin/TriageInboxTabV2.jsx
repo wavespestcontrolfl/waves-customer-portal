@@ -102,6 +102,9 @@ export function ConfirmEvidence({ payload }) {
   const rows = [
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
+    // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
+    // three — without a row the card looks complete and nobody re-listens.
+    p.other_parties_mentioned === true && { label: "More parties", value: "Caller named more people than captured — re-listen to the call" },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

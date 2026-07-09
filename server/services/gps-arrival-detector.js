@@ -214,6 +214,12 @@ function extractDestination(service) {
     return { lat: serviceLat, lng: serviceLng, source: 'scheduled_service' };
   }
 
+  // A visit stamped with its own service address (secondary/rental booking)
+  // must never arrival-detect against the customer's PRIMARY coords — a tech
+  // near the primary home would auto-flip the rental job to on-site (codex
+  // round-3 P1). No destination = no auto-flip; the tech flips manually.
+  if (service?.service_address_line1) return null;
+
   const customerLat = validLatitude(service?.customer_latitude);
   const customerLng = validLongitude(service?.customer_longitude);
   if (customerLat != null && customerLng != null) {
@@ -226,6 +232,10 @@ function extractDestination(service) {
 async function resolveDestination(service) {
   const existing = extractDestination(service);
   if (existing || !service?.customer_id) return existing;
+  // The geocode fallback resolves the customer's PRIMARY address. A visit
+  // stamped with its own service address must not arrival-detect against
+  // the primary home — leave the destination unresolved (manual flip).
+  if (service.service_address_line1) return null;
 
   try {
     const geocoded = await withTimeout(
@@ -261,6 +271,7 @@ async function loadCurrentService(currentJobId) {
       's.en_route_at',
       's.lat as service_lat',
       's.lng as service_lng',
+      's.service_address_line1 as service_address_line1',
       'c.latitude as customer_latitude',
       'c.longitude as customer_longitude'
     );

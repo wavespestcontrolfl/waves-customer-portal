@@ -175,6 +175,10 @@ async function buildVehicle(service) {
 async function ensureEnRouteDestinationGeocoded(service) {
   if (!service || service.track_state !== 'en_route') return service;
   if (finiteNumber(service.latitude) != null && finiteNumber(service.longitude) != null) return service;
+  // ensureCustomerGeocoded resolves the PRIMARY address — for a visit
+  // stamped with its own service address (secondary/rental booking) that
+  // would map/ETA the wrong house. No pin beats a wrong pin.
+  if (service.address_stamped) return service;
   if (!service.customer_id) return service;
 
   try {
@@ -326,8 +330,13 @@ router.get('/:token', async (req, res, next) => {
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
         db.raw('COALESCE(s.service_address_state, c.state) as state'),
         db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
-        db.raw('CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END as latitude'),
-        db.raw('CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END as longitude'),
+        // Stamped visits carry their own coords (property geocode stamped
+        // at booking) — read them first; the customer's primary coords stay
+        // a fallback for UNstamped visits only (codex round-3 P1: this
+        // select ignored s.lat/s.lng entirely).
+        db.raw('COALESCE(s.lat, CASE WHEN s.service_address_line1 IS NULL THEN c.latitude END) as latitude'),
+        db.raw('COALESCE(s.lng, CASE WHEN s.service_address_line1 IS NULL THEN c.longitude END) as longitude'),
+        db.raw('(s.service_address_line1 IS NOT NULL) as address_stamped'),
         't.name as tech_name',
         't.bouncie_imei as tech_bouncie_imei',
         't.photo_url as tech_photo_url',

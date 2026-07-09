@@ -40,31 +40,46 @@ describe('on-location contact slot helpers', () => {
       service_contact_name: 'Sam Spouse',
       service_contact_phone: '+15553330000',
       service_contact_email: 'sam@example.com',
+      // Slot 1's identity changed (empty before-row) — its role clears.
+      service_contact_role: null,
       service_contact2_name: null,
       service_contact2_phone: null,
       service_contact2_email: null,
       service_contact3_name: null,
       service_contact3_phone: null,
       service_contact3_email: null,
-      service_contact_role: null,
-      service_contact2_role: null,
-      service_contact3_role: null,
     });
   });
 
-  test('serviceContactSlotUpdates clears every slot for an empty list', () => {
-    const updates = serviceContactSlotUpdates([]);
+  test('serviceContactSlotUpdates clears filled slots (and their roles) for an empty list', () => {
+    const before = {
+      service_contact_name: 'Terry Tenant', service_contact_phone: '+15552220000',
+      service_contact_email: null, service_contact_role: 'tenant',
+    };
+    const updates = serviceContactSlotUpdates([], before);
     expect(Object.values(updates).every((v) => v === null)).toBe(true);
-    expect(Object.keys(updates)).toHaveLength(12);
+    // Slot 1 identity changed → its role clears; untouched empty slots 2/3
+    // have no role key at all.
+    expect(updates.service_contact_role).toBeNull();
+    expect(Object.keys(updates)).toHaveLength(10);
   });
 
-  test('serviceContactSlotUpdates always clears the role columns — a replaced slot must not hand its old role to the new person', () => {
+  test('serviceContactSlotUpdates clears the role only when the slot identity actually changes', () => {
+    const before = {
+      service_contact_name: 'Terry Tenant', service_contact_phone: '+15552220000',
+      service_contact_email: 'terry@example.com', service_contact_role: 'tenant',
+      service_contact2_name: 'Rhonda Realtor', service_contact2_phone: '+15556660000',
+      service_contact2_email: '', service_contact2_role: 'real_estate_agent',
+    };
+    // Slot 1 re-submitted unchanged, slot 2 replaced by a new person.
     const updates = serviceContactSlotUpdates([
-      { name: 'New Realtor', phone: '+15556660000', email: '' },
-    ]);
-    expect(updates.service_contact_role).toBeNull();
+      { name: 'Terry Tenant', phone: '+15552220000', email: 'terry@example.com' },
+      { name: 'New Manager', phone: '+15557770000', email: '' },
+    ], before);
+    // Unchanged identity keeps its pipeline-recorded role (round-3 P1 class):
+    expect('service_contact_role' in updates).toBe(false);
+    // Replaced identity must not inherit the realtor role:
     expect(updates.service_contact2_role).toBeNull();
-    expect(updates.service_contact3_role).toBeNull();
   });
 
   test('normalizeContactInput joins and trims the name parts', () => {

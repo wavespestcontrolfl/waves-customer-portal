@@ -220,6 +220,28 @@ describe('gps-arrival-detector', () => {
     expect(result.ok).toBe(true);
   });
 
+  test('refuses primary-coord and geocode fallbacks for address-stamped visits', async () => {
+    // A stamped secondary/rental booking with no property geocode: the tech
+    // idling at the customer's PRIMARY home must not auto-flip this job.
+    installServiceLookup(baseService({
+      service_lat: null,
+      service_lng: null,
+      service_address_line1: '456 Rental Ave',
+      customer_latitude: 27.4386,
+      customer_longitude: -82.3719,
+    }));
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint({ speed_mph: 0, ignition: false }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false });
+  });
+
   test('does not scan stale en-route jobs without a current job pointer', async () => {
     const result = await detector.maybeMarkArrivedFromGps({
       techStatus: baseTechStatus({

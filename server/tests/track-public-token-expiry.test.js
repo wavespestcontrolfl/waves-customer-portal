@@ -95,6 +95,22 @@ describe('public track token expiry', () => {
     expect(row.longitude).toBeNull();
   });
 
+  test('does not geocode the primary address for address-stamped visits', async () => {
+    // Stamped secondary/rental booking with no property geocode: the tracker
+    // must show no pin rather than map/ETA the customer's primary home.
+    const row = await trackPublicRouter._test.ensureEnRouteDestinationGeocoded({
+      track_state: 'en_route',
+      customer_id: 'cust-1',
+      address_stamped: true,
+      latitude: null,
+      longitude: null,
+    });
+
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(row.latitude).toBeNull();
+    expect(row.longitude).toBeNull();
+  });
+
   test('hides report token and photos when frozen delivery suppresses customer artifacts', async () => {
     installSummaryDb({
       record: {

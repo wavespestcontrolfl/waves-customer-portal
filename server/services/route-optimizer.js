@@ -198,7 +198,11 @@ function nearestNeighborOptimize(stops, options = {}) {
     lng: options.startLng || HQ.lng,
   };
 
-  const validStops = [...stops];
+  // Coordless stops append at the END, same as the Google Routes path — the
+  // ZIP heuristic used to interleave them mid-route, which hands a stamped
+  // no-geocode visit a confident-looking route_order pointing nowhere.
+  const coordlessStops = stops.filter(s => !parseFloat(s.lat) || !parseFloat(s.lng));
+  const validStops = stops.filter(s => parseFloat(s.lat) && parseFloat(s.lng));
   const ordered = [];
   let current = origin;
   let totalDistanceMeters = 0;
@@ -217,14 +221,6 @@ function nearestNeighborOptimize(stops, options = {}) {
         const dist = haversine(current.lat, current.lng, sLat, sLng);
         if (dist < nearestDist) {
           nearestDist = dist;
-          nearestIdx = i;
-        }
-      } else {
-        // No coordinates — use zip proximity heuristic
-        const zipDist = Math.abs(parseInt(s.zip || '34202') - parseInt(current.zip || '34202'));
-        const fakeDist = zipDist * 0.5;
-        if (fakeDist < nearestDist) {
-          nearestDist = fakeDist;
           nearestIdx = i;
         }
       }
@@ -270,6 +266,9 @@ function nearestNeighborOptimize(stops, options = {}) {
   }
 
   const totalDurationSeconds = legs.reduce((sum, l) => sum + l.durationMinutes * 60, 0);
+
+  // Coordless stops land after the routed ones (no legs — nothing to route).
+  ordered.push(...coordlessStops);
 
   return {
     orderedStops: ordered,
