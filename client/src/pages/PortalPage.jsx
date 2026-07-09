@@ -3291,22 +3291,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
                 { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'A message the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
-                // Phase 2E: per-customer auto-flip opt-out. Distinct
-                // from techEnRoute — that one fires when the tech taps
-                // "En Route". This one fires automatically when the
-                // tech's vehicle leaves the previous job. Default ON
-                // (column DEFAULT TRUE); user can toggle off to skip
-                // the auto-detected version while keeping the manual
-                // tap-triggered text.
-                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route alert the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
-                { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
-                { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
-                // Kept as the customer's only in-portal opt-out: the irrigation
-                // weekly email and the retention/marketing policy key on
-                // notification_prefs.seasonal_tips. Email-only since the
-                // seasonal_alert SMS blast was retired (2026-07-06), so no
-                // delivery-channel select — the on/off toggle is the honest control.
-                { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
+                // Owner ruling 2026-07-09: the list stops at the appointment
+                // alerts. Auto En Route from GPS (internal detail of the
+                // en-route alert above), Service Complete Report (locked
+                // always-on — a toggle that can't toggle is noise), Billing
+                // Reminder (copy promised a "monthly charge" that doesn't
+                // match per-application billing; the Billing tab keeps the
+                // real billing-texts control), and Seasonal Lawn Tips were
+                // removed from this customer-facing list. The underlying
+                // notification_prefs columns stay honored server-side —
+                // existing opt-outs keep working, and the irrigation weekly
+                // email footer offers the reply-to opt-out (migration
+                // 20260709000030).
               ];
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
