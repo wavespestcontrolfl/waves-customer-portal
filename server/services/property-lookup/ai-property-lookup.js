@@ -1325,6 +1325,7 @@ function slugAddressLine(url) {
 // and torpedo valid new-construction evidence (codex P2).
 const LISTING_SLUG_HOSTS = [
   'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
+  'coldwellbankerhomes.com', 'coldwellbanker.com', 'movoto.com',
   'apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com',
 ];
 
@@ -1354,12 +1355,6 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   if (!record) return false;
   const typedNumber = leadingHouseNumber(typedAddress);
   if (!typedNumber) return false;
-  // A trusted PRIMARY source (county/permit/builder page) means the facts
-  // are not listing-borrowed — a comp/neighbor listing cited beside it must
-  // not veto the record (codex P2). The veto below exists for records whose
-  // facts came from listing-shaped sources.
-  const primaryType = classifyPropertySource(record._aiSourceUrl).type;
-  if (['county', 'cadastral', 'permit', 'builder'].includes(primaryType)) return false;
   // Same bare-'#' pre-strip as the audit, so a typed unit can't ride into
   // the street identity.
   const typedLine = stripUnitDesignators(
@@ -1379,6 +1374,13 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
     ...(Array.isArray(record._aiSources) ? record._aiSources.map((s) => s?.url) : []),
     record._aiSourceUrl,
   ].filter(Boolean))];
+  // A trusted source ANYWHERE in the citation set (county/permit/builder
+  // page — primary or secondary; providers don't reliably put the fact
+  // source first) means the facts are not listing-borrowed, and a
+  // comp/neighbor listing cited beside it must not veto the record
+  // (codex P2 ×2). The veto below exists for listing-sourced records.
+  if (urls.some((url) => ['county', 'cadastral', 'permit', 'builder']
+    .includes(classifyPropertySource(url).type))) return false;
   let confirmed = false;
   let sawDisagreement = false;
   for (const url of urls) {
@@ -1882,7 +1884,21 @@ function extractInlineCountyCity(address) {
 function extractTrailingCountyCity(normalizedText) {
   const text = String(normalizedText || '').trim();
   const cities = [...COUNTY_ADDRESS_CITY_HINTS].sort((a, b) => b.length - a.length);
-  return cities.find((city) => text === city || text.endsWith(` ${city}`)) || null;
+  const match = cities.find((city) => text === city || text.endsWith(` ${city}`)) || null;
+  if (!match || text === match) return match;
+  // Directional-prefixed city aliases ("WEST BRADENTON") can swallow a
+  // spelled-out POST-DIRECTION: "4506 45TH STREET WEST BRADENTON" is
+  // "45th St W, Bradenton" — stripping WEST with the city loses the
+  // direction and the street stops matching its own situs (codex P2).
+  // When the token before the directional is a street suffix and the
+  // remainder is itself a known city, strip only the remainder city and
+  // leave the directional on the street line.
+  const directional = /^(?:NORTH|SOUTH|EAST|WEST)\s+(.+)$/.exec(match);
+  if (directional && COUNTY_ADDRESS_CITY_HINTS.has(directional[1])) {
+    const beforeCity = text.slice(0, -match.length).trim();
+    if (PRE_DIRECTION_STREET_SUFFIX_RE.test(beforeCity)) return directional[1];
+  }
+  return match;
 }
 
 // Canonical (post-normalizeCountyStreetLine) street suffixes the county
@@ -1891,6 +1907,12 @@ function extractTrailingCountyCity(normalizedText) {
 // again — the original inline copies omitted LOOP entirely, and every
 // Loop-suffixed street (all of Canoe Creek) read as not-on-the-roll.
 const COUNTY_STREET_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
+// "…ends with a street suffix" — canonical abbreviations plus the
+// spelled-out forms, because extractTrailingCountyCity runs BEFORE the
+// suffix replacements in normalizeCountyStreetLine.
+const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
+  `\\b(?:${COUNTY_STREET_SUFFIXES}|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$`,
+);
 const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');

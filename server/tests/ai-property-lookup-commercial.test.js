@@ -223,6 +223,18 @@ describe('Manatee PAO property lookup facts', () => {
       '123 SUMMER GLN',
       '123 SUMMER',
     ]);
+    // A spelled-out post-direction before a directional city alias stays on
+    // the street: "45th Street West, Bradenton" — not a street in the
+    // "WEST BRADENTON" CDP (codex P2).
+    expect(_private.manateeAddressSearchCandidates('4506 45th Street West Bradenton FL 34209')).toEqual([
+      '4506 45TH ST W',
+      '4506 45TH',
+    ]);
+    // A directional city alias after a NON-suffix token still strips whole.
+    expect(_private.manateeAddressSearchCandidates('6510 3rd Ave W West Bradenton FL 34209')).toEqual([
+      '6510 3RD AVE W',
+      '6510 3RD',
+    ]);
   });
 
   test('matches a typed "Lp" street against a roll row spelled LOOP', () => {

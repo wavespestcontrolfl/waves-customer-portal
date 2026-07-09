@@ -393,6 +393,10 @@ describe('AI web-record house-number guard', () => {
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.homes.com/property/14343-skipping-stone-loop-parrish-fl/id-400/',
     }, '14384 Skipping Stone Lp')).toBe(true);
+    // Coldwell Banker detail slugs participate too (codex P2).
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.coldwellbankerhomes.com/fl/parrish/14344-skipping-stone-loop/pid_60888176/',
+    }, '14384 Skipping Stone Lp')).toBe(true);
     // A classified listing with the same slug shape still fires.
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.zillow.com/homedetails/14343-Skipping-Stone-Loop-Parrish-FL-34219/2063272367_zpid/',
@@ -415,6 +419,16 @@ describe('AI web-record house-number guard', () => {
       _aiSources: [
         { provider: 'claude', url: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/canoe-creek/magnolia' },
         { provider: 'claude', url: 'https://www.zillow.com/homedetails/14380-Skipping-Stone-Loop-Parrish-FL-34219/222_zpid/' },
+      ],
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+    // The trusted source can sit ANYWHERE in the citation set — providers
+    // don't reliably put the fact source first (codex P2).
+    expect(aiRecordHouseNumberMismatch({
+      _aiSourceUrl: 'https://www.zillow.com/parrish-fl/',
+      _aiSources: [
+        { provider: 'openai', url: 'https://www.zillow.com/parrish-fl/' },
+        { provider: 'openai', url: 'https://www.manateepao.gov/parcel/?parid=497325009' },
+        { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
       ],
     }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
   });
