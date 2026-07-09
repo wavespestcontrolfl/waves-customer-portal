@@ -43,17 +43,17 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $64 / $576 / $48.00', () => {
+  it('canonical anchor: 4,250 sqft St-Aug Enhanced/9 DENSE = $67 / $603 / $50.25 (program minimum)', () => {
     const r = priceLawnCare({ turfSf: 4250 }, { track: 'st_augustine', tier: 'enhanced' });
-    expect(r.perApp).toBe(64);
-    expect(r.annual).toBe(576);
-    expect(r.monthly).toBe(48);
+    expect(r.perApp).toBe(67);
+    expect(r.annual).toBe(603);
+    expect(r.monthly).toBe(50.25);
     expect(r.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
     // Annual is source-of-truth; monthly is derived and must reconcile within ¢.
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);
   });
 
-  it('every recurring case uses the market table, the 35% floor, or the $45 program minimum, whichever is highest', () => {
+  it('every recurring case uses the market table, the 35% floor, or the $50 program minimum, whichever is highest', () => {
     for (const c of cases) {
       expect(['TABLE_INTERPOLATION', 'EXTRAPOLATED_ABOVE_TABLE_MAX', 'THIRTY_FIVE_MARGIN_FLOOR', 'PROGRAM_MINIMUM_MONTHLY'])
         .toContain(c.out.pricingBasis);
@@ -63,14 +63,14 @@ describe('lawn pricing golden master', () => {
     }
   });
 
-  it('program minimum: no sold plan below $45/mo (owner directive 2026-07-09)', () => {
+  it('program minimum: no sold plan below $50/mo (owner directive 2026-07-09, raised from $45 same day)', () => {
     for (const c of cases) {
-      expect(c.out.monthly).toBeGreaterThanOrEqual(45);
+      expect(c.out.monthly).toBeGreaterThanOrEqual(50);
     }
-    // The old worst case — small Bahia — now floors at exactly $45/$540.
+    // The old worst case — small Bahia — now floors at exactly $50/$600.
     const r = priceLawnCare({ turfSf: 3000 }, { track: 'bahia', tier: 'standard' });
-    expect(r.monthly).toBe(45);
-    expect(r.annual).toBe(540);
+    expect(r.monthly).toBe(50);
+    expect(r.annual).toBe(600);
     expect(r.pricingSource).toBe('PROGRAM_MINIMUM');
   });
 });

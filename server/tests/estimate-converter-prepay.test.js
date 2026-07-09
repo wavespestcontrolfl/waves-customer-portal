@@ -104,12 +104,22 @@ describe('estimate converter annual prepay amount', () => {
   });
 
   test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {
-    // No-fee mix (lawn): 5% off; lawn lines are excluded from the floor.
+    // No-fee mix (lawn): 5% off — but ONLY on the slice above the $50/mo
+    // lawn program minimum (owner directive 2026-07-09: prepay is NOT
+    // exempt from the floor). $660 protects $600 → 5% on $60 → $657.
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
-      estimateData: { result: { lineItems: [] } },
-    })).toEqual({ amount: 627, discount: 33, rate: 0.05 });
+      estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }] } },
+    })).toEqual({ amount: 657, discount: 3, rate: 0.0045 });
+
+    // A lawn plan AT the floor has zero prepay headroom — no discount at all
+    // (the estimate page hides the prepay incentive when discount = 0).
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 600,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 600 }] } },
+    })).toEqual({ amount: 600, discount: 0, rate: 0 });
 
     // Pest/mosquito: setup-waiver path, no extra discount.
     expect(resolveAnnualPrepayInvoiceTotal({

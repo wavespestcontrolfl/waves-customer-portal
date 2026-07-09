@@ -341,9 +341,9 @@ const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
   // Mirrors server constants.LAWN_PRICING_V2.programMinimumMonthly (owner
-  // directive 2026-07-09): no recurring lawn plan below $45/mo. Server is
+  // directive 2026-07-09): no recurring lawn plan below $50/mo. Server is
   // authoritative on save; this keeps the preview from under-quoting.
-  programMinimumMonthly: 45,
+  programMinimumMonthly: 50,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
   pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
   laborRateLoaded: 35,

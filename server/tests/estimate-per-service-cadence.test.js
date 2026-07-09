@@ -80,17 +80,17 @@ describe('nonPestTierBaseMap — per-service tier price lookup from result rows'
     expect(map.lawn_care.premium).toMatchObject({ mo: 89, v: 12 });
   });
 
-  test('clamps below-floor stored lawn rows to the $45/mo program minimum', () => {
+  test('clamps below-floor stored lawn rows to the $50/mo program minimum', () => {
     // Old stored estimates predate the floor — a $38/mo Standard row must
     // enter the combo math at the floored price, not the stale one.
     const map = nonPestTierBaseMap({
       lawn: [
         { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
-        { name: 'Enhanced', v: 9, mo: 47, ann: 564, pa: 62.67, recommended: true },
+        { name: 'Enhanced', v: 9, mo: 52, ann: 624, pa: 69.33, recommended: true },
       ],
     });
-    expect(map.lawn_care.standard).toMatchObject({ mo: 45, ann: 540, pa: 90, v: 6 });
-    expect(map.lawn_care.enhanced).toMatchObject({ mo: 47, ann: 564, v: 9 });
+    expect(map.lawn_care.standard).toMatchObject({ mo: 50, ann: 600, pa: 100, v: 6 });
+    expect(map.lawn_care.enhanced).toMatchObject({ mo: 52, ann: 624, v: 9 });
   });
 
   test('returns {} when there are no non-pest tier rows', () => {
@@ -114,14 +114,15 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     expect(entry.monthly).toBe(expected);
   });
 
-  test('pest Monthly + lawn Standard recomputes both contributions at 10% off, lawn floored at $45', () => {
+  test('pest Monthly + lawn Standard recomputes both contributions at 10% off, lawn floored at $50', () => {
     const entry = comboPricingEntry(v1, MONTHLY, v1.pestTiers[2], {}, tierBaseMap, {
       pest_control: 'monthly',
       lawn_care: 'standard',
     });
-    // pest 120*0.9 = 108 ; lawn 45.5*0.9 = 40.95 → program minimum clamps to 45 → 153
-    expect(entry.monthly).toBe(153);
-    expect(entry.annual).toBe(Math.round(153 * 12 * 100) / 100);
+    // pest 120*0.9 = 108 ; lawn base clamps 45.5 → 50, then 50*0.9 = 45 →
+    // program minimum re-clamps to 50 → 158
+    expect(entry.monthly).toBe(158);
+    expect(entry.annual).toBe(Math.round(158 * 12 * 100) / 100);
   });
 
   test('pest Quarterly + lawn Premium', () => {
@@ -134,19 +135,19 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
   });
 
   test('a bundle manual discount cannot spend the lawn floor (capped to non-lawn + above-floor headroom)', () => {
-    // No WaveGuard %; lawn Standard prices at $45.50/mo. A $65/mo manual
-    // discount may spend pest ($60) plus lawn's above-floor headroom
-    // ($0.50), never the floor itself → capped to $60.50/mo and the bundle
-    // total lands exactly on pest 0 + lawn 45.
+    // No WaveGuard %; the lawn Standard base clamps to the $50 floor. A
+    // $65/mo manual discount may spend pest ($60) but never the lawn floor
+    // → capped to $60/mo and the bundle total lands exactly on pest 0 +
+    // lawn 50.
     const manualV1 = { ...pestLawnV1(), discount: 0, manualDiscount: { type: 'FIXED', value: 780 } };
     const entry = comboPricingEntry(manualV1, QUARTERLY, manualV1.pestTiers[0], {}, tierBaseMap, {
       pest_control: 'quarterly',
       lawn_care: 'standard',
     });
-    // pest 60 + lawn 45.5 = 105.5 gross; headroom = 105.5 − 45 = 60.5
-    expect(entry.monthly).toBe(45);
+    // pest 60 + lawn 50 = 110 gross; headroom = 110 − 50 = 60
+    expect(entry.monthly).toBe(50);
     expect(entry.manualDiscount).toMatchObject({ capped: true, capReason: 'lawn_program_minimum' });
-    expect(entry.manualDiscount.monthlyAmount).toBe(60.5);
+    expect(entry.manualDiscount.monthlyAmount).toBe(60);
   });
 });
 
@@ -164,9 +165,9 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
     const combos = buildServiceCadenceCombos(pestLawnV1(), {}, LAWN_RESULT_STATS);
     expect(combos).toHaveLength(9);
     expect(combos.some((c) => c.selection.lawn_care === 'basic')).toBe(false);
-    // Spot-check combos against the hand math (lawn floored at $45 post-discount).
+    // Spot-check combos against the hand math (lawn floored at $50 post-discount).
     const monthlyStandard = combos.find((c) => c.key === 'lawn_care:standard|pest_control:monthly');
-    expect(monthlyStandard.monthly).toBe(153); // pest 108 + lawn max(40.95, 45)
+    expect(monthlyStandard.monthly).toBe(158); // pest 108 + lawn max(45, 50)
     const quarterlyEnhanced = combos.find((c) => c.key === 'lawn_care:enhanced|pest_control:quarterly');
     expect(quarterlyEnhanced.monthly).toBe(Math.round((60 * 0.9 + 66.75 * 0.9) * 100) / 100);
     // Every combo carries a selection for both axes.
@@ -184,9 +185,9 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
     const combos = buildServiceCadenceCombos(pestLawnV1(), {}, LAWN_RESULT_STATS);
     const monthlyStandard = combos.find((c) => c.key === 'lawn_care:standard|pest_control:monthly');
     const lawnRow = monthlyStandard.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
-    // standard per-app 91 * 0.9 = 81.9, but the floored plan bills $45/mo ×
-    // 12 ÷ 6 visits = $90/visit — the first-visit invoice matches the floor.
-    expect(lawnRow.displayPrice).toBe(90);
+    // standard per-app clamps to 100 at the floor; the floored plan bills
+    // $50/mo × 12 ÷ 6 visits = $100/visit — the first-visit invoice matches.
+    expect(lawnRow.displayPrice).toBe(100);
     const quarterlyPremium = combos.find((c) => c.key === 'lawn_care:premium|pest_control:quarterly');
     const lawnRow2 = quarterlyPremium.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
     expect(lawnRow2.displayPrice).toBe(80.1); // premium per-app 89 * 0.9 (above floor)
@@ -224,17 +225,17 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
 describe('bundleSectionLadderForService — non-pest section own-cadence slider', () => {
   const lawnSvc = { name: 'Lawn Care', service: 'lawn_care' };
 
-  test('reprices each lawn tier post-WaveGuard discount, PRE manual (manual null), floored at $45', () => {
+  test('reprices each lawn tier post-WaveGuard discount, PRE manual (manual null), floored at $50', () => {
     const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0.10);
     expect(ladder.map((e) => e.key)).toEqual(['standard', 'enhanced', 'premium']);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
-    expect(byKey.standard.monthly).toBe(45); // 45.5 * 0.9 = 40.95 → program minimum
+    expect(byKey.standard.monthly).toBe(50); // base clamps 45.5 → 50; 50*0.9 = 45 → floor
     expect(byKey.enhanced.monthly).toBe(60.08); // 66.75 * 0.9 (above floor)
     expect(byKey.premium.monthly).toBe(80.1); // 89 * 0.9
     // monthlyBase stays the PRE-discount monthly — the client derives the
     // struck-through anchor and the "You save … with WaveGuard" line from
     // the monthlyBase-vs-monthly gap on non-pest rows (no perVisit anchor).
-    expect(byKey.standard.monthlyBase).toBe(45.5);
+    expect(byKey.standard.monthlyBase).toBe(50);
     expect(byKey.premium.monthlyBase).toBe(89);
     // Manual discount is applied once at the bundle total, never per-section.
     for (const e of ladder) expect(e.manualDiscount).toBeNull();
@@ -243,7 +244,7 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
   test('no discount applied when the rate is 0 (Bronze / single-service)', () => {
     const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
-    expect(byKey.standard.monthly).toBe(45.5);
+    expect(byKey.standard.monthly).toBe(50); // base clamps 45.5 → 50
     expect(byKey.premium.monthly).toBe(89);
   });
 
@@ -264,10 +265,10 @@ describe('mosquito as a per-service combo axis (pest + lawn + mosquito)', () => 
   test('combos fan out pest(3) × lawn(3, Basic retired) × mosquito(2) = 18, summed at 15% off', () => {
     const combos = buildServiceCadenceCombos(pestLawnMosquitoV1(), {}, LAWN_MQ_RESULT_STATS);
     expect(combos).toHaveLength(18);
-    // pest Monthly 120*0.85 = 102 + lawn Standard max(45.5*0.85, 45) = 45 +
-    // mosquito Seasonal 65*0.85 = 55.25 → 202.25
+    // pest Monthly 120*0.85 = 102 + lawn Standard base clamps to 50, then
+    // max(50*0.85, 50) = 50 + mosquito Seasonal 65*0.85 = 55.25 → 207.25
     const c = combos.find((x) => x.key === 'lawn_care:standard|mosquito:seasonal9|pest_control:monthly');
-    expect(c.monthly).toBe(202.25);
+    expect(c.monthly).toBe(207.25);
     for (const combo of combos) {
       expect(combo.selection.pest_control).toBeTruthy();
       expect(combo.selection.lawn_care).toBeTruthy();

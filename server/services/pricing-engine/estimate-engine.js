@@ -1480,8 +1480,8 @@ function generateEstimate(input) {
         item.annualAfterDiscount = guarded.finalAnnual;
       } else if (item.service === 'lawn_care') {
         // Lawn program minimum (owner directive 2026-07-09) holds POST-
-        // WaveGuard: a floor-priced $540/yr lawn line must not leave the
-        // engine at $486/$459/$432 after Silver/Gold/Platinum. Never raise
+        // WaveGuard: a floor-priced lawn line must not leave the engine
+        // below the floor after Silver/Gold/Platinum. Never raise
         // a line above its own pre-discount price (min() keeps legacy
         // below-floor lines merely undiscounted, not repriced upward here).
         const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);

@@ -1,9 +1,11 @@
 // Lawn program minimum + quarterly retirement (owner directive 2026-07-09).
 //
-// 1. lawn_pricing_v2.programMinimumMonthly = 45 — no recurring lawn plan is
-//    sold below $45/mo on any track/size/cadence. The engine clamps new
+// 1. lawn_pricing_v2.programMinimumMonthly = 50 — no recurring lawn plan is
+//    sold below $50/mo on any track/size/cadence (owner set $45 initially,
+//    raised to $50 the same day). The engine clamps new
 //    quotes (priceLawnCare) and the customer ladder re-clamps AFTER
-//    WaveGuard/manual discounts (estimate-public), so the bracket bottom
+//    WaveGuard/manual discounts AND the annual-prepay % (estimate-public /
+//    estimate-converter — prepay is NOT exempt), so the bracket bottom
 //    cells ($25/mo Bahia, $30/mo St. Augustine) and discount stacking can no
 //    longer produce a below-floor plan.
 // 2. tiers.basic → hidden (customerFacing: false) — the 4-app/Quarterly
@@ -18,8 +20,8 @@
 // Read-modify-write per house rules: this row also carries keys owned by
 // other migrations and admin Pricing Logic edits.
 
-const PROGRAM_MINIMUM_MONTHLY = 45;
-const ROW_NAME = 'Lawn Pricing V2 Dense 35% Floor + $45 Program Minimum';
+const PROGRAM_MINIMUM_MONTHLY = 50;
+const ROW_NAME = 'Lawn Pricing V2 Dense 35% Floor + $50 Program Minimum';
 const CHANGED_BY = 'claude-2026-07-09';
 
 const CHANGELOG_IDENTITY = {
@@ -27,7 +29,7 @@ const CHANGELOG_IDENTITY = {
   version_to: 'v4.6',
   changed_by: CHANGED_BY,
   category: 'rule',
-  summary: 'Add $45/mo recurring lawn program minimum; retire the quarterly (4-app) cadence for new sales.',
+  summary: 'Add $50/mo recurring lawn program minimum; retire the quarterly (4-app) cadence for new sales.',
 };
 
 function parseConfigData(value) {
@@ -93,7 +95,7 @@ async function insertChangelog(knex) {
     after_value: JSON.stringify({
       lawn_pricing_v2: { programMinimumMonthly: PROGRAM_MINIMUM_MONTHLY, tiers: { basic: { customerFacing: false, hidden: true } } },
     }),
-    rationale: 'Owner directive 2026-07-09: the quarterly lawn bottom cells ($25/mo Bahia, $30/mo St. Augustine at ≤5,000 sqft) priced small-lawn plans far below sustainable account economics, and the 35% cost floor never binds at small sizes (≈$244/yr computed floor vs a $360/yr bracket price). Quarterly (basic/4-app) is retired for NEW sales — 4 apps/yr cannot maintain SWFL turf and it anchors lawn care value at an unsellable sticker — and a hard $45/mo program minimum now holds under every recurring lawn plan, enforced post-WaveGuard and post-manual-discount so Platinum 20% or manual discounts cannot recreate a below-floor price. One-time lawn keeps the raw market baseline (applyProgramMinimum: false) so this floor does not inflate one-time treatment pricing. Existing quarterly customers keep their accepted plans; outstanding estimate links stop offering the quarterly cadence and re-clamp below-floor cadences at view/accept.',
+    rationale: 'Owner directive 2026-07-09: the quarterly lawn bottom cells ($25/mo Bahia, $30/mo St. Augustine at ≤5,000 sqft) priced small-lawn plans far below sustainable account economics, and the 35% cost floor never binds at small sizes (≈$244/yr computed floor vs a $360/yr bracket price). Quarterly (basic/4-app) is retired for NEW sales — 4 apps/yr cannot maintain SWFL turf and it anchors lawn care value at an unsellable sticker — and a hard $50/mo program minimum (owner set $45 initially, raised to $50 the same day) now holds under every recurring lawn plan, enforced post-WaveGuard, post-manual-discount, and under the annual-prepay 5% (prepay is NOT exempt) so no discount stack can recreate a below-floor price. One-time lawn keeps the raw market baseline (applyProgramMinimum: false) so this floor does not inflate one-time treatment pricing. Existing quarterly customers keep their accepted plans; outstanding estimate links stop offering the quarterly cadence and re-clamp below-floor cadences at view/accept.',
   });
 }
 
@@ -129,7 +131,7 @@ exports.up = async function up(knex) {
     knex,
     oldSlice,
     newSlice,
-    'Owner directive 2026-07-09: $45/mo recurring lawn program minimum (post-discount); quarterly (basic/4-app) cadence retired for new sales.',
+    'Owner directive 2026-07-09: $50/mo recurring lawn program minimum (post-discount, incl. annual prepay); quarterly (basic/4-app) cadence retired for new sales.',
   );
   await insertChangelog(knex);
 };
@@ -142,16 +144,21 @@ exports.down = async function down(knex) {
   }
 
   const existingData = await readLawnPricingData(knex);
-  const { programMinimumMonthly, ...rest } = existingData;
+  const { programMinimumMonthly } = existingData;
 
+  // The down must OVERRIDE the floor, not merely drop the key: constants.js
+  // defaults programMinimumMonthly to 50, and db-bridge only merges keys
+  // present in pricing_config — a deleted key would leave the floor active
+  // after rollback. 0 explicitly disables it (every reader guards on > 0).
   await upsertLawnPricingConfig(knex, {
-    ...rest,
+    ...existingData,
+    programMinimumMonthly: 0,
     tiers: {
-      ...(rest.tiers || {}),
+      ...(existingData.tiers || {}),
       basic: {
         label: 'Basic',
         applicationsPerYear: 4,
-        ...((rest.tiers && rest.tiers.basic) || {}),
+        ...((existingData.tiers && existingData.tiers.basic) || {}),
         customerFacing: true,
         hidden: false,
       },
@@ -161,7 +168,7 @@ exports.down = async function down(knex) {
   await insertAudit(
     knex,
     { programMinimumMonthly: programMinimumMonthly ?? null, tiers: { basic: { customerFacing: false, hidden: true } } },
-    { programMinimumMonthly: null, tiers: { basic: { customerFacing: true, hidden: false } } },
-    'Rollback: remove the $45/mo lawn program minimum and re-enable the quarterly cadence.',
+    { programMinimumMonthly: 0, tiers: { basic: { customerFacing: true, hidden: false } } },
+    'Rollback: disable the $50/mo lawn program minimum (explicit 0 — the in-code default is 50) and re-enable the quarterly cadence.',
   );
 };

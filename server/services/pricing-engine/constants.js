@@ -221,12 +221,13 @@ const LAWN_TIERS = {
 const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
-  // Hard program minimum (owner directive 2026-07-09): no recurring lawn
-  // plan is sold below this monthly price, on ANY track/size/cadence, and
-  // the customer-facing ladder re-clamps AFTER WaveGuard/manual discounts —
-  // the bracket bottom cells ($25 Bahia) and discount stacking can't
-  // recreate a below-floor plan. 0/null disables the floor.
-  programMinimumMonthly: 45,
+  // Hard program minimum (owner directive 2026-07-09, raised $45→$50 same
+  // day): no recurring lawn plan is sold below this monthly price, on ANY
+  // track/size/cadence, and the customer-facing ladder re-clamps AFTER
+  // WaveGuard/manual discounts AND the annual-prepay % (prepay is NOT
+  // exempt) — the bracket bottom cells ($25 Bahia) and discount stacking
+  // can't recreate a below-floor plan. 0/null disables the floor.
+  programMinimumMonthly: 50,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',

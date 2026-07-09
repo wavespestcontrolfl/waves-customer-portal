@@ -706,7 +706,9 @@ describe('lawn pricing production follow-up', () => {
   });
 
   test('cost-floor pricing source is explicit per tier and selected tier', () => {
-    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4000 }));
+    // 8,000 sqft: the enhanced market cell ($68/mo) clears the $50 program
+    // minimum, so the MARKET_TABLE vs COST_FLOOR source plumbing stays visible.
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 8000 }));
     const market = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: false });
     const floor = priceLawnCare(property, {
       track: 'st_augustine',
@@ -744,7 +746,7 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tiers.map(t => t.label)).toEqual(['4x applications/yr', '6x applications/yr', '9x applications/yr', '12x applications/yr']);
   });
 
-  test('small lawn pricing uses market table when it is above the 35% floor', () => {
+  test('small lawn pricing floors at the $50 program minimum when the market cell sits below it', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 2720,
       lotSqFt: 7200,
@@ -753,8 +755,10 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    expect(lawn.selected.perApp).toBe(62.67);
-    expect(Math.round(lawn.selected.perApp * 0.9 * 100) / 100).toBe(56.4);
+    // Market $564/yr and cost floor both sit below the $600 program minimum
+    // → $603/yr (ceil'd to a clean 9-app multiple), $67/app.
+    expect(lawn.selected.perApp).toBe(67);
+    expect(lawn.selected.pricingSource).toBe('PROGRAM_MINIMUM');
     expect(lawn.selected.costFloorApplied).toBe(false);
     expect(lawn.selected.costFloorAnnual).toBeLessThan(lawn.selected.marketAnnual);
     expect(lawn.margin).toBeGreaterThan(0.45);
@@ -778,15 +782,16 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
     });
     expect(lawn.frequency).toBe(9);
-    expect(lawn.perApp).toBe(62.67);
-    expect(lawn.annual).toBe(564);
-    // Silver 10% would land at $507.60/yr ($42.30/mo) — below the $45/mo
-    // program minimum, so the discount caps at the floor (owner 2026-07-09).
-    expect(lawn.annualAfterDiscount).toBe(540);
-    expect(lawn.monthlyAfterDiscount).toBe(45);
+    // The $564 market cell floors at the $600 program minimum ($603 ceil'd
+    // to a 9-app multiple); Silver 10% would land at $542.70 — below the
+    // floor, so the discount caps right back at $600 (owner 2026-07-09).
+    expect(lawn.perApp).toBe(67);
+    expect(lawn.annual).toBe(603);
+    expect(lawn.annualAfterDiscount).toBe(600);
+    expect(lawn.monthlyAfterDiscount).toBe(50);
     expect(lawn.programMinimumGuardApplied).toBe(true);
     expect(lawn.discountCapped).toBe(true);
-    expect(lawn.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.pricingSource).toBe('PROGRAM_MINIMUM');
     expect(lawn.costFloorApplied).toBe(false);
   });
 
@@ -797,8 +802,9 @@ describe('lawn pricing production follow-up', () => {
     const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
     const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
 
-    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor.
-    expect(stAug.selected.perApp).toBe(66);
+    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor
+    // ($594/yr), which then rides up to the $600 program minimum ($603/9-app).
+    expect(stAug.selected.perApp).toBe(67);
     expect(stAug.selected.costFloorApplied).toBe(true);
 
     // Bermuda enhanced remains market-table priced because market is above the floor.
@@ -815,17 +821,18 @@ describe('lawn pricing production follow-up', () => {
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
     // Under the 35% floor the cost floor (~$572/yr) drops below the market
-    // table (~$576/yr), so the market table is the final customer price.
-    expect(lawn.selected.perApp).toBe(64);
-    expect(lawn.annual).toBe(576);
-    expect(lawn.monthly).toBe(48);
+    // table (~$576/yr) — but both sit below the $600 program minimum, which
+    // is the final customer price ($603 ceil'd to a clean 9-app multiple).
+    expect(lawn.selected.perApp).toBe(67);
+    expect(lawn.annual).toBe(603);
+    expect(lawn.monthly).toBe(50.25);
     expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
     expect(lawn.costs.total).toBeLessThan(372);
     expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(571);
     expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(572);
     expect(lawn.margin).toBeGreaterThanOrEqual(0.35);
-    expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
-    expect(lawn.selected.marketAnnual).toBe(lawn.annual);
+    expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
+    expect(lawn.selected.marketAnnual).toBe(576);
   });
 
   test('Lawn V2 receives WaveGuard percent discounts', () => {
@@ -843,16 +850,16 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
       activeServices: ['pest_control', 'lawn_care'],
     });
-    expect(lawn.annual).toBe(576);
-    // Silver 10% would land at $518.40/yr ($43.20/mo) — below the $45/mo
-    // program minimum, so only the slice down to the floor applies
-    // (576 → 540 is an effective 6.3%).
-    expect(lawn.annualAfterDiscount).toBe(540);
-    expect(lawn.monthlyAfterDiscount).toBe(45);
+    expect(lawn.annual).toBe(603);
+    // Silver 10% would land at $542.70/yr — below the $600/yr program
+    // minimum, so only the slice down to the floor applies (603 → 600 is an
+    // effective 0.5%).
+    expect(lawn.annualAfterDiscount).toBe(600);
+    expect(lawn.monthlyAfterDiscount).toBe(50);
     expect(lawn.programMinimumGuardApplied).toBe(true);
     expect(lawn.discountCapped).toBe(true);
     expect(lawn.requestedDiscountPct).toBe(0.10);
-    expect(lawn.actualDiscountPct).toBe(0.063);
+    expect(lawn.actualDiscountPct).toBe(0.005);
     expect(lawn.discount).toMatchObject({
       discountable: true,
       requestedDiscountPercent: 0.10,
@@ -872,13 +879,13 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    // Lawn holds at the $540 floor post-WaveGuard, so the manual-discount
-    // base is pest 421.20 + lawn 540 = 961.20 (was 939.60 pre-floor).
-    expect(lawn.annualAfterDiscount).toBe(540);
-    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(961.2, 2);
-    // 10% (96.12) fits inside the non-lawn headroom (961.20 − 540 protected
+    // Lawn holds at the $600 floor post-WaveGuard, so the manual-discount
+    // base is pest 421.20 + lawn 600 = 1021.20.
+    expect(lawn.annualAfterDiscount).toBe(600);
+    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(1021.2, 2);
+    // 10% (102.12) fits inside the non-lawn headroom (1021.20 − 600 protected
     // = 421.20), so the manual discount applies in full, uncapped.
-    expect(estimate.summary.manualDiscount.amount).toBe(96.12);
+    expect(estimate.summary.manualDiscount.amount).toBe(102.12);
     expect(estimate.summary.manualDiscount.capReason).not.toBe('lawn_program_minimum');
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
@@ -886,7 +893,7 @@ describe('lawn pricing production follow-up', () => {
 
   test('a manual discount on a lawn-only estimate is capped at the program minimum (recurring slice)', () => {
     // Lawn-only, standard/6x at 4,500 sqft: the $38/mo bracket cell floors to
-    // $45/mo ($540/yr). The whole recurring base is floor-protected, so a 10%
+    // $50/mo ($600/yr). The whole recurring base is floor-protected, so a 10%
     // manual discount has zero recurring room — the recurring slice caps to 0
     // and the plan bills the floor.
     const estimate = generateEstimate(baseInput({
@@ -897,12 +904,12 @@ describe('lawn pricing production follow-up', () => {
       manualDiscount: { type: 'PERCENT', value: 10 },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
-    expect(lawn.annual).toBe(540);
+    expect(lawn.annual).toBe(600);
     expect(lawn.programMinimumApplied).toBe(true);
     expect(estimate.summary.manualDiscount.recurringAmount).toBe(0);
     expect(estimate.summary.manualDiscount.capped).toBe(true);
     expect(estimate.summary.manualDiscount.capReason).toBe('lawn_program_minimum');
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThanOrEqual(540);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThanOrEqual(600);
   });
 
   test('requesting the retired 4-application tier falls back to enhanced (quarterly retired 2026-07-09)', () => {

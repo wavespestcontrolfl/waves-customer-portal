@@ -10,7 +10,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
-const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT } = require('./pricing-engine/constants');
+const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 const {
   inferFrequencyKeyFromEstimateData,
   resolveBillingCadence,
@@ -778,6 +778,27 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
   return calculateAnnualPrepayAmount(monthlyRate);
 }
 
+// The lawn program minimum's floor-protected annual (owner directive
+// 2026-07-09): the slice of each recurring lawn line up to $50/mo × 12 that
+// no discount — including the annual-prepay % — may cut into. Scans the same
+// dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
+// lineItems) and dedupes by key so a lawn line is only protected once.
+function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
+  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
+  const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
+  const lawnLineItems = estimateLineItemsFromData(estimateData)
+    .filter((i) => recurringServiceKey(i) === 'lawn_care');
+  const rows = lawnLineItems.length
+    ? lawnLineItems
+    : recurringServicesFromEstimateData(estimateData)
+      .filter((svc) => recurringServiceKey(svc) === 'lawn_care');
+  return Math.round(rows.reduce((sum, item) => {
+    const annual = recurringLineAnnualAmount(item);
+    return annual > 0 ? sum + Math.min(annual, floorAnnual) : sum;
+  }, 0) * 100) / 100;
+}
+
 // Single source of truth for the annual-prepay invoice amount, shared by the
 // converter (billing), the public estimate render, and the accept response so the
 // displayed/messaged total always equals the invoice the converter creates.
@@ -793,7 +814,13 @@ function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], e
   // discount) are split out first and added back at full price — otherwise a
   // mixed plan (foam + lawn) would still bleed part of the 5% onto foam because
   // a simple max(discounted, floor) clamp only protects foam-heavy mixes.
-  const floor = Math.min(base, nonDiscountableRecurringAnnualFloor(estimateData));
+  // The lawn program minimum's protected slice (owner directive 2026-07-09:
+  // prepay is NOT exempt from the floor) joins the same non-discountable
+  // floor — only lawn's above-floor headroom earns the prepay %.
+  const floor = Math.min(base, Math.round((
+    nonDiscountableRecurringAnnualFloor(estimateData)
+    + lawnProgramMinimumProtectedAnnual(estimateData)
+  ) * 100) / 100);
   const discountableBase = Math.max(0, Math.round((base - floor) * 100) / 100);
   const amount = Math.round((floor + discountableBase * (1 - discountRate)) * 100) / 100;
   const discount = Math.max(0, Math.round((base - amount) * 100) / 100);

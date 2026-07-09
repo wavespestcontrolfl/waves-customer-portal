@@ -595,8 +595,8 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'quarterly',
                 label: 'Quarterly',
-                monthly: 95,
-                annual: 1140,
+                monthly: 100,
+                annual: 1200,
                 perServiceTreatments: [
                   {
                     service: 'pest_control',
@@ -606,13 +606,13 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $90/app × 6 ÷ 12 = $45/mo — a SOLD cadence at the lawn
+                    // $100/app × 6 ÷ 12 = $50/mo — a SOLD cadence at the lawn
                     // program minimum, so this snapshot keeps the fast path
                     // (4-visit lawn rows are retired regardless of price).
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 90,
-                    perTreatment: 90,
+                    displayPrice: 100,
+                    perTreatment: 100,
                     visitsPerYear: 6,
                   },
                 ],
@@ -626,11 +626,11 @@ describe('public estimate one-time breakdown', () => {
         },
         result: {
           recurring: {
-            monthlyTotal: 95,
-            annualAfterDiscount: 1140,
+            monthlyTotal: 100,
+            annualAfterDiscount: 1200,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 45 },
+              { name: 'Lawn Care', mo: 50 },
             ],
           },
           oneTime: {
@@ -640,19 +640,19 @@ describe('public estimate one-time breakdown', () => {
           },
         },
       },
-      monthly_total: 95,
-      annual_total: 1140,
+      monthly_total: 100,
+      annual_total: 1200,
       onetime_total: 99,
       waveguard_tier: 'Bronze',
     });
 
     expect(payload.frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 95,
+      monthly: 100,
     }));
     expect(payload.combinedRecurring).toEqual(expect.objectContaining({
-      monthlySubtotal: 95,
-      annualSubtotal: 1140,
+      monthlySubtotal: 100,
+      annualSubtotal: 1200,
     }));
     expect(payload.services.map((section) => section.key)).toEqual(['pest_control', 'lawn_care']);
     expect(payload.services[0]).toEqual(expect.objectContaining({
@@ -677,8 +677,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies).toHaveLength(1);
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'recurring',
-      monthly: 45,
-      perTreatment: 90,
+      monthly: 50,
+      perTreatment: 100,
       perVisit: null,
       addOns: [],
     }));
@@ -696,7 +696,7 @@ describe('public estimate one-time breakdown', () => {
   test('multi-service pest bundles preserve non-pest cadence rows when split', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-mixed-pest-non-pest-cadence-test',
-      monthly_total: 95,
+      monthly_total: 100,
       estimate_data: {
         sendSnapshot: {
           pricingBundle: {
@@ -706,7 +706,7 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'quarterly',
                 label: 'Quarterly',
-                monthly: 95,
+                monthly: 100,
                 perServiceTreatments: [
                   {
                     service: 'pest_control',
@@ -716,11 +716,11 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $90/app × 6 ÷ 12 = $45/mo — a sold cadence at the floor.
+                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care (Bi-monthly)',
-                    displayPrice: 90,
-                    perTreatment: 90,
+                    displayPrice: 100,
+                    perTreatment: 100,
                     visitsPerYear: 6,
                   },
                 ],
@@ -751,11 +751,11 @@ describe('public estimate one-time breakdown', () => {
         },
         result: {
           recurring: {
-            monthlyTotal: 95,
-            annualAfterDiscount: 1140,
+            monthlyTotal: 100,
+            annualAfterDiscount: 1200,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 45 },
+              { name: 'Lawn Care', mo: 50 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -767,8 +767,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
     expect(payload.frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 95,
-      annual: 1140,
+      monthly: 100,
+      annual: 1200,
     }));
     expect(payload.frequencies[1]).toEqual(expect.objectContaining({
       key: 'monthly',
@@ -780,8 +780,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 45,
-      perTreatment: 90,
+      monthly: 50,
+      perTreatment: 100,
       perVisit: null,
     }));
     expect(payload.services[1].frequencies[1]).toEqual(expect.objectContaining({
@@ -791,16 +791,16 @@ describe('public estimate one-time breakdown', () => {
       perVisit: null,
     }));
     expect(payload.combinedRecurring).toEqual(expect.objectContaining({
-      monthlySubtotal: 95,
-      annualSubtotal: 1140,
+      monthlySubtotal: 100,
+      annualSubtotal: 1200,
     }));
   });
 
   test('multi-service non-pest bundles preserve selectable cadence rows when split', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-non-pest-multi-cadence-test',
-      monthly_total: 65,
-      annual_total: 780,
+      monthly_total: 70,
+      annual_total: 840,
       estimate_data: {
         sendSnapshot: {
           pricingBundle: {
@@ -809,15 +809,15 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'quarterly',
                 label: 'Quarterly',
-                monthly: 65,
-                annual: 780,
+                monthly: 70,
+                annual: 840,
                 perServiceTreatments: [
                   {
-                    // $90/app × 6 ÷ 12 = $45/mo — a sold cadence at the floor.
+                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 90,
-                    perTreatment: 90,
+                    displayPrice: 100,
+                    perTreatment: 100,
                     visitsPerYear: 6,
                   },
                   {
@@ -832,14 +832,14 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'monthly',
                 label: 'Monthly',
-                monthly: 70,
-                annual: 840,
+                monthly: 75,
+                annual: 900,
                 perServiceTreatments: [
                   {
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 45,
-                    perTreatment: 45,
+                    displayPrice: 50,
+                    perTreatment: 50,
                     visitsPerYear: 12,
                   },
                   {
@@ -856,10 +856,10 @@ describe('public estimate one-time breakdown', () => {
         },
         result: {
           recurring: {
-            monthlyTotal: 65,
-            annualAfterDiscount: 780,
+            monthlyTotal: 70,
+            annualAfterDiscount: 840,
             services: [
-              { name: 'Lawn Care', mo: 45 },
+              { name: 'Lawn Care', mo: 50 },
               { name: 'Mosquito', mo: 20 },
             ],
           },
@@ -875,19 +875,19 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
     expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 45,
-      perTreatment: 90,
+      monthly: 50,
+      perTreatment: 100,
       perVisit: null,
     }));
     expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
       key: 'monthly',
-      monthly: 45,
-      perTreatment: 45,
+      monthly: 50,
+      perTreatment: 50,
       perVisit: null,
     }));
     expect(payload.combinedRecurring).toEqual(expect.objectContaining({
-      monthlySubtotal: 65,
-      annualSubtotal: 780,
+      monthlySubtotal: 70,
+      annualSubtotal: 840,
     }));
   });
 
@@ -967,11 +967,11 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $90/app × 6 ÷ 12 = $45/mo — a sold cadence at the floor.
+                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 90,
-                    perTreatment: 90,
+                    displayPrice: 100,
+                    perTreatment: 100,
                     visitsPerYear: 6,
                   },
                 ],
@@ -983,7 +983,7 @@ describe('public estimate one-time breakdown', () => {
           recurring: {
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 45 },
+              { name: 'Lawn Care', mo: 50 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -5613,8 +5613,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<span>Invoice total</span>');
     expect(html).not.toContain('Invoice includes WaveGuard setup');
     expect(html).not.toContain('we open the $99 setup invoice');
-    // Prepay is still offered, now with a 5% discount: $660 → $627.
-    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.05">$627');
+    // Prepay is still offered, but the $50/mo lawn program minimum protects
+    // $600 of the $660 base — the 5% applies only to the $60 headroom:
+    // $660 → $657 (effective 0.45%).
+    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.0045">$657');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
@@ -5674,18 +5676,21 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<strong><s>$99</s> $0</strong>');
     expect(html).toContain('Pay the 12-month plan in full');
     // Prepay incentive is a 5% discount off the recurring annual, not a setup waiver.
-    expect(html).toContain('Choose the 12-month plan up front and save 5%; we send the annual invoice automatically after confirmation.');
-    expect(html).toContain('Prepay discount (5%)');
-    expect(html).toContain('Save 5%');
+    // The lawn floor protects $600 of the $660 base — the effective prepay
+    // rate is 0.5% (one-decimal label so it never reads "save 0%").
+    expect(html).toContain('Choose the 12-month plan up front and save 0.5%; we send the annual invoice automatically after confirmation.');
+    expect(html).toContain('Prepay discount (0.5%)');
+    expect(html).toContain('Save 0.5%');
     expect(html).not.toContain('Net setup fee: $0');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>−$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
-    // Annual plan total $660 → prepay invoice $627 (5% off the recurring annual).
-    expect(html).toContain('data-prepay-discount-rate="0.05">$627</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.05">$627</span>');
+    // Annual plan total $660 → prepay invoice $657 (5% off only the $60
+    // slice above the $600 lawn program minimum).
+    expect(html).toContain('data-prepay-discount-rate="0.0045">$657</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.0045">$657</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
-    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 627;');
+    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 657;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
     expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be available for optional payment after confirmation.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
