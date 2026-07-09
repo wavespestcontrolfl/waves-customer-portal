@@ -1167,6 +1167,17 @@ const EstimateConverter = {
         })
       : null;
 
+    // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
+    // their membership model — an unconditional per_application stamp would
+    // stop the monthly cron for them and start billing every completion per
+    // visit (Codex round-7 P1). "Current member" = live pipeline stage + a
+    // positive monthly_rate + not already an estimate-flow mode. Everyone
+    // else (new signups, leads, churned/dormant re-signups) converts to
+    // per-visit billing per the owner ruling; annual-prepay accepts are
+    // re-stamped at the term choke point either way.
+    const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+      && Number(customer.monthly_rate) > 0
+      && !['per_application', 'annual_prepay'].includes(customer.billing_mode || '');
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -1205,9 +1216,12 @@ const EstimateConverter = {
           // monthly billing cron skips non-membership modes and completion
           // collects per_application_fee each visit. Annual-prepay accepts are
           // re-stamped 'annual_prepay' at their term choke point
-          // (createTermForAnnualPrepay), which every prepay path runs through,
-          // so the converter always writes 'per_application' here.
-          billing_mode: 'per_application',
+          // (createTermForAnnualPrepay), which every prepay path runs through.
+          // CURRENT monthly members accepting an add-on keep their existing
+          // model (see preservesExistingMembership above).
+          billing_mode: preservesExistingMembership
+            ? (customer.billing_mode || null)
+            : 'per_application',
           // Exact per-visit charge at the accepted billing cadence (quarterly
           // derives from the exact annual: $98.00, not 3 x rounded-monthly
           // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
@@ -1216,12 +1230,14 @@ const EstimateConverter = {
           // customer-level whole-plan fee would bill the full package on
           // EVERY row's completion (Codex P1). Multi-service plans leave the
           // fee NULL so completion keeps its existing per-row precedence.
-          per_application_fee: (recurringServicesForConversion.length === 1
-            && billingCadence && Number(billingCadence.amount) > 0)
-            ? Number(billingCadence.amount)
-            : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
-              ? Number(monthlyRate)
-              : null),
+          per_application_fee: preservesExistingMembership
+            ? (customer.per_application_fee ?? null)
+            : ((recurringServicesForConversion.length === 1
+              && billingCadence && Number(billingCadence.amount) > 0)
+              ? Number(billingCadence.amount)
+              : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+                ? Number(monthlyRate)
+                : null)),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former

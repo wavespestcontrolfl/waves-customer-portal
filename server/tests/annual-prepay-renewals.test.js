@@ -1512,6 +1512,7 @@ describe('annual_prepay billing_mode stamp timing', () => {
       term_end: '2027-07-09',
     };
     const stampQ = query({});
+    const priorWriteQ = query({});
     setDbQueues({
       annual_prepay_terms: [
         query({ columnInfo: {} }), // annualPrepayColumns
@@ -1519,6 +1520,7 @@ describe('annual_prepay billing_mode stamp timing', () => {
         query({ returning: [ACTIVE] }), // insert
         query({ first: ACTIVE }), // refreshTermSnapshot term read
         query({ returning: [ACTIVE] }), // refreshTermSnapshot snapshot update
+        priorWriteQ, // prior_billing_mode record on the term
       ],
       scheduled_services: [
         query({ columnInfo: { scheduled_date: {}, service_type: {} } }), // scheduledServiceColumns (attach no-ops)
@@ -1526,6 +1528,7 @@ describe('annual_prepay billing_mode stamp timing', () => {
       ],
       customers: [
         query({ columnInfo: {} }), // syncCustomerRenewalDate probe (no renewal column)
+        query({ first: { billing_mode: 'per_application' } }), // prior-mode read
         stampQ, // billing_mode stamp update
       ],
     });
@@ -1536,6 +1539,10 @@ describe('annual_prepay billing_mode stamp timing', () => {
     });
 
     expect(created).toEqual(ACTIVE);
+    // The stamp records what the customer WAS (round-7: refunds restore it).
+    expect(priorWriteQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ prior_billing_mode: 'per_application' }),
+    );
     expect(stampQ.update).toHaveBeenCalledWith(
       expect.objectContaining({ billing_mode: 'annual_prepay' }),
     );
@@ -1557,6 +1564,7 @@ describe('annual_prepay billing_mode stamp timing', () => {
         query({ rows: [PENDING] }), // terms select for the paid invoice
         query({ returning: [ACTIVE] }), // pending→active transition update
         query({ returning: [ACTIVE] }), // refreshTermSnapshot snapshot update
+        query({}), // prior_billing_mode record on the term
       ],
       scheduled_services: [
         query({ columnInfo: { scheduled_date: {}, service_type: {} } }), // scheduledServiceColumns
@@ -1564,6 +1572,7 @@ describe('annual_prepay billing_mode stamp timing', () => {
       ],
       customers: [
         query({ columnInfo: {} }), // syncCustomerRenewalDate probe
+        query({ first: { billing_mode: 'per_application' } }), // prior-mode read
         stampQ, // billing_mode stamp update
       ],
     });
@@ -1591,6 +1600,7 @@ describe('billing_mode reset on term void/refund', () => {
       query({ rows: [term] }), // terms select for the refunded invoice
       query({ returning: [cancelled] }), // cancel transition update
       query({ first: undefined }), // reset helper's replacement-coverage check
+      query({ first: undefined }), // prior_billing_mode read (not recorded → heuristic)
       query({ rows: [] }), // decided-covered terms sweep (post-loop)
     ],
     scheduled_services: [
@@ -1629,6 +1639,50 @@ describe('billing_mode reset on term void/refund', () => {
     expect(results[0].status).toBe('cancelled');
     expect(resetQ.update).toHaveBeenCalledWith(
       expect.objectContaining({ billing_mode: 'per_application' }),
+    );
+  });
+
+  test('a MANUAL term with a RECORDED prior mode restores it exactly — per_application customer who bought a manual prepay (Codex round-7)', async () => {
+    const TERM = {
+      id: 'term-mp', customer_id: 'customer-1', status: 'active',
+      source_estimate_id: null, prepay_amount: null,
+      term_start: '2026-07-09', term_end: '2027-07-09',
+    };
+    const resetQ = query({});
+    const queues = cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ);
+    // prior_billing_mode WAS recorded at stamp time — the heuristic
+    // (no source estimate → NULL) must NOT win over it.
+    queues.annual_prepay_terms[3] = query({ first: { prior_billing_mode: 'per_application' } });
+    setDbQueues(queues);
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    );
+
+    expect(resetQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: 'per_application' }),
+    );
+  });
+
+  test("a recorded prior of 'none' restores legacy NULL", async () => {
+    const TERM = {
+      id: 'term-le', customer_id: 'customer-1', status: 'active',
+      source_estimate_id: 'est-1', prepay_amount: null,
+      term_start: '2026-07-09', term_end: '2027-07-09',
+    };
+    const resetQ = query({});
+    const queues = cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ);
+    // Recorded 'none' (prior was NULL legacy monthly) beats the heuristic
+    // (source estimate present → per_application).
+    queues.annual_prepay_terms[3] = query({ first: { prior_billing_mode: 'none' } });
+    setDbQueues(queues);
+
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(
+      { id: 'inv-r', status: 'refunded', paid_at: null },
+    );
+
+    expect(resetQ.update).toHaveBeenCalledWith(
+      expect.objectContaining({ billing_mode: null }),
     );
   });
 
@@ -1675,6 +1729,7 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
         query({ rows: [] }), // active/pending terms select — none (already decided)
         query({ rows: [DECIDED] }), // decided-covered terms sweep
         query({ first: undefined }), // reset helper's replacement-coverage check
+        query({ first: undefined }), // prior_billing_mode read (not recorded → heuristic)
       ],
       scheduled_services: [
         query({ columnInfo: { scheduled_date: {} } }), // clearPrepaidStamps probe → no-op

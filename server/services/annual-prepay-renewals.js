@@ -1185,7 +1185,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // (pre-payment completions bill per application), so this transition
       // is where the pending case picks up its stamp. Idempotent re-stamp
       // for already-active terms; best-effort + column-guarded inside.
-      await stampAnnualPrepayBillingMode(current.customer_id, conn);
+      await stampAnnualPrepayBillingMode(current.customer_id, conn, current.id);
       results.push(refreshed || current);
     } else {
       results.push(current);
@@ -1383,9 +1383,26 @@ async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
 // pre-payment completions keep billing per application; the payment sync
 // stamps on the pending→active transition. Best-effort + column-guarded:
 // term creation must never fail on this stamp.
-async function stampAnnualPrepayBillingMode(customerId, conn) {
+async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
   try {
     if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    // Record what the customer was BEFORE prepay so a later void/refund can
+    // restore it EXACTLY (Codex round-7: a per_application customer buying a
+    // MANUAL prepay has no source_estimate_id on the term, and the heuristic
+    // alone would wrongly return them to legacy monthly). 'none' = prior
+    // mode was NULL; a NULL column value means "not recorded" (pre-column
+    // terms) and falls back to the heuristic. First stamp wins — renewal
+    // syncs / duplicate webhooks re-stamp the customer but never overwrite
+    // the recorded prior with 'annual_prepay'.
+    if (termId && (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode'))) {
+      const current = await conn('customers').where({ id: customerId }).first('billing_mode');
+      if (current && current.billing_mode !== 'annual_prepay') {
+        await conn('annual_prepay_terms')
+          .where({ id: termId })
+          .whereNull('prior_billing_mode')
+          .update({ prior_billing_mode: current.billing_mode || 'none' });
+      }
+    }
     await conn('customers')
       .where({ id: customerId })
       .update({ billing_mode: 'annual_prepay', updated_at: new Date() });
@@ -1416,10 +1433,23 @@ async function resetBillingModeAfterTermCancel(term, conn) {
       .whereIn('status', [PAYMENT_PENDING_STATUS, ...ACTIVE_STATUSES])
       .first('id');
     if (replacement) return;
+    // Restore the EXACT prior mode when the stamp recorded it ('none' =
+    // legacy NULL); pre-column terms fall back to the source heuristic
+    // (estimate-flow term → per-visit, manual prepay → legacy monthly).
+    let restored;
+    if (await conn.schema.hasColumn('annual_prepay_terms', 'prior_billing_mode')) {
+      const trow = await conn('annual_prepay_terms').where({ id: term.id }).first('prior_billing_mode');
+      if (trow?.prior_billing_mode) {
+        restored = trow.prior_billing_mode === 'none' ? null : trow.prior_billing_mode;
+      }
+    }
+    if (restored === undefined) {
+      restored = term.source_estimate_id ? 'per_application' : null;
+    }
     await conn('customers')
       .where({ id: term.customer_id, billing_mode: 'annual_prepay' })
       .update({
-        billing_mode: term.source_estimate_id ? 'per_application' : null,
+        billing_mode: restored,
         updated_at: new Date(),
       });
   } catch (err) {
@@ -1624,7 +1654,7 @@ async function createTermForAnnualPrepay({
       // invoice is paid, and the annual_prepay stamp would divert them to
       // the monthly-membership dispatch path (Codex round-2). The payment
       // sync (syncTermForInvoicePayment) stamps on pending→active.
-      await stampAnnualPrepayBillingMode(customerId, conn);
+      await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
     }
     return refreshed;
   }
@@ -1664,7 +1694,7 @@ async function createTermForAnnualPrepay({
     // ACTIVE (born-paid) only — a payment_pending term keeps the customer
     // 'per_application' so pre-payment completions bill per application; the
     // payment sync stamps when the invoice pays (Codex round-2).
-    await stampAnnualPrepayBillingMode(customerId, conn);
+    await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
   }
   return refreshed;
 }

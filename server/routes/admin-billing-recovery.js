@@ -317,7 +317,21 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       ach_status: visit.ach_status,
     });
     if (onAutopay) {
-      return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
+      // Per-application customers are on autopay BY DESIGN — the saved card
+      // is HOW each visit charge collects, and the monthly cron skips them
+      // (GUARD 3b), so "autopay = monthly-covered" is exactly wrong for
+      // them: a per-app visit that completion failed to invoice/charge is
+      // THE case this workbench exists to recover (Codex round-7).
+      // annual_prepay stays blocked (uncovered visits belong to the renewal
+      // flow, covered ones to the prepaid stamps). Column-guarded.
+      let recoveryBillingMode = null;
+      try {
+        const modeRow = await db('customers').where({ id: visit.customer_id }).first('billing_mode');
+        recoveryBillingMode = modeRow?.billing_mode || null;
+      } catch { /* billing_mode column absent — keep legacy block */ }
+      if (recoveryBillingMode !== 'per_application') {
+        return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
+      }
     }
     // v1 is self-pay only — a payer-billed visit is owed by the payer's AP inbox,
     // not the homeowner, and must be cut through the payer invoice path.
