@@ -5199,28 +5199,6 @@ function PropertyTab({ customer }) {
     </div>
   );
 
-  const dateValue = (value) => {
-    if (!value) return '';
-    if (typeof value === 'string') return value.slice(0, 10);
-    const d = new Date(value);
-    return isNaN(d) ? '' : etDateString(d);
-  };
-
-  const dateInput = (field, label) => (
-    <div>
-      <label style={labelStyle}>{label}</label>
-      <input
-        type="date"
-        value={dateValue(prefs[field])}
-        onChange={e => updateField(field, e.target.value || null)}
-        aria-label={label}
-        style={inputStyle}
-        onFocus={focusBorder}
-        onBlur={blurBorder}
-      />
-    </div>
-  );
-
   const sqft = (n) => {
     const num = Number(n || 0);
     return num > 0 ? `${num.toLocaleString()} sq ft` : 'Not set';
@@ -5524,7 +5502,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       <PropertySection title="Scheduling" icon="calendar" summary={scheduleSummary}>
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 14 }}>
           <div>
             <label style={labelStyle}>Preferred Day</label>
             <PillSelector
@@ -5548,27 +5526,6 @@ function PropertyTab({ customer }) {
                 { value: 'no_preference', label: 'Any' },
               ]}
             />
-          </div>
-          <div>
-            <label style={labelStyle}>Contact</label>
-            <PillSelector
-              value={prefs.contactPreference}
-              onChange={v => updateField('contactPreference', v)}
-              options={[
-                { value: 'call', label: 'Call' }, { value: 'text', label: 'Text' },
-                { value: 'email', label: 'Email' },
-              ]}
-            />
-          </div>
-        </div>
-        <div style={{ marginTop: 16, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7' }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 4 }}>Blackout dates</div>
-          <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
-            Do not service between these dates (vacation, events, etc.)
-          </div>
-          <div style={fieldGrid}>
-            {dateInput('blackoutStart', 'Start Date')}
-            {dateInput('blackoutEnd', 'End Date')}
           </div>
         </div>
       </PropertySection>
