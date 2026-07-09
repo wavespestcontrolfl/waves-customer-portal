@@ -144,12 +144,13 @@ describe('annual prepay late-payment gap fixes', () => {
       const priorQ = query({ first: { prior_billing_mode: 'per_application' } });
       const customerResetQ = query();
       const decidedQ = query({ rows: [{ id: 'term-decided', customer_id: 'cust-2', status: 'renewed', source_estimate_id: null }] });
+      const decidedMarkerQ = query();
       const decidedStampClearQ = query();
       const decidedReplacementQ = query({ first: undefined });
       const decidedPriorQ = query({ first: { prior_billing_mode: 'none' } });
       const decidedCustomerResetQ = query();
       const conn = makeConn({
-        annual_prepay_terms: [colsQ, suspendQ, reselectQ, replacementQ, priorQ, decidedQ, decidedReplacementQ, decidedPriorQ],
+        annual_prepay_terms: [colsQ, suspendQ, reselectQ, replacementQ, priorQ, decidedQ, decidedMarkerQ, decidedReplacementQ, decidedPriorQ],
         scheduled_services: [stampClearQ, decidedStampClearQ],
         customers: [customerResetQ, decidedCustomerResetQ],
       });
@@ -172,6 +173,11 @@ describe('annual prepay late-payment gap fixes', () => {
       // covered" and the customer double-pays.
       expect(stampClearQ.where).toHaveBeenCalledWith('prepaid_method', 'annual_prepay_invoice');
       expect(stampClearQ.update).toHaveBeenCalledWith(expect.objectContaining({ prepaid_amount: null }));
+      // Decided terms get the dispute marker too (status untouched): it
+      // anchors the won-dispute dues claw-back window and flags an
+      // incomplete restore for the daily sweep. whereNull = replay-safe.
+      expect(decidedMarkerQ.whereNull).toHaveBeenCalledWith('dispute_suspended_at');
+      expect(decidedMarkerQ.update).toHaveBeenCalledWith(expect.objectContaining({ dispute_suspended_at: expect.any(Date) }));
       // Same double-pay exists for DECIDED coverage (Codex round-2 P1): its
       // stamps must clear at suspension too.
       expect(decidedStampClearQ.where).toHaveBeenCalledWith('prepaid_method', 'annual_prepay_invoice');
@@ -444,7 +450,171 @@ describe('annual prepay late-payment gap fixes', () => {
     test('sweep query failure degrades to empty summary, never throws', async () => {
       const conn = jest.fn(() => { throw new Error('boom'); });
       const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
-      expect(summary).toEqual({ terms: 0, settled: 0, credited: 0, reversed: 0 });
+      expect(summary).toEqual({ terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 });
+    });
+
+    test('dispute-marker leg (Codex round-3 P2): a covered term still carrying the marker gets mode re-stamp, dues claw-back, and marker clear', async () => {
+      const markedTerm = {
+        id: 'term-1', customer_id: 'cust-1', status: 'renewed',
+        term_start: '2026-07-01', term_end: '2027-07-01',
+        prepay_amount: '480.00', coverage_visit_count: null, coverage_service_type: null,
+        dispute_suspended_at: '2026-07-05T14:00:00Z',
+      };
+      const paidDues = {
+        id: 'pay-dues-1', status: 'paid', amount: '89.00',
+        payment_date: '2026-07-06', refund_status: null, refund_amount: null,
+      };
+      const priorWriteQ = query();
+      const stampModeQ = query();
+      const markerClearQ = query();
+      const conn = makeConn({
+        'annual_prepay_terms as t': [query({ rows: [markedTerm] })],
+        annual_prepay_terms: [priorWriteQ, markerClearQ],
+        customers: [
+          query({ first: { billing_mode: null } }), // stamp prior-mode read
+          stampModeQ, // billing_mode re-stamp
+          query({ first: { id: 'cust-1' } }), // dues credit row lock
+        ],
+        payments: [query({ rows: [paidDues] })],
+        customer_credit_ledger: [
+          query({ first: undefined }), // dues credit dedupe check
+          query({ rows: [] }), // reversal-recovery grants scan
+        ],
+      });
+      conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+      db.mockImplementation(() => query({ columnInfo: SS_COLS }));
+
+      const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
+
+      expect(summary.disputeRecovered).toBe(1);
+      expect(stampModeQ.update).toHaveBeenCalledWith(expect.objectContaining({ billing_mode: 'annual_prepay' }));
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: 89,
+        createdBy: 'system:annual_prepay_dispute_dues',
+      }), conn);
+      expect(markerClearQ.update).toHaveBeenCalledWith(expect.objectContaining({ dispute_suspended_at: null }));
+    });
+  });
+
+  describe('dispute-window monthly dues claw-back (Codex round-3 P1)', () => {
+    const MARKED_TERM = {
+      id: 'term-1', customer_id: 'cust-1', status: 'active',
+      term_start: '2026-07-01', term_end: '2027-07-01',
+      dispute_suspended_at: '2026-07-05T14:00:00Z',
+    };
+
+    test('paid dues inside the dispute window credit back and the marker clears', async () => {
+      const markerClearQ = query();
+      const conn = makeConn({
+        payments: [query({
+          rows: [{ id: 'pay-dues-1', status: 'paid', amount: '89.00', payment_date: '2026-07-06', refund_status: null, refund_amount: null }],
+        })],
+        customers: [query({ first: { id: 'cust-1' } })], // row lock
+        customer_credit_ledger: [query({ first: undefined })], // no dup marker
+        annual_prepay_terms: [markerClearQ],
+      });
+
+      const summary = await AnnualPrepayRenewals.finishDisputeRecoveryForTerm(MARKED_TERM, conn);
+
+      expect(summary).toEqual({ credited: 1, pending: 0 });
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: 89,
+        createdBy: 'system:annual_prepay_dispute_dues',
+        note: expect.stringContaining('(term term-1, dues payment pay-dues-1)'),
+      }), conn);
+      expect(markerClearQ.update).toHaveBeenCalledWith(expect.objectContaining({ dispute_suspended_at: null }));
+    });
+
+    test('processing (in-flight ACH) dues defer: no credit, marker kept for the next sync/sweep', async () => {
+      const conn = makeConn({
+        payments: [query({
+          rows: [{ id: 'pay-dues-2', status: 'processing', amount: '89.00', payment_date: '2026-07-06', refund_status: null, refund_amount: null }],
+        })],
+        // NO annual_prepay_terms queue: a marker-clear attempt would throw
+        // and fail this test.
+      });
+
+      const summary = await AnnualPrepayRenewals.finishDisputeRecoveryForTerm(MARKED_TERM, conn);
+
+      expect(summary).toEqual({ credited: 0, pending: 1 });
+      expect(postCreditMovement).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('deferred'));
+    });
+
+    test('refund-touched dues go to operator follow-up: no auto-credit, marker still clears', async () => {
+      const markerClearQ = query();
+      const conn = makeConn({
+        payments: [query({
+          rows: [{ id: 'pay-dues-3', status: 'paid', amount: '89.00', payment_date: '2026-07-06', refund_status: 'partial', refund_amount: '20.00' }],
+        })],
+        annual_prepay_terms: [markerClearQ],
+      });
+
+      const summary = await AnnualPrepayRenewals.finishDisputeRecoveryForTerm(MARKED_TERM, conn);
+
+      expect(summary).toEqual({ credited: 0, pending: 0 });
+      expect(postCreditMovement).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('refund activity'));
+      expect(markerClearQ.update).toHaveBeenCalledWith(expect.objectContaining({ dispute_suspended_at: null }));
+    });
+
+    test('no marker on the term → no-op', async () => {
+      const conn = makeConn({});
+      const summary = await AnnualPrepayRenewals.finishDisputeRecoveryForTerm({ ...MARKED_TERM, dispute_suspended_at: null }, conn);
+      expect(summary).toEqual({ credited: 0, pending: 0 });
+      expect(conn).not.toHaveBeenCalled();
+    });
+
+    test('won-dispute reactivation runs the claw-back end to end through syncTermForInvoicePayment', async () => {
+      const PENDING_MARKED = {
+        id: 'term-s', customer_id: 'cust-1', status: 'payment_pending',
+        prepay_amount: null, coverage_visit_count: null, coverage_service_type: null,
+        term_start: '2026-07-01', term_end: '2027-07-01',
+        dispute_suspended_at: '2026-07-05T14:00:00Z',
+      };
+      const ACTIVE_MARKED = { ...PENDING_MARKED, status: 'active' };
+      const stampModeQ = query();
+      const markerClearQ = query();
+      const conn = makeConn({
+        annual_prepay_terms: [
+          query({ rows: [PENDING_MARKED] }), // terms select for the paid invoice
+          query({ returning: [ACTIVE_MARKED] }), // pending→active flip (marker survives)
+          query({ returning: [ACTIVE_MARKED] }), // refreshTermSnapshot snapshot update
+          query(), // prior_billing_mode record on the term
+          markerClearQ, // marker clear after clean claw-back
+          query({ rows: [] }), // decided-coverage select
+        ],
+        customers: [
+          query({ columnInfo: {} }), // syncCustomerRenewalDate probe
+          query({ first: { billing_mode: 'per_application' } }), // stamp prior-mode read
+          stampModeQ, // billing_mode stamp
+          query({ first: { id: 'cust-1' } }), // dues credit row lock
+        ],
+        scheduled_services: [
+          query(), // attachScheduledServices window update (no coverage config)
+          query({ first: undefined }), // findLastScheduledServiceForTerm
+        ],
+        payments: [query({
+          rows: [{ id: 'pay-dues-1', status: 'paid', amount: '89.00', payment_date: '2026-07-06', refund_status: null, refund_amount: null }],
+        })],
+        customer_credit_ledger: [query({ first: undefined })], // dues dedupe check
+      });
+      conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+      db.mockImplementation(() => query({ columnInfo: SS_COLS }));
+
+      await AnnualPrepayRenewals.syncTermForInvoicePayment(
+        { id: 'prepay-inv-1', status: 'paid', paid_at: '2026-07-09' },
+        conn,
+      );
+
+      expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1',
+        delta: 89,
+        createdBy: 'system:annual_prepay_dispute_dues',
+      }), conn);
+      expect(markerClearQ.update).toHaveBeenCalledWith(expect.objectContaining({ dispute_suspended_at: null }));
     });
   });
 

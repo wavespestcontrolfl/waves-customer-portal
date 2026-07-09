@@ -901,6 +901,116 @@ async function reversePendingWindowCompletionCredits(term, conn = db, { visitId 
   return reversedCount;
 }
 
+// A dispute on the annual-prepay invoice restores a prior-monthly customer to
+// monthly billing (mid-dispute visits must not go out free — GUARD 5 excludes
+// dispute-suspended terms), so the monthly cron legitimately collects dues
+// while the dispute is open. A WON dispute / re-collection reinstates the
+// annual for the same coverage window, so dues collected during the dispute
+// double-charge the covered months (Codex #2533 round-3 P1) — return them as
+// account credit. Dues payments are matched the same way the cron's own
+// already-charged dedupe matches them: metadata.billed_month stamp bounded to
+// the term's obligation months, with the legacy description fallback for
+// pre-stamp rows; both bounded to the dispute window (dispute_suspended_at →
+// now, so an earlier legitimately-billed month can never claw back). Only
+// 'paid' collections credit — a 'processing' ACH can still fail, so it defers
+// (pending) and the caller keeps the dispute marker; the daily sweep re-enters
+// until it resolves. Refund-touched dues rows go to operator follow-up (the
+// collectible amount is a judgment call), same as the visit-slice leg.
+// Ledger-deduped per term+payment under the customer row lock, same
+// atomic-once shape as the pending-completion grants.
+const DISPUTE_DUES_CREDIT_BY = 'system:annual_prepay_dispute_dues';
+
+async function reconcileDisputeWindowMonthlyDues(term, conn = db) {
+  const summary = { credited: 0, pending: 0 };
+  try {
+    if (!term?.id || !term.customer_id || !term.dispute_suspended_at) return summary;
+    const disputeStartDate = dateOnly(term.dispute_suspended_at);
+    const termStartMonth = String(dateOnly(term.term_start) || '').slice(0, 7);
+    const termEndMonth = String(dateOnly(term.term_end) || '').slice(0, 7);
+    if (!disputeStartDate || !termStartMonth || !termEndMonth) return summary;
+    const duesRows = await conn('payments')
+      .where({ customer_id: term.customer_id })
+      .whereIn('status', ['paid', 'processing'])
+      .where('payment_date', '>=', disputeStartDate)
+      .where(function duesShape() {
+        this.where(function stampedDues() {
+          this.whereRaw("metadata->>'billed_month' >= ?", [termStartMonth])
+            .whereRaw("metadata->>'billed_month' <= ?", [termEndMonth]);
+        }).orWhere(function legacyDues() {
+          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+            .where('description', 'like', '%WaveGuard Monthly%');
+        });
+      })
+      .select('id', 'status', 'amount', 'payment_date', 'refund_status', 'refund_amount');
+    for (const dues of duesRows) {
+      if (String(dues.status || '').toLowerCase() !== 'paid') {
+        logger.warn(`[annual-prepay] dispute-window dues payment ${dues.id} still ${dues.status} — credit deferred until it resolves`);
+        summary.pending += 1;
+        continue;
+      }
+      if (dues.refund_status || Number(dues.refund_amount) > 0) {
+        logger.warn(`[annual-prepay] dispute-window dues payment ${dues.id} has refund activity — operator follow-up needed, not auto-credited`);
+        continue;
+      }
+      const amount = Number(dues.amount) || 0;
+      if (!(amount > 0)) continue;
+      const marker = `(term ${term.id}, dues payment ${dues.id})`;
+      const creditOnce = async (t) => {
+        await t('customers').where({ id: term.customer_id }).forUpdate().first('id');
+        const dup = await t('customer_credit_ledger')
+          .where({ customer_id: term.customer_id, created_by: DISPUTE_DUES_CREDIT_BY })
+          .where('note', 'like', `%${marker}%`)
+          .first('id');
+        if (dup) return false;
+        const { postCreditMovement } = require('./customer-credit');
+        await postCreditMovement({
+          customerId: term.customer_id,
+          delta: amount,
+          source: 'adjustment',
+          note: `Annual prepay reinstated after dispute — monthly dues collected during the dispute window returned as account credit ${marker}`,
+          createdBy: DISPUTE_DUES_CREDIT_BY,
+        }, t);
+        return true;
+      };
+      try {
+        const credited = conn === db ? await db.transaction(creditOnce) : await creditOnce(conn);
+        if (credited) summary.credited += 1;
+      } catch (err) {
+        logger.warn(`[annual-prepay] dispute-window dues credit skipped for payment ${dues.id}: ${err.message}`);
+        summary.pending += 1;
+      }
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] dispute-window dues reconcile skipped for term ${term?.id}: ${err.message}`);
+    summary.pending += 1;
+  }
+  return summary;
+}
+
+// Shared tail of every dispute-recovery path (won-dispute reactivation,
+// decided-coverage restore, daily sweep): claw back dispute-window dues,
+// then — only when nothing deferred — clear the dispute marker. Keeping the
+// marker until the follow-ups run clean is what makes the recovery
+// re-enterable: a crash, a swallowed error, or an in-flight ACH leaves the
+// marker in place and the next sync / daily sweep finishes the job.
+async function finishDisputeRecoveryForTerm(term, conn = db) {
+  const summary = { credited: 0, pending: 0 };
+  if (!term?.id || !term.dispute_suspended_at) return summary;
+  const dues = await reconcileDisputeWindowMonthlyDues(term, conn);
+  summary.credited += dues.credited;
+  summary.pending += dues.pending;
+  if (!summary.pending) {
+    try {
+      await conn('annual_prepay_terms')
+        .where({ id: term.id })
+        .update({ dispute_suspended_at: null, updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[annual-prepay] dispute marker clear skipped for term ${term.id}: ${err.message}`);
+    }
+  }
+  return summary;
+}
+
 // When a paid prepay invoice is voided/refunded the term flips to 'cancelled',
 // but its not-yet-completed covered visits keep the per-visit prepaid_amount
 // stamp that suppresses completion billing — so they'd be serviced free even
@@ -1166,17 +1276,16 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   for (const term of terms) {
     let current = term;
     if (nextStatus === 'active' && term.status === PAYMENT_PENDING_STATUS) {
-      const reactivation = { status: 'active', updated_at: new Date() };
-      // A dispute-suspended term returning to active (won dispute /
-      // re-collection) sheds its suspension marker, or GUARD 5 would treat
-      // a LATER unrelated payment_pending hop as dispute-suspended and
-      // wrongly lift the monthly-billing suppression. Column-guarded.
-      if ((await annualPrepayColumns(conn)).dispute_suspended_at) {
-        reactivation.dispute_suspended_at = null;
-      }
+      // NOTE: reactivation deliberately does NOT clear dispute_suspended_at
+      // here — the marker must survive until the dispute-window follow-ups
+      // below (dues claw-back) complete, or a crash between this flip and
+      // those follow-ups loses them forever (the retry would find no
+      // marker). It is cleared after the follow-ups run clean; GUARD 5 is
+      // unaffected either way (it only reads the marker on payment_pending
+      // rows).
       const [updated] = await conn('annual_prepay_terms')
         .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
-        .update(reactivation)
+        .update({ status: 'active', updated_at: new Date() })
         .returning('*');
       current = updated || term;
     } else if (nextStatus === 'cancelled') {
@@ -1226,6 +1335,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // is where the pending case picks up its stamp. Idempotent re-stamp
       // for already-active terms; best-effort + column-guarded inside.
       await stampAnnualPrepayBillingMode(current.customer_id, conn, current.id);
+      // Dispute-suspended term returning to life (won dispute /
+      // re-collection): monthly dues the cron collected during the open
+      // dispute double-charge the reinstated coverage — claw them back,
+      // then clear the marker once nothing is deferred (Codex round-3 P1).
+      if (current.dispute_suspended_at) {
+        await finishDisputeRecoveryForTerm(current, conn);
+      }
       results.push(refreshed || current);
     } else {
       results.push(current);
@@ -1269,6 +1385,14 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         };
         await applyPrepaidCoverageForTerm(normalized, conn);
         await reconcilePendingWindowCompletions(normalized, conn);
+        // Dues claw-back + marker clear LAST: a failure anywhere above
+        // leaves the marker set, and the daily sweep's marker leg finishes
+        // the restore within a day (Codex round-3 P2 — this block is
+        // deliberately best-effort because it runs on EVERY paid-invoice
+        // sync, so throwing here would poison unrelated payment events).
+        if (decidedTerm.dispute_suspended_at) {
+          await finishDisputeRecoveryForTerm(decidedTerm, conn);
+        }
       }
     } catch (err) {
       logger.warn(`[annual-prepay] decided-coverage restore skipped for invoice ${invoice.id}: ${err.message}`);
@@ -1504,6 +1628,18 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
     .select('*');
   for (const term of decided) {
     logger.warn(`[annual-prepay] term ${term.id} has decided coverage on disputed invoice ${invoiceId} — status kept (renewal state), coverage suspends via the decided paid-invoice gate once the invoice reopens`);
+    // Decided terms keep their status but still get the dispute marker: it
+    // anchors the dues claw-back window when the dispute is won, and its
+    // survival marks an incomplete restore for the daily sweep to finish.
+    // whereNull so a webhook replay never slides the window start forward
+    // past dues already collected. GUARD 5 is untouched — it only reads the
+    // marker on payment_pending rows, and decided statuses never are.
+    if (termCols.dispute_suspended_at) {
+      await conn('annual_prepay_terms')
+        .where({ id: term.id })
+        .whereNull('dispute_suspended_at')
+        .update({ dispute_suspended_at: new Date(), updated_at: new Date() });
+    }
     // Decided-term stamps must clear exactly like the suspended terms above
     // (Codex #2533 round-2 P1): a stamped visit completing mid-dispute
     // bills per-visit (the coverage gate correctly refuses the suspended
@@ -1530,8 +1666,9 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
  * error (every caller swallows; activatePaidPendingTerms can't recover them
  * because the covering term is already ACTIVE and its join only selects
  * payment_pending terms). Also closes the crash window between the term's
- * pending→active flip and its first reconcile. Two idempotent legs per
- * live covered term:
+ * pending→active flip and its first reconcile, and finishes any
+ * dispute-restore a swallowed error left incomplete (marker leg below).
+ * Idempotent legs per live covered term:
  *   1. Re-run reconcilePendingWindowCompletions — settles/credits any
  *      pending-window completion whose one-shot hook was lost (the settle
  *      no-ops on covered invoices; the credit is ledger-deduped).
@@ -1543,7 +1680,7 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
  * Best-effort per term; a failure on one term never blocks the rest.
  */
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
-  const summary = { terms: 0, settled: 0, credited: 0, reversed: 0 };
+  const summary = { terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 };
   if (!(await annualPrepayTableExists())) return summary;
   let terms = [];
   try {
@@ -1554,6 +1691,25 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   }
   for (const term of terms) {
     summary.terms += 1;
+    // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
+    // dispute_suspended_at means the dispute resolved (coverage requires the
+    // prepay invoice paid again) but the one-shot won-dispute restore didn't
+    // finish — its errors are swallowed on the paid-invoice sync, and
+    // nothing else re-enters it. Finish the restore here: re-stamp coverage
+    // + billing mode (idempotent; skips foreign-term and out-of-band
+    // stamps), claw back dispute-window dues, and clear the marker only
+    // when nothing deferred. Bounds any lost restore to one sweep cycle.
+    if (term.dispute_suspended_at) {
+      try {
+        const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+        await applyPrepaidCoverageForTerm(normalized, conn);
+        await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+        const recovery = await finishDisputeRecoveryForTerm(term, conn);
+        summary.disputeRecovered += recovery.credited;
+      } catch (err) {
+        logger.warn(`[annual-prepay] sweep dispute-recovery leg failed for term ${term.id}: ${err.message}`);
+      }
+    }
     const res = await reconcilePendingWindowCompletions(term, conn);
     summary.settled += res.settled || 0;
     summary.credited += res.credited || 0;
@@ -1585,7 +1741,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
       logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
     }
   }
-  if (summary.settled || summary.credited || summary.reversed) {
+  if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
   }
   return summary;
@@ -2720,6 +2876,8 @@ module.exports = {
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
   reconcilePendingWindowCompletions,
+  reconcileDisputeWindowMonthlyDues,
+  finishDisputeRecoveryForTerm,
   reversePendingWindowCompletionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,

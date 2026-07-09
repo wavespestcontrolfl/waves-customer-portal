@@ -1559,12 +1559,10 @@ describe('annual_prepay billing_mode stamp timing', () => {
     };
     const ACTIVE = { ...PENDING, status: 'active' };
     const stampQ = query({});
-    const transitionQ = query({ returning: [ACTIVE] });
     setDbQueues({
       annual_prepay_terms: [
         query({ rows: [PENDING] }), // terms select for the paid invoice
-        query({ columnInfo: { prior_billing_mode: {}, dispute_suspended_at: {} } }), // annualPrepayColumns (reactivation marker guard)
-        transitionQ, // pending→active transition update
+        query({ returning: [ACTIVE] }), // pending→active transition update
         query({ returning: [ACTIVE] }), // refreshTermSnapshot snapshot update
         query({}), // prior_billing_mode record on the term
       ],
@@ -1585,11 +1583,6 @@ describe('annual_prepay billing_mode stamp timing', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('active');
-    // Reactivation sheds the dispute-suspension marker so GUARD 5 never
-    // misreads a later unrelated payment_pending hop as dispute-suspended.
-    expect(transitionQ.update).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'active', dispute_suspended_at: null }),
-    );
     expect(stampQ.update).toHaveBeenCalledWith(
       expect.objectContaining({ billing_mode: 'annual_prepay' }),
     );
