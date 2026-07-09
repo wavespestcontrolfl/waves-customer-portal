@@ -1,8 +1,8 @@
 // Lawn Report V2 — customer-facing visual insight layer.
 //
-// Presentational components ONLY: every component is driven by props so they can
-// render from the eventual `/api/reports/:token/data` payload (and from mock data
-// in the dev preview at /report-v2-preview). Lightweight inline SVG/CSS — no
+// Presentational components ONLY: every component is driven by props and renders
+// from the live `/api/reports/:token/data` payload's `reportV2` key (the dev
+// preview page was removed once V2 went live). Lightweight inline SVG/CSS — no
 // charting dependency. Customer-surface warm tokens (NOT the admin monochrome).
 //
 // Honest-copy rules baked in here are presentation-side guards only — the real

@@ -207,7 +207,6 @@ const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocols
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
 const AdminPhotoAssessmentsPage = lazyWithRetry(() => import('./pages/admin/PhotoAssessmentsPage'));
-const LawnReportV2Preview = lazyWithRetry(() => import('./pages/LawnReportV2Preview'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
@@ -241,7 +240,6 @@ const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'))
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
-const TrackPreviewPage = lazyWithRetry(() => import('./pages/TrackPreviewPage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
 const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
@@ -263,7 +261,6 @@ const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareInclude
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterLandingPage = lazyWithRetry(() => import('./pages/NewsletterLandingPage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
-const ButtonExamples = lazyWithRetry(() => import('./pages/ButtonExamples'));
 
 function EstimatePublicGateway() {
   const { token } = useParams();
@@ -362,7 +359,6 @@ export default function App() {
           <Route path="/report/project/:token" element={<WavesShell><ProjectReportViewPage /></WavesShell>} />
           <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
           <Route path="/recap/:token" element={<WavesShell><RecapViewPage /></WavesShell>} />
-          {import.meta.env.DEV && <Route path="/report-v2-preview" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportV2Preview /></Suspense>} />}
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
@@ -370,7 +366,6 @@ export default function App() {
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
-          <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
@@ -387,7 +382,6 @@ export default function App() {
           <Route path="/quote" element={<Navigate to="/estimate" replace />} />
           <Route path="/newsletter" element={<Suspense fallback={<div style={{background:'#1B2C5B',minHeight:'100vh'}}/>}><NewsletterLandingPage /></Suspense>} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
-          <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
           <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
