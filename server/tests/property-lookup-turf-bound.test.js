@@ -121,6 +121,18 @@ describe('turfRiskReasons clamp reason', () => {
     const reasons = turfRiskReasons({ estimatedTurfSf: 6000, lotSqFt: 10043 });
     expect(reasons.some((r) => r.includes('clamped'))).toBe(false);
   });
+
+  it('flags a vision estimate above the county-facts ceiling — and only above it', () => {
+    // Lot large enough that the %-of-lot reason cannot fire (isolates the
+    // ceiling reason).
+    const over = turfRiskReasons({ estimatedTurfSf: 8000, footprintTurfSf: 5442, lotSqFt: 20000 });
+    expect(over.some((r) => r.includes('county-facts ceiling of 5,442 sq ft'))).toBe(true);
+    const under = turfRiskReasons({ estimatedTurfSf: 4000, footprintTurfSf: 5442, lotSqFt: 20000 });
+    expect(under.some((r) => r.includes('ceiling'))).toBe(false);
+    // No ceiling available → no reason.
+    const none = turfRiskReasons({ estimatedTurfSf: 8000, lotSqFt: 20000 });
+    expect(none.some((r) => r.includes('ceiling'))).toBe(false);
+  });
 });
 
 describe('gate interaction (intentional behavior change)', () => {

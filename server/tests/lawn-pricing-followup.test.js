@@ -506,7 +506,13 @@ describe('lawn pricing production follow-up', () => {
 
     expect(profile.imperviousSurfacePercent).toBeUndefined();
     expect(profile.imperviosSurfacePercent).toBeUndefined();
-    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    // County turf prior (2026-07): with county lot+building on the record
+    // and no vision estimate, the profile seeds estimatedTurfSf at 50% of
+    // the county ceiling ((10000 − 2000) × 0.5) — pricing reads the seed
+    // instead of the legacy hardscape fallback.
+    expect(profile.estimatedTurfSf).toBe(4000);
+    expect(profile.turfSource).toBe('county_prior');
+    expect(property.turfBasis).toBe('estimatedTurfSf');
   });
 
   test('profile builder copies legacy impervious value into corrected field', () => {

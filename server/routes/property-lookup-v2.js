@@ -59,6 +59,23 @@ const TURF_REVIEW_THRESHOLD_SQFT = 15000;
 const TURF_MANUAL_CONFIRMATION_SQFT = 20000;
 const TURF_HIGH_LOT_RATIO = 0.55;
 const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH', 'PLUGGING']);
+// County-facts turf prior (2026-07-09 shadow-delta judgment, 95 paired prod
+// lookups): the vision estimate sits at ~half the deterministic county-facts
+// ceiling (lot − building footprint − assessed impervious) — vision/ceiling
+// median 0.54, IQR 0.45–0.66; vision exceeded the ceiling on only 4/95.
+// When vision produced NO turf number, seeding at this ratio beats the
+// pricing engine's lot-based fallback, which lands near the ceiling itself
+// (~2× what real lawns measure). Applied positively-eligible only —
+// residential, non-shared-turf type, ceiling big enough to be a real yard —
+// and always paired with a HIGH-priority verify flag.
+// Kill switch: TURF_COUNTY_PRIOR_DISABLED=1 (no deploy).
+const TURF_COUNTY_PRIOR_RATIO = 0.5;
+const TURF_COUNTY_PRIOR_MIN_CEILING_SF = 500;
+const turfCountyPriorDisabled = () => ['1', 'true'].includes(String(process.env.TURF_COUNTY_PRIOR_DISABLED || '').toLowerCase());
+// Shared-turf residential types whose treatable lawn legitimately spans
+// beyond their own parcel — one pattern for the parcel turf cap and the
+// county prior so the exemptions can't drift apart.
+const SHARED_TURF_TYPE_RE = /CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/;
 
 function positiveIntEnv(name, fallback) {
   const n = Number(process.env[name]);
@@ -1285,6 +1302,31 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ? rc.propertyType
       : (visionPropertyType || 'Single Family');
 
+  // County-facts turf prior: vision produced no turf number (satellite miss,
+  // obstructed imagery, brand-new construction) but the county roll gave
+  // lot + building + assessed impervious. Seed the estimate at
+  // TURF_COUNTY_PRIOR_RATIO × that ceiling instead of leaving 0 — the
+  // pricing engine's lot-based fallback otherwise prices near the ceiling
+  // itself. Never silent: a HIGH-priority verify flag rides with it below.
+  const visionTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf) || 0;
+  const countyTurfPriorSf = (
+    !visionTurfSf
+    && !commercialProfile
+    && !turfCountyPriorDisabled()
+    && footprintTurf
+    && footprintTurf.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
+    && !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase())
+  ) ? Math.round(footprintTurf.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
+
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
+  if (countyTurfPriorSf) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `No AI turf estimate — seeded ${countyTurfPriorSf.toLocaleString()} sq ft from county records (${Math.round(TURF_COUNTY_PRIOR_RATIO * 100)}% of lot − building − assessed hardscape). Verify treatable lawn area.`,
+      priority: 'HIGH',
+    });
+  }
+
   const landscapeComplexity = ai?.landscapeComplexity || 'MODERATE';
   const footprintSf = rc?.squareFootage
     ? Math.round(rc.squareFootage / (rc.stories || 1))
@@ -1388,7 +1430,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ── TURF ──
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
-    estimatedTurfSf: ai?.estimatedTurfSf || 0,
+    estimatedTurfSf: visionTurfSf || countyTurfPriorSf || 0,
+    // 'vision' = satellite estimate; 'county_prior' = seeded from the county
+    // ceiling (see countyTurfPriorSf above); 'none' = no basis — pricing
+    // falls back to its lot-based estimate.
+    turfSource: visionTurfSf ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
+    countyTurfPriorSf,
     // Shadow comparison fields — see computeFootprintTurf. Not a pricing
     // input; estimatedTurfSf above remains the engine's turf source.
     footprintTurfSf: footprintTurf ? footprintTurf.turfSf : null,
@@ -1514,7 +1561,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
     addressAudit,
-    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai, addressAudit),
+    fieldVerifyFlags,
 
     // ── DATA SOURCE TRACKING ──
     dataSources: {
@@ -1526,16 +1573,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     }
   };
 
-  // Shadow signal for the footprint-turf rollout decision: how far the
-  // vision estimate sits from the deterministic county-facts ceiling.
+  // Shadow signal comparing the VISION estimate against the deterministic
+  // county-facts ceiling (a county-prior seed would compare the ceiling with
+  // itself and pollute the series). Judged 2026-07-09 across 95 lookups
+  // (median −46%) — kept running so the ratio can be re-checked over time.
   // Coarse fields only (no address/parcel values — PII rule).
-  if (footprintTurf && !commercialProfile && profile.estimatedTurfSf > 0) {
+  if (footprintTurf && !commercialProfile && visionTurfSf > 0) {
     const deltaPct = Math.round(
-      ((profile.estimatedTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
+      ((visionTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
     ) / 10;
     logger.info('[turf-footprint] shadow comparison', {
       footprintTurfSf: footprintTurf.turfSf,
-      estimatedTurfSf: profile.estimatedTurfSf,
+      estimatedTurfSf: visionTurfSf,
       deltaPct,
       imperviousKnown: footprintTurf.parts.imperviousKnown,
       county: profile.county || null,
@@ -1721,7 +1770,7 @@ function applyParcelTurfBound(aiAnalysis, propertyRecord) {
   const typeTrusted = String(typeEvidence?.sourceType || '').toLowerCase() === 'satellite'
     || recordCommercialSignalTrusted(propertyRecord);
   const propertyType = typeTrusted ? String(propertyRecord.propertyType || '').toUpperCase() : '';
-  if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
+  if (SHARED_TURF_TYPE_RE.test(propertyType)) return aiAnalysis;
 
   const bound = parcelTurfBoundSqft(propertyRecord);
   if (!bound) return aiAnalysis;
@@ -1758,6 +1807,14 @@ function turfRiskReasons(source = {}) {
 
   if (lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO) {
     reasons.push(`estimated turf is ${Math.round((estimatedTurfSf / lotSqFt) * 100)}% of lot`);
+  }
+  // Above the county-facts ceiling (lot − building − assessed impervious) —
+  // observed on only 4/95 prod lookups, always an obstructed-imagery
+  // overshoot. Pricing already caps at its own plausible max; this surfaces
+  // the disagreement to the operator.
+  const countyCeilingSf = firstNonNegativeNumber(source.footprintTurfSf);
+  if (countyCeilingSf > 0 && estimatedTurfSf && estimatedTurfSf > countyCeilingSf) {
+    reasons.push(`exceeds the county-facts ceiling of ${Math.round(countyCeilingSf).toLocaleString()} sq ft (lot − building − assessed hardscape)`);
   }
   if (aiConfidence !== undefined && aiConfidence < 60) reasons.push(`AI confidence ${aiConfidence}%`);
   if (treeDensity === 'HEAVY') reasons.push('heavy tree canopy');
@@ -2460,6 +2517,9 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     ...ai,
     lotSqFt: rc?.lotSize,
     aiConfidence: ai?.confidenceScore,
+    // County-facts ceiling for the exceeds-ceiling reason — ai carries no
+    // county figures; the profile path passes its own footprintTurfSf.
+    footprintTurfSf: computeFootprintTurf(rc)?.turfSf,
   });
   if (estimatedTurfSf > 0 && turfReviewReasons.length > 0) {
     flags.push({
