@@ -678,6 +678,15 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         .orderBy('created_at', 'desc')
         .first();
       if (!invoice) continue;
+      // Payer-billed visit: the money (owed or collected) is the PAYER's AR,
+      // not the homeowner's — settling it as homeowner coverage or crediting
+      // the homeowner a slice for the payer's money are both wrong. The
+      // settle helper refuses payer invoices already; skip before the credit
+      // leg too and leave the slice for operator follow-up.
+      if (invoice.payer_id) {
+        logger.warn(`[annual-prepay] pending-completion slice for visit ${row.id} skipped — invoice ${invoice.id} is payer-billed; operator follow-up needed`);
+        continue;
+      }
       const invoiceStatus = String(invoice.status || '').toLowerCase();
       // Coverage-settled by a prepay term (this or another) — delivered; the
       // refund reopen path owns any reversal. A bare 'prepaid' WITHOUT the
@@ -1313,6 +1322,121 @@ async function activatePaidPendingTerms(conn = db) {
     activated.push(...synced.filter((term) => ACTIVE_STATUSES.includes(term.status)));
   }
   return activated;
+}
+
+/**
+ * A chargeback (charge.dispute.created) on the prepay invoice provisionally
+ * claws the money back, so paid coverage must SUSPEND — not cancel — while
+ * the dispute is open. Flipping active/renewal_pending terms back to
+ * payment_pending reuses the existing state machine end to end:
+ *   - coveredTermsAsOf stops covering (the reopened invoice is 'overdue',
+ *     so the paid-pending branch fails) → completions bill normally and the
+ *     monthly cron's covered-set guard no longer suppresses on coverage —
+ *     while getPaymentPendingCustomerIds keeps monthly billing suppressed on
+ *     the open prepay invoice, so the customer is never double-billed
+ *     mid-dispute.
+ *   - Dispute WON restores the payment row + invoice to paid → the normal
+ *     payment sync flips the term back active and its reconcile makes any
+ *     visits that billed during the dispute whole (idempotent).
+ *   - Dispute LOST runs the refund-shaped sync (caller's job) → term
+ *     cancels with the full claw-back (stamps cleared, covered invoices
+ *     reopened, pending-window credits reversed, billing mode reset).
+ * A re-collection (customer re-pays the reopened invoice) also flips the
+ * term back active through the ordinary paid path.
+ * Decided-coverage terms (renewed / switch_plan / decided lapse) are NOT
+ * suspended — their renewal-flow state would be destroyed; they stay
+ * covered until a LOST dispute cancels them, and the admin dispute
+ * notification covers the interim. Conditional UPDATE = idempotent on
+ * Stripe retries. renewal_pending demotes to payment_pending and returns
+ * as 'active' on a won dispute; the renewal alert recomputes from dates,
+ * so only the contacted flag's status is lost — acceptable, logged.
+ */
+async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
+  if (!invoiceId || !(await annualPrepayTableExists())) return [];
+  const suspended = await conn('annual_prepay_terms')
+    .where({ prepay_invoice_id: invoiceId })
+    .whereIn('status', ACTIVE_STATUSES)
+    .update({ status: PAYMENT_PENDING_STATUS, updated_at: new Date() })
+    .returning('*');
+  const rows = Array.isArray(suspended) ? suspended : [];
+  for (const term of rows) {
+    logger.warn(`[annual-prepay] term ${term.id} suspended (active→payment_pending) — prepay invoice ${invoiceId} disputed`);
+  }
+  const decided = await conn('annual_prepay_terms')
+    .where({ prepay_invoice_id: invoiceId })
+    .whereIn('status', ['renewed', 'switch_plan'])
+    .select('id');
+  for (const term of decided) {
+    logger.warn(`[annual-prepay] term ${term.id} has decided coverage on disputed invoice ${invoiceId} — NOT suspended; a lost dispute cancels it, admin notified meanwhile`);
+  }
+  return rows;
+}
+
+/**
+ * Daily catch-all for the late-payment reconcile paths that otherwise fire
+ * exactly once from a payment/refund event and can be lost to a transient
+ * error (every caller swallows; activatePaidPendingTerms can't recover them
+ * because the covering term is already ACTIVE and its join only selects
+ * payment_pending terms). Also closes the crash window between the term's
+ * pending→active flip and its first reconcile. Two idempotent legs per
+ * live covered term:
+ *   1. Re-run reconcilePendingWindowCompletions — settles/credits any
+ *      pending-window completion whose one-shot hook was lost (the settle
+ *      no-ops on covered invoices; the credit is ledger-deduped).
+ *   2. Reversal recovery — a visit invoice that REFUNDED/VOIDED after its
+ *      slice credit was granted must give the credit back; if that one
+ *      webhook sync died, nothing retries it. Re-derive from the ledger:
+ *      every grant marker whose visit invoice is now cancelled gets the
+ *      (marker-deduped, balance-capped) reversal re-attempted.
+ * Best-effort per term; a failure on one term never blocks the rest.
+ */
+async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
+  const summary = { terms: 0, settled: 0, credited: 0, reversed: 0 };
+  if (!(await annualPrepayTableExists())) return summary;
+  let terms = [];
+  try {
+    terms = await coveredTermsAsOf(conn, dateOnly(today) || etDateString()).select('t.*');
+  } catch (err) {
+    logger.warn(`[annual-prepay] covered-term sweep query failed: ${err.message}`);
+    return summary;
+  }
+  for (const term of terms) {
+    summary.terms += 1;
+    const res = await reconcilePendingWindowCompletions(term, conn);
+    summary.settled += res.settled || 0;
+    summary.credited += res.credited || 0;
+    try {
+      const grants = await conn('customer_credit_ledger')
+        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+        .where('note', 'like', `%term ${term.id},%`)
+        .where('delta', '>', 0)
+        .select('note', 'invoice_id');
+      for (const grant of grants) {
+        const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
+        const visitId = visitMatch ? visitMatch[1] : null;
+        // The grant row carries the exact invoice the credit was issued
+        // against — check THAT invoice, not the visit's latest (a re-invoiced
+        // visit must not mask its refunded original, and a pre-grant void
+        // must not trigger a reversal).
+        if (!visitId || !grant.invoice_id) continue;
+        const grantInvoice = await conn('invoices')
+          .where({ id: grant.invoice_id })
+          .first('id', 'status');
+        if (!grantInvoice) continue;
+        const status = String(grantInvoice.status || '').toLowerCase();
+        if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
+        // The reversal is marker-deduped, so re-running for an
+        // already-reversed grant is a no-op.
+        summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
+    }
+  }
+  if (summary.settled || summary.credited || summary.reversed) {
+    logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
+  }
+  return summary;
 }
 
 /**
@@ -2400,6 +2524,8 @@ module.exports = {
   syncTermForInvoicePayment,
   syncTermForRefundedPayment,
   activatePaidPendingTerms,
+  suspendActiveTermsForDisputedInvoice,
+  reconcileCoveredTermsSweep,
   getActivelyCoveredCustomerIds,
   getPaymentPendingCustomerIds,
   getOpenRenewalAlerts,

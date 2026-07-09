@@ -2620,6 +2620,18 @@ async function handleDisputeCreated(dispute) {
         metadata: JSON.stringify({ ...createdPaymentMeta, dispute_invoice_id: invoice.id }),
       });
 
+      // Annual-prepay coverage must not ride on provisionally clawed-back
+      // money: SUSPEND (active → payment_pending, never cancel) any live
+      // term this invoice paid for. A won dispute restores the invoice to
+      // paid and the ordinary payment sync re-activates the term; a lost
+      // dispute cancels it via the refund-shaped sync in dispute-closed.
+      // Ordered BEFORE the invoice reopen: both writes are idempotent, and
+      // a crash between them retries into this block intact (the reopen's
+      // PI-clear would otherwise skip it). No .catch — critical-write
+      // discipline, the event must not be marked processed on failure.
+      await require('../services/annual-prepay-renewals')
+        .suspendActiveTermsForDisputedInvoice(invoice.id);
+
       await db('invoices').where({ id: invoice.id }).update({
         status: 'overdue',
         paid_at: null,
@@ -2775,6 +2787,21 @@ async function handleDisputeClosed(dispute) {
           stripe_charge_id: payment.stripe_charge_id || null,
         });
       }
+      // Annual-prepay sync on the restored money: a paid PREPAY invoice
+      // re-activates its dispute-suspended term (payment_pending → active)
+      // and re-runs the pending-window reconcile, so visits that billed
+      // per-application during the dispute settle/credit against the
+      // annual; a paid VISIT invoice re-enters the pending-window hook to
+      // resolve a slice the activation left in-flight. Fresh read — the
+      // restore above (or a replacement payment) decides the status this
+      // sync sees. Idempotent; no .catch (critical-write discipline).
+      if (invoice) {
+        const freshWonInvoice = await db('invoices').where({ id: invoice.id }).first();
+        if (freshWonInvoice) {
+          await require('../services/annual-prepay-renewals')
+            .syncTermForInvoicePayment(freshWonInvoice);
+        }
+      }
     } else if (status === 'lost') {
       // Money is gone for good. Set status explicitly — Stripe does not
       // guarantee dispute.created arrived first, so don't assume the
@@ -2800,6 +2827,18 @@ async function handleDisputeClosed(dispute) {
       // that newly paid invoice must not be flipped back to overdue.
       if (lostInvoice && ['paid', 'processing'].includes(lostInvoice.status)
         && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
+        // Persist the invoice binding (mirrors dispute-created): the reopen
+        // below clears the invoice's PI, so a Stripe retry of THIS event can
+        // only re-find the invoice — and re-run the prepay claw-back sync —
+        // through the metadata.
+        await db('payments').where({ id: payment.id }).update({
+          metadata: JSON.stringify({
+            ...closedPaymentMeta,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            dispute_invoice_id: lostInvoice.id,
+          }),
+        });
         await db('invoices').where({ id: lostInvoice.id }).update({
           status: 'overdue',
           paid_at: null,
@@ -2809,6 +2848,28 @@ async function handleDisputeClosed(dispute) {
           stripe_payment_intent_id: null,
           stripe_charge_id: null,
         });
+      }
+      // Annual-prepay claw-back: lost = the money is gone for good — the
+      // same semantics as a full refund. Run the refund-shaped sync
+      // whenever the DISPUTED payment (not a replacement) backed the
+      // invoice: on first delivery the PI still matches or the invoice sits
+      // reopened ('overdue') under this dispute's recorded binding; on a
+      // Stripe retry after the PI-clear above, the metadata binding decides.
+      // A replacement-paid invoice never matches either arm — its coverage
+      // is backed by real money and must survive. For a PREPAY invoice this
+      // cancels the term (stamps cleared, coverage-settled invoices
+      // reopened, pending-window credits reversed, billing mode restored);
+      // for a VISIT invoice the pending-window hook reverses that visit's
+      // slice credit. Idempotent; no .catch (critical-write discipline).
+      const lostDisputeOwnedInvoice = !!lostInvoice && (
+        (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
+        || (!lostInvoicePi
+          && String(lostInvoice.status || '').toLowerCase() === 'overdue'
+          && closedPaymentMeta.dispute_invoice_id === lostInvoice.id)
+      );
+      if (lostDisputeOwnedInvoice) {
+        await require('../services/annual-prepay-renewals')
+          .syncTermForInvoicePayment({ id: lostInvoice.id, status: 'refunded', paid_at: null });
       }
     }
   }

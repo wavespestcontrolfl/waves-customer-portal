@@ -34,6 +34,20 @@ class RenewalReminder {
       logger.error(`Annual prepay payment reminder failed: ${err.message}`);
     }
 
+    // Daily catch-all reconcile for live covered terms: recovers
+    // pending-window settle/credit/reversal work whose one-shot
+    // payment/refund hook was lost to a transient error (idempotent — see
+    // reconcileCoveredTermsSweep). Independent try/catch: a sweep failure
+    // must not silence the reminders below.
+    try {
+      const prepay = annualPrepay || require('../annual-prepay-renewals');
+      if (prepay.reconcileCoveredTermsSweep) {
+        await prepay.reconcileCoveredTermsSweep();
+      }
+    } catch (err) {
+      logger.error(`Annual prepay covered-term sweep failed: ${err.message}`);
+    }
+
     const renewalFields = [
       { column: 'termite_renewal_date', label: 'Termite Bond Renewal' },
       { column: 'mosquito_season_start', label: 'Mosquito Season' },
