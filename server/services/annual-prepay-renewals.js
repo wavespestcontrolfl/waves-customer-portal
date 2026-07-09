@@ -1357,7 +1357,10 @@ async function activatePaidPendingTerms(conn = db) {
  *     monthly cron's covered-set guard no longer suppresses on coverage —
  *     while getPaymentPendingCustomerIds keeps monthly billing suppressed on
  *     the open prepay invoice, so the customer is never double-billed
- *     mid-dispute.
+ *     mid-dispute. billing_mode is restored to the customer's prior mode
+ *     (below) so mid-dispute completions actually BILL per
+ *     application/monthly instead of hitting the annual-prepay completion
+ *     gate's never-invoice branch.
  *   - Dispute WON restores the payment row + invoice to paid → the normal
  *     payment sync flips the term back active and its reconcile makes any
  *     visits that billed during the dispute whole (idempotent).
@@ -1386,6 +1389,18 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
   const rows = Array.isArray(suspended) ? suspended : [];
   for (const term of rows) {
     logger.warn(`[annual-prepay] term ${term.id} suspended (active→payment_pending) — prepay invoice ${invoiceId} disputed`);
+    // A suspended term must not strand the customer in billing_mode
+    // 'annual_prepay': the completion gate deliberately never auto-invoices
+    // unpriced annual-prepay visits (uncovered = renewal flow's problem), so
+    // a visit completing mid-dispute would be serviced FREE. Restore the
+    // prior mode exactly like a cancel does (same replacement-coverage
+    // self-check, same prior_billing_mode restore) — completions bill
+    // per-application/monthly again while GUARD 5 keeps the monthly cron
+    // off the open prepay invoice. A won dispute re-pays the invoice and
+    // the payment sync's stampAnnualPrepayBillingMode re-stamps the mode
+    // (first-stamp-wins keeps the ORIGINAL prior). Best-effort like every
+    // billing_mode write.
+    await resetBillingModeAfterTermCancel(term, conn);
   }
   const decided = await conn('annual_prepay_terms')
     .where({ prepay_invoice_id: invoiceId })

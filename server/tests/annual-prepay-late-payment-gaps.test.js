@@ -26,7 +26,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   [
     'whereIn', 'whereNull', 'whereBetween', 'whereNotIn', 'whereNotNull',
     'orderBy', 'select', 'join', 'leftJoin', 'distinct', 'forUpdate',
-    'whereRaw', 'modify', 'orWhere', 'orWhereNotNull', 'limit',
+    'whereRaw', 'modify', 'orWhere', 'orWhereNotNull', 'limit', 'whereNot',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -132,16 +132,28 @@ describe('annual prepay late-payment gap fixes', () => {
   });
 
   describe('suspendActiveTermsForDisputedInvoice', () => {
-    test('flips active/renewal_pending terms to payment_pending; decided terms only logged', async () => {
+    test('flips active/renewal_pending terms to payment_pending, restores prior billing mode; decided terms only logged', async () => {
       const suspendQ = query({ returning: [{ ...COVERED_TERM, status: 'payment_pending' }] });
+      const replacementQ = query({ first: undefined }); // no replacement coverage
+      const priorQ = query({ first: { prior_billing_mode: 'per_application' } });
+      const customerResetQ = query();
       const decidedQ = query({ rows: [{ id: 'term-decided' }] });
-      const conn = makeConn({ annual_prepay_terms: [suspendQ, decidedQ] });
+      const conn = makeConn({
+        annual_prepay_terms: [suspendQ, replacementQ, priorQ, decidedQ],
+        customers: [customerResetQ],
+      });
+      conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
 
       const suspended = await AnnualPrepayRenewals.suspendActiveTermsForDisputedInvoice('prepay-inv-1', conn);
 
       expect(suspended).toHaveLength(1);
       expect(suspendQ.whereIn).toHaveBeenCalledWith('status', ['active', 'renewal_pending']);
       expect(suspendQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'payment_pending' }));
+      // Mid-dispute completions must BILL: the customer's billing_mode is
+      // restored to the recorded prior (guarded on currently-annual_prepay),
+      // exactly like the cancel path.
+      expect(customerResetQ.where).toHaveBeenCalledWith({ id: 'cust-1', billing_mode: 'annual_prepay' });
+      expect(customerResetQ.update).toHaveBeenCalledWith(expect.objectContaining({ billing_mode: 'per_application' }));
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('term term-1 suspended'));
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('term term-decided has decided coverage'));
     });
