@@ -11801,9 +11801,32 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // Per-message report state, keyed by message index: 'sending' | 'done' | 'error'.
+  const [reportState, setReportState] = useState({});
   const messagesEndRef = useRef(null);
   const sessionId = useRef(`chat-${Date.now()}`);
   const initialSentRef = useRef(false);
+
+  // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
+  // users must be able to flag AI-generated content for review).
+  const reportMessage = async (idx, content) => {
+    if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
+    setReportState(prev => ({ ...prev, [idx]: 'sending' }));
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
+        },
+        body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
+      });
+      if (!res.ok) throw new Error('report failed');
+      setReportState(prev => ({ ...prev, [idx]: 'done' }));
+    } catch {
+      setReportState(prev => ({ ...prev, [idx]: 'error' }));
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -11849,7 +11872,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
       const data = await res.json();
-      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749." }]);
+      // Only model-generated replies are reportable — the greeting and the
+      // hardcoded fallback/error strings are not AI output.
+      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false }]);
       if (data.escalated) {
         setMessages(prev => [...prev, { role: 'system', content: 'A team member has been notified and will follow up shortly.' }]);
       }
@@ -11921,7 +11946,8 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
-              display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              display: 'flex', flexDirection: 'column',
+              alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
               marginBottom: 10,
             }}>
               <div style={{
@@ -11944,6 +11970,29 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               }}>
                 {msg.content}
               </div>
+              {msg.reportable && (
+                reportState[i] === 'done' ? (
+                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Icon name="check" size={12} strokeWidth={2} /> Reported — our team will review this response.
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => reportMessage(i, msg.content)}
+                    disabled={reportState[i] === 'sending'}
+                    aria-label="Report this AI response as inappropriate"
+                    style={{
+                      border: 'none', background: 'transparent', cursor: 'pointer',
+                      fontSize: 12, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
+                      textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
+                    }}
+                  >
+                    {reportState[i] === 'sending' ? 'Reporting…'
+                      : reportState[i] === 'error' ? "Couldn't send report — try again"
+                      : 'Report this response'}
+                  </button>
+                )
+              )}
             </div>
           ))}
           {sending && (

@@ -245,6 +245,16 @@ app.use('/api/public/pest-identifier', (req, res, next) => {
   }
   next();
 });
+// The AI-content-report surface (default ON — MS Store policy 11.16 needs it
+// live; GATE_AI_CONTENT_REPORT=false kills it) carries the same contract:
+// while dark it must read 404 even for an IP that already exhausted the
+// global /api/ limiter. Mirrors requireAiContentReport in routes/ai-assistant.js.
+app.use('/api/ai/chat/report', (req, res, next) => {
+  if (process.env.GATE_AI_CONTENT_REPORT === 'false') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

@@ -381,7 +381,7 @@ async function loadOperatorInboxTasks() {
           this.where('status', 'snoozed').where('snoozed_until', '<=', db.fn.now());
         });
     })
-    .select('id', 'source', 'channel', 'priority', 'needs_reply', 'at_risk', 'title', 'summary', 'occurred_at', 'created_at')
+    .select('id', 'source', 'channel', 'priority', 'needs_reply', 'at_risk', 'title', 'summary', 'occurred_at', 'created_at', 'metadata')
     .orderBy('occurred_at', 'desc')
     .limit(12);
 
@@ -397,6 +397,11 @@ async function loadOperatorInboxTasks() {
       sourceLabel: 'Operator Inbox',
       sourceId: row.id,
       createdAt: row.occurred_at || row.created_at,
+      // metadata is part of the task fingerprint — attach it ONLY for
+      // ai_report rows (none can predate the constraint migration), so
+      // existing tasks' fingerprints and their handled-state overlays
+      // stay stable.
+      metadata: row.source === 'ai_report' ? (row.metadata || {}) : undefined,
       actionUrl: '/admin/communications',
       actionLabel: 'Open Inbox',
       impact: row.needs_reply ? 'Needs reply' : null,
@@ -1036,6 +1041,41 @@ router.post('/tasks/:taskId/state', async (req, res, next) => {
         updated_at: now,
       })
       .returning('*');
+
+    // Closing an operator-inbox task also closes the underlying row — the
+    // state overlay only hides it, so a forever-'open' row would permanently
+    // occupy the loader's 12-row window and crowd out newer items.
+    if (current.source === 'operator_inbox_items' && current.sourceId) {
+      try {
+        if (await tableExists('operator_inbox_items')) {
+          const [closedInbox] = await db('operator_inbox_items')
+            .where({ id: String(current.sourceId) })
+            .update({
+              status: status === 'done' ? 'resolved' : 'dismissed',
+              [status === 'done' ? 'resolved_at' : 'dismissed_at']: now,
+              acted_by: uuidOrNull(req.technicianId),
+              last_action_at: now,
+              updated_at: now,
+            })
+            .returning(['source', 'source_id']);
+          // An ai_report mirror points at its durable ai_escalations row —
+          // resolve that too, or handled reports keep counting as pending in
+          // the escalation queue and stats.
+          if (closedInbox?.source === 'ai_report' && closedInbox.source_id
+            && await tableExists('ai_escalations')) {
+            await db('ai_escalations')
+              .where({ id: closedInbox.source_id })
+              .update({
+                status: status === 'done' ? 'resolved' : 'dismissed',
+                resolution_notes: `Closed from Agent Ops by ${actorName(req)}`,
+                updated_at: now,
+              });
+          }
+        }
+      } catch (err) {
+        logger.warn(`[admin-agents] operator inbox close failed for ${current.sourceId}: ${err.message}`);
+      }
+    }
 
     res.json({ state, task: current });
   } catch (err) {
