@@ -10080,14 +10080,18 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
   };
 
   return (
-    <div role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} style={{
+    // data-glass: the preview shell + header pick up the glass material like
+    // every other portal overlay (owner 2026-07-09); the document itself
+    // stays opaque inside its iframe. Inert without the glass theme.
+    <div role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
       position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
       display: 'flex', flexDirection: 'column',
     }}>
-      <div style={{
+      <div data-glass="soft" style={{
         display: 'flex', alignItems: 'center', gap: 10,
         padding: 'calc(env(safe-area-inset-top, 0px) + 10px) 14px 10px',
         background: B.white, borderBottom: '1px solid #E7E2D7', flexShrink: 0,
+        position: 'relative',
       }}>
         <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {doc.title || 'Document'}
