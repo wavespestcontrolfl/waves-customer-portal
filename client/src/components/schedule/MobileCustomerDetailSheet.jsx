@@ -119,7 +119,7 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
       {/* Top bar */}
       <div
         className="sticky top-0 bg-surface-page flex items-center justify-between gap-3 px-4 border-b border-hairline border-zinc-200"
-        style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"

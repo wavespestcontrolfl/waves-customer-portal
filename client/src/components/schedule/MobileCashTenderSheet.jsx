@@ -89,7 +89,7 @@ export default function MobileCashTenderSheet({
       {/* Header */}
       <div
         className="flex items-center px-3 border-b border-hairline border-zinc-200"
-        style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"

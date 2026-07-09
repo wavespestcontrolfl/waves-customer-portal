@@ -130,7 +130,7 @@ export default function MobileServiceEditModal({
       {/* Header: X + title + Save */}
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center"
-        style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"

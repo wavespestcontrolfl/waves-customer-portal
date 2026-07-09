@@ -91,7 +91,7 @@ export default function MobileCardOnFileSheet({
       {/* Header — back button left, customer name centered. */}
       <div
         className="sticky top-0 bg-white flex items-center px-3 border-b border-hairline border-zinc-200"
-        style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"

@@ -60,6 +60,7 @@
 // - alert-fg discipline: spec reserves red for overdue / failed /
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   ExternalLink,
   FileText,
@@ -2223,7 +2224,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
     [invoice.first_name, invoice.last_name].filter(Boolean).join(" ").trim() ||
     "Customer";
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -2231,6 +2232,8 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -2245,6 +2248,9 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
           width: "100%",
           maxWidth: 540,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
         }}
       >
@@ -2469,7 +2475,8 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2551,7 +2558,7 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
     }
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -2559,6 +2566,8 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -2574,6 +2583,9 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           width: "100%",
           maxWidth: 440,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
         }}
       >
@@ -2766,7 +2778,8 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2844,7 +2857,7 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
     letterSpacing: "0.05em",
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -2852,6 +2865,8 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -2866,6 +2881,9 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
           width: "100%",
           maxWidth: 460,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -3010,7 +3028,8 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3147,7 +3166,7 @@ function RecordPaymentModal({
     </button>
   );
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3155,6 +3174,8 @@ function RecordPaymentModal({
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -3170,6 +3191,9 @@ function RecordPaymentModal({
           width: "100%",
           maxWidth: 460,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -3375,7 +3399,8 @@ function RecordPaymentModal({
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3562,7 +3587,7 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
     letterSpacing: "0.05em",
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3570,6 +3595,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -3584,6 +3611,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           width: "100%",
           maxWidth: 460,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -3752,7 +3782,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3842,7 +3873,7 @@ function PaymentPlanModal({
     </button>
   );
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3850,6 +3881,8 @@ function PaymentPlanModal({
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -3864,6 +3897,9 @@ function PaymentPlanModal({
           width: "100%",
           maxWidth: 500,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -4050,7 +4086,8 @@ function PaymentPlanModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
