@@ -107,6 +107,14 @@ const BillingCron = {
     // Get active customers with a monthly rate — include autopay + pause state.
     // service_paused_at is set when the 3-retry ladder exhausts; skip those so
     // we don't keep burning charges against a dead card until billing is fixed.
+    // billing_mode ships in migration 20260709000010 — selecting it
+    // unconditionally would abort the WHOLE monthly run on a pre-migration
+    // database (Codex round-9); absent column leaves customer.billing_mode
+    // undefined and GUARD 3b inert, exactly the legacy behavior.
+    let billingModeColumnExists = false;
+    try {
+      billingModeColumnExists = await db.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy select shape */ }
     const customers = await db('customers')
       .where({ active: true })
       .where('monthly_rate', '>', 0)
@@ -115,7 +123,7 @@ const BillingCron = {
       .select(
         'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
-        'billing_day', 'billing_mode',
+        'billing_day', ...(billingModeColumnExists ? ['billing_mode'] : []),
       );
 
     // Annual-prepay customers paid for the whole period up front. The paid

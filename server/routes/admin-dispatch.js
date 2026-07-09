@@ -2223,6 +2223,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardCalibrationId = calibrationId || null;
     let treeShrubCloseoutSummary = null;
     let treeShrubCloseoutWarnings = [];
+    // billing_mode/per_application_fee ship in migration 20260709000010 —
+    // selecting them unconditionally would 500 EVERY completion on a
+    // pre-migration database (Codex round-9). Guarded once here; absent
+    // columns leave svc.cust_billing_mode undefined = legacy behavior.
+    let billingModeColumnsExist = false;
+    try {
+      billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -2233,8 +2241,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
-        'customers.billing_mode as cust_billing_mode',
-        'customers.per_application_fee as cust_per_application_fee',
+        ...(billingModeColumnsExist
+          ? ['customers.billing_mode as cust_billing_mode', 'customers.per_application_fee as cust_per_application_fee']
+          : []),
         'customers.autopay_enabled as cust_autopay_enabled',
         'customers.autopay_paused_until as cust_autopay_paused_until',
         'customers.autopay_payment_method_id as cust_autopay_payment_method_id',
@@ -4275,6 +4284,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // otherwise. The monthly-membership model (autopayCoversVisit suppression
     // + the 8AM cron) never applies to them.
     const perApplicationBilling = svc.cust_billing_mode === 'per_application';
+    // inspection_only / customer_declined = no application performed —
+    // nothing bills for the visit (mirrors referralVisitPerformed;
+    // 'incomplete' returned earlier). Shared by the auto-invoice gate AND
+    // the auto-charge block below: an existing open invoice (pre-minted /
+    // recovery) must not be auto-charged either when nothing was performed
+    // (Codex round-9 P1).
+    const visitPerformed = visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined';
     // Annual-prepay customers settle covered visits via prepaid stamps; an
     // UNCOVERED visit (expired term awaiting renewal) is owned by the
     // renewal flow — never billed here and never suppressed as
@@ -4464,7 +4480,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       isCallback: svc.is_callback,
       // inspection_only / customer_declined = no application performed
       // (mirrors referralVisitPerformed; 'incomplete' returned earlier).
-      visitPerformed: visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined',
+      visitPerformed,
     });
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
@@ -4810,7 +4826,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // link exactly as before, so the customer experience degrades to manual
     // pay — never a blocked completion and never a double charge (the helper
     // fail-closes on a live PaymentIntent).
-    if (perApplicationBilling && invoice?.id && !alreadyPaid && !invoice.payer_id
+    if (perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       try {
@@ -4870,8 +4886,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // operator's reconcile queue. Best-effort: if parking fails, the
           // loud error below still flags the invoice id.
           try {
-            await db('invoices').where({ id: invoice.id }).update({ status: 'processing', updated_at: new Date() });
-            invoice = { ...invoice, status: 'processing' };
+            // Bind the succeeded PI to the row while parking: the webhook's
+            // settle path refuses a 'processing' invoice whose active PI
+            // doesn't match, so without this binding the self-heal never
+            // fires and the park is permanent (Codex round-9 P1). The
+            // rollback erased the binding chargeInvoiceWithSavedCard wrote.
+            await db('invoices').where({ id: invoice.id }).update({
+              status: 'processing',
+              ...(chargeErr.stripePaymentIntentId ? { stripe_payment_intent_id: chargeErr.stripePaymentIntentId } : {}),
+              updated_at: new Date(),
+            });
+            invoice = { ...invoice, status: 'processing', ...(chargeErr.stripePaymentIntentId ? { stripe_payment_intent_id: chargeErr.stripePaymentIntentId } : {}) };
           } catch (parkErr) {
             logger.error(`[dispatch] failed to park orphaned invoice ${invoice?.id} as processing: ${parkErr.message}`);
           }
