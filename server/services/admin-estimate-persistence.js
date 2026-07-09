@@ -130,6 +130,11 @@ function normalizeClientPestFloorMetadata(estimateData) {
     const hasMetadata = Number.isFinite(stampedPa);
     const isClientStamped = hasMetadata && CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa);
     if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
+    // Metadata-less rows get stamped only on client-engine payloads, where the
+    // totals correction below applies the matching lift. Stamping a legacy
+    // no-flag payload would let the public reprice collect the floor while
+    // the persisted columns keep the old discounted amount — divergence.
+    if (!hasMetadata && !isClientEngineResult) continue;
     delete row.floorPa;
     delete row.floorAnn;
     delete row.floorMo;
@@ -526,8 +531,19 @@ async function createOrReuseAdminEstimate({
   // Server-authoritative pest program floor: normalize client-stamped floor
   // metadata AND the client-baked lift in the totals BEFORE resolving the
   // billable preview, so CLIENT_FALLBACK persists collect per the live
-  // DB-synced floor/kill switch. A successful server recompute below replaces
-  // the whole result, making this a no-op for server-priced saves.
+  // DB-synced floor/kill switch. Sync the pricing constants first —
+  // serverRecomputeFromEstimateData returns NO_INPUTS before any sync on
+  // fallback payloads, so without this the restamp could use a stale
+  // in-memory floor right after a pricing_config edit. Best-effort: a sync
+  // failure must not block the save (the restamp then uses the last-synced
+  // constants, same as every other pricing surface).
+  try {
+    if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+      await pricingEngine.syncConstantsFromDB(database);
+    }
+  } catch (err) {
+    logger.warn(`[admin-estimate] pricing-config sync before floor normalize skipped: ${err.message}`);
+  }
   normalizeClientPestFloorMetadata(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);

@@ -401,3 +401,53 @@ describe('normalizeClientPestFloorMetadata — totals correction (codex r5 P1)',
     expect(estData.result.recurring.annualAfterDiscount).toBe(2187.20);
   });
 });
+
+describe('normalizeClientPestFloorMetadata — legacy no-flag payloads stay untouched (codex r6)', () => {
+  test('bare rows on a payload without the client-engine flag get NO metadata stamped', () => {
+    // Stamping without the matching totals lift would let the public reprice
+    // collect the floor while the persisted columns keep the old amount.
+    const estData = {
+      result: {
+        results: {
+          pestTiers: [{ pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly' }],
+          pest: { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly' },
+        },
+        recurring: { discount: 0.20, savings: 529, annualAfterDiscount: 2116, monthlyTotal: 176.33 },
+      },
+    };
+    normalizeClientPestFloorMetadata(estData);
+    for (const row of [...estData.result.results.pestTiers, estData.result.results.pest]) {
+      expect(row.floorPa).toBeUndefined();
+      expect(row.floorAnn).toBeUndefined();
+    }
+    expect(estData.result.recurring.savings).toBe(529);
+  });
+
+  test('bare rows WITH the client-engine flag get stamped and the totals lifted', () => {
+    // Flagged payload whose metadata was somehow absent: stamping is safe
+    // because the totals correction applies the matching server lift.
+    const estData = {
+      result: {
+        results: {
+          pestTiers: [{ pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly' }],
+          pest: { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly' },
+        },
+        recurring: {
+          discount: 0.20,
+          savings: 529,
+          annualAfterDiscount: 2116,
+          monthlyTotal: 176.33,
+          grandTotal: 176.33,
+          pestProgramFloorApplied: false,
+        },
+        totals: { year2: 2116, year2mo: 176.33, year1: 2116 },
+      },
+    };
+    normalizeClientPestFloorMetadata(estData);
+    expect(estData.result.results.pest).toMatchObject({ floorPa: 89, floorAnn: 356 });
+    // server lift = 356×0.2 − 0 = 71.20 (pest sat at the 89 floor, fully discounted before)
+    expect(estData.result.recurring.savings).toBe(457.80);
+    expect(estData.result.recurring.annualAfterDiscount).toBe(2187.20);
+    expect(estData.result.recurring.pestProgramFloorApplied).toBe(true);
+  });
+});
