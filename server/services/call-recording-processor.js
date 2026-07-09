@@ -94,7 +94,10 @@ Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and prop
 Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
-const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+// Default tracks the newest stable Flash: Google retired gemini-2.5-flash
+// (rolling 404 brown-outs starting 2026-07-09), so a dead default here means
+// the fallback transcriber fails exactly when OpenAI needs it.
+const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-3.5-flash';
 // v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
 // v1.0.0 schema (better structured-output adherence + fewer hallucinations than
 // Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
@@ -106,7 +109,16 @@ const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'ge
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
 // V1 (legacy) extractor model — historically hardcoded in the request URL,
 // which made V1 the only lane without a zero-deploy rollback lever.
-const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-2.5-flash';
+// 2026-07-09: the old gemini-2.5-flash default 404'd (model retired by
+// Google) and six calls died unprocessed — keep this on a live model.
+const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-3.5-flash';
+
+// AI-extraction retry budget. A failure marks the row extraction_failed and
+// increments call_log.extraction_attempts; processAllPending re-runs it while
+// under this cap (≥10 min between attempts via the sweep's age gate), which
+// rides out transient provider errors. At the cap a blocking triage item is
+// filed so the call can't die silently.
+const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -2985,12 +2997,34 @@ const CallRecordingProcessor = {
       extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
-      await db('call_log').where({ id: call.id }).update({
+      // Increment in SQL, not from the in-memory row: the stale-reclaim path
+      // means `call` can predate another run's failed attempt.
+      const [failedRow] = await db('call_log').where({ id: call.id }).update({
         processing_status: 'extraction_failed',
+        extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
         processing_token: null,
         processing_started_at: null,
         updated_at: new Date(),
-      });
+      }).returning(['extraction_attempts']);
+      const attempts = Number(failedRow?.extraction_attempts) || 0;
+      if (attempts >= CALL_EXTRACTION_MAX_ATTEMPTS) {
+        // Retry budget exhausted — surface a blocking Needs Review card.
+        // Without it the call dies with no route decision, no lead, no
+        // customer, and nothing in any inbox (exactly how six calls were
+        // silently lost to a retired-model 404 on 2026-07-09). The partial
+        // unique index dedupes re-files while a card is already open.
+        try {
+          const failTriageItem = buildTriageItem({
+            callLogId: call.id,
+            flag: 'extraction_failed_permanent',
+            extraction: { meta: { call_summary: `AI extraction failed ${attempts} time(s); automatic retries exhausted. Fix the cause, then use Reprocess on the call recording.` } },
+            extraPayload: { attempts, last_error: String(err.message || err).slice(0, 500) },
+          });
+          await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+        } catch (triageErr) {
+          logger.warn(`[call-proc] extraction-failure triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+        }
+      }
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
 
@@ -5877,6 +5911,11 @@ const CallRecordingProcessor = {
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
+    //   - processing_status='extraction_failed' with retry budget left (extraction_attempts
+    //     < CALL_EXTRACTION_MAX_ATTEMPTS) — 10-min age gate spaces the attempts so a
+    //     provider brown-out isn't burned through in one cron tick. 7-day created_at fence:
+    //     belt-and-suspenders with the migration backfill (which parks pre-existing failures
+    //     at the cap) so ancient calls can never be resurrected into fresh leads/SMS.
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
@@ -5901,6 +5940,12 @@ const CallRecordingProcessor = {
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .orWhere('processing_status', 'no_transcription')
+        .orWhere(function () {
+          this.where('processing_status', 'extraction_failed')
+            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+            .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+        })
         .orWhere(function () {
           this.where('processing_status', 'processing')
             .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
