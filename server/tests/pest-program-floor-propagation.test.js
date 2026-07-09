@@ -18,6 +18,7 @@ const {
   monthlyForRecurringParts,
   pestFloorMonthlyLift,
 } = require('../routes/estimate-public');
+const { normalizeClientPestFloorMetadata } = require('../services/admin-estimate-persistence');
 
 const ORIGINAL_PEST_BASE = constants.PEST.base;
 const ORIGINAL_PEST_FLOOR = constants.PEST.floor;
@@ -183,6 +184,23 @@ describe('pestFloorMonthlyLift — stored-payload repricers (select-tier / prefe
     expect(pestFloorMonthlyLift(aboveFloor, 'Silver', () => 0.10)).toBe(0);
   });
 
+  test('bimonthly lift annualizes to the EXACT floor despite the rounded stored monthly', () => {
+    // The never-above-list cap must use the row's exact ann (453.90), not the
+    // rounded mo (37.82) — min(floorAnn/12, mo) would re-shave the anchor-less
+    // annual to 453.84 (codex r3).
+    const estData = {
+      result: {
+        results: {
+          pest: { pa: 75.65, apps: 6, mo: 37.82, ann: 453.90, floorPa: 75.65, floorAnn: 453.90, floorMo: 37.82 },
+        },
+      },
+    };
+    const lift = pestFloorMonthlyLift(estData, 'Platinum', platinum);
+    // Collected pest monthly = mo × 0.8 + lift = exactly floorAnn/12.
+    expect(37.82 * 0.8 + lift).toBeCloseTo(453.90 / 12, 9);
+    expect((37.82 * 0.8 + lift) * 12).toBeCloseTo(453.90, 9);
+  });
+
   test('monthlyForRecurringParts applies the lift before the manual/pref offs', () => {
     // Pest 29.67 + lawn/mosquito/ts 190.75, all WaveGuard-discountable.
     const parts = { discountableBaseMonthly: 220.42, nonDiscountableMonthly: 0 };
@@ -192,5 +210,64 @@ describe('pestFloorMonthlyLift — stored-payload repricers (select-tier / prefe
     expect(total).toBe(Math.round((356 / 12 + 190.75 * 0.8) * 100) / 100);
     // Manual/pref offs still subtract after the lift (warn-only manual).
     expect(monthlyForRecurringParts(parts, 'Platinum', 10, platinum, lift)).toBe(Math.round((356 / 12 + 190.75 * 0.8 - 10) * 100) / 100);
+  });
+});
+
+describe('normalizeClientPestFloorMetadata — server-authoritative restamp at save (client fallback)', () => {
+  function clientStampedEstData() {
+    // What the deprecated client engine persists: 89-literal floor fields.
+    return {
+      result: {
+        results: {
+          pestTiers: [
+            { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly', floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+            { pa: 75.65, apps: 6, ann: 453.90, mo: 37.82, label: 'Bi-Monthly', floorPa: 75.65, floorAnn: 453.90, floorMo: 37.82 },
+            { pa: 62.30, apps: 12, ann: 747.60, mo: 62.30, label: 'Monthly', floorPa: 62.30, floorAnn: 747.60, floorMo: 62.30 },
+          ],
+          pest: { pa: 89, apps: 4, ann: 356, mo: 29.67, label: 'Quarterly', floorPa: 89, floorAnn: 356, floorMo: 29.67 },
+        },
+      },
+    };
+  }
+
+  test('restamps the client 89-literal floors from the live DB-synced floor', () => {
+    constants.PEST.floor = 79; // prod-style DB override
+    const estData = clientStampedEstData();
+    normalizeClientPestFloorMetadata(estData);
+    const [q, b, m] = estData.result.results.pestTiers;
+    // Per-visit basis rounded first: round(79 × fm) × visits (v1 curve).
+    expect(q).toMatchObject({ floorPa: 79, floorAnn: 316 });
+    expect(b).toMatchObject({ floorPa: 67.15, floorAnn: 402.90 });
+    expect(m).toMatchObject({ floorPa: 55.30, floorAnn: 663.60 });
+    expect(q.floorMo).toBe(Math.round((316 / 12) * 100) / 100);
+    expect(estData.result.results.pest).toMatchObject({ floorPa: 79, floorAnn: 316 });
+  });
+
+  test('kill switch off strips the client-stamped floors entirely', () => {
+    constants.PEST.enforceFloorPostDiscount = false;
+    const estData = clientStampedEstData();
+    normalizeClientPestFloorMetadata(estData);
+    for (const row of [...estData.result.results.pestTiers, estData.result.results.pest]) {
+      expect(row.floorPa).toBeUndefined();
+      expect(row.floorAnn).toBeUndefined();
+      expect(row.floorMo).toBeUndefined();
+    }
+  });
+
+  test('unknown cadence rows are stripped, never guessed', () => {
+    const estData = {
+      result: { results: { pestTiers: [{ pa: 50, apps: 26, ann: 1300, mo: 108.33, floorPa: 89, floorAnn: 2314, floorMo: 192.83 }] } },
+    };
+    normalizeClientPestFloorMetadata(estData);
+    const [row] = estData.result.results.pestTiers;
+    expect(row.floorPa).toBeUndefined();
+    expect(row.floorAnn).toBeUndefined();
+    expect(row.floorMo).toBeUndefined();
+  });
+
+  test('no-op on payloads without pest results', () => {
+    const estData = { result: { results: { lawn: [] } } };
+    expect(() => normalizeClientPestFloorMetadata(estData)).not.toThrow();
+    expect(() => normalizeClientPestFloorMetadata(null)).not.toThrow();
   });
 });

@@ -75,6 +75,41 @@ function estimateResultRoot(estimateData) {
     : estimateData;
 }
 
+// Pest post-discount program floor metadata is SERVER-authoritative. The
+// deprecated client fallback engine stamps floorPa/floorAnn/floorMo from its
+// own constants.js literal ($89), which ignores the DB-tuned pest_base.floor
+// (live: a different value) AND the enforce_floor_post_discount kill switch.
+// When a client-priced payload persists as-is (no server recompute), restamp
+// every pest row's floor fields from the live synced constants — or strip
+// them when enforcement is off. Server-recomputed results already carry
+// correct metadata and never pass through here. The client fallback prices
+// on the v1 cadence curve, so the restamp mirrors it.
+const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
+function normalizeClientPestFloorMetadata(estimateData) {
+  const results = estimateResultRoot(estimateData)?.results;
+  if (!results || typeof results !== 'object') return;
+  const rows = [
+    ...(Array.isArray(results.pestTiers) ? results.pestTiers : []),
+    ...(results.pest && typeof results.pest === 'object' ? [results.pest] : []),
+  ];
+  const { PEST } = pricingEngine.constants;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    delete row.floorPa;
+    delete row.floorAnn;
+    delete row.floorMo;
+    if (!PEST.enforceFloorPostDiscount) continue;
+    const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
+    if (!frequencyKey) continue;
+    const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+    const floorAnn = pricingEngine.pestProgramFloorAnnual(freqMult, Number(row.apps ?? row.v));
+    if (floorAnn === null) continue;
+    row.floorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
+    row.floorAnn = floorAnn;
+    row.floorMo = Math.round((floorAnn / 12) * 100) / 100;
+  }
+}
+
 function sumPositiveAmounts(rows = [], fields = ['price']) {
   return roundMoney((rows || []).reduce((sum, row) => {
     if (!row || typeof row !== 'object') return sum;
@@ -453,6 +488,12 @@ async function createOrReuseAdminEstimate({
   // must NOT write any membership artifacts that would advertise a discount the
   // charge doesn't include.
   const repricedAtServer = pricing.audit?.pricing_authority === 'SERVER';
+  // Client-priced payload persisting as-is: replace the client-stamped pest
+  // program-floor metadata with the live server floor (or strip it when the
+  // kill switch is off) — the stored fields drive the public repricers.
+  if (!repricedAtServer) {
+    normalizeClientPestFloorMetadata(trustedEstimateData);
+  }
   // Persist the prior qualifying services into the replayable estimate data so
   // any LATER recompute from stored inputs (public bundle CTA, frequency
   // slider) keeps the combined WaveGuard tier (extractEngineInputs re-injects).
@@ -586,6 +627,7 @@ module.exports = {
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,
+  normalizeClientPestFloorMetadata,
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,
   compareClientToServer,

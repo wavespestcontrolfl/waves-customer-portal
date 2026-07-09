@@ -1568,7 +1568,12 @@ function pestFloorMonthlyLift(estData, tierName, discountResolver = tierDiscount
   if (!Number.isFinite(floorAnn) || floorAnn <= 0 || !Number.isFinite(pestMo) || pestMo <= 0) return 0;
   const disc = Number(discountResolver(tierName)) || 0;
   if (disc <= 0) return 0;
-  const floorMoExact = Math.min(floorAnn / 12, pestMo);
+  // Never-above-list cap on the EXACT annual basis (row's ann), not the
+  // rounded display monthly — min(floorAnn/12, pestMo) would re-shave the
+  // bimonthly floor to 37.82 × 12 = 453.84 on anchor-less payloads.
+  const pestAnnRaw = Number(pest?.ann ?? pest?.annual);
+  const listAnn = Number.isFinite(pestAnnRaw) && pestAnnRaw > 0 ? pestAnnRaw : pestMo * 12;
+  const floorMoExact = Math.min(floorAnn, listAnn) / 12;
   return Math.max(0, floorMoExact - pestMo * (1 - disc));
 }
 
