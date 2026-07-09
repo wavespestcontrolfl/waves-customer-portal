@@ -453,7 +453,9 @@ function mapV1ToLegacyShape(v1Result) {
     R.tsMeta = {
       eb: tsLI.bedArea || 0,
       et: tsLI.treeCount || 0,
-      bedAreaIsEstimated: false,
+      // Anything other than an explicit operator-entered bed area is an
+      // estimate — drives the T&S "FIELD VERIFY" badge in the admin builder.
+      bedAreaIsEstimated: !!tsLI.bedAreaSource && tsLI.bedAreaSource !== 'explicit',
     };
   }
 

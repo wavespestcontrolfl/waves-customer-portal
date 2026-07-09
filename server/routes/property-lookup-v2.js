@@ -3138,6 +3138,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
+    // Turf provenance — a county-prior seed or a parcel-clamped vision number
+    // must stay distinguishable from a real satellite measurement all the way
+    // into the engine, so computeTurfArea can grade it (LOW + field-verify)
+    // instead of treating every estimatedTurfSf as vision-measured.
+    turfSource: p.turfSource || null,
+    countyTurfPriorSf: p.countyTurfPriorSf ?? null,
+    countyTurfCeilingSf: p.countyTurfCeilingSf ?? null,
+    turfCappedToParcel: p.turfCappedToParcel === true,
     imperviousSurfacePercent: p.imperviousSurfacePercent,
     imperviosSurfacePercent: p.imperviosSurfacePercent,
     estimatedBedAreaSf: p.estimatedBedAreaSf,

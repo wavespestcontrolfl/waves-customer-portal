@@ -144,6 +144,13 @@ function computeTurfArea(input, fallback = {}) {
 
   const estimated = toPositiveNumber(input.estimatedTurfSf);
   if (estimated > 0) {
+    // Turf provenance (rides in from the lookup profile via the translate
+    // boundary). A county-prior seed is a ratio guess off county records —
+    // NOT a vision measurement — so it grades LOW + field-verify instead of
+    // the vision-grade MEDIUM. A parcel-clamped vision number keeps its
+    // grade but carries the clamp reason as a flag.
+    const isCountyPrior = String(input.turfSource || '').trim().toLowerCase() === 'county_prior';
+    const parcelCapFlags = input.turfCappedToParcel === true ? ['TURF_CAPPED_TO_PARCEL'] : [];
     const hasKnownMaxEstimatedTurfSf = input.maxEstimatedTurfSfKnown === true &&
       hasNonNegativeNumber(input.maxEstimatedTurfSf);
     const maxEstimatedTurfSf = hasKnownMaxEstimatedTurfSf ? Number(input.maxEstimatedTurfSf) : 0;
@@ -157,10 +164,10 @@ function computeTurfArea(input, fallback = {}) {
         return {
           turfSf: maxEstimatedTurfSf,
           turfEstimated: true,
-          turfConfidence: 'MEDIUM',
+          turfConfidence: isCountyPrior ? 'LOW' : 'MEDIUM',
           turfBasis: 'plausibleMaxTurfCap',
           turfOpenArea: maxEstimatedTurfSf,
-          turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'],
+          turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX', ...parcelCapFlags],
         };
       }
       const hasFallbackTurf =
@@ -178,7 +185,16 @@ function computeTurfArea(input, fallback = {}) {
         turfConfidence: 'LOW',
         turfBasis: hasFallbackTurf ? 'legacyHardscapeEstimate' : 'plausibleMaxTurfCap',
         turfOpenArea: maxEstimatedTurfSf,
-        turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'],
+        turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX', ...parcelCapFlags],
+      };
+    }
+    if (isCountyPrior) {
+      return {
+        turfSf: estimated,
+        turfEstimated: true,
+        turfConfidence: 'LOW',
+        turfBasis: 'countyPrior',
+        turfFlags: ['FIELD_VERIFY_TURF_SQFT', ...parcelCapFlags],
       };
     }
     return {
@@ -186,7 +202,7 @@ function computeTurfArea(input, fallback = {}) {
       turfEstimated: true,
       turfConfidence: 'MEDIUM',
       turfBasis: 'estimatedTurfSf',
-      turfFlags: [],
+      turfFlags: parcelCapFlags,
     };
   }
 
@@ -312,6 +328,10 @@ function calculatePerimeter(footprint, complexity = 'standard') {
 }
 
 function getLotCategory(lotSqFt) {
+  // Non-finite (missing/NaN) lot must not fall through every `<` comparison
+  // into 'ACRE'. Numeric behavior is unchanged — 0 still maps to 'SMALL'
+  // (the commercial-mosquito gate documents callers relying on that).
+  if (!Number.isFinite(Number(lotSqFt))) return null;
   if (lotSqFt < 10890) return 'SMALL';
   if (lotSqFt < 14520) return 'QUARTER';
   if (lotSqFt < 21780) return 'THIRD';
@@ -584,9 +604,18 @@ function calculatePropertyProfile(input) {
   }
   const perimeter = explicitPerimeter || calculatePerimeter(footprint, features.complexity);
   const perimeterSource = explicitPerimeter ? 'property_perimeter' : 'computed_from_footprint';
+  const hasFiniteLot = Number.isFinite(Number(input.lotSqFt));
   const lotCategory = getLotCategory(input.lotSqFt);
-  const mosquitoTreatableSqFt = Math.max(0, input.lotSqFt - footprint - hardscape);
-  const mosquitoLotCategory = getMosquitoTreatableCategory(mosquitoTreatableSqFt, lotCategory);
+  const mosquitoTreatableSqFt = hasFiniteLot
+    ? Math.max(0, input.lotSqFt - footprint - hardscape)
+    : 0;
+  // Missing lot keeps the longstanding fail-expensive mosquito direction
+  // (ACRE bucket) — previously reached accidentally via the NaN→'ACRE'
+  // comparison fall-through, now explicit. Whether missing-lot mosquito
+  // should instead fail cheap or hard quote-require is an owner policy call.
+  const mosquitoLotCategory = hasFiniteLot
+    ? getMosquitoTreatableCategory(mosquitoTreatableSqFt, lotCategory)
+    : 'ACRE';
 
   return {
     footprint, hardscape, lawnSqFt, turfSf: lawnSqFt,
@@ -595,6 +624,13 @@ function calculatePropertyProfile(input) {
     turfBasis: turfArea.turfBasis,
     turfOpenArea: turfArea.turfOpenArea,
     turfFlags: turfArea.turfFlags,
+    // Turf provenance passthrough — persists on the saved property profile so
+    // a re-price weeks later still knows the number was a county-ratio seed
+    // or a parcel-clamped vision estimate.
+    turfSource: input.turfSource || null,
+    countyTurfPriorSf: input.countyTurfPriorSf ?? null,
+    countyTurfCeilingSf: input.countyTurfCeilingSf ?? null,
+    turfCappedToParcel: input.turfCappedToParcel === true,
     bedArea,
     estimatedBedArea: bedAreaSource === 'estimated' ? bedArea : undefined,
     bedAreaSource,

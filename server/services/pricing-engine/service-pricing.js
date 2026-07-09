@@ -3786,10 +3786,18 @@ function priceTermiteBait(property, options = {}) {
     ...constructionMult.warnings,
     ...foundationAdj.warnings,
   ]);
+  const storiesSourceForBait = String(property.storiesSource || '').toLowerCase();
   const manualReviewReasons = uniqueList([
     ...measurementState.manualReviewReasons,
     ...constructionMult.warnings,
     ...foundationAdj.warnings,
+    // Perimeter derived from a footprint whose stories count was a guess —
+    // a 2-story home defaulted to 1 story doubles the footprint and inflates
+    // the station count. Review-surfacing only; the price is unchanged.
+    ...((storiesSourceForBait === 'default' || storiesSourceForBait === 'estimated') &&
+      perimeterResolution.source === 'computed_from_footprint'
+      ? ['stories_estimated']
+      : []),
   ]);
   const mon = TERMITE.monitoring[selectedMonitoringTier] || TERMITE.monitoring.basic;
 
@@ -3885,7 +3893,9 @@ function priceTermiteBait(property, options = {}) {
     },
     measurementWarnings,
     requiresMeasurement: false,
-    requiresManualReview: measurementState.requiresManualReview || measurementWarnings.length > 0,
+    requiresManualReview: measurementState.requiresManualReview ||
+      measurementWarnings.length > 0 ||
+      manualReviewReasons.length > 0,
     manualReviewReasons,
     inputSourceSummary: {
       footprintSqFt: footprintResolution.source,
