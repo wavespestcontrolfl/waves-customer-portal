@@ -50,6 +50,21 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
   const target = await targetQuery.whereNotNull('stripe_payment_method_id').first();
   if (!target) return { enrolled: false, reason: 'method_not_found' };
 
+  // The customer-level ACH block applies to the TARGET too, not just the
+  // incumbent (Codex #2507 round-5 P2): while ach_status is
+  // needs_verification/suspended, customerOnAutopay refuses every non-card
+  // method, so enrolling a fresh bank account would flip the flags onto a
+  // method collection keeps rejecting. The method stays saved
+  // card-on-file; enrollment happens through the normal surfaces once the
+  // bank state clears.
+  const achUnhealthy = async () => {
+    const achRow = await db('customers').where({ id: customerId }).first('ach_status');
+    return !!(achRow?.ach_status && achRow.ach_status !== 'active');
+  };
+  if (BANK_ALIASES.includes(target.method_type) && (await achUnhealthy())) {
+    return { enrolled: false, reason: 'ach_blocked', methodId: target.id };
+  }
+
   let incumbent = await db('payment_methods')
     .where({
       customer_id: customerId,
@@ -59,11 +74,8 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
     })
     .whereNotNull('stripe_payment_method_id')
     .first('id', 'method_type');
-  if (BANK_ALIASES.includes(incumbent?.method_type)) {
-    const achRow = await db('customers').where({ id: customerId }).first('ach_status');
-    if (achRow?.ach_status && achRow.ach_status !== 'active') {
-      incumbent = null;
-    }
+  if (BANK_ALIASES.includes(incumbent?.method_type) && (await achUnhealthy())) {
+    incumbent = null;
   }
 
   const alreadyInCharge = incumbent && incumbent.id === target.id;

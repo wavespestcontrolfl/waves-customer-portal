@@ -749,15 +749,15 @@ router.post('/:token/consent', async (req, res, next) => {
     const optedIn = pi.setup_future_usage === 'off_session'
       && pi?.metadata?.save_card_opt_in === 'true';
     if (!optedIn) {
-      logger.warn(`[pay-v2] Consent rejected — PI ${pi.id} not configured for save-on-file (setup_future_usage=${pi.setup_future_usage}, save_card_opt_in=${pi?.metadata?.save_card_opt_in})`);
-      return respondWithPaymentError(req, res, {
-        invoice,
-        phase: 'consent',
-        methodCategory,
-        paymentIntentId: invoice.stripe_payment_intent_id,
-        message: 'Save-on-file was not requested on this payment',
-        statusCode: 409,
-      });
+      // No opt-in on the PI = nothing to record, and NOT an error: the
+      // redirect-return handler posts here on every successful redirect
+      // (the page that knew the checkbox state unloaded), so a plain
+      // one-time 3DS/bank payment reaching this branch is normal — a 409
+      // alert per non-save redirect would flood admin reconciliation with
+      // false alarms (Codex #2507 round-5 P2). A tampered client gets the
+      // same silent refusal: nothing is recorded either way.
+      logger.info(`[pay-v2] Consent skipped — PI ${pi.id} not configured for save-on-file (setup_future_usage=${pi.setup_future_usage}, save_card_opt_in=${pi?.metadata?.save_card_opt_in})`);
+      return res.json({ success: false, skipped: true, reason: 'not_opted_in' });
     }
 
     // Prefer the verified charge.payment_method_details.type — that's
@@ -792,21 +792,21 @@ router.post('/:token/consent', async (req, res, next) => {
     // Complete consent-gated autopay enrollment (Codex #2507 P1): the
     // webhook only enrolls when the consent row already exists, so when
     // Stripe's payment_intent.succeeded beat this POST the method sits
-    // saved-but-unenrolled — finish the job now that the authorization
-    // artifact is on file. If the webhook hasn't mirrored the pm yet,
-    // method_not_found is fine: the webhook runs after this row exists
-    // and enrolls there. Best-effort — consent recording never fails on
-    // an enrollment hiccup.
-    try {
-      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-      await enrollConsentedMethod({
-        customerId: invoice.customer_id,
-        stripePaymentMethodId: verifiedStripePmId,
-        source: 'save_card_consent',
-      });
-    } catch (enrollErr) {
-      logger.error(`[pay-v2] consent-side autopay enrollment failed for invoice ${invoice.id}: ${enrollErr.message}`);
-    }
+    // saved-but-unenrolled — this call is then the ONLY path that flips
+    // the autopay flags, so an enrollment failure must FAIL the request
+    // (Codex #2507 round-5 P1): the client retries /consent once and
+    // flags consent_failed on the receipt, exactly like a consent-record
+    // failure — never a silent success with no Auto Pay. The consent row
+    // itself is already durably recorded (re-posting is idempotent via
+    // hasConsentFor on the enrollment side), and method_not_found is a
+    // NORMAL outcome (webhook hasn't mirrored the pm yet — it enrolls
+    // when it runs, the row now being present).
+    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+    await enrollConsentedMethod({
+      customerId: invoice.customer_id,
+      stripePaymentMethodId: verifiedStripePmId,
+      source: 'save_card_consent',
+    });
 
     res.json({ success: true, consentId: row.id, version: row.consent_text_version });
   } catch (err) {

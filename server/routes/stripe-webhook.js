@@ -1870,7 +1870,14 @@ async function handleSetupIntentSucceeded(setupIntent) {
       });
       logger.info(`[stripe-webhook] covered-capture completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
     } catch (err) {
-      logger.error(`[stripe-webhook] covered-capture completion failed for SI ${setupIntent.id}: ${err.message}`);
+      // Re-throw so the dispatcher returns 500 and Stripe retries (Codex
+      // #2507 round-5 P1): this webhook can be the ONLY completion path
+      // (browser never returned after 3DS/bank auth, or micro-deposits
+      // verified days later), and every step above is idempotent — a
+      // swallowed transient error would leave a required-save signup
+      // prepaid with nothing chargeable, permanently.
+      logger.error(`[stripe-webhook] covered-capture completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
+      throw err;
     }
     return;
   }

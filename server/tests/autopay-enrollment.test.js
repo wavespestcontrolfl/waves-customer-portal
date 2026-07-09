@@ -102,6 +102,22 @@ describe('enrollConsentedMethod', () => {
     expect(logAutopay).not.toHaveBeenCalled();
   });
 
+  test('a bank TARGET is refused while the customer ACH state is blocked (saved, not enrolled)', async () => {
+    // customerOnAutopay refuses every non-card method while ach_status is
+    // unhealthy — enrolling a fresh bank account would point collection at
+    // a method it keeps rejecting (Codex #2507 round-5).
+    const bankTarget = { ...TARGET, method_type: 'us_bank_account' };
+    setQueues({
+      payment_methods: [qb({ first: bankTarget })],
+      customers: [qb({ first: { ach_status: 'needs_verification' } })],
+    });
+
+    const result = await enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'portal_add_card' });
+
+    expect(result).toEqual({ enrolled: false, reason: 'ach_blocked', methodId: 'pm-new' });
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
+
   test('unknown method → method_not_found (the /consent endpoint relies on this when the webhook has not mirrored yet)', async () => {
     setQueues({ payment_methods: [qb({ first: null })] });
     const result = await enrollConsentedMethod({ customerId: 'cust-1', stripePaymentMethodId: 'pm_missing', source: 'save_card_consent' });

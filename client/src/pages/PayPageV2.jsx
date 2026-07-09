@@ -1493,13 +1493,39 @@ export default function PayPageV2() {
       return;
     }
     if (redirectStatus === 'succeeded') {
-      fetch(`${API_BASE}/pay/${token}/consent`, {
+      const finish = (consentFailed) => navigate(
+        `/receipt/${token}${consentFailed ? '?fresh=1&consent_failed=1' : '?fresh=1'}`,
+        { replace: true },
+      );
+      // Only save-configured links post consent (the return URL keeps the
+      // pay link's own params, so saveCardDefault survives the redirect) —
+      // a plain one-time redirect goes straight to the receipt. The server
+      // treats a non-opted-in PI as a silent no-op either way, so an
+      // unticked optional box can't produce a false failure. AWAITED with
+      // one retry, mirroring the normal post-confirm path (Codex #2507
+      // round-5 P1): the webhook's enrollment is consent-gated, so a
+      // dropped consent here would defer Auto Pay forever with no signal —
+      // a persistent failure flags consent_failed on the receipt instead.
+      if (!saveCardDefault) { finish(false); return; }
+      const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
-      }).catch(() => {});
-      navigate(`/receipt/${token}?fresh=1`, { replace: true });
+      });
+      (async () => {
+        try {
+          let res = await postConsent();
+          if (!res.ok) {
+            await new Promise((r) => setTimeout(r, 800));
+            res = await postConsent();
+          }
+          finish(!res.ok);
+        } catch {
+          finish(true);
+        }
+      })();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigate, token]);
 
   // Promote "capture needed, nothing started" → the minting state. Entry
