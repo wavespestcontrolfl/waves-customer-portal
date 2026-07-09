@@ -92,11 +92,14 @@ const D = {
   red: "#991B1B",
   purple: "#18181B",
   blue: "#18181B",
-  text: "#000000",
-  muted: "#000000",
+  // V2 ink tokens (owner-requested normalization 2026-07-09): primary =
+  // zinc-900 like every other admin page; muted = ink-secondary so labels
+  // and captions read one step lighter than values again.
+  text: "#18181B",
+  muted: "#52525B",
   white: "#FFFFFF",
   input: "#FFFFFF",
-  heading: "#000000",
+  heading: "#18181B",
   inputBorder: "#D4D4D8",
 };
 
