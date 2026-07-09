@@ -28,8 +28,37 @@ exports.up = async function up(knex) {
 
   await knex.raw("CREATE SEQUENCE IF NOT EXISTS estimate_slug_seq START 1");
 
-  // Backfill first (created_at order) so the sequence continues after the
-  // highest backfilled number when the trigger takes over.
+  await knex.raw(`
+    CREATE OR REPLACE FUNCTION waves_stamp_estimate_slug()
+    RETURNS trigger AS $$
+    DECLARE
+      seq_val bigint;
+    BEGIN
+      IF NEW.estimate_slug IS NULL THEN
+        seq_val := nextval('estimate_slug_seq');
+        NEW.estimate_slug := 'EST-'
+          || to_char(COALESCE(NEW.created_at, now()) AT TIME ZONE 'America/New_York', 'YYYY')
+          || '-'
+          || lpad(seq_val::text, GREATEST(4, length(seq_val::text)), '0');
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `);
+
+  await knex.raw(`
+    DROP TRIGGER IF EXISTS estimates_stamp_slug ON estimates;
+    CREATE TRIGGER estimates_stamp_slug
+      BEFORE INSERT ON estimates
+      FOR EACH ROW
+      EXECUTE FUNCTION waves_stamp_estimate_slug()
+  `);
+
+  // Trigger is installed BEFORE the backfill (codex P1): an estimate the
+  // still-running old deployment inserts mid-migration gets stamped by the
+  // trigger and skipped by the backfill's IS NULL filter — nothing can fall
+  // between the two paths. Backfill in created_at order; interleaved
+  // sequence values across the two paths stay unique by construction.
   await knex.raw(`
     UPDATE estimates e
     SET estimate_slug = 'EST-'
@@ -69,31 +98,6 @@ exports.up = async function up(knex) {
     WHERE estimate_slug IS NOT NULL
   `);
 
-  await knex.raw(`
-    CREATE OR REPLACE FUNCTION waves_stamp_estimate_slug()
-    RETURNS trigger AS $$
-    DECLARE
-      seq_val bigint;
-    BEGIN
-      IF NEW.estimate_slug IS NULL THEN
-        seq_val := nextval('estimate_slug_seq');
-        NEW.estimate_slug := 'EST-'
-          || to_char(COALESCE(NEW.created_at, now()) AT TIME ZONE 'America/New_York', 'YYYY')
-          || '-'
-          || lpad(seq_val::text, GREATEST(4, length(seq_val::text)), '0');
-      END IF;
-      RETURN NEW;
-    END;
-    $$ LANGUAGE plpgsql
-  `);
-
-  await knex.raw(`
-    DROP TRIGGER IF EXISTS estimates_stamp_slug ON estimates;
-    CREATE TRIGGER estimates_stamp_slug
-      BEFORE INSERT ON estimates
-      FOR EACH ROW
-      EXECUTE FUNCTION waves_stamp_estimate_slug()
-  `);
 };
 
 exports.down = async function down(knex) {
