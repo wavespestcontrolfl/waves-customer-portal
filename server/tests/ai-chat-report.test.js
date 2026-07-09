@@ -247,13 +247,14 @@ describe('POST /ai/chat canReport flag', () => {
     delete process.env.GATE_AI_CONTENT_REPORT;
   });
 
-  test('model-generated replies advertise canReport while the gate is on (default)', async () => {
+  test('model-generated replies advertise canReport for authenticated customers (gate default on)', async () => {
+    mockReportTables();
     WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
         body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
       });
       const body = await res.json();
@@ -262,8 +263,9 @@ describe('POST /ai/chat canReport flag', () => {
     });
   });
 
-  test('canned fallback replies are never reportable', async () => {
-    WavesAssistant.processMessage.mockResolvedValue({ reply: "I'm having trouble right now.", escalated: false });
+  test('unauthenticated chat never advertises canReport (report route requires auth)', async () => {
+    mockReportTables();
+    WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
@@ -276,14 +278,30 @@ describe('POST /ai/chat canReport flag', () => {
     });
   });
 
+  test('canned fallback replies are never reportable', async () => {
+    mockReportTables();
+    WavesAssistant.processMessage.mockResolvedValue({ reply: "I'm having trouble right now.", escalated: false });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+      });
+      const body = await res.json();
+      expect(body.canReport).toBe(false);
+    });
+  });
+
   test('chat responses drop canReport when the gate is killed', async () => {
+    mockReportTables();
     WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
     process.env.GATE_AI_CONTENT_REPORT = 'false';
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
         body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
       });
       const body = await res.json();

@@ -116,8 +116,10 @@ router.post('/chat', async (req, res, next) => {
     });
 
     // Only true model output is reportable — canned fallbacks and the
-    // deterministic escalation template are not AI-generated content.
-    res.json({ ...result, canReport: aiContentReportEnabled() && result.generated === true });
+    // deterministic escalation template are not AI-generated content. The
+    // affordance also needs the same auth state /chat/report requires, or an
+    // expired-token tab would render a Report link whose POST always 401s.
+    res.json({ ...result, canReport: aiContentReportEnabled() && result.generated === true && !!customerId });
   } catch (err) { next(err); }
 });
 

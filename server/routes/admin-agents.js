@@ -1037,6 +1037,27 @@ router.post('/tasks/:taskId/state', async (req, res, next) => {
       })
       .returning('*');
 
+    // Closing an operator-inbox task also closes the underlying row — the
+    // state overlay only hides it, so a forever-'open' row would permanently
+    // occupy the loader's 12-row window and crowd out newer items.
+    if (current.source === 'operator_inbox_items' && current.sourceId) {
+      try {
+        if (await tableExists('operator_inbox_items')) {
+          await db('operator_inbox_items')
+            .where({ id: String(current.sourceId) })
+            .update({
+              status: status === 'done' ? 'resolved' : 'dismissed',
+              [status === 'done' ? 'resolved_at' : 'dismissed_at']: now,
+              acted_by: uuidOrNull(req.technicianId),
+              last_action_at: now,
+              updated_at: now,
+            });
+        }
+      } catch (err) {
+        logger.warn(`[admin-agents] operator inbox close failed for ${current.sourceId}: ${err.message}`);
+      }
+    }
+
     res.json({ state, task: current });
   } catch (err) {
     next(err);
