@@ -1241,14 +1241,22 @@ const EstimateConverter = {
           // customer-level whole-plan fee would bill the full package on
           // EVERY row's completion (Codex P1). Multi-service plans leave the
           // fee NULL so completion keeps its existing per-row precedence.
+            // An already-per_application customer accepting an ADD-ON keeps
+            // their established fee (Codex round-10): the customer-level fee
+            // is the fallback for EVERY per-app visit without a row price,
+            // so overwriting it with the add-on's cadence amount would
+            // re-price the ORIGINAL series; the add-on's own rows carry
+            // their explicit estimated_price (single-service writer).
             per_application_fee: preservesExistingMembership
               ? (customer.per_application_fee ?? null)
-              : ((recurringServicesForConversion.length === 1
-                && billingCadence && Number(billingCadence.amount) > 0)
-                ? Number(billingCadence.amount)
-                : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
-                  ? Number(monthlyRate)
-                  : null)),
+              : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
+                ? Number(customer.per_application_fee)
+                : ((recurringServicesForConversion.length === 1
+                  && billingCadence && Number(billingCadence.amount) > 0)
+                  ? Number(billingCadence.amount)
+                  : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+                    ? Number(monthlyRate)
+                    : null))),
           } : {}),
           active: true,
           deleted_at: null,

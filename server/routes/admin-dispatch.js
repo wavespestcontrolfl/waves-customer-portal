@@ -4891,12 +4891,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // doesn't match, so without this binding the self-heal never
             // fires and the park is permanent (Codex round-9 P1). The
             // rollback erased the binding chargeInvoiceWithSavedCard wrote.
-            await db('invoices').where({ id: invoice.id }).update({
-              status: 'processing',
-              ...(chargeErr.stripePaymentIntentId ? { stripe_payment_intent_id: chargeErr.stripePaymentIntentId } : {}),
-              updated_at: new Date(),
-            });
-            invoice = { ...invoice, status: 'processing', ...(chargeErr.stripePaymentIntentId ? { stripe_payment_intent_id: chargeErr.stripePaymentIntentId } : {}) };
+            // ATOMIC status guard (Codex round-10): the succeeded webhook can
+            // settle the invoice paid via waves_invoice_id BEFORE this catch
+            // runs — an unconditional park would downgrade that fresh 'paid'
+            // back to money-in-flight. Only a still-collectible row parks.
+            const parked = await db('invoices').where({ id: invoice.id })
+              .whereNotIn('status', ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
+              .update({
+                status: 'processing',
+                ...(chargeErr.stripePaymentIntentId ? { stripe_payment_intent_id: chargeErr.stripePaymentIntentId } : {}),
+                updated_at: new Date(),
+              });
+            const fresh = await db('invoices').where({ id: invoice.id }).first();
+            if (fresh) invoice = fresh;
+            if (!parked && ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
+              // The webhook won the race and settled it — this is the happy
+              // self-heal, not an orphan situation anymore.
+              alreadyPaid = true;
+            }
           } catch (parkErr) {
             logger.error(`[dispatch] failed to park orphaned invoice ${invoice?.id} as processing: ${parkErr.message}`);
           }

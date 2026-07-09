@@ -1192,7 +1192,12 @@ const StripeService = {
         // 'processing' (not 'succeeded'); the status mapping below + the
         // webhook's processing→paid settlement already handle that lifecycle,
         // and computeChargeAmount already priced ACH surcharge-free.
-        const savedMethodIsBank = card.method_type === 'ach';
+        // Both bank aliases: payment_methods rows store 'ach'
+        // (savePaymentMethod) but other surfaces persist Stripe's
+        // 'us_bank_account' — classifying either as card would mint a
+        // card-only PI that Stripe refuses to confirm against a bank
+        // method (Codex round-10).
+        const savedMethodIsBank = card.method_type === 'ach' || card.method_type === 'us_bank_account';
         const invPiParams = {
           amount: invTotalCents,
           currency: 'usd',
