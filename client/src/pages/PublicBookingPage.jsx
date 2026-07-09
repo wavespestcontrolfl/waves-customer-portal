@@ -6,7 +6,7 @@ import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
-import { useGlassSurface, fireGlassConfetti } from '../glass/glass-engine';
+import { fireGlassConfetti } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 
@@ -70,8 +70,8 @@ function captureBookingAttribution() {
 }
 
 export default function PublicBookingPage() {
-  useGlassSurface(true, 'full');
-
+  // Marketing surface — standard wavespestcontrol.com warm chrome; the glass
+  // scene stays on the tokened/portal customer surfaces only.
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';

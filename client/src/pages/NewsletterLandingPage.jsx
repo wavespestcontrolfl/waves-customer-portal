@@ -13,7 +13,6 @@ import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { COLORS as B, FONTS } from '../theme-brand';
-import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -331,8 +330,6 @@ function PastIssues() {
 }
 
 export default function NewsletterLandingPage() {
-  useGlassSurface(true, 'full');
-
   return (
     <div data-glass-clear="" style={{ background: '#fff', minHeight: '100vh' }}>
       <Hero />

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPinned, ShieldCheck, Sprout } from "lucide-react";
 import BrandFooter from "../components/BrandFooter";
-import { useGlassSurface } from "../glass/glass-engine";
+import { WavesShell } from "../components/brand";
 
 const TURF_SECTIONS = [
   {
@@ -68,8 +68,6 @@ function CheckItem({ children }) {
 }
 
 export default function LawnCareIncludedPage() {
-  useGlassSurface(true, "full");
-
   useEffect(() => {
     document.title = "What's Included in Lawn Care Service? | Waves Lawn Care";
     const desc = document.querySelector('meta[name="description"]') || document.createElement("meta");
@@ -79,16 +77,11 @@ export default function LawnCareIncludedPage() {
   }, []);
 
   return (
-    <div data-glass-clear="" className="min-h-screen bg-[#f7f4ee] text-zinc-950">
-      <header data-glass-clear="" className="border-b border-zinc-200 bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
-          <Link to="/" className="text-lg font-semibold tracking-tight">Waves</Link>
-          <Link to="/estimate/lawn" data-glass-accent="" className="inline-flex h-10 items-center justify-center rounded-xs bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800">
-            Request Lawn Care Estimate
-          </Link>
-        </div>
-      </header>
-
+    // Standard marketing chrome (owner 2026-07-08): WavesShell top bar +
+    // trust footer replace the old bare text header — same presentation as
+    // /book. No glass; this is a public marketing surface.
+    <WavesShell variant="customer" topBar="solid">
+    <div className="min-h-screen bg-[#f7f4ee] text-zinc-950">
       <main>
         <section data-glass-clear="" className="bg-white">
           <div className="mx-auto grid max-w-6xl gap-8 px-4 py-12 lg:grid-cols-[1fr_360px]">
@@ -233,5 +226,6 @@ export default function LawnCareIncludedPage() {
         </div>
       </main>
     </div>
+    </WavesShell>
   );
 }
