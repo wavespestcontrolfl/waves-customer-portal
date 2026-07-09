@@ -31,6 +31,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // Authenticated fetch → blob download for Bearer-only report endpoints. A
 // bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
@@ -1166,6 +1167,138 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   );
 }
 
+// Share action on the home-page content cards (owner 2026-07-09): native
+// share sheet where available, clipboard fallback with a "Copied!" flash.
+// A canceled share sheet is not an error and does nothing.
+function SharePostButton({ url, title }) {
+  const [copied, setCopied] = useState(false);
+  const share = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const absolute = new URL(url, window.location.origin).toString();
+    if (navigator.share) {
+      try { await navigator.share({ title: title || 'Waves Pest Control', url: absolute }); } catch { /* canceled */ }
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(absolute);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch { /* clipboard unavailable */ }
+  };
+  return (
+    <button
+      type="button"
+      onClick={share}
+      style={{
+        border: 'none', background: 'none', padding: 0, cursor: 'pointer',
+        fontSize: 12, fontWeight: 800, color: PORTAL_SHELL.muted, fontFamily: FONTS.heading,
+      }}
+    >
+      {copied ? 'Copied!' : 'Share'}
+    </button>
+  );
+}
+
+// Home-page content row (owner 2026-07-09): one glass section per source —
+// Facebook, the Waves blog, and the newsletter — each a swipeable card rail
+// mirroring the wavespestcontrol.com Social Hub cards (View Post + Share,
+// no quote CTA). Hidden entirely while its feed is empty or unreachable.
+function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compact, ctaLabel }) {
+  if (!posts.length) return null;
+  return (
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          {iconTile}
+          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
+        </div>
+        {followHref && (
+          <a
+            href={followHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-glass="chip"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 36,
+              padding: '0 14px', borderRadius: 999, textDecoration: 'none',
+              background: '#fff', border: '1px solid #E7E2D7',
+              color: B.blueDeeper, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {followLabel}
+          </a>
+        )}
+      </div>
+      <div style={{
+        display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
+        WebkitOverflowScrolling: 'touch', paddingBottom: 4, scrollbarWidth: 'thin',
+      }}>
+        {posts.map((post) => (
+          <div
+            key={post.url}
+            data-glass="soft"
+            style={{
+              // Exactly three cards fill the rail on desktop (owner
+              // 2026-07-09); extra posts overflow into the horizontal
+              // scroll. Mobile keeps a fixed swipe width.
+              flex: compact ? '0 0 230px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
+              display: 'flex', flexDirection: 'column',
+              background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+              overflow: 'hidden', position: 'relative',
+            }}
+          >
+            <a href={post.url} target={post.external ? '_blank' : undefined} rel={post.external ? 'noopener noreferrer' : undefined} style={{ display: 'block', textDecoration: 'none' }}>
+              {post.image ? (
+                <img
+                  src={post.image}
+                  alt=""
+                  loading="lazy"
+                  style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
+                />
+              ) : (
+                <div style={{
+                  width: '100%', aspectRatio: '4 / 3', display: 'flex',
+                  alignItems: 'center', justifyContent: 'center',
+                  background: PORTAL_SHELL.soft, color: B.blueDeeper,
+                }}>
+                  <Icon name="waves" size={30} strokeWidth={1.6} />
+                </div>
+              )}
+            </a>
+            <div style={{ padding: '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+              {post.title && (
+                <div style={{
+                  fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
+                  display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                }}>{post.title}</div>
+              )}
+              {post.text && (
+                <div style={{
+                  fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.45,
+                  display: '-webkit-box', WebkitLineClamp: post.title ? 2 : 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                }}>{post.text}</div>
+              )}
+              <div style={{ marginTop: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
+                <a
+                  href={post.url}
+                  target={post.external ? '_blank' : undefined}
+                  rel={post.external ? 'noopener noreferrer' : undefined}
+                  style={{ fontSize: 12, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.heading, textDecoration: 'none' }}
+                >
+                  {ctaLabel} →
+                </a>
+                <SharePostButton url={post.url} title={post.title || post.text} />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function DashboardTab({ customer, onSwitchTab }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
@@ -1186,6 +1319,13 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [satOfficeName, setSatOfficeName] = useState('');
   const [satSubmitting, setSatSubmitting] = useState(false);
   const [satDismissed, setSatDismissed] = useState(false);
+  // Home-page content rows (owner 2026-07-09) — Facebook (same public feed
+  // the wavespestcontrol.com Social Hub renders, Facebook only), the Waves
+  // blog, and the newsletter. Best-effort: an empty/failed feed just hides
+  // its row.
+  const [facebookPosts, setFacebookPosts] = useState([]);
+  const [blogPosts, setBlogPosts] = useState([]);
+  const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
   const tier = TIER[customer.tier];
   const annualPrepay = customer.annualPrepay || null;
@@ -1232,6 +1372,21 @@ function DashboardTab({ customer, onSwitchTab }) {
         rewardPerReferral: Number(d.rewardPerReferral) || 25,
       });
     }).catch(console.error);
+    fetch(`${API_BASE}/public/social-feed`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const posts = (d?.posts || [])
+          .filter((p) => p.platform === 'facebook' && p.postUrl)
+          .slice(0, 6);
+        setFacebookPosts(posts);
+      })
+      .catch(() => {});
+    api.getBlogPosts()
+      .then((d) => setBlogPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
+      .catch(() => {});
+    api.getNewsletterPosts()
+      .then((d) => setNewsletterPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
+      .catch(() => {});
   }, []);
 
   const formatTime = (t) => {
@@ -1746,6 +1901,52 @@ function DashboardTab({ customer, onSwitchTab }) {
           />
         </section>
       )}
+
+      {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog, and
+          the newsletter — Social Hub-style cards in glass, each with View
+          Post + Share (no quote CTA), above the rewards cards. */}
+      <HomeContentRow
+        compact={compact}
+        title="Latest from Facebook"
+        followHref="https://facebook.com/wavespestcontrol"
+        followLabel="Follow Waves on Facebook"
+        ctaLabel="View Post"
+        iconTile={(
+          <span style={{
+            width: 38, height: 38, borderRadius: 10, flexShrink: 0,
+            background: '#1877F2', color: '#fff',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+          </span>
+        )}
+        posts={facebookPosts.map((p) => ({
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', external: true,
+        }))}
+      />
+      <HomeContentRow
+        compact={compact}
+        title="Latest from the Blog"
+        followHref="https://www.wavespestcontrol.com/blog/"
+        followLabel="Visit the Waves Blog"
+        ctaLabel="Read Post"
+        iconTile={<ShellIconTile icon="bulb" size={38} />}
+        posts={blogPosts.map((p) => ({
+          url: p.link, image: p.image, title: p.title, text: p.description, external: true,
+        }))}
+      />
+      <HomeContentRow
+        compact={compact}
+        title="The Waves Newsletter"
+        followHref="https://www.wavespestcontrol.com/newsletter/"
+        followLabel="Subscribe to the Waves Newsletter"
+        ctaLabel="Read Issue"
+        iconTile={<ShellIconTile icon="newspaper" size={38} />}
+        posts={newsletterPosts.map((p) => ({
+          url: p.link, image: p.image, title: p.title, text: p.description,
+          external: !String(p.link || '').startsWith('/'),
+        }))}
+      />
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
         {rewardCards.map(item => (
@@ -10206,6 +10407,63 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 
       {open && (
         <div style={{ padding: '0 18px 16px' }}>
+          {/* Service reports get a visual slider (owner 2026-07-09): one card
+              per past visit with the tech's first photo, swipeable so clients
+              can slide through their report history. Tapping opens the report
+              via the same handler as the list rows. The detailed list below
+              keeps the download/share actions. */}
+          {section.id === 'service_reports' && items.length > 0 && (
+            <div style={{
+              display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
+              WebkitOverflowScrolling: 'touch', padding: '2px 0 12px', scrollbarWidth: 'thin',
+            }}>
+              {items.map((doc) => (
+                <button
+                  key={`slide-${doc.id}`}
+                  type="button"
+                  onClick={() => onDownload(doc)}
+                  data-glass="soft"
+                  aria-label={`Open ${doc.title}`}
+                  style={{
+                    // Exactly three cards fill the rail on desktop (owner
+                    // 2026-07-09); older reports overflow into the
+                    // horizontal scroll. Mobile keeps a fixed swipe width.
+                    flex: compact ? '0 0 180px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
+                    display: 'flex', flexDirection: 'column', textAlign: 'left',
+                    background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+                    overflow: 'hidden', padding: 0, cursor: 'pointer', position: 'relative',
+                    fontFamily: FONTS.body,
+                  }}
+                >
+                  {doc.previewImage ? (
+                    <img
+                      src={doc.previewImage}
+                      alt=""
+                      loading="lazy"
+                      style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
+                    />
+                  ) : (
+                    <div style={{
+                      width: '100%', aspectRatio: '4 / 3', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      background: '#F8FCFE', color: B.blueDeeper,
+                    }}>
+                      <Icon name="clipboard" size={28} strokeWidth={1.6} />
+                    </div>
+                  )}
+                  <div style={{ padding: '10px 12px 12px' }}>
+                    <div style={{
+                      fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {(doc.title || '').replace(/^Visit Report — /, '')}
+                    </div>
+                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>{formatDate(doc)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
           {items.length === 0 ? (
             <PortalInlineState
               icon="document"
