@@ -9,8 +9,6 @@ import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import NewsletterSignup from '../components/NewsletterSignup';
-import BrandFooter from '../components/BrandFooter';
-import { TrustFooter, WavesShellContext } from '../components/brand';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
@@ -11872,21 +11870,10 @@ export default function PortalPage() {
             <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>Customer Portal</div>
           </div>
         </div>
-        {!isMobileShell && (
-          <nav aria-label="Customer portal" data-glass="soft" style={{
-            flex: 1, minWidth: 0, margin: '0 10px',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
-            background: PORTAL_SHELL.soft,
-            border: `1px solid ${PORTAL_SHELL.border}`,
-            borderRadius: 12,
-            padding: 4,
-            position: 'relative',
-          }}>
-            {headerNavItems.map(headerNavButton)}
-          </nav>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
+            renders as a glass card above the Waves AI bar in the content
+            column. Mobile keeps the bottom nav untouched. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
           {!isMobileShell && (
             <button
               type="button"
@@ -12253,6 +12240,25 @@ export default function PortalPage() {
       {/* Content — bottom padding clears the mobile nav so fixed UI doesn't hide the last section. */}
       <div style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
+        {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
+            Home · Plan · Visits · Billing · Refer · Documents · My Property ·
+            Learn — renders as a glass card right above the Waves AI bar
+            instead of inside the sticky top bar. Desktop only; the mobile
+            shell keeps its bottom nav. data-glass is inert without glass. */}
+        {!isMobileShell && (
+          <nav aria-label="Customer portal" data-glass="card" style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
+            background: PORTAL_SHELL.soft,
+            border: `1px solid ${PORTAL_SHELL.border}`,
+            borderRadius: 14,
+            padding: 5,
+            marginBottom: 12,
+            position: 'relative',
+          }}>
+            {headerNavItems.map(headerNavButton)}
+          </nav>
+        )}
         <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
@@ -12262,16 +12268,6 @@ export default function PortalPage() {
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
-        {/* Standard identity footer — every glass surface carries the same
-            footer stack as /track (owner 2026-07-08): BrandFooter identity
-            block + TrustFooter legal strip. The inShell provider keeps
-            BrandFooter from doubling the legal lines, exactly as WavesShell
-            pages render it. Sits inside the padded content column so the
-            mobile bottom-nav clearance still applies. */}
-        <WavesShellContext.Provider value={{ variant: 'customer', inShell: true }}>
-          <BrandFooter />
-        </WavesShellContext.Provider>
-        <TrustFooter />
       </div>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
