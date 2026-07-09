@@ -6,6 +6,7 @@
  */
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
+import { docTransition, FS, FW, LH } from '../../theme-doc';
 import { W } from './tokens';
 
 
@@ -24,15 +25,20 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8 }}>
         Customize your visit
       </div>
-      <div style={{
-        fontSize: 24,
-        fontWeight: 500,
+      {/* Real h2 (doc-style unify): the glass walker's DIV_H2 promotion set
+          still lists this title, but native h2 gets the identical
+          html[data-glass-theme] h2 rule, so the stale entry is a harmless
+          no-op (EstimateGlassTheme is read-only). */}
+      <h2 style={{
+        fontSize: FS.h2,
+        fontWeight: FW.medium,
         color: W.blueDeeper,
-        lineHeight: 1.2,
+        lineHeight: LH.heading,
+        margin: 0,
         marginBottom: 4,
       }}>
         Skip parts you don't need
-      </div>
+      </h2>
       <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.5, marginBottom: 20 }}>
         {disabled
           ? "The add-ons included in the visit you booked."
@@ -55,7 +61,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
                 {item.label} {checked ? 'included' : 'skipped'}
               </div>
               {item.detail ? (
-                <div style={{ fontSize: 14, color: W.textCaption, marginTop: 3, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4, lineHeight: 1.5 }}>
                   {checked ? 'Toggle off if you want to skip this.' : `Your estimate skips this. ${item.detail}`}
                 </div>
               ) : null}
@@ -78,7 +84,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
                 inset: 0,
                 background: checked ? W.blueDeeper : '#D4CBB8',
                 borderRadius: 999,
-                transition: 'background 160ms ease',
+                transition: docTransition('background'),
               }} />
               <span aria-hidden="true" style={{
                 position: 'absolute',
@@ -89,7 +95,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
                 background: W.white,
                 borderRadius: '50%',
                 boxShadow: '0 1px 2px rgba(0,0,0,.15)',
-                transition: 'left 160ms ease',
+                transition: docTransition('left'),
               }} />
             </span>
           </label>

@@ -237,7 +237,7 @@ export function GlassScarcityBadge({ info }) {
  */
 export function GlassSectionCta({ label, onClick, style }) {
   return (
-    <div style={{ display: 'flex', margin: '14px 0 4px', ...style }}>
+    <div style={{ display: 'flex', margin: '16px 0 4px', ...style }}>
       <button type="button" className="gc-section-cta" onClick={onClick}>
         {label}
       </button>

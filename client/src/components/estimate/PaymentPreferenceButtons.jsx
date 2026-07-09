@@ -118,7 +118,7 @@ export default function PaymentPreferenceButtons({
   const optionNote = {
     fontSize: 14,
     color: W.textCaption,
-    lineHeight: 1.45,
+    lineHeight: 1.5,
     marginTop: 8,
     padding: '0 2px',
     textAlign: 'center',
@@ -162,7 +162,7 @@ export default function PaymentPreferenceButtons({
   if (invoiceMode) {
     return (
       <div style={estimateCard()}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+        <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
           {oneTimeBooking ? 'Book your visit' : 'Accept your estimate'}
         </div>
@@ -199,7 +199,7 @@ export default function PaymentPreferenceButtons({
     const windowText = `${cardHold?.cancelWindowHours != null ? cardHold.cancelWindowHours : 24} hours`;
     return (
       <div style={estimateCard()}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+        <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
           {holdRequired ? 'Hold your appointment' : 'Book your visit'}
         </div>
@@ -224,7 +224,7 @@ export default function PaymentPreferenceButtons({
 
   return (
     <div style={estimateCard()}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+      <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
         {isOneTime ? 'Book your visit' : 'Reserve your spot'}
       </div>
@@ -257,7 +257,7 @@ export default function PaymentPreferenceButtons({
                     alignItems: 'baseline',
                     fontSize: 14,
                     color: W.navy,
-                    lineHeight: 1.4,
+                    lineHeight: 1.35,
                     marginBottom: 8,
                   }}
                 >
@@ -282,7 +282,7 @@ export default function PaymentPreferenceButtons({
                   <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(invoiceTotal)}</strong>
                 </div>
               ) : null}
-              <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 12 }}>
+              <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
                 No payment is charged on this page. After confirmation, we open the invoice
                 {invoiceTotal > 0 ? ` for ${fmtMoney(invoiceTotal)}` : ''} so you can pay in-flow.
                 {Number(oneTimeExtrasTotal) > 0

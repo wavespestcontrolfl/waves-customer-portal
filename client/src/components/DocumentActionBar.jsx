@@ -6,36 +6,15 @@
 import { useState } from 'react';
 import { Download, Share2, Printer, Lock } from 'lucide-react';
 import { canSaveNative, canShareNative, isNativeApp, saveUrlNative, shareUrlNative } from '../native/nativeFile';
-import { COLORS as B } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { docButton } from '../theme-doc';
 
-const FONT_BODY = "'Inter', system-ui, sans-serif";
-
+// Canonical document button values (incl. the #2532 border-box fix: these
+// render as width-100% grid items — content-box would add padding/border on
+// top of the cell width and overflow the row) now live in theme-doc's
+// docButton so every doc page shares one definition.
 function buttonStyle() {
-  return {
-    // border-box: these render as width-100% grid items — content-box would
-    // add the padding/border on top of the cell width and overflow the row.
-    boxSizing: 'border-box',
-    minHeight: 48,
-    padding: '0 18px',
-    borderRadius: 10,
-    border: `1px solid ${B.blueDeeper}`,
-    background: B.blueDeeper,
-    color: '#FFFFFF',
-    fontFamily: FONT_BODY,
-    fontWeight: 700,
-    fontSize: 14,
-    lineHeight: 1,
-    cursor: 'pointer',
-    textDecoration: 'none',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    boxShadow: 'none',
-    textTransform: 'none',
-    whiteSpace: 'nowrap',
-  };
+  return docButton('primary');
 }
 
 /**

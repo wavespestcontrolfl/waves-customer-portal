@@ -7,6 +7,8 @@
  * sits in WHITE inner boxes inside the tan card, same as the AI panel's
  * metric tiles.
  */
+import { RADIUS } from '../../theme-doc';
+
 export const ESTIMATE_CARD_SHADOW = '0 6px 18px rgba(15,23,42,.10), 0 2px 4px rgba(15,23,42,.06)';
 export const ESTIMATE_CARD_BG = '#F2EEE0';
 export const ESTIMATE_CARD_BORDER = '#D9D3C4';
@@ -15,7 +17,7 @@ export function estimateCard(overrides = {}) {
   return {
     background: ESTIMATE_CARD_BG,
     border: `1px solid ${ESTIMATE_CARD_BORDER}`,
-    borderRadius: 12,
+    borderRadius: RADIUS.card,
     padding: 24,
     marginBottom: 16,
     boxShadow: ESTIMATE_CARD_SHADOW,
@@ -32,7 +34,7 @@ export function estimateInnerBox(overrides = {}) {
   return {
     background: '#FFFFFF',
     border: `1px solid ${ESTIMATE_CARD_BORDER}`,
-    borderRadius: 10,
+    borderRadius: RADIUS.button,
     boxShadow: ESTIMATE_INNER_SHADOW,
     ...overrides,
   };
