@@ -1345,32 +1345,13 @@ function formatPostDate(d) {
 // Facebook, the Waves blog, and the newsletter — each a swipeable card rail
 // mirroring the wavespestcontrol.com Social Hub cards (View Post + Share,
 // no quote CTA). Hidden entirely while its feed is empty or unreachable.
-function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compact, ctaLabel }) {
+function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: compact ? 14 : 18 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: compact ? 8 : 12, marginBottom: compact ? 10 : 14, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          {iconTile}
-          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
-        </div>
-        {followHref && (
-          <a
-            href={followHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            data-glass="chip"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: compact ? 30 : 36,
-              padding: compact ? '0 11px' : '0 14px', borderRadius: 999, textDecoration: 'none',
-              background: '#fff', border: '1px solid #E7E2D7',
-              color: B.blueDeeper, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {followLabel}
-          </a>
-        )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, marginBottom: compact ? 10 : 14 }}>
+        {iconTile}
+        <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
       </div>
       <div style={{
         display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
@@ -2030,8 +2011,6 @@ function DashboardTab({ customer, onSwitchTab }) {
       <HomeContentRow
         compact={compact}
         title="Latest from Facebook"
-        followHref="https://facebook.com/wavespestcontrol"
-        followLabel="Follow Waves on Facebook"
         ctaLabel="View Post"
         iconTile={(
           <span style={{
@@ -2049,8 +2028,6 @@ function DashboardTab({ customer, onSwitchTab }) {
       <HomeContentRow
         compact={compact}
         title="Latest from the Blog"
-        followHref="https://www.wavespestcontrol.com/blog/"
-        followLabel="Visit the Waves Blog"
         ctaLabel="Read Post"
         iconTile={<ShellIconTile icon="bulb" size={compact ? 30 : 38} />}
         posts={blogPosts.map((p) => ({
@@ -2060,8 +2037,6 @@ function DashboardTab({ customer, onSwitchTab }) {
       <HomeContentRow
         compact={compact}
         title="The Waves Newsletter"
-        followHref="https://www.wavespestcontrol.com/newsletter/"
-        followLabel="Subscribe to the Waves Newsletter"
         ctaLabel="Read Issue"
         iconTile={<ShellIconTile icon="newspaper" size={compact ? 30 : 38} />}
         posts={newsletterPosts.map((p) => ({
