@@ -186,10 +186,41 @@ describe('runRemediationForPr', () => {
     expect(r.reason).toMatch(/no change/);
   });
 
-  test('already parked → skip', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked' }] });
-    const r = await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+  test('parked at the CURRENT head → skip', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: HEAD }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('park persists reason + the head the verdict applied to', async () => {
+    const db = makeDb();
+    const gh = makeGh({ fileContent: 'ORIGINAL BODY' });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('ORIGINAL BODY'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.status).toBe('parked');
+    expect(row.park_reason).toMatch(/no change/);
+    expect(row.parked_head_sha).toBe(HEAD.toLowerCase());
+  });
+
+  test('parked at an OLDER head → re-arm with fresh rounds and run the round', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'parked', parked_head_sha: 'older9999999', park_reason: 'exhausted rounds' }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(r.round).toBe(1); // rounds reset on re-arm
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.park_reason).toBeNull();
+    expect(row.parked_head_sha).toBeNull();
+  });
+
+  test('legacy parked row (no parked_head_sha) → re-arms once', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked' }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
   });
 
   test('closed PR → skip', async () => {
@@ -265,6 +296,23 @@ describe('lane entry points', () => {
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/lane gates/);
     expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('autonomous lane park annotates the run reviewer_notes with the reason', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note' }] });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: false, reason: 'uniqueness gate: near-duplicate' }),
+    });
+    expect(r.parked).toBe(true);
+    const run = db._tables.autonomous_runs[0];
+    expect(run.reviewer_notes).toContain('prior note');
+    expect(run.reviewer_notes).toContain('Codex remediation parked PR #7');
+    expect(run.reviewer_notes).toContain('uniqueness gate: near-duplicate');
   });
 
   test('autonomous lane with NO run row -> park (fail closed), runner never loaded', async () => {

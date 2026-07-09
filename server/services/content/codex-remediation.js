@@ -24,7 +24,12 @@
  *   - Bounded by CODEX_REMEDIATION_MAX_ROUNDS (default 3). After that — or if a
  *     fix produces no change (usually a false-positive finding) — the PR is
  *     parked (status='parked'; scheduler lane also disarms its publishing claim
- *     so the row leaves the auto-merge loop for human review).
+ *     so the row leaves the auto-merge loop for human review). Every park
+ *     persists its reason + the PR head it was rendered against
+ *     (park_reason / parked_head_sha), and a park auto-re-arms with fresh
+ *     rounds when the branch later receives a NEW head — a park is a verdict
+ *     on a specific head, so a human/agent fix push resumes the loop instead
+ *     of stranding the PR.
  *   - A round is only spent when Codex has left fresh findings for the current
  *     head. If Codex hasn't re-reviewed the latest push yet it no-ops (and
  *     re-posts the "@codex review" request if a prior post failed), so it never
@@ -574,8 +579,16 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
   });
 }
 
-async function park(db, prNumber, reason, onPark) {
-  await saveState(db, prNumber, { status: 'parked' });
+async function park(db, prNumber, reason, onPark, headSha = null) {
+  // Persist the reason and the head the verdict applied to — the reason used
+  // to live only in logs (short retention: three parked autonomous PRs were
+  // undiagnosable after the fact), and the head is what lets a later push
+  // re-arm the loop (a park is a verdict on a specific head, not on the PR).
+  await saveState(db, prNumber, {
+    status: 'parked',
+    park_reason: String(reason || '').slice(0, 1000),
+    parked_head_sha: headSha ? String(headSha).trim().toLowerCase() : null,
+  });
   if (typeof onPark === 'function') {
     try { await onPark(reason); } catch (e) { logger.warn(`[codex-remediation] onPark failed for PR #${prNumber}: ${e.message}`); }
   }
@@ -599,11 +612,29 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
   const state = await getState(db, prNumber);
-  if (state.status === 'parked') return { skipped: true, reason: 'parked' };
 
   const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
+
+  if (state.status === 'parked') {
+    // A park is a verdict on the head it was rendered against. If the branch
+    // has since received a NEW head (a human or agent pushed a fix), the
+    // verdict is stale — re-arm with fresh rounds so the loop can carry that
+    // push the rest of the way. Same head (or no head to compare) stays
+    // parked. Legacy rows parked before parked_head_sha existed re-arm once:
+    // the round either succeeds or re-parks stamping reason + head, so this
+    // converges instead of looping.
+    const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
+    const currentHead = String(headSha || '').trim().toLowerCase();
+    if (!currentHead || (parkedHead && parkedHead === currentHead)) {
+      return { skipped: true, reason: 'parked' };
+    }
+    await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });
+    state.status = 'active';
+    state.rounds = 0;
+    logger.info(`[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
+  }
 
   const reviewComments = await gh.listPrReviewComments(prNumber);
   const findings = parseCodexFindings(reviewComments, headSha);
@@ -637,14 +668,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Fresh findings on the current head.
   if (atRoundLimit(state.rounds)) {
-    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark);
+    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark, headSha);
   }
 
   const targetPath = pickTargetPath(findings, slug);
-  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark);
+  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark, headSha);
 
   const file = await gh.getFile(targetPath, branch);
-  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark);
+  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark, headSha);
 
   // Deterministic date-restamp carve-out: resolve date-stamp findings in code
   // (today ET), and only send the REMAINING findings to the body-only LLM fix.
@@ -675,11 +706,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // round limit so the PR reaches human review instead of looping.
     const attempt = (state.rounds || 0) + 1;
     await saveState(db, prNumber, { branch, rounds: attempt });
-    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark);
+    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha);
     return { skipped: true, reason: 'no valid LLM fix (will retry)' };
   }
   if (fixed.trim() === String(file.content).trim()) {
-    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark);
+    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha);
   }
   // Frontmatter is immutable during remediation (fixes are body-only) — any
   // added/removed/altered key parks: routing keys would mark a different URL
@@ -689,7 +720,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // the ONLY frontmatter delta that can ever pass — the LLM still can't touch
   // frontmatter at all.
   if (immutableFrontmatterChanged(baseline, fixed)) {
-    return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark);
+    return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark, headSha);
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
   // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
@@ -697,7 +728,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // content that isn't there. Park — restamping schema is a human call.
   const schemaChanged = deps.schemaShapeChanged || schemaShapeChanged;
   if (schemaChanged(file.content, fixed, deps)) {
-    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark);
+    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha);
   }
   // An un-interpolated {{token}} in an .mdx body crashes the MDX compile —
   // publishOrUpdatePage blocks these before opening a PR (astro-publisher
@@ -708,22 +739,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (!tokenOf) {
       try { tokenOf = require('../content-astro/astro-publisher')._internals.mdxBreakingToken; } catch (_) { tokenOf = null; }
     }
-    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark);
+    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark, headSha);
     let token = null;
-    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark); }
-    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark);
+    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark, headSha); }
+    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark, headSha);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
   const gate = await validate(fixed, { service, factContext }, deps);
-  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark);
+  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
   // / named_competitor_review) predate the fix and are never restamped here.
   if (gate.requiresHumanReview === true) {
-    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark);
+    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha);
   }
 
   // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
@@ -732,7 +763,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     let recheck;
     try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
     if (!recheck || recheck.ok !== true) {
-      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark);
+      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha);
     }
   }
 
@@ -774,7 +805,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       const body = String((fm.parse(fixed) || {}).content || '').trim();
       await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped });
     } catch (e) {
-      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark);
+      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, headSha);
     }
   }
 
@@ -875,19 +906,33 @@ async function maybeRemediateBlogPost(post, deps = {}) {
 async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
+  const db = deps.db || dbDefault;
   return runRemediationForPr({
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
     // path comes from the findings themselves (the autonomous run has no slug
-    // column and posts are .mdx); onPark left null — the run stays parked at
-    // completed_pending_review and status='parked' stops re-remediation.
+    // column and posts are .mdx).
     slug: null,
     // Only a brand-new publish may restamp `published` — refresh/rewrite
     // lanes must never rewrite an existing post's publication date. (Those
     // lanes park at validateAutonomousRunGates before any commit anyway;
     // this keeps the invariant local instead of relying on that gate.)
     restampPublished: (run && run.action_type) === 'new_supporting_blog',
-    onPark: null,
+    // Surface the park on the run itself: the run stays parked at
+    // completed_pending_review (status='parked' stops re-remediation until a
+    // new head re-arms), and without this note the ONLY record of why lived
+    // in short-retention logs — a parked PR was indistinguishable from one
+    // still waiting on Codex. Append-only; park() wraps this in try/catch so
+    // an annotation failure never blocks the park itself.
+    onPark: run && run.id ? async (reason) => {
+      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+      if (!fresh) return;
+      const note = `Codex remediation parked PR #${pr.number}: ${String(reason || '').slice(0, 500)} — fix the findings on the PR branch (a new head re-arms remediation) or merge/close manually.`;
+      await db('autonomous_runs').where({ id: run.id }).update({
+        reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
+        updated_at: new Date(),
+      });
+    } : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
