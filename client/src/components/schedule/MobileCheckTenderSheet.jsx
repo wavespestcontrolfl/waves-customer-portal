@@ -104,7 +104,7 @@ export default function MobileCheckTenderSheet({
             marginTop: 0,
             padding: '18px 24px',
             fontSize: 18,
-            fontWeight: 600,
+            fontWeight: 500,
             background: '#111111',
             color: '#FFFFFF',
             border: 'none',
