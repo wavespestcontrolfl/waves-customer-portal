@@ -161,7 +161,6 @@ const DEFAULT_BLOG_AUTHOR = Object.freeze({
   name: 'Adam Benetti',
   role: 'Founder & Lead Technician',
   fdacs_license: 'JB351547',
-  years_swfl: 12,
   bio_url: '/about/authors/adam-benetti',
 });
 const DEFAULT_TECHNICAL_REVIEWER = Object.freeze({
@@ -259,7 +258,6 @@ async function buildFrontmatter(post) {
       name: author.name,
       role: author.role,
       fdacs_license: author.fdacs_license || undefined,
-      years_swfl: author.years_swfl || undefined,
       bio_url: author.bio_url,
     } : undefined,
     technically_reviewed_by: reviewer ? {
@@ -364,8 +362,8 @@ function normalizeAuthorBlock(value, fallback) {
   const out = { name, role, bio_url: bioUrl };
   const fdacs = String(source.fdacs_license || fallback.fdacs_license || '').trim();
   if (/^JB\d{4,}$/.test(fdacs)) out.fdacs_license = fdacs;
-  const years = Number.isInteger(source.years_swfl) ? source.years_swfl : fallback.years_swfl;
-  if (Number.isInteger(years) && years >= 0) out.years_swfl = years;
+  // No tenure field: the old years_swfl emission was a fabricated "12" (owner
+  // ruling 2026-07-09 — real figure is 3, and tenure is not displayed anywhere).
   return out;
 }
 

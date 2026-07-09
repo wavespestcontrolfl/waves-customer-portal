@@ -92,7 +92,6 @@ describe('content-brief-builder operator-intercept injection', () => {
       name: 'Adam Benetti',
       role: 'Founder & Lead Technician',
       fdacs_license: 'JB351547',
-      years_swfl: 12,
       bio_url: '/about/authors/adam-benetti',
     });
     expect(op.byline.emphasis).toMatch(/Augusta National/);
