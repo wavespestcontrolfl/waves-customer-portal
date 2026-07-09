@@ -4558,8 +4558,14 @@ const CallRecordingProcessor = {
                       // Send them (and only them) the confirmation email;
                       // recipientFilter keeps the phone-channel primary from
                       // receiving an email their channel choice didn't ask for.
+                      // Honors the New Appointment Confirmation opt-out: the
+                      // SMS legs are suppressed by sendCustomerMessage's
+                      // validator, but the email path bypasses it — an
+                      // opted-out account must not leak a confirmation email
+                      // (same rule deliverConfirmationByChannel encodes).
+                      const confirmationOptedOut = prefsRow?.appointment_confirmation === false;
                       const { getServiceContactSlots } = require('./customer-contact');
-                      const emailOnlySlots = getServiceContactSlots(freshCustomer || {})
+                      const emailOnlySlots = confirmationOptedOut ? [] : getServiceContactSlots(freshCustomer || {})
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
                         const AppointmentEmail = require('./appointment-email');

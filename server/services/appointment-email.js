@@ -104,9 +104,19 @@ async function resolveRecipients(customer) {
       recipients.push({ email: value, name });
     }
   };
-  // The SMS appointment recipients first (service contacts and/or primary, each
-  // with their own email — service email falls back to primary email in here).
-  for (const c of getAppointmentContacts(customer, prefs || {})) add(c.email, c.name);
+  // The SMS appointment recipients first (service contacts and/or primary).
+  // A service contact's email inside getAppointmentContacts falls back to the
+  // PRIMARY email when their slot has none — keep that delivery fallback (the
+  // primary mailbox still gets the notice) but under the PRIMARY's name: a
+  // greeting with the service contact's name on the primary's address
+  // mislabels the email (phone-only buyer/tenant slots made this common).
+  const primary = getPrimaryContact(customer);
+  const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
+  for (const c of getAppointmentContacts(customer, prefs || {})) {
+    const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
+    if (ownEmail) add(ownEmail, c.name);
+    else add(primary.email, primary.name);
+  }
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
@@ -114,7 +124,6 @@ async function resolveRecipients(customer) {
   // Last resort: the primary customer email (e.g. email-only customer with no
   // appointment phone contacts at all).
   if (!recipients.length) {
-    const primary = getPrimaryContact(customer);
     add(primary.email, primary.name);
   }
   return recipients;
