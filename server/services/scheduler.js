@@ -2986,6 +2986,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:15AM ET — Sunbiz annual-report reminder + late-fee sweep.
+  // Florida LLC annual reports open Jan 1 and are due May 1; filing late adds
+  // a non-waivable $400 statutory fee. January ticks ring the admin bell once
+  // per year (notifications-metadata dedupe; daily rather than Jan-1-only so
+  // a New Year's deploy gap can't swallow the reminder) and self-heal the
+  // Tax → Filing Calendar row. Ticks after May 1 bump the still-unfiled
+  // row's amount_due by the $400 fee so /admin/tax shows the real payable.
+  // runExclusive: read-then-act against notifications — a deploy overlap
+  // must not double-ring.
+  // =========================================================================
+  cron.schedule('15 6 * * *', async () => {
+    logger.info('Running: Sunbiz annual-report reminder');
+    try {
+      await runExclusive('sunbiz-annual-report-reminder', async () => {
+        const { runSunbizAnnualReportReminder } = require('./sunbiz-annual-report-reminder');
+        await runSunbizAnnualReportReminder();
+      });
+    } catch (err) {
+      logger.error(`Sunbiz annual-report reminder failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:30AM — Sync Google Business Profile performance metrics
   // =========================================================================
   cron.schedule('30 6 * * *', async () => {
