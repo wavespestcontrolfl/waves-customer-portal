@@ -6,7 +6,10 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
-const COVERED_STATUSES = [...ACTIVE_STATUSES, 'renewed', 'switch_plan'];
+// Decided coverage: the renewal decision is recorded but the paid window still
+// runs. Covered ONLY while the prepay invoice is actually paid — see the
+// decidedCoveredAndPaid branch in coveredTermsAsOf.
+const DECIDED_COVERED_STATUSES = ['renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 // Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
@@ -958,15 +961,35 @@ function coveredTermsAsOf(conn, coverageDate = null) {
   }
   return query
     .where(function statusGuard() {
-      this.whereIn('t.status', COVERED_STATUSES)
+      // Live statuses (active / renewal_pending) carry no invoice condition —
+      // legacy born-active terms may predate invoice linkage entirely.
+      this.whereIn('t.status', ACTIVE_STATUSES)
         .orWhere(function paidPending() {
           this.where('t.status', PAYMENT_PENDING_STATUS)
             .andWhere(function invoicePaid() {
               this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
             });
         })
-        .orWhere(function lapsedRenewalStillInTerm() {
-          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
+        // DECIDED coverage (renewed / switch_plan / a decided lapse riding out
+        // its paid window) stays covered ONLY while its prepay invoice is
+        // actually PAID. A lost chargeback (or an open dispute) reopens that
+        // invoice to 'overdue' WITH ITS PI LINKAGE CLEARED, so neither the
+        // cancelled-status exclusion nor the refunded-payment NOT EXISTS below
+        // can see the claw-back — this paid gate is what revokes decided
+        // coverage on disputed money, and it self-restores when the invoice
+        // returns to paid (dispute won / re-collection). A decided term with
+        // NO linked invoice (legacy) keeps its historical covered semantics.
+        .orWhere(function decidedCoveredAndPaid() {
+          this.where(function decidedShape() {
+            this.whereIn('t.status', DECIDED_COVERED_STATUSES)
+              .orWhere(function lapsedRenewalStillInTerm() {
+                this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
+              });
+          }).andWhere(function decidedInvoicePaid() {
+            this.whereNull('t.prepay_invoice_id')
+              .orWhere('i.status', 'paid')
+              .orWhereNotNull('i.paid_at');
+          });
         });
     })
     .whereRaw(
@@ -1344,12 +1367,14 @@ async function activatePaidPendingTerms(conn = db) {
  * A re-collection (customer re-pays the reopened invoice) also flips the
  * term back active through the ordinary paid path.
  * Decided-coverage terms (renewed / switch_plan / decided lapse) are NOT
- * suspended — their renewal-flow state would be destroyed; they stay
- * covered until a LOST dispute cancels them, and the admin dispute
- * notification covers the interim. Conditional UPDATE = idempotent on
- * Stripe retries. renewal_pending demotes to payment_pending and returns
- * as 'active' on a won dispute; the renewal alert recomputes from dates,
- * so only the contacted flag's status is lost — acceptable, logged.
+ * status-flipped — their renewal-flow state would be destroyed. Their
+ * coverage suspends anyway: coveredTermsAsOf's decidedCoveredAndPaid
+ * branch requires the prepay invoice to be PAID, and the dispute reopen
+ * flips it to 'overdue'. A LOST dispute then cancels them outright.
+ * Conditional UPDATE = idempotent on Stripe retries. renewal_pending
+ * demotes to payment_pending and returns as 'active' on a won dispute;
+ * the renewal alert recomputes from dates, so only the contacted flag's
+ * status is lost — acceptable, logged.
  */
 async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
   if (!invoiceId || !(await annualPrepayTableExists())) return [];
@@ -1367,7 +1392,7 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
     .whereIn('status', ['renewed', 'switch_plan'])
     .select('id');
   for (const term of decided) {
-    logger.warn(`[annual-prepay] term ${term.id} has decided coverage on disputed invoice ${invoiceId} — NOT suspended; a lost dispute cancels it, admin notified meanwhile`);
+    logger.warn(`[annual-prepay] term ${term.id} has decided coverage on disputed invoice ${invoiceId} — status kept (renewal state), coverage suspends via the decided paid-invoice gate once the invoice reopens`);
   }
   return rows;
 }
@@ -1446,11 +1471,14 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
  * monthly_rate > 0 + autopay on. The paid coverage term — not a zeroed
  * monthly_rate — is the billing-suppression source of truth.
  *
- * Coverage = today within [term_start, term_end] AND a COVERED_STATUSES term
- * (or a payment_pending term whose invoice is in fact paid, or a renewal-lapsed
- * term still inside its paid window) AND the prepay invoice is not void/refunded
- * AND the prepay payment was not fully refunded. A refund (invoice flips to
- * refunded / payment refund_status='full') correctly re-enables monthly billing.
+ * Coverage = today within [term_start, term_end] AND a live (active /
+ * renewal_pending) term (or a payment_pending term whose invoice is in fact
+ * paid, or a decided renewed/switch_plan/lapsed term whose invoice is STILL
+ * paid) AND the prepay invoice is not void/refunded AND the prepay payment was
+ * not fully refunded. A refund (invoice flips to refunded / payment
+ * refund_status='full') correctly re-enables monthly billing, and so does a
+ * chargeback (the dispute reopen flips the invoice off 'paid', which drops
+ * decided coverage and — via the term suspend — live coverage).
  */
 async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
   if (!(await annualPrepayTableExists())) return new Set();

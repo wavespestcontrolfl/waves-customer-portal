@@ -217,4 +217,82 @@ describe('annual prepay late-payment gap fixes', () => {
       expect(summary).toEqual({ terms: 0, settled: 0, credited: 0, reversed: 0 });
     });
   });
+
+  describe('coveredTermsAsOf status guard — decided coverage requires a PAID invoice', () => {
+    // Capture the real statusGuard where-callback off coveredTermsAsOf, then
+    // evaluate it against synthetic rows with a minimal knex-semantics
+    // interpreter (where/andWhere/whereIn/whereNull = AND; orWhere* = OR;
+    // nested callbacks = groups). This pins the lost-chargeback behavior:
+    // the dispute reopen flips the prepay invoice to 'overdue' with its PI
+    // linkage CLEARED, so this guard is the only thing that can revoke
+    // decided coverage.
+    function captureStatusGuard() {
+      let guard = null;
+      const b = {};
+      ['leftJoin', 'whereRaw', 'whereIn', 'select', 'distinct', 'first'].forEach((m) => {
+        b[m] = () => b;
+      });
+      b.where = (arg) => {
+        if (typeof arg === 'function' && !guard) guard = arg;
+        return b;
+      };
+      AnnualPrepayRenewals.coveredTermsAsOf(() => b, null);
+      if (!guard) throw new Error('statusGuard callback not captured');
+      return guard;
+    }
+
+    function evaluateGuard(guard, row) {
+      function makeGroup() {
+        const g = {
+          val: null,
+          comb(op, v) { g.val = g.val === null ? v : (op === 'and' ? (g.val && v) : (g.val || v)); return g; },
+        };
+        const pred = (a, b2) => {
+          if (typeof a === 'function') { const inner = makeGroup(); a.call(inner); return !!inner.val; }
+          return row[a] === b2;
+        };
+        g.where = (a, b2) => g.comb('and', pred(a, b2));
+        g.andWhere = (a, b2) => g.comb('and', pred(a, b2));
+        g.orWhere = (a, b2) => g.comb('or', pred(a, b2));
+        g.whereIn = (col, arr) => g.comb('and', arr.includes(row[col]));
+        g.whereNull = (col) => g.comb('and', row[col] == null);
+        g.orWhereNotNull = (col) => g.comb('or', row[col] != null);
+        return g;
+      }
+      const root = makeGroup();
+      guard.call(root);
+      return !!root.val;
+    }
+
+    const rows = {
+      renewedPaid: { 't.status': 'renewed', 't.prepay_invoice_id': 'inv-1', 'i.status': 'paid', 'i.paid_at': '2026-01-01' },
+      renewedDisputeReopened: { 't.status': 'renewed', 't.prepay_invoice_id': 'inv-1', 'i.status': 'overdue', 'i.paid_at': null },
+      switchPlanDisputeReopened: { 't.status': 'switch_plan', 't.prepay_invoice_id': 'inv-1', 'i.status': 'overdue', 'i.paid_at': null },
+      decidedLapsePaid: { 't.status': 'cancelled', 't.renewal_decision': 'cancel', 't.prepay_invoice_id': 'inv-1', 'i.status': 'paid', 'i.paid_at': '2026-01-01' },
+      decidedLapseDisputeReopened: { 't.status': 'cancelled', 't.renewal_decision': 'cancel', 't.prepay_invoice_id': 'inv-1', 'i.status': 'overdue', 'i.paid_at': null },
+      decidedLegacyNoInvoice: { 't.status': 'renewed', 't.prepay_invoice_id': null, 'i.status': undefined, 'i.paid_at': undefined },
+      activeAnyInvoice: { 't.status': 'active', 't.prepay_invoice_id': 'inv-1', 'i.status': 'overdue', 'i.paid_at': null },
+      pendingPaidInvoice: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'paid', 'i.paid_at': '2026-01-01' },
+      pendingOpenInvoice: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'sent', 'i.paid_at': null },
+      trueCancel: { 't.status': 'cancelled', 't.renewal_decision': null, 't.prepay_invoice_id': 'inv-1', 'i.status': 'refunded', 'i.paid_at': null },
+    };
+
+    test('decided terms lose coverage when the prepay invoice reopens (lost/open chargeback)', () => {
+      const guard = captureStatusGuard();
+      expect(evaluateGuard(guard, rows.renewedDisputeReopened)).toBe(false);
+      expect(evaluateGuard(guard, rows.switchPlanDisputeReopened)).toBe(false);
+      expect(evaluateGuard(guard, rows.decidedLapseDisputeReopened)).toBe(false);
+    });
+
+    test('paid decided coverage, legacy no-invoice decided coverage, and live/pending semantics are unchanged', () => {
+      const guard = captureStatusGuard();
+      expect(evaluateGuard(guard, rows.renewedPaid)).toBe(true);
+      expect(evaluateGuard(guard, rows.decidedLapsePaid)).toBe(true);
+      expect(evaluateGuard(guard, rows.decidedLegacyNoInvoice)).toBe(true);
+      expect(evaluateGuard(guard, rows.activeAnyInvoice)).toBe(true); // ACTIVE carries no invoice condition here (dispute suspend + NOT-EXISTS handle it)
+      expect(evaluateGuard(guard, rows.pendingPaidInvoice)).toBe(true);
+      expect(evaluateGuard(guard, rows.pendingOpenInvoice)).toBe(false);
+      expect(evaluateGuard(guard, rows.trueCancel)).toBe(false);
+    });
+  });
 });
