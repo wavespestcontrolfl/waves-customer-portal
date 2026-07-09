@@ -2625,23 +2625,31 @@ async function handleDisputeCreated(dispute) {
       // term this invoice paid for. A won dispute restores the invoice to
       // paid and the ordinary payment sync re-activates the term; a lost
       // dispute cancels it via the refund-shaped sync in dispute-closed.
-      // Ordered BEFORE the invoice reopen: both writes are idempotent, and
-      // a crash between them retries into this block intact (the reopen's
-      // PI-clear would otherwise skip it). No .catch — critical-write
-      // discipline, the event must not be marked processed on failure.
-      await require('../services/annual-prepay-renewals')
-        .suspendActiveTermsForDisputedInvoice(invoice.id);
+      // ATOMIC with the invoice reopen (Codex #2533 round-5 P2): a crash
+      // between a committed suspension and the reopen would leave a
+      // payment_pending + dispute-marked term joined to a still-'paid'
+      // invoice — exactly the shape activatePaidPendingTerms (billing cron)
+      // and the sweep's marker legs read as "dispute resolved", so they
+      // would flip coverage back on and clear the marker mid-dispute before
+      // Stripe's retry lands. One transaction means the world only ever
+      // sees suspended-term + reopened-invoice together. No .catch —
+      // critical-write discipline, a rollback fails the event and Stripe
+      // retries it.
+      await db.transaction(async (trx) => {
+        await require('../services/annual-prepay-renewals')
+          .suspendActiveTermsForDisputedInvoice(invoice.id, trx);
 
-      await db('invoices').where({ id: invoice.id }).update({
-        status: 'overdue',
-        paid_at: null,
-        // Clear the PI linkage: the pay page and card-on-file paths
-        // treat a lingering non-canceled intent as "payment already in
-        // progress" and would refuse re-collection on the reopened
-        // invoice. The disputed payments row keeps the original PI for
-        // the audit trail.
-        stripe_payment_intent_id: null,
-        stripe_charge_id: null,
+        await trx('invoices').where({ id: invoice.id }).update({
+          status: 'overdue',
+          paid_at: null,
+          // Clear the PI linkage: the pay page and card-on-file paths
+          // treat a lingering non-canceled intent as "payment already in
+          // progress" and would refuse re-collection on the reopened
+          // invoice. The disputed payments row keeps the original PI for
+          // the audit trail.
+          stripe_payment_intent_id: null,
+          stripe_charge_id: null,
+        });
       });
     }
     }

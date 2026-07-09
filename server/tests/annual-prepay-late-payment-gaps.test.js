@@ -587,6 +587,23 @@ describe('annual prepay late-payment gap fixes', () => {
       expect(paymentsQ.where).toHaveBeenCalledWith('payment_date', '<=', '2027-07-01');
     });
 
+    test('an ET-evening suspension keeps same-ET-day dues in the window (Codex round-5 P2: timestamptz vs ET calendar date)', async () => {
+      // 2026-07-06T01:30:00Z = 2026-07-05 9:30 PM ET (EDT): the UTC date has
+      // already rolled over, so a UTC-derived lower bound would start the
+      // window on 07-06 and skip dues collected that same ET evening.
+      const eveningTerm = { ...MARKED_TERM, dispute_suspended_at: '2026-07-06T01:30:00Z' };
+      const paymentsQ = query({ rows: [] });
+      const markerClearQ = query();
+      const conn = makeConn({
+        payments: [paymentsQ],
+        annual_prepay_terms: [markerClearQ],
+      });
+
+      await AnnualPrepayRenewals.finishDisputeRecoveryForTerm(eveningTerm, conn);
+
+      expect(paymentsQ.where).toHaveBeenCalledWith('payment_date', '>=', '2026-07-05');
+    });
+
     test('won-dispute reactivation runs the claw-back end to end through syncTermForInvoicePayment', async () => {
       const PENDING_MARKED = {
         id: 'term-s', customer_id: 'cust-1', status: 'payment_pending',

@@ -924,7 +924,16 @@ async function reconcileDisputeWindowMonthlyDues(term, conn = db) {
   const summary = { credited: 0, pending: 0 };
   try {
     if (!term?.id || !term.customer_id || !term.dispute_suspended_at) return summary;
-    const disputeStartDate = dateOnly(term.dispute_suspended_at);
+    // ET calendar date, NOT dateOnly (Codex round-5 P2): the marker is a
+    // timestamptz, and an ET-evening suspension has already rolled to the
+    // next UTC day — dateOnly would start the window one day late while
+    // payments.payment_date is an ET calendar date, silently skipping dues
+    // collected later that same ET evening (and the marker clear would then
+    // lose them for good).
+    const disputeStartRaw = term.dispute_suspended_at instanceof Date
+      ? term.dispute_suspended_at
+      : new Date(term.dispute_suspended_at);
+    const disputeStartDate = Number.isNaN(disputeStartRaw.getTime()) ? null : etDateString(disputeStartRaw);
     const termEndDate = dateOnly(term.term_end);
     const termStartMonth = String(dateOnly(term.term_start) || '').slice(0, 7);
     const termEndMonth = String(termEndDate || '').slice(0, 7);
