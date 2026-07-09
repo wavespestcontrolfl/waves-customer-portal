@@ -171,6 +171,15 @@ const gates = {
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
 
+  // Estimate accept — widen existing-appointment detection to ANY upcoming
+  // pending/confirmed appointment belonging to the estimate's customer (not
+  // just rows already linked to the estimate). A match swaps the accept
+  // wizard's slot picker for payment options and the accept stamps
+  // source_estimate_id onto that visit. Changes which visit an acceptance
+  // attaches to, so it FAILS CLOSED (explicit opt-in in every environment)
+  // until the owner verifies the first customer-wide match end-to-end.
+  estimateExistingApptCustomerWide: process.env.GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE === 'true',
+
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
 
