@@ -1137,6 +1137,42 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     }
   }
 
+  // If ACH payment succeeded, resolve any pending ACH failures for this
+  // customer. ORDER MATTERS: this reset must run BEFORE the save-card
+  // mirror below — a required-save customer paying by bank from a
+  // previously blocked account (ach_status needs_verification/suspended)
+  // has just proven the account collects, and enrollConsentedMethod
+  // refuses bank targets while ach_status is unhealthy. Resetting first
+  // means the enrollment attempt sees the healthy state; the old
+  // reset-after ordering left the debit cleared but the method
+  // saved-only with no second enrollment attempt (Codex #2507 round-6).
+  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
+  if (pmType === 'us_bank_account') {
+    try {
+      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+      if (payment?.customer_id) {
+        // Third-party Bill-To: a payer/AP bank transfer clearing must not
+        // reactivate the homeowner's suspended/needs-verification ACH state —
+        // the payer's payment row sits under the service customer's id but is
+        // not the homeowner's bank account. (Symmetric to the handleAchFailure
+        // guard.)
+        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+        if (achInvoice?.payer_id) {
+          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
+        } else {
+          await db('ach_failure_log')
+            .where({ customer_id: payment.customer_id, resolved: false })
+            .update({ resolved: true, resolution: 'retry_success' })
+            .catch(() => {});
+          await db('customers').where({ id: payment.customer_id })
+            .update({ ach_status: 'active', ach_failure_count: 0 })
+            .catch(() => {});
+          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
+        }
+      }
+    } catch { /* non-critical */ }
+  }
+
   // ── Save payment method on the customer if they opted in ─────
   //
   // When the /pay/:token page sets `setup_future_usage: 'off_session'`
@@ -1267,34 +1303,6 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       source: 'stripe_webhook',
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
-  }
-
-  // If ACH payment succeeded, resolve any pending ACH failures for this customer
-  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
-  if (pmType === 'us_bank_account') {
-    try {
-      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
-      if (payment?.customer_id) {
-        // Third-party Bill-To: a payer/AP bank transfer clearing must not
-        // reactivate the homeowner's suspended/needs-verification ACH state —
-        // the payer's payment row sits under the service customer's id but is
-        // not the homeowner's bank account. (Symmetric to the handleAchFailure
-        // guard.)
-        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
-        if (achInvoice?.payer_id) {
-          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
-        } else {
-          await db('ach_failure_log')
-            .where({ customer_id: payment.customer_id, resolved: false })
-            .update({ resolved: true, resolution: 'retry_success' })
-            .catch(() => {});
-          await db('customers').where({ id: payment.customer_id })
-            .update({ ach_status: 'active', ach_failure_count: 0 })
-            .catch(() => {});
-          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
-        }
-      }
-    } catch { /* non-critical */ }
   }
 
   // ── Bell + push for the admin team ──

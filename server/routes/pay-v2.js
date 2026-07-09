@@ -140,7 +140,19 @@ async function invoiceRequiresSavedMethod(invoice) {
       .first('source_estimate_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
     if (!ss?.source_estimate_id) return false;
     return !!(ss.is_recurring || ss.recurring_parent_id || ss.recurring_pattern);
-  } catch { return false; }
+  } catch (err) {
+    // Only the EXPECTED pre-migration shape (billing_mode column/table not
+    // there yet) may relax the requirement. Anything else — a transient
+    // read failure in migrated prod — must surface: every server-side
+    // enforcement of required-save calls this helper, so swallowing the
+    // error would let /setup, /update-amount and /finalize stop forcing
+    // saveCard and the recurring signup completes with no saved method
+    // (Codex #2507 round-6 P1). Failing the request is the fail-closed
+    // path — the customer retries a transient error, the requirement never
+    // silently disappears.
+    if (err?.code === '42703' || err?.code === '42P01') return false;
+    throw err;
+  }
 }
 
 // Nothing chargeable is on file for this required-save customer — the
@@ -153,7 +165,17 @@ async function invoiceCaptureNeeded(invoice) {
     const { customerOnAutopay } = require('../services/autopay-eligibility');
     const customerRow = await db('customers').where({ id: invoice.customer_id }).first();
     return !!customerRow && !(await customerOnAutopay(customerRow));
-  } catch { return false; }
+  } catch (err) {
+    // This is the ONLY gate deciding whether a credit-covered required-save
+    // signup must complete the capture step, and no PaymentIntent/webhook
+    // path exists to save a method for it — so an unknown autopay state
+    // must read as "capture needed", never "all set" (Codex #2507 round-6
+    // P1). A spurious true only shows the capture step; /capture-setup
+    // re-derives the need server-side before minting, so it can never
+    // double-save or charge.
+    logger.warn(`[pay-v2] captureNeeded lookup failed for invoice ${invoice?.id}: ${err.message} — failing closed (capture needed)`);
+    return true;
+  }
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -1034,3 +1056,5 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
+module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;

@@ -630,7 +630,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           try {
             const { error, paymentIntent } = await stripeRef.current.confirmPayment({
               elements: elementsRef.current,
-              confirmParams: { return_url: window.location.href },
+              confirmParams: { return_url: redirectReturnUrl() },
               redirect: 'if_required',
             });
             if (error) {
@@ -731,6 +731,24 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const isCardFamily = selectedMethod !== 'us_bank_account';
   const buttonAmount = displayedTotal;
 
+  // Return URL for redirect tenders (bank auth, wallet handoff): component
+  // state does not survive the redirect, so carry the LIVE consent-box
+  // state as the pay link's own saveCard param — the page-level
+  // redirect-return effect re-derives saveCardDefault from the URL and
+  // would otherwise skip the consent POST for a box the customer ticked on
+  // an optional link (Codex #2507 round-6 P1). Read through a ref because
+  // the Express Checkout confirm handler is registered once on mount and
+  // would close over a stale prop. Never cleared when unticked: the server
+  // treats a non-opted-in PI's consent POST as a silent no-op.
+  const saveCardRef = useRef(saveCard);
+  useEffect(() => { saveCardRef.current = saveCard; }, [saveCard]);
+  const redirectReturnUrl = () => {
+    if (!saveCardRef.current) return window.location.href;
+    const url = new URL(window.location.href);
+    url.searchParams.set('saveCard', '1');
+    return url.toString();
+  };
+
   const selectPaymentMethod = (methodCategory) => {
     if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
     // Clear any pending card quote when switching methods
@@ -821,7 +839,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       try {
         const { error, paymentIntent: pi } = await stripeRef.current.confirmPayment({
           elements: elementsRef.current,
-          confirmParams: { return_url: window.location.href },
+          confirmParams: { return_url: redirectReturnUrl() },
           redirect: 'if_required',
         });
         if (error) {
@@ -1497,22 +1515,36 @@ export default function PayPageV2() {
         `/receipt/${token}${consentFailed ? '?fresh=1&consent_failed=1' : '?fresh=1'}`,
         { replace: true },
       );
-      // Only save-configured links post consent (the return URL keeps the
-      // pay link's own params, so saveCardDefault survives the redirect) —
-      // a plain one-time redirect goes straight to the receipt. The server
-      // treats a non-opted-in PI as a silent no-op either way, so an
-      // unticked optional box can't produce a false failure. AWAITED with
-      // one retry, mirroring the normal post-confirm path (Codex #2507
-      // round-5 P1): the webhook's enrollment is consent-gated, so a
-      // dropped consent here would defer Auto Pay forever with no signal —
-      // a persistent failure flags consent_failed on the receipt instead.
-      if (!saveCardDefault) { finish(false); return; }
+      // Save flows post consent; a plain one-time redirect goes straight
+      // to the receipt (no false consent_failed banner on a payment that
+      // never involved saving). The gate is URL-first but SERVER-decided
+      // (Codex #2507 round-6 P1): the confirm return_url carries the live
+      // box state as saveCard=1, so saveCardDefault covers ticked flows —
+      // but a required-save invoice opened from a bare /pay/:token (old
+      // link, stripped params) has nothing in the URL, so before skipping
+      // we ask the GET payload's own invoice.saveRequired. Unknown (GET
+      // unreachable) reads as a save flow: the consent POST is a silent
+      // no-op on a non-opted-in PI, so guessing wrong costs one request.
+      // The POST is AWAITED with one retry, mirroring the normal
+      // post-confirm path (round-5 P1): webhook enrollment is
+      // consent-gated, so a dropped consent here would defer Auto Pay
+      // forever with no signal — a persistent failure flags
+      // consent_failed on the receipt instead.
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
       (async () => {
+        let saveFlow = saveCardDefault;
+        if (!saveFlow) {
+          try {
+            const r = await fetch(`${API_BASE}/pay/${token}`);
+            const d = r.ok ? await r.json() : null;
+            saveFlow = d ? !!d.invoice?.saveRequired : true;
+          } catch { saveFlow = true; }
+        }
+        if (!saveFlow) { finish(false); return; }
         try {
           let res = await postConsent();
           if (!res.ok) {
