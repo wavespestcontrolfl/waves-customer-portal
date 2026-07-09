@@ -26,10 +26,11 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   [
     'whereIn', 'whereNull', 'whereBetween', 'whereNotIn', 'whereNotNull',
     'orderBy', 'select', 'join', 'leftJoin', 'distinct', 'forUpdate',
-    'whereRaw', 'modify', 'orWhere', 'orWhereNotNull', 'limit', 'whereNot',
+    'whereRaw', 'orWhere', 'orWhereNotNull', 'limit', 'whereNot',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
+  q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
   q.where = jest.fn((arg) => {
     if (typeof arg === 'function') arg.call(q);
     return q;
@@ -132,30 +133,73 @@ describe('annual prepay late-payment gap fixes', () => {
   });
 
   describe('suspendActiveTermsForDisputedInvoice', () => {
-    test('flips active/renewal_pending terms to payment_pending, restores prior billing mode; decided terms only logged', async () => {
+    test('flips active/renewal_pending to payment_pending, clears stamps, restores billing mode for suspended AND decided terms', async () => {
       const suspendQ = query({ returning: [{ ...COVERED_TERM, status: 'payment_pending' }] });
+      const stampClearQ = query();
       const replacementQ = query({ first: undefined }); // no replacement coverage
       const priorQ = query({ first: { prior_billing_mode: 'per_application' } });
       const customerResetQ = query();
-      const decidedQ = query({ rows: [{ id: 'term-decided' }] });
+      const decidedQ = query({ rows: [{ id: 'term-decided', customer_id: 'cust-2', status: 'renewed', source_estimate_id: null }] });
+      const decidedReplacementQ = query({ first: undefined });
+      const decidedPriorQ = query({ first: { prior_billing_mode: 'none' } });
+      const decidedCustomerResetQ = query();
       const conn = makeConn({
-        annual_prepay_terms: [suspendQ, replacementQ, priorQ, decidedQ],
-        customers: [customerResetQ],
+        annual_prepay_terms: [suspendQ, replacementQ, priorQ, decidedQ, decidedReplacementQ, decidedPriorQ],
+        scheduled_services: [stampClearQ],
+        customers: [customerResetQ, decidedCustomerResetQ],
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+      db.mockImplementation(() => query({ columnInfo: SS_COLS })); // scheduledServiceColumns cache
 
       const suspended = await AnnualPrepayRenewals.suspendActiveTermsForDisputedInvoice('prepay-inv-1', conn);
 
       expect(suspended).toHaveLength(1);
       expect(suspendQ.whereIn).toHaveBeenCalledWith('status', ['active', 'renewal_pending']);
       expect(suspendQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'payment_pending' }));
+      // Future-visit stamps must clear (method-scoped) or a visit billed
+      // mid-dispute is skipped by the won-dispute reconcile as "already
+      // covered" and the customer double-pays.
+      expect(stampClearQ.where).toHaveBeenCalledWith('prepaid_method', 'annual_prepay_invoice');
+      expect(stampClearQ.update).toHaveBeenCalledWith(expect.objectContaining({ prepaid_amount: null }));
       // Mid-dispute completions must BILL: the customer's billing_mode is
       // restored to the recorded prior (guarded on currently-annual_prepay),
-      // exactly like the cancel path.
+      // exactly like the cancel path — for the suspended term AND the
+      // decided-coverage term ('none' prior restores legacy NULL).
       expect(customerResetQ.where).toHaveBeenCalledWith({ id: 'cust-1', billing_mode: 'annual_prepay' });
       expect(customerResetQ.update).toHaveBeenCalledWith(expect.objectContaining({ billing_mode: 'per_application' }));
+      expect(decidedCustomerResetQ.where).toHaveBeenCalledWith({ id: 'cust-2', billing_mode: 'annual_prepay' });
+      expect(decidedCustomerResetQ.update).toHaveBeenCalledWith(expect.objectContaining({ billing_mode: null }));
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('term term-1 suspended'));
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('term term-decided has decided coverage'));
+    });
+
+    test('GUARD 5 suppression excludes dispute-suspended terms (prior_billing_mode recorded) when the column exists', async () => {
+      const colsQ = query({ columnInfo: { prior_billing_mode: {} } });
+      const pendingQ = query({ rows: [] });
+      const conn = makeConn({
+        annual_prepay_terms: [colsQ],
+        'annual_prepay_terms as t': [pendingQ],
+      });
+
+      await AnnualPrepayRenewals.getPaymentPendingCustomerIds('2026-07-09', conn);
+
+      // Accept-pending terms have prior_billing_mode NULL (it is only written
+      // at activation), so this filter keeps them suppressed while letting
+      // dispute-suspended (once-active) terms bill normally mid-dispute.
+      expect(pendingQ.whereNull).toHaveBeenCalledWith('t.prior_billing_mode');
+    });
+
+    test('GUARD 5 keeps legacy shape when the prior_billing_mode column is absent', async () => {
+      const colsQ = query({ columnInfo: {} });
+      const pendingQ = query({ rows: [] });
+      const conn = makeConn({
+        annual_prepay_terms: [colsQ],
+        'annual_prepay_terms as t': [pendingQ],
+      });
+
+      await AnnualPrepayRenewals.getPaymentPendingCustomerIds('2026-07-09', conn);
+
+      expect(pendingQ.whereNull).not.toHaveBeenCalledWith('t.prior_billing_mode');
     });
 
     test('no invoice id → no-op', async () => {
