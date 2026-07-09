@@ -1144,6 +1144,71 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.snapshotHit).not.toBe(true);
   });
 
+  test('a snapshot whose lawn is only a section KEY (generic frequencies) is recomputed, not fast-pathed', async () => {
+    // Old snapshots of the no-engine fallback can carry a section keyed
+    // lawn_care whose frequencies are generic (no serviceCategory, no lawn
+    // treatment rows). The policy check cannot attribute those rows to lawn,
+    // so the section key alone must NOT count as lawn-identifiable — the
+    // below-floor snapshot recomputes and lands in the quote-required gate.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-section-key-snapshot-test',
+      monthly_total: 34,
+      annual_total: 408,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'legacy_section_key_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 34, annual: 408 }],
+            services: [{
+              key: 'lawn_care',
+              label: 'Lawn Care',
+              frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 34, annual: 408 }],
+            }],
+          },
+        },
+        recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 34 }] },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('annual prepay is hidden when the lawn floor leaves no sellable discount (React /data gate)', async () => {
+    // Lawn-only plan AT the $50/mo program minimum: prepay would save $0
+    // (the whole annual is floor-protected), so the bundle must not expose
+    // annualPrepayEligible — PaymentPreferenceButtons renders off that
+    // boolean alone. The $87/mo case above stays eligible (real headroom).
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-at-floor-prepay-gate-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [{
+              service: 'lawn_care',
+              name: 'Lawn Care',
+              mo: 50,
+              ann: 600,
+              perTreatment: 100,
+              visitsPerYear: 6,
+            }],
+          },
+          oneTime: { total: 0, items: [] },
+        },
+      },
+    });
+
+    expect(payload.annualPrepayEligible).toBe(false);
+  });
+
   test('no-engine fallback: a below-floor recurring-lawn estimate is quote-required, not rendered verbatim', async () => {
     // Legacy shape whose lawn row lives at the estData top level — no
     // result.* (so no v1 shape) and no engineInputs — takes the no-engine

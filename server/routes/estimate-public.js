@@ -9556,6 +9556,29 @@ function annualPrepayEligibleForEstimateData(estData) {
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
 }
 
+// Does annual prepay carry a SELLABLE incentive for this estimate? Mirrors
+// the SSR showAnnualPrepayOption gate for the React /data flow, whose
+// PaymentPreferenceButtons renders the prepay option off annualPrepayEligible
+// alone: pest/mosquito mixes keep the setup-waiver incentive; every other mix
+// must offer an effective discount ≥ 0.1%. A lawn plan clamped at the program
+// minimum (or with sub-0.1% headroom) saves the customer nothing on prepay —
+// don't offer it in EITHER flow. With no stored annual to price against,
+// eligibility stays with the service-mix rule (fail open — the shared
+// converter calc still bills the correct floor-clamped total either way).
+function annualPrepayHasSellableIncentive(estimate = {}, estData = null) {
+  const converter = require('../services/estimate-converter');
+  const { recurringSvcList } = acceptanceServiceLists(estData || {});
+  if (converter.hasWaveGuardSetupService(recurringSvcList || [])) return true;
+  const baseAnnual = Number(estimate.annual_total ?? estimate.annualTotal) || 0;
+  if (!(baseAnnual > 0)) return true;
+  const resolved = converter.resolveAnnualPrepayInvoiceTotal({
+    baseAnnual,
+    recurringServices: recurringSvcList || [],
+    estimateData: estData || {},
+  });
+  return resolved.discount > 0 && resolved.rate >= 0.001;
+}
+
 function attachQuoteRequirement(payload, estData = null) {
   const quoteState = resolveEstimateQuoteRequirement(payload, estData);
   return {
@@ -12554,6 +12577,13 @@ function normalizeBreakdownItemLabel(item = {}) {
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   const alignedPayload = alignOneTimeChoiceBreakdown(payload, estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
+  // Floor-capped prepay has no sellable incentive — mirror the SSR
+  // showAnnualPrepayOption gate here so the React /data flow hides the
+  // annual-prepay option too (it renders off annualPrepayEligible alone).
+  if (withQuoteState.annualPrepayEligible === true
+    && !annualPrepayHasSellableIncentive(estimate, estData)) {
+    withQuoteState.annualPrepayEligible = false;
+  }
   const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
@@ -12809,15 +12839,20 @@ function estimateDataHasRecurringLawn(estData = null) {
 }
 
 // Does the bundle carry ANY lawn-identifiable element the policy check can
-// inspect — a lawn frequency/section row, a lawn per-service treatment row,
-// or a lawn combo axis?
+// inspect — a lawn-tagged frequency row (top-level or per-section), a lawn
+// per-service treatment row, or a lawn combo axis? This must mirror EXACTLY
+// the elements pricingBundleViolatesLawnPolicy reads: a section merely KEYED
+// lawn_care whose frequencies are generic (no serviceCategory, no lawn
+// treatment rows — e.g. an old snapshot of the no-engine fallback) is NOT
+// identifiable, because the policy check cannot attribute those rows to lawn
+// and a below-floor/quarterly snapshot would fast-path unchecked. Such
+// shapes must recompute instead.
 function pricingBundleHasLawnIdentifiableRow(bundle = {}) {
   const hasLawnTreatmentRow = (rows) => Array.isArray(rows)
     && rows.some((r) => recurringServiceKey(r) === 'lawn_care');
   const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
   const services = Array.isArray(bundle.services) ? bundle.services : [];
   for (const s of services) {
-    if (s?.key === 'lawn_care' || s?.category === 'lawn_care') return true;
     if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
   }
   for (const f of frequencyRows) {
