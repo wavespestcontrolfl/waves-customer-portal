@@ -1186,15 +1186,34 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
   });
 
-  test('no-engine fallback: a lawn-only estimate at/above the floor keeps self-serve accept', async () => {
-    // Lawn-only is the one fallback shape whose lawn slice IS the stored
-    // total — provably compliant at $55/mo, so it stays self-serve.
+  test('no-engine fallback: even a floor-compliant lawn-only estimate is quote-required (no provable cadence)', async () => {
+    // $55/mo satisfies the price floor, but the fallback bundle's single
+    // frequency is keyed 'quarterly' and the sparse row carries no explicit
+    // cadence — accepting could schedule the retired 4-visit program. No
+    // exception: every no-engine recurring-lawn shape requotes.
     const payload = await buildPricingBundle({
       id: 'estimate-public-no-engine-lawn-compliant-test',
       monthly_total: 55,
       annual_total: 660,
       estimate_data: {
         recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55 }] },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('no-engine fallback: a recurring NON-lawn estimate stays self-serve', async () => {
+    // The requote gate keys on recurring lawn only — a legacy pest-only
+    // no-engine shape keeps its existing fallback behavior.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-pest-only-test',
+      monthly_total: 55,
+      annual_total: 660,
+      estimate_data: {
+        recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 55 }] },
       },
     });
 

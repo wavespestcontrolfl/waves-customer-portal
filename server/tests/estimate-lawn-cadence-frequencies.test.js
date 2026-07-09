@@ -192,6 +192,25 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence(withLawnRow(
       { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
     ))).toBe(false);
+    // NUMERIC cadence fields (legacy quote-wizard rows): the seeder parses
+    // numeric frequency values as visits/yr, so frequency: 4 (or '4') is the
+    // retired program and must be flagged; a sold numeric cadence passes.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: 4 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: '4' },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequency: 6 },
+    ))).toBe(false);
+    // frequencyKey participates in both the numeric and string checks.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequencyKey: 4 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', mo: 45, frequencyKey: 'quarterly' },
+    ))).toBe(true);
   });
 
   test('quote gate: an explicitly-quarterly lawn row with NO lawn tier rows is quote-required UP FRONT', () => {

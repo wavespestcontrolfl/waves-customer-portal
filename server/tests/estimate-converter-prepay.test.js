@@ -1,4 +1,5 @@
 const {
+  annualPrepayDiscountPctLabel,
   annualPrepayRecurringUnitCount,
   calculateAnnualPrepayAmount,
   canAutoSendDraftInvoice,
@@ -186,6 +187,25 @@ describe('estimate converter annual prepay amount', () => {
     expect(floored.amount).toBe(659.5); // 650 protected + 5% off only the $10 discountable remainder
     expect(floored.discount).toBe(0.5);
     expect(floored.rate).toBeCloseTo(0.0008, 4);
+  });
+
+  test('invoice prepay % label reflects the EFFECTIVE rate, never the configured 5%', () => {
+    // Uncapped plans keep the configured label; floor-capped lawn plans show
+    // the effective rate the public page displayed at approval; a nonzero
+    // discount that rounds away renders '<0.1%' rather than a false '0%'.
+    expect(annualPrepayDiscountPctLabel(0.05)).toBe('5%');
+    // $660 lawn plan: floor protects $600, 5% on $60 → rate 0.0045 → '0.5%'.
+    expect(annualPrepayDiscountPctLabel(
+      resolveAnnualPrepayInvoiceTotal({
+        baseAnnual: 660,
+        recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+        estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }] } },
+      }).rate,
+    )).toBe('0.5%');
+    // $603 plan: $0.15 discount on $603 → rate 0.0002 → sub-0.1% sliver.
+    expect(annualPrepayDiscountPctLabel(0.0002)).toBe('<0.1%');
+    expect(annualPrepayDiscountPctLabel(0)).toBe('0%');
+    expect(annualPrepayDiscountPctLabel(undefined)).toBe('0%');
   });
 
   test('engine-backed foam (no discountable flag) is still protected from the prepay discount', () => {

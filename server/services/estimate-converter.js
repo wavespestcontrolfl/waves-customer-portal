@@ -839,6 +839,20 @@ function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], e
   return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
 }
 
+// Human label for the EFFECTIVE annual-prepay rate on invoice copy. The lawn
+// program minimum's protected floor can cap the discount well below the
+// configured 5% (only above-floor headroom is discountable), so the invoice
+// must never claim the configured rate. Mirrors the estimate-public SSR label
+// rules — integer percent at ≥1%, one decimal below — and renders '<0.1%'
+// instead of a misleading '0%' when a nonzero discount rounds away.
+function annualPrepayDiscountPctLabel(rate) {
+  const r = Number(rate) || 0;
+  if (r >= 0.01) return `${Math.round(r * 100)}%`;
+  if (r <= 0) return '0%';
+  const oneDecimal = Math.round(r * 1000) / 10;
+  return oneDecimal > 0 ? `${oneDecimal}%` : '<0.1%';
+}
+
 function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
   if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
   if (billingTerm === 'prepay_annual') return true;
@@ -1614,7 +1628,11 @@ const EstimateConverter = {
           const termMonthlyRate = monthlyRate > 0
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
-          const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
+          // Label the EFFECTIVE prepay rate, not the configured 5% — the lawn
+          // program minimum's protected floor can cap the discount to a sliver
+          // of the annual, and the invoice must claim the same rate the public
+          // page showed at approval.
+          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(prepayResolved.rate);
           // Commercial plans are not a WaveGuard membership and tier is the
           // non-member 'none'; label them 'Commercial' rather than letting the
           // truthy 'none' render as "WaveGuard none".
@@ -2134,6 +2152,7 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;

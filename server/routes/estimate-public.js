@@ -9468,7 +9468,15 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
     if (recurringServiceKey(svc) !== 'lawn_care') return false;
     const explicitVisits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.v);
     if (Number.isFinite(explicitVisits) && explicitVisits > 0) return retiredFreqs.has(explicitVisits);
-    const cadence = String(svc?.frequency || svc?.cadence || '').toLowerCase().replace(/[-_\s]/g, '');
+    // Legacy quote-wizard rows store the cadence as a NUMBER (frequency: 4,
+    // sometimes as the string '4'). The seeder parses numeric cadence values
+    // as visits/yr (normalizeRecurringPattern → patternFromVisitsPerYear), so
+    // treat them exactly like an explicit visit count.
+    const cadenceCandidates = [svc?.frequency, svc?.frequencyKey, svc?.cadence]
+      .filter((value) => value !== undefined && value !== null && String(value).trim() !== '');
+    const numericCadence = cadenceCandidates.map(Number).find((n) => Number.isFinite(n) && n > 0);
+    if (numericCadence) return retiredFreqs.has(Math.round(numericCadence));
+    const cadence = String(cadenceCandidates[0] || '').toLowerCase().replace(/[-_\s]/g, '');
     if (cadence) return cadence === 'quarterly' && retiredFreqs.has(4);
     // No cadence field at all: the recurring appointment seeder infers the
     // cadence from the row's label/service key, so an explicit quarterly
@@ -13067,23 +13075,15 @@ async function buildPricingBundle(estimate) {
       : null;
     const manualDiscount = normalizeManualDiscountSummary(estData);
     // A recurring-LAWN estimate on this fallback is uninspectable: the stored
-    // totals render verbatim (no ladder rebuild, no clamp), so a pre-floor
-    // lawn quote — or a mixed bundle whose lawn slice can't be attributed —
-    // could still be accepted below the program minimum. Mark it
-    // quote-required (accept + deposit-intent gate on the same resolver)
-    // UNLESS the estimate is lawn-only AND its stored monthly already
-    // satisfies the floor: that's the one shape whose lawn slice IS the
-    // stored total and is provably compliant.
-    let legacyLawnRequote = false;
-    const fallbackMinMonthly = lawnProgramMinimumMonthly();
-    if (fallbackMinMonthly > 0 && estimateDataHasRecurringLawn(estData)) {
-      const { recurringSvcList } = acceptanceServiceLists(estData);
-      const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
-      const lawnOnly = recurringKeys.length > 0 && recurringKeys.every((key) => key === 'lawn_care');
-      const storedMonthly = Number(estimate.monthly_total || 0)
-        || (Number(estimate.annual_total || 0) > 0 ? Number(estimate.annual_total) / 12 : 0);
-      legacyLawnRequote = !(lawnOnly && storedMonthly >= fallbackMinMonthly - 0.005);
-    }
+    // totals render verbatim (no ladder rebuild, no clamp) AND the single
+    // fallback frequency below is keyed 'quarterly' — so even a lawn-only
+    // link whose price satisfies the floor cannot prove (or restamp to) a
+    // current 6/9/12 cadence, and a sparse lawn row with no explicit cadence
+    // would let the converter schedule the retired 4-visit program off that
+    // fallback key. No exception is safe here: every no-engine recurring-lawn
+    // shape goes quote-required (accept + deposit-intent gate on the same
+    // resolver) and shows the call-to-refresh copy.
+    const legacyLawnRequote = estimateDataHasRecurringLawn(estData);
     const payload = finalizePricingBundle(withManualDiscount({
       ...(legacyLawnRequote
         ? { quoteRequired: true, quoteRequiredReason: 'legacy_lawn_pricing_requote' }
