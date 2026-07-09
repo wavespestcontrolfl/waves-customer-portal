@@ -56,7 +56,10 @@ export default function DocumentActionBar({
   // fallback with visible feedback; a canceled sheet or absent Clipboard API
   // (in-app webviews, non-secure contexts) is not an error and shows nothing.
   const share = async () => {
-    const url = shareUrl || window.location.href;
+    // origin + pathname ONLY — after a Stripe redirect the pay/statement
+    // pages carry payment_intent_client_secret/redirect_status query params,
+    // which must never ride a shared link. Tokens live in the path.
+    const url = shareUrl || `${window.location.origin}${window.location.pathname}`;
     try {
       if (navigator.share) {
         await navigator.share({ title: shareTitle, url });

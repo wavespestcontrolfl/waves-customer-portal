@@ -243,13 +243,17 @@ export default function ContractSignPage() {
           </div>
         </div>
 
-        {/* PDF availability keeps the pre-existing rule: the unsigned render
-            only (the signed record is served by the page itself). */}
-        <DocumentActionBar
-          pdfUrl={!signed ? `${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf` : null}
-          pdfFileName="Waves_Agreement.pdf"
-          shareTitle="Waves service agreement"
-        />
+        {/* Unsigned render only: the customer-facing token is single-use and
+            BURNED after signing (contracts-public.js returns 410), so on the
+            signed-success state there is nothing valid to download OR share —
+            the whole bar hides rather than offering a dead link. */}
+        {!signed && (
+          <DocumentActionBar
+            pdfUrl={`${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf`}
+            pdfFileName="Waves_Agreement.pdf"
+            shareTitle="Waves service agreement"
+          />
+        )}
 
         <div className="waves-contract-grid">
           <BrandCard padding={28}>
