@@ -179,6 +179,18 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(recurringLawnRowAtRetiredCadence({
       result: { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 50, frequency: 'quarterly' }] } },
     })).toBe(false);
+    // A retired cadence encoded ONLY in the label/service key is flagged too —
+    // the appointment seeder schedules from the label when fields are absent.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 50 },
+    ))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Lawn Care', service: 'lawn_care', serviceKey: 'lawn_care_quarterly', mo: 50 },
+    ))).toBe(true);
+    // An explicit SOLD cadence field wins over a stale quarterly label.
+    expect(recurringLawnRowAtRetiredCadence(withLawnRow(
+      { name: 'Quarterly Lawn Care Service', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
+    ))).toBe(false);
   });
 
   test('a manual discount fully blocked by the floor is SUPPRESSED, not just dropped', () => {

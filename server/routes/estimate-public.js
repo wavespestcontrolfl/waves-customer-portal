@@ -3867,8 +3867,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Annual prepay is offered to NEW customers only (unchanged invariant) and only
   // when it carries an incentive: the setup waiver (pest/mosquito) or the prepay
   // discount (no-fee services). Existing members stay pay-per-application only.
+  // Sub-0.1% effective rates (e.g. a $3 headroom on a floor-priced $603/yr
+  // lawn plan) are not a sellable incentive — treat them like the at-floor
+  // case and hide the prepay option instead of advertising ~$0 savings.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && (annualPrepayWaivesMembership || prepayDiscountAmount > 0);
+    && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   const prepayInvoiceTotal = annualPrepayWaivesMembership
     ? annualTotal
     : (() => {
@@ -9456,7 +9459,15 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
     const explicitVisits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.v);
     if (Number.isFinite(explicitVisits) && explicitVisits > 0) return retiredFreqs.has(explicitVisits);
     const cadence = String(svc?.frequency || svc?.cadence || '').toLowerCase().replace(/[-_\s]/g, '');
-    return cadence === 'quarterly' && retiredFreqs.has(4);
+    if (cadence) return cadence === 'quarterly' && retiredFreqs.has(4);
+    // No cadence field at all: the recurring appointment seeder infers the
+    // cadence from the row's label/service key, so an explicit quarterly
+    // LABEL ('Quarterly Lawn Care Service' / 'lawn_care_quarterly') is just
+    // as schedulable as a cadence field — flag it too. Unlabeled rows stay
+    // unflagged (never inferred as quarterly by default).
+    const labelText = [svc?.service, svc?.serviceKey, svc?.service_key, svc?.name, svc?.label, svc?.displayName]
+      .filter(Boolean).join(' ').toLowerCase();
+    return /\bquarterly\b|_quarterly\b/.test(labelText) && retiredFreqs.has(4);
   });
 }
 
@@ -12771,6 +12782,35 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
 // floor shipped) keep the fast path. Legacy bundle rows whose lawn slice is
 // not itemized (no lawn perServiceTreatments row) cannot be attributed and
 // are intentionally left alone.
+// Does the ESTIMATE carry a recurring lawn service? (Bundle-independent —
+// used to detect snapshots whose lawn slice is unitemized.)
+function estimateDataHasRecurringLawn(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estData);
+  return (recurringSvcList || []).some((svc) => recurringServiceKey(svc) === 'lawn_care');
+}
+
+// Does the bundle carry ANY lawn-identifiable element the policy check can
+// inspect — a lawn frequency/section row, a lawn per-service treatment row,
+// or a lawn combo axis?
+function pricingBundleHasLawnIdentifiableRow(bundle = {}) {
+  const hasLawnTreatmentRow = (rows) => Array.isArray(rows)
+    && rows.some((r) => recurringServiceKey(r) === 'lawn_care');
+  const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  const services = Array.isArray(bundle.services) ? bundle.services : [];
+  for (const s of services) {
+    if (s?.key === 'lawn_care' || s?.category === 'lawn_care') return true;
+    if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
+  }
+  for (const f of frequencyRows) {
+    if (f?.serviceCategory === 'lawn_care') return true;
+    if (hasLawnTreatmentRow(f?.perServiceTreatments)) return true;
+  }
+  const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
+  return combos.some((c) => (c?.selection && Object.prototype.hasOwnProperty.call(c.selection, 'lawn_care'))
+    || hasLawnTreatmentRow(c?.perServiceTreatments));
+}
+
 function pricingBundleViolatesLawnPolicy(bundle = {}) {
   const minMonthly = lawnProgramMinimumMonthly();
   const belowFloor = (monthly) => minMonthly > 0
@@ -12882,8 +12922,13 @@ async function buildPricingBundle(estimate) {
     // Snapshots that violate the lawn program policy (retired Quarterly
     // cadence, or an itemized lawn price below the program minimum) must NOT
     // short-circuit — they re-derive through the clamped ladder builders so
-    // outstanding links can't sell the retired/below-floor plan.
+    // outstanding links can't sell the retired/below-floor plan. A snapshot
+    // for an estimate with a recurring LAWN service that carries no
+    // lawn-identifiable element at all can't be policy-checked — those
+    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
+    // not fast-path just because its lawn slice is unitemized).
     && !pricingBundleViolatesLawnPolicy(snapshotBundle)
+    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,

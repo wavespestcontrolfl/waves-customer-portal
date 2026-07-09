@@ -918,7 +918,11 @@ describe('public estimate one-time breakdown', () => {
             discount: 0,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 40 },
+              // Tree & Shrub, not lawn: an estimate with a recurring LAWN
+              // service and an unitemized snapshot now recomputes (lawn
+              // program-minimum policy), so the legacy-preservation
+              // mechanism is pinned with a non-lawn mix.
+              { name: 'Tree & Shrub', service: 'tree_shrub', mo: 40 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -1087,6 +1091,48 @@ describe('public estimate one-time breakdown', () => {
             services: [
               { name: 'Pest Control', mo: 50 },
               { name: 'Lawn Care', mo: 45 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+  });
+
+  test('an unitemized snapshot on a recurring-lawn estimate is recomputed (cannot be policy-checked)', async () => {
+    // Legacy snapshot with bare frequency rows — no lawn serviceCategory,
+    // treatment rows, sections, or combo axes. The estimate's recurring lawn
+    // is pre-floor ($34/mo), so fast-pathing the snapshot would sell below
+    // the program minimum without any row the policy check could catch.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-unitemized-lawn-snapshot-test',
+      monthly_total: 84,
+      annual_total: 1008,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'legacy_unitemized_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              { key: 'quarterly', label: 'Quarterly', monthly: 84, annual: 1008 },
+              { key: 'monthly', label: 'Monthly', monthly: 104, annual: 1248 },
+            ],
+          },
+        },
+        result: {
+          results: {
+            pestTiers: [{ label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 }],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 84,
+            annualAfterDiscount: 1008,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 34, visitsPerYear: 6 },
             ],
           },
           oneTime: { total: 0, items: [] },

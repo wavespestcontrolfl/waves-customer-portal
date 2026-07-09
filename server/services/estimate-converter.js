@@ -787,16 +787,20 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
   const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
   if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
   const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
-  const lawnLineItems = estimateLineItemsFromData(estimateData)
-    .filter((i) => recurringServiceKey(i) === 'lawn_care');
-  const rows = lawnLineItems.length
-    ? lawnLineItems
-    : recurringServicesFromEstimateData(estimateData)
-      .filter((svc) => recurringServiceKey(svc) === 'lawn_care');
-  return Math.round(rows.reduce((sum, item) => {
+  const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
     const annual = recurringLineAnnualAmount(item);
     return annual > 0 ? sum + Math.min(annual, floorAnnual) : sum;
   }, 0) * 100) / 100;
+  // Acceptance restamps recurring.services (NOT engine lineItems), so a
+  // stale pre-floor line item must never shrink the protection below what
+  // the accepted rows warrant — take the larger of the two sources. Both
+  // are per-line capped at the floor, so overlap can only over-protect
+  // (shrinking the prepay discount), never under-protect.
+  const fromLineItems = protectedSum(estimateLineItemsFromData(estimateData)
+    .filter((i) => recurringServiceKey(i) === 'lawn_care'));
+  const fromRecurringRows = protectedSum(recurringServicesFromEstimateData(estimateData)
+    .filter((svc) => recurringServiceKey(svc) === 'lawn_care'));
+  return Math.max(fromLineItems, fromRecurringRows);
 }
 
 // Single source of truth for the annual-prepay invoice amount, shared by the

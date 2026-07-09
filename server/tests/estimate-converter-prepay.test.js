@@ -121,6 +121,28 @@ describe('estimate converter annual prepay amount', () => {
       estimateData: { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 600 }] } },
     })).toEqual({ amount: 600, discount: 0, rate: 0 });
 
+    // A stale pre-floor engine line item must never shrink the protection
+    // below what the ACCEPTED (restamped) recurring row warrants — the
+    // larger of the two sources wins, so the accepted $600 base stays
+    // fully protected even with a $408 line item lingering.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 600,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: {
+        result: {
+          lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 408 }],
+          // The accept restamp (selectedLawnServiceRow) writes the full field
+          // set — ann/annual/annualAfterDiscount — onto the recurring row.
+          recurring: {
+            services: [{
+              service: 'lawn_care', name: 'Lawn Care',
+              ann: 600, annual: 600, annualAfterDiscount: 600,
+            }],
+          },
+        },
+      },
+    })).toEqual({ amount: 600, discount: 0, rate: 0 });
+
     // Pest/mosquito: setup-waiver path, no extra discount.
     expect(resolveAnnualPrepayInvoiceTotal({
       baseAnnual: 660,
