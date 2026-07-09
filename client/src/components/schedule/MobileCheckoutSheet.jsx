@@ -1,4 +1,4 @@
-// Check Out Appointment — mobile-only, full-screen sheet opened from
+// Check out appointment — mobile-only, full-screen sheet opened from
 // MobileAppointmentDetailSheet's "Review & checkout" CTA. Square-style
 // layout per IMG_3729: Charge button up top, service line items below,
 // Add Service / Add Item or Discount buttons at the bottom.
@@ -244,7 +244,7 @@ export default function MobileCheckoutSheet({
           <X size={22} strokeWidth={1.75} />
         </button>
         <div className="flex-1 text-center font-medium text-zinc-900" style={{ fontSize: 16 }}>
-          Check Out Appointment
+          Check out appointment
         </div>
         <div className="w-11" />
       </div>

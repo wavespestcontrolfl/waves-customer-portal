@@ -249,7 +249,7 @@ export default function MobileServiceEditModal({
               style={{
                 width: 120,
                 padding: '8px 10px 8px 22px',
-                fontSize: 14,
+                fontSize: 16,
                 background: '#FFFFFF',
               }}
             />
@@ -343,7 +343,7 @@ export default function MobileServiceEditModal({
             style={{
               width: 80,
               padding: '8px 10px',
-              fontSize: 14,
+              fontSize: 16,
               background: '#FFFFFF',
             }}
           />

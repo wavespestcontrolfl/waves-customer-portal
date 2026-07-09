@@ -102,7 +102,7 @@ export default function MobileCardOnFileSheet({
         >
           <ArrowLeft size={20} strokeWidth={2} />
         </button>
-        <div className="flex-1 text-center font-semibold text-zinc-900" style={{ fontSize: 18 }}>
+        <div className="flex-1 text-center font-medium text-zinc-900" style={{ fontSize: 18 }}>
           {resolvedName}
         </div>
         <div className="w-11" />
@@ -144,7 +144,7 @@ export default function MobileCardOnFileSheet({
                     border: `1px solid ${style.border}`,
                     color: style.fg,
                     fontSize: 11,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     letterSpacing: 0.3,
                     flexShrink: 0,
                   }}
@@ -152,7 +152,7 @@ export default function MobileCardOnFileSheet({
                   {brandLabel(c)}
                 </span>
                 <span
-                  className="font-semibold text-zinc-900 truncate"
+                  className="font-medium text-zinc-900 truncate"
                   style={{ fontSize: 18 }}
                 >
                   {cardTitle(c)}
@@ -166,7 +166,7 @@ export default function MobileCardOnFileSheet({
                 style={{
                   padding: '12px 24px',
                   fontSize: 16,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   borderRadius: 999,
                   background: (isCharging || anotherCharging) ? '#E5E5E5' : '#111111',
                   color: (isCharging || anotherCharging) ? '#A3A3A3' : '#FFFFFF',

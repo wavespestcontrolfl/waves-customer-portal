@@ -90,7 +90,7 @@ export default function MobileItemDiscountPickerSheet({
       >
         {icon}
       </div>
-      <div className="flex-1 font-semibold text-ink-primary" style={{ fontSize: 15 }}>{label}</div>
+      <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>{label}</div>
     </button>
   );
 
@@ -123,7 +123,7 @@ export default function MobileItemDiscountPickerSheet({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
-            className="block w-full bg-white text-14 text-ink-primary border border-hairline border-zinc-200 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+            className="block w-full bg-white text-16 text-ink-primary border border-hairline border-zinc-200 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
           />
         </div>
 
@@ -156,7 +156,7 @@ export default function MobileItemDiscountPickerSheet({
             <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
               <Tag size={22} strokeWidth={1.75} />
             </div>
-            <div className="flex-1 font-semibold text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
+            <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
             <div className="text-ink-secondary" style={{ fontSize: 14 }}>Variable $</div>
           </button>
           <button
@@ -167,7 +167,7 @@ export default function MobileItemDiscountPickerSheet({
             <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
               <Tag size={22} strokeWidth={1.75} />
             </div>
-            <div className="flex-1 font-semibold text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
+            <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
             <div className="text-ink-secondary" style={{ fontSize: 14 }}>Variable %</div>
           </button>
 
@@ -184,7 +184,7 @@ export default function MobileItemDiscountPickerSheet({
               <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
                 <Tag size={22} strokeWidth={1.75} />
               </div>
-              <div className="flex-1 min-w-0 font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{d.name}</div>
+              <div className="flex-1 min-w-0 font-medium text-ink-primary truncate" style={{ fontSize: 15 }}>{d.name}</div>
               <div className="u-nums font-medium text-ink-primary shrink-0" style={{ fontSize: 14 }}>{formatAmount(d)}</div>
             </button>
           ))}
