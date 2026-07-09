@@ -455,7 +455,10 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                           <div className="flex items-center gap-3">
                             {e.token && (
                               <a
-                                href={`/estimate/${e.token}`}
+                                // ?adminPreview=1 → real React (glass) page for
+                                // drafts too; bare /estimate/<token> serves the
+                                // legacy server-HTML renderer for unpublished rows.
+                                href={`/estimate/${e.token}?adminPreview=1`}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
