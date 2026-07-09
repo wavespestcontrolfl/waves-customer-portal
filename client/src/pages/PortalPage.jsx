@@ -1213,21 +1213,34 @@ function SharePostButton({ url, title }) {
     };
   }, [open]);
 
-  const toggle = (e) => {
+  // 5 items × 42px + 12px padding + 2px border — used to decide whether the
+  // menu fits above the button; measured-after-render would flash misplaced.
+  const MENU_HEIGHT = 228;
+
+  const toggle = async (e) => {
     e.preventDefault();
     e.stopPropagation();
     if (open) { setOpen(false); return; }
+    const absolute = new URL(url, window.location.origin).toString();
+    // Capacitor shell: window.open(_blank) dead-ends the webview and the
+    // webview clipboard is unreliable (see nativeFile.js) — hand the link to
+    // the OS share sheet instead, which offers the same channels natively.
+    if (isNativeApp() && await shareUrlNative(absolute, title || 'Waves Pest Control').catch(() => false)) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    // Anchor above the button, right-aligned to it — the footer sits at the
-    // card bottom, so upward never collides with the viewport edge.
-    setMenuPos({
-      right: Math.max(8, window.innerWidth - rect.right),
-      bottom: window.innerHeight - rect.top + 8,
-    });
+    const right = Math.max(8, window.innerWidth - rect.right);
+    // Prefer opening above the button (the footer sits at the card bottom),
+    // but a rail scrolled near the viewport top would push the top options
+    // off-screen — and the scroll-closes-menu listener makes them
+    // unreachable — so flip below when the space above is too short.
+    if (rect.top >= MENU_HEIGHT + 12) {
+      setMenuPos({ right, bottom: window.innerHeight - rect.top + 8 });
+    } else {
+      setMenuPos({ right, top: rect.bottom + 8 });
+    }
     setOpen(true);
   };
 
-  const shareTo = (channel) => {
+  const shareTo = async (channel) => {
     const absolute = new URL(url, window.location.origin).toString();
     const text = title || 'Waves Pest Control';
     setOpen(false);
@@ -1236,12 +1249,19 @@ function SharePostButton({ url, title }) {
     } else if (channel === 'twitter') {
       window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(absolute)}&text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
     } else if (channel === 'instagram') {
-      // No web share intent exists for Instagram: copy the link, open the
-      // app/site, and tell the customer the link is ready to paste.
-      navigator.clipboard?.writeText(absolute).catch(() => {});
+      // No web share intent exists for Instagram: copy the link and open the
+      // app/site. Open FIRST (synchronously, keeping the click's popup
+      // activation), then report honestly — Instagram sharing depends
+      // entirely on the copied URL, so a swallowed copy failure would strand
+      // the customer there with nothing to paste and a false "copied" flash.
       window.open('https://www.instagram.com/', '_blank', 'noopener,noreferrer');
-      setFlash('Link copied!');
-      setTimeout(() => setFlash(''), 2000);
+      try {
+        await navigator.clipboard.writeText(absolute);
+        setFlash('Link copied!');
+      } catch {
+        setFlash("Couldn't copy link");
+      }
+      setTimeout(() => setFlash(''), 2400);
     } else if (channel === 'email') {
       window.location.href = `mailto:?subject=${encodeURIComponent(text)}&body=${encodeURIComponent(absolute)}`;
     } else if (channel === 'sms') {
@@ -1280,7 +1300,8 @@ function SharePostButton({ url, title }) {
           ref={menuRef}
           role="menu"
           style={{
-            position: 'fixed', right: menuPos.right, bottom: menuPos.bottom, zIndex: 1200,
+            position: 'fixed', right: menuPos.right, zIndex: 1200,
+            ...(menuPos.bottom != null ? { bottom: menuPos.bottom } : { top: menuPos.top }),
             background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
             boxShadow: '0 8px 24px rgba(15,23,42,0.14)', padding: 6, minWidth: 172,
           }}
