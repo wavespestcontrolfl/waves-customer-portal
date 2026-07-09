@@ -1610,6 +1610,17 @@ export default function PayPageV2() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
+      {/* The Print button below calls window.print() — back the
+          waves-no-print marker with an actual print rule (ReceiptPage
+          defines its own local copy) so the newsletter card + identity
+          footer and shell chrome stay out of the invoice printout. */}
+      <style>{`
+        @media print {
+          @page { margin: 0.5in; }
+          body { background: #FFFFFF !important; }
+          header, footer, .waves-no-print { display: none !important; }
+        }
+      `}</style>
       <div className="waves-customer-page waves-receipt-page">
         {isOverdue && (
           <div style={{
