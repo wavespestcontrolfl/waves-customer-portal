@@ -69,10 +69,13 @@ function withTimeout(promise, ms) {
   ]);
 }
 
-// Authoritative "this name has no such records" answers. Anything else
-// (timeout, SERVFAIL, EAI_AGAIN, refused) is a resolver hiccup, not evidence
-// about the domain — it must never eliminate a candidate.
-const AUTHORITATIVE_NEGATIVE_CODES = new Set(['ENOTFOUND', 'ENODATA', 'NXDOMAIN']);
+// Authoritative "this name can never receive mail" answers. ENOTFOUND /
+// ENODATA / NXDOMAIN say the records don't exist; EBADNAME says the name
+// itself is malformed (e.g. "bad..com" — regex-valid but not a DNS name), so
+// it can never resolve on any retry. Anything else (timeout, SERVFAIL,
+// EAI_AGAIN, refused) is a resolver hiccup, not evidence about the domain —
+// it must never eliminate a candidate.
+const AUTHORITATIVE_NEGATIVE_CODES = new Set(['ENOTFOUND', 'ENODATA', 'NXDOMAIN', 'EBADNAME']);
 
 /**
  * DNS facts per candidate email domain: can this domain receive mail at all?

@@ -3501,8 +3501,13 @@ const CallRecordingProcessor = {
         // deriveEmailReview gives EVERY call-captured email a read-back
         // reason unconditionally, so the settled reasons must be REMOVED,
         // not just not-re-added. adopt_with_confirmation and review verdicts
-        // keep the flag (card stays open).
-        if (dictationEmailPayload?.arbiter?.verdict === 'adopt') {
+        // keep the flag (card stays open). EXCEPTION: when the bridge's
+        // domain-typo corrector proposes a DIFFERENT value than the arbiter
+        // adopted (normalizedEmail below overwrites extracted.email), the
+        // question is NOT settled — the reasons stay so the card survives
+        // the conflicting correction.
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt'
+            && (!normalizedEmail || normalizedEmail === dictationEmailPayload.arbiter.chosen_value)) {
           for (const settled of ['email_unverified', 'email_invalid']) {
             const at = needsConfirmation.indexOf(settled);
             if (at !== -1) needsConfirmation.splice(at, 1);
@@ -3607,8 +3612,11 @@ const CallRecordingProcessor = {
         // Same arbiter release as the shadow branch: a decisive adopt closed
         // the question, and deriveEmailReview adds a read-back reason for
         // every call-captured email unconditionally — remove the settled
-        // ones. Anything less than a decisive adopt keeps the card.
-        if (dictationEmailPayload?.arbiter?.verdict === 'adopt') {
+        // ones. Anything less than a decisive adopt keeps the card, and so
+        // does a domain-typo correction that would CHANGE the adopted value
+        // (the correction write below must never land unreviewed).
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt'
+            && (!correctedEmail || correctedEmail === dictationEmailPayload.arbiter.chosen_value)) {
           for (const settled of ['email_unverified', 'email_invalid']) {
             const at = emailReasons.indexOf(settled);
             if (at !== -1) emailReasons.splice(at, 1);

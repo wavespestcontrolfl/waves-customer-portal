@@ -240,6 +240,13 @@ describe('gatherEmailDomainEvidence', () => {
     expect(out[0].deliverable).toBeNull();
   });
 
+  test('EBADNAME (malformed name) is authoritatively undeliverable, not a transient unknown', async () => {
+    const ebadname = () => { const e = new Error('queryMx EBADNAME'); e.code = 'EBADNAME'; return Promise.reject(e); };
+    const out = await gatherEmailDomainEvidence(['a@bad..com'], { resolveMx: ebadname, resolve4: ebadname, resolve6: ebadname });
+    expect(out[0].deliverable).toBe(false);
+    expect(out[0].dns_error).toBe('EBADNAME');
+  });
+
   test('transient MX failure stays unknown even when A/AAAA resolve (implicit MX needs authoritative no-MX)', async () => {
     const servfail = () => { const e = new Error('queryMx ESERVFAIL'); e.code = 'ESERVFAIL'; return Promise.reject(e); };
     const out = await gatherEmailDomainEvidence(['a@mx-flaky.example'], {
