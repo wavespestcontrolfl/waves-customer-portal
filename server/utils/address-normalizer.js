@@ -39,6 +39,8 @@ const STREET_SUFFIX_ALIASES = {
   highway: 'HWY',
   hwy: 'HWY',
   loop: 'LOOP',
+  // Google's geocoder abbreviates Loop as "Lp" (USPS keeps LOOP unabbreviated)
+  lp: 'LOOP',
   pass: 'PASS',
   path: 'PATH',
   run: 'RUN',
@@ -107,7 +109,7 @@ const STREET_SPLIT_SUFFIX_ALIAS_KEYS = [
   'trail', 'trl',
   'parkway', 'pkwy',
   'highway', 'hwy',
-  'loop',
+  'loop', 'lp',
   'pass',
   'path',
   'run',
