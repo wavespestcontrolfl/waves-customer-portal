@@ -4,8 +4,6 @@ import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
-import BrandFooter from '../components/BrandFooter';
-import { TrustFooter, WavesShellContext } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import { isNativeApp } from '../native/platform';
 
@@ -688,14 +686,12 @@ export default function LoginPage() {
         </section>
       </div>
     </main>
-    {/* Standard identity footer — every glass surface carries the same
-        footer stack as /track (owner 2026-07-08): BrandFooter identity
-        block + TrustFooter legal strip, added beneath the locked login
-        layout without touching it. */}
-    <WavesShellContext.Provider value={{ variant: 'customer', inShell: true }}>
-      <BrandFooter />
-    </WavesShellContext.Provider>
-    <TrustFooter />
+    {/* Logo-only sign-off (owner 2026-07-09): the login screen drops the
+        BrandFooter identity block + TrustFooter legal strip — just the
+        mascot below the support links, styled like BrandFooter's logo row. */}
+    <div style={{ textAlign: 'center', marginTop: 32, padding: '20px 16px', borderTop: `1px solid ${B.grayLight}` }}>
+      <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: 0.6 }} />
+    </div>
     </>
   );
 }
