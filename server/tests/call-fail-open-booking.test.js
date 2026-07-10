@@ -54,6 +54,23 @@ describe('canAutoRoute fail-open booking', () => {
     expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'missing_service_address']));
   });
 
+  test('existing customer who GAVE a new AV-rejected address is NOT failed open (P1)', () => {
+    // Known customer, but this call provided a new/secondary street AV couldn't
+    // accept — must stay blocked (AV still governs new addresses).
+    const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
+    ex.property = { service_address: { street_line_1: '9999 Nonexistent Rd' } };
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'low_confidence_address']));
+  });
+
+  test('existing customer who did NOT restate an address (uses on-file) IS failed open', () => {
+    const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
+    ex.property = { service_address: {} }; // nothing given → on-file address used
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(true);
+  });
+
   test('hard blocks are NEVER failed open', () => {
     for (const hard of ['out_of_service_area', 'caller_not_authorized', 'spam_or_wrong_number']) {
       const r = canAutoRoute(extraction([hard]), { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });

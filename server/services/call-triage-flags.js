@@ -378,11 +378,19 @@ function canAutoRoute(extraction, opts = {}) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
     const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
+    // Address fail-open applies ONLY when the caller did NOT give a new service
+    // address on this call — i.e. we're using their on-file, Google-verified
+    // address (Barbara's case: she didn't restate it). If they DID provide an
+    // address and Google Address Validation couldn't accept it (that's why the
+    // flag survived suppressAddressFlagsForAV), a new/secondary/ambiguous
+    // address is NOT auto-approved — AV still governs new addresses.
+    const sa = extraction.property?.service_address || {};
+    const newAddressGiven = !!String(sa.street_line_1 || sa.line1 || sa.street || '').trim();
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
       if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomer) { failedOpenFlags.push(f); return false; }
-      if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress) { failedOpenFlags.push(f); return false; }
+      if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
       return true;
     });
   }

@@ -3561,6 +3561,22 @@ const CallRecordingProcessor = {
               if (n.state) extracted.state = n.state;
               if (n.postal_code) extracted.zip = n.postal_code;
             }
+            // Fail-open recovery: this appointment was allowed only because
+            // recoverable flags were dropped from the blocking set. Surface
+            // them as ADVISORY review items so the office confirms the field
+            // (phone via ANI, garbled email, on-file address, low confidence) —
+            // book-and-flag, never book-and-hide (owner directive).
+            if (routingResult.failedOpenFlags?.length) {
+              for (const f of routingResult.failedOpenFlags) {
+                try {
+                  await db('triage_items')
+                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                    .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                } catch (fe) {
+                  logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
+                }
+              }
+            }
             v2ApprovedExtraction = v2Extraction;
           }
         }
@@ -4877,18 +4893,34 @@ const CallRecordingProcessor = {
     // the booking. Also rescues catalog services whose names don't hit the
     // coarse canonicalWavesService buckets (every bookable service must be
     // bookable by phone). null -> legacy coarse-label behavior.
-    const callBookingCatalogRow = resolveCallBookingCatalogService({
+    let callBookingCatalogRow = resolveCallBookingCatalogService({
       extracted,
       transcription,
       services: bookableCallServices,
     });
+    // Never book a made-up service (owner directive 2026-07-10): the booking's
+    // service_type MUST be a real admin-catalog service. When nothing specific
+    // resolved and fail-open booking is active, fall back to the "Waves
+    // Assessment" catalog service — assess on-site rather than guess. This keeps
+    // service_type/service_id catalog-valid instead of a coarse invented label.
+    if (!callBookingCatalogRow && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
+      const wavesAssessment = bookableCallServices.find((s) => /^waves assessment$/i.test(String(s.name || '')));
+      if (wavesAssessment) {
+        callBookingCatalogRow = wavesAssessment;
+        logger.info(`[call-proc] No specific service matched for ${maskSid(callSid)} — booking as "Waves Assessment" (catalog fallback; assess on-site)`);
+      }
+    }
     // Use the module-level isOutboundCall(call) helper — a local `const
     // isOutboundCall` here shadows it for the WHOLE function scope, putting the
     // phantom-guard references above (Step 0) in the temporal dead zone:
     // "Cannot access 'isOutboundCall' before initialization" on every call that
     // reaches them with a pre-linked customer_id.
     const canCreateAppointmentFromCall = !isOutboundCall(call)
-      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
+      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true)
+        // Fail-open: a confirmed booking with a catalog-valid service (specific
+        // match OR the Waves Assessment fallback above) proceeds — assess on-site
+        // rather than drop the booking over an unresolved service.
+        || (isEnabled('callFailOpenBooking') && !isOutboundCall(call) && !!callBookingCatalogRow));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
