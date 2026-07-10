@@ -140,6 +140,22 @@ describe('addressCompat', () => {
   it('conflict on different streets', () => {
     expect(addressCompat(base, { address_line1: '901 31st Avenue West', zip: '34207' }).status).toBe('conflict');
   });
+  it('hyphenated unit suffixes are identity-bearing: Apt 12-B ≠ Apt 12-C, ≡ Apt 12B', () => {
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd Apt 12-B', zip: '34243' },
+      { address_line1: '5350 De Soto Rd Apt 12-C', zip: '34243' },
+    ).status).toBe('unit_conflict');
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd Apt 12-B', zip: '34243' },
+      { address_line1: '5350 De Soto Rd Apt 12B', zip: '34243' },
+    ).status).toBe('match');
+    // line2 variants get the same treatment
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd', address_line2: '12-B', zip: '34243' },
+      { address_line1: '5350 De Soto Rd', address_line2: '12-C', zip: '34243' },
+    ).status).toBe('unit_conflict');
+  });
+
   it('unit_conflict on same building, different units', () => {
     expect(addressCompat(
       { address_line1: '5350 Desoto Rd Apt 2', zip: '34243' },
@@ -1049,6 +1065,73 @@ describe('executeMerge', () => {
     });
     expect(result.repointed['customers.autopay_restrictions'])
       .toBe('autopay_enabled, autopay_paused_until, autopay_pause_reason');
+  });
+
+  it('refuses matching per-application modes with different fees', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: 'per_application', per_application_fee: '65.00' },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', billing_mode: 'per_application', per_application_fee: '80.00' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/different per-application fees/);
+  });
+
+  it('refuses when the loser has live multi-property account siblings', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', account_id: 'acct-w' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', account_id: 'acct-l' };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('whereNotIn')) return { id: 'sibling-1' }; // live sibling on acct-l
+        return [];
+      }
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/multi-property account/);
+  });
+
+  it('demotes the loser cards when the winner already has a default payment method', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: 'cus_shared' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: 'cus_shared' };
+    const state = { demoted: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'payment_methods') {
+        if (q.called('first')) return { id: 'pm-winner-default' };
+        if (q.called('select')) return [{ id: 'pm-loser-1' }, { id: 'pm-loser-2' }];
+        if (q.called('update') && q.called('whereIn')) {
+          state.demoted = { ids: q.args('whereIn')[1], payload: q.args('update')[0] };
+          return 2;
+        }
+        if (q.called('update')) return 1;
+      }
+      if (table === 'referral_promoters' && q.called('first')) return null;
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // The winner's own pre-merge default stays THE default: every loser card
+    // arrives demoted from default/autopay.
+    expect(state.demoted.ids).toEqual(['pm-loser-1', 'pm-loser-2']);
+    expect(state.demoted.payload).toMatchObject({ is_default: false, autopay_enabled: false });
+    expect(result.repointed['payment_methods.demoted_defaults']).toBe(2);
   });
 });
 

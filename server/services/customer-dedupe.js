@@ -52,20 +52,24 @@ const STREET_WORD_CANON = {
   north: 'n', south: 's', east: 'e', west: 'w',
   northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
 };
-const UNIT_RE = /\b(?:apt|apartment|unit|ste|suite|lot|bldg|building|trlr|rm)\s*#?\s*([a-z0-9]+)\b/;
+// Units may carry a hyphenated suffix letter ("Apt 12-B") that distinguishes
+// separate properties — the hyphen survives until the unit is captured, then
+// strips from the captured value so "12-B" ≡ "12B" but ≠ "12-C".
+const UNIT_RE = /\b(?:apt|apartment|unit|ste|suite|lot|bldg|building|trlr|rm)\s*#?\s*([a-z0-9]+(?:-[a-z0-9]+)*)\b/;
 
 function normalizeStreetKey(raw) {
   if (!raw) return null;
   let s = String(raw).toLowerCase()
-    .replace(/[.,#-]/g, ' ')
+    .replace(/[.,#]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   let unit = null;
   const unitMatch = s.match(UNIT_RE);
   if (unitMatch) {
-    unit = unitMatch[1];
-    s = s.replace(unitMatch[0], ' ').replace(/\s+/g, ' ').trim();
+    unit = unitMatch[1].replace(/-/g, '');
+    s = s.replace(unitMatch[0], ' ');
   }
+  s = s.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
   const m = s.match(/^(\d+[a-z]?)\s+(.+)$/);
   if (!m) return null;
   const number = m[1];
@@ -92,11 +96,11 @@ function namesCompatible(a, b) {
 // different-unit rows read as a clean match.
 function unitFromLine2(line2) {
   if (!line2) return null;
-  const s = String(line2).toLowerCase().replace(/[.,#-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const s = String(line2).toLowerCase().replace(/[.,#]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!s) return null;
   const m = s.match(UNIT_RE);
-  if (m) return m[1];
-  return /^[a-z0-9]{1,6}$/.test(s) ? s : null;
+  if (m) return m[1].replace(/-/g, '');
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s) && s.length <= 8 ? s.replace(/-/g, '') : null;
 }
 
 function addressCompat(winner, loser) {
@@ -244,10 +248,16 @@ function sanitizeCustomer(row) {
 }
 
 async function findDuplicateGroups(database = db) {
-  // Live rows only (active + not deleted, mirroring whereLiveCustomer): a
-  // churned inactive record must never be picked as a winner — its Stripe/
-  // portal signals would outrank a NEW active shell and the merge would
-  // retire the active row into a customer hidden from live surfaces.
+  // Live ROWS only (active + not deleted) — deliberately NOT restricted to
+  // whereLiveCustomer's real-customer stages: the duplicates this tool exists
+  // to clean up ARE lead-stage shells (intake guards refuse ambiguous
+  // linking and mint new_lead rows on repeat calls — every green shell in
+  // the prod dry-run is one). Retiring a shell that duplicates a real
+  // customer is the feature; identity compatibility + the shell blockers,
+  // not pipeline stage, are what make it safe. The active/deleted filter
+  // still matters: a churned inactive record must never be picked as a
+  // winner — its Stripe/portal signals would outrank a NEW active shell and
+  // the merge would retire the active row into a hidden customer.
   const rows = await database('customers')
     .where('active', true)
     .whereNull('deleted_at')
@@ -706,6 +716,31 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     if (winner.billing_mode && loser.billing_mode && winner.billing_mode !== loser.billing_mode) {
       throw new Error('executeMerge: customers have different billing modes — reconcile billing first');
     }
+    // Same mode but DIFFERENT per-application fees is still a billing
+    // conflict: completion billing reads the surviving row's fee for visits
+    // without an explicit price, so the loser's moved visits would invoice
+    // at the wrong accepted amount.
+    if (winner.billing_mode === 'per_application' && loser.billing_mode === 'per_application') {
+      const wFee = Number(winner.per_application_fee);
+      const lFee = Number(loser.per_application_fee);
+      if (Number.isFinite(wFee) && Number.isFinite(lFee) && wFee !== lFee) {
+        throw new Error('executeMerge: customers have different per-application fees — reconcile billing first');
+      }
+    }
+    // Multi-property account groups: retiring a loser whose account still
+    // has OTHER live member profiles would strand them — the portal's
+    // property switcher lists rows by the login's account_id, so the
+    // siblings become invisible after the merge. Reconcile accounts first.
+    if (loser.account_id && loser.account_id !== winner.account_id) {
+      const sibling = await trx('customers')
+        .where({ account_id: loser.account_id, active: true })
+        .whereNull('deleted_at')
+        .whereNotIn('id', [loserId, winnerId])
+        .first('id');
+      if (sibling) {
+        throw new Error('executeMerge: the duplicate belongs to a multi-property account with other live members — reconcile accounts first');
+      }
+    }
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
@@ -753,6 +788,17 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         });
       if (stamped) repointed['scheduled_services.service_address_stamp'] = stamped;
     }
+    // BEFORE the sweep: if the winner already has a default card, the
+    // loser's cards must arrive DEMOTED — autopay picks .first() among
+    // is_default+autopay_enabled rows, and two defaults after the repoint
+    // would charge an arbitrary card. (Reachable when both rows share a
+    // Stripe profile or the loser's stripe_customer_id is stale/null.)
+    const winnerHadDefault = await trx('payment_methods')
+      .where({ customer_id: winnerId, is_default: true })
+      .first('id');
+    const loserCardIds = (await trx('payment_methods')
+      .where({ customer_id: loserId }).select('id')).map((r) => r.id);
+
     // BEFORE the sweep: remember the loser's referral enrollment — after the
     // sweep both promoter rows sit on the winner and can no longer be told
     // apart by customer_id. (referral_promoters has no unique on customer_id,
@@ -780,6 +826,16 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         }
       }
     }
+    // Normalize payment-method defaults now that the loser's cards moved:
+    // the winner's own pre-merge default stays the ONE default/autopay card.
+    if (winnerHadDefault && loserCardIds.length) {
+      const demoted = await trx('payment_methods')
+        .whereIn('id', loserCardIds)
+        .where((q) => q.where({ is_default: true }).orWhere({ autopay_enabled: true }))
+        .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
+      if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
+    }
+
     // Polymorphic customer pointers (recipient_type/recipient_id) — see
     // POLYMORPHIC_CUSTOMER_POINTERS. Same fail-closed contract as the FK
     // sweep: any failure aborts the merge.
