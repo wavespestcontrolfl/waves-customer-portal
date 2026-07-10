@@ -33,21 +33,25 @@ function phone10(raw) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-// Suffix/directional words carry no identity ("St" vs "Street Northeast") and
-// are dropped; the remaining street words are squashed together so spacing
-// variants ("De Soto" vs "Desoto") compare equal. Real prod pairs pinned in
-// tests: "221 36th St NE" ≡ "221 36th Street Northeast", "5350 Desoto Rd" ≡
-// "5350 De Soto Rd Apt 1418" (same key, unit captured separately).
-const STREET_SUFFIXES = new Set([
-  'st', 'street', 'rd', 'road', 'ave', 'av', 'avenue', 'dr', 'drive', 'ln', 'lane',
-  'ct', 'court', 'cir', 'circle', 'ter', 'terrace', 'trl', 'trail', 'blvd',
-  'boulevard', 'pl', 'place', 'way', 'loop', 'pkwy', 'parkway', 'hwy', 'highway',
-  'gln', 'glen', 'cv', 'cove', 'pt', 'point', 'bnd', 'bend', 'xing', 'crossing',
-]);
-const DIRECTIONALS = new Set([
-  'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw',
-  'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest',
-]);
+// Suffix and directional words are identity-bearing ("100 Oak St" is not
+// "100 Oak Ave"; "100 1st St N" is not "100 1st St S") — so they are
+// CANONICALIZED, never dropped: every spelled-out variant maps to its short
+// form and the whole street is squashed so spacing variants ("De Soto" vs
+// "Desoto") compare equal. Real prod pairs pinned in tests: "221 36th St NE"
+// ≡ "221 36th Street Northeast", "5350 Desoto Rd" ≡ "5350 De Soto Rd Apt
+// 1418" (same key, unit captured separately). A missing-vs-present suffix or
+// directional now reads as a conflict — that fails toward the review queue,
+// never toward an auto-merge.
+const STREET_WORD_CANON = {
+  street: 'st', str: 'st',
+  avenue: 'ave', av: 'ave',
+  road: 'rd', drive: 'dr', lane: 'ln', court: 'ct',
+  circle: 'cir', terrace: 'ter', trail: 'trl', boulevard: 'blvd',
+  place: 'pl', parkway: 'pkwy', highway: 'hwy', glen: 'gln',
+  cove: 'cv', point: 'pt', bend: 'bnd', crossing: 'xing',
+  north: 'n', south: 's', east: 'e', west: 'w',
+  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
 const UNIT_RE = /\b(?:apt|apartment|unit|ste|suite|lot|bldg|building|trlr|rm)\s*#?\s*([a-z0-9]+)\b/;
 
 function normalizeStreetKey(raw) {
@@ -65,11 +69,7 @@ function normalizeStreetKey(raw) {
   const m = s.match(/^(\d+[a-z]?)\s+(.+)$/);
   if (!m) return null;
   const number = m[1];
-  const words = m[2].split(' ').filter(Boolean).filter((w) => !DIRECTIONALS.has(w));
-  // Strip suffix words from the END only, always keeping at least one word: a
-  // street can BE a suffix word ("Loop Rd" → "loop", "Abalone Loop" →
-  // "abalone") and an interior suffix word is part of the name.
-  while (words.length > 1 && STREET_SUFFIXES.has(words[words.length - 1])) words.pop();
+  const words = m[2].split(' ').filter(Boolean).map((w) => STREET_WORD_CANON[w] || w);
   if (!words.length) return null;
   return { key: `${number} ${words.join('')}`, unit };
 }
@@ -167,6 +167,14 @@ function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
 
+// Detection output travels to the admin browser via the review-queue route —
+// never ship the stored credential hash or raw Stripe id; the UI only needs
+// existence booleans for its badges.
+function sanitizeCustomer(row) {
+  const { password_hash: passwordHash, stripe_customer_id: stripeCustomerId, ...rest } = row;
+  return { ...rest, has_portal_login: !!passwordHash, has_stripe: !!stripeCustomerId };
+}
+
 async function findDuplicateGroups(database = db) {
   const rows = await database('customers')
     .whereNull('deleted_at')
@@ -227,13 +235,13 @@ async function findDuplicateGroups(database = db) {
       else if (reasons.length) tier = 'yellow';
 
       candidates.push({
-        loser,
+        loser: sanitizeCustomer(loser),
         tier,
         reasons,
         evidence: { phone10: p10, names_compatible: namesOk, address: addr.status },
       });
     }
-    if (candidates.length) groups.push({ phone10: p10, winner, candidates });
+    if (candidates.length) groups.push({ phone10: p10, winner: sanitizeCustomer(winner), candidates });
   }
   return groups;
 }
@@ -246,9 +254,67 @@ async function findDuplicateGroups(database = db) {
 // dismissal pair must not collapse into a self-pair.
 const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals']);
 
-// One row per customer by design, auto-created with defaults — if repointing
-// collides with the winner's existing row, the loser's copy is droppable.
-const DROPPABLE_SINGLETON_TABLES = new Set(['notification_prefs']);
+// One-row-per-customer preference tables: when both sides have a row, the
+// loser's row can't just be dropped — it may hold opted-OUT notification
+// consent or gate/pet details the winner's row lacks. Merge conservatively:
+// booleans take the AND (false = opted out / more restrictive always wins, so
+// a merge can never widen consent), empty winner fields fill from the loser,
+// then the loser's row is removed. Anything the merge doesn't copy survives in
+// the journal's loser snapshot.
+async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
+  const loserRow = await trx(table).where(column, loserId).first();
+  if (!loserRow) return 'no loser row';
+  const winnerRow = await trx(table).where(column, winnerId).first();
+  if (!winnerRow) {
+    const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
+    return count;
+  }
+  const updates = {};
+  for (const [col, loserVal] of Object.entries(loserRow)) {
+    if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
+    const winnerVal = winnerRow[col];
+    if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
+      if (winnerVal && !loserVal) updates[col] = false;
+    } else if ((winnerVal === null || winnerVal === '') && loserVal !== null && loserVal !== '') {
+      updates[col] = loserVal;
+    }
+  }
+  if (Object.keys(updates).length) {
+    await trx(table).where(column, winnerId).update({ ...updates, updated_at: trx.fn.now() });
+  }
+  await trx(table).where(column, loserId).del();
+  return `merged ${Object.keys(updates).length} fields into winner row, dropped loser row`;
+}
+
+// customer_properties carries two partial uniques — one primary per customer,
+// one active row per (customer, address_key). Repoint row-by-row: demote the
+// loser's properties from primary (the winner keeps its own primary), and an
+// address the winner already has active comes across deactivated instead of
+// colliding (the winner's copy of that address is the live one).
+async function repointCustomerProperties(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id');
+  let moved = 0;
+  let deactivated = 0;
+  for (const { id } of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id }).update({ [column]: winnerId, is_primary: false });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      await trx(table).where({ id }).update({ [column]: winnerId, is_primary: false, active: false });
+      deactivated += 1;
+    }
+  }
+  return `moved ${moved}, deactivated ${deactivated} (winner already had the address)`;
+}
+
+const UNIQUE_COLLISION_HANDLERS = {
+  notification_prefs: mergeSingletonPrefRow,
+  property_preferences: mergeSingletonPrefRow,
+  customer_properties: repointCustomerProperties,
+};
 
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
@@ -324,9 +390,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         });
       } catch (e) {
         const uniqueViolation = e && e.code === '23505';
-        if (uniqueViolation && DROPPABLE_SINGLETON_TABLES.has(table)) {
-          const dropped = await trx(table).where(column, loserId).del();
-          repointed[`${table}.${column}`] = `dropped ${dropped} (winner already has one)`;
+        const handler = UNIQUE_COLLISION_HANDLERS[table];
+        if (uniqueViolation && handler) {
+          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId);
         } else {
           throw new Error(`executeMerge: repoint failed on ${table}.${column}: ${e.message}`);
         }

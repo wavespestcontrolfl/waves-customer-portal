@@ -54,6 +54,19 @@ async function handleMerge(req, res, { linkAsProperty }) {
     return res.status(400).json({ error: 'winnerId and loserId must be customer UUIDs' });
   }
   try {
+    // Server-side eligibility recheck: the UI hides merge on red pairs, but a
+    // stale or tampered request must not merge a red pair — or two unrelated
+    // customers. The pair must still be in the live duplicate queue, under
+    // this exact winner, and not tiered red.
+    const groups = await findDuplicateGroups();
+    const group = groups.find((g) => g.winner.id === winnerId);
+    const candidate = group?.candidates.find((c) => c.loser.id === loserId);
+    if (!candidate) {
+      return res.status(409).json({ error: 'Pair is no longer in the duplicate queue — refresh and retry' });
+    }
+    if (candidate.tier === 'red') {
+      return res.status(409).json({ error: 'This pair looks like two different people and cannot be merged from the queue' });
+    }
     const result = await executeMerge({
       winnerId,
       loserId,

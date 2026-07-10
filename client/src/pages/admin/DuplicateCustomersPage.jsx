@@ -59,8 +59,8 @@ function CustomerLine({ customer, isWinner }) {
           {displayName(customer)}
         </Link>
         {isWinner && <Badge tone="strong">Keep</Badge>}
-        {customer.stripe_customer_id && <Badge tone="neutral">Stripe</Badge>}
-        {customer.password_hash && <Badge tone="neutral">Portal login</Badge>}
+        {customer.has_stripe && <Badge tone="neutral">Stripe</Badge>}
+        {customer.has_portal_login && <Badge tone="neutral">Portal login</Badge>}
       </div>
       <div className="truncate text-12 text-ink-secondary">
         {[customer.address_line1, customer.city, customer.zip].filter(Boolean).join(", ") || "No address on file"}

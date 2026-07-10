@@ -77,9 +77,19 @@ describe('normalizeStreetKey (pinned to real prod pairs)', () => {
     expect(normalizeStreetKey('18018 Littleton Pl').key)
       .not.toBe(normalizeStreetKey('8120 Sternway Rd').key);
   });
-  it('keeps a suffix-word street name from squashing to nothing', () => {
-    expect(normalizeStreetKey('123 Loop Rd')).not.toBe(null);
-    expect(normalizeStreetKey('123 Loop Rd').key).toBe('123 loop');
+  it('keeps the street type: 100 Oak St ≠ 100 Oak Ave', () => {
+    expect(normalizeStreetKey('100 Oak St').key)
+      .not.toBe(normalizeStreetKey('100 Oak Ave').key);
+  });
+  it('keeps directionals: 100 1st St N ≠ 100 1st St S', () => {
+    expect(normalizeStreetKey('100 1st St N').key)
+      .not.toBe(normalizeStreetKey('100 1st St S').key);
+    expect(normalizeStreetKey('100 1st St N').key)
+      .toBe(normalizeStreetKey('100 1st Street North').key);
+  });
+  it('canonicalizes a suffix-word street name: Loop Rd ≡ Loop Road', () => {
+    expect(normalizeStreetKey('123 Loop Rd').key).toBe('123 looprd');
+    expect(normalizeStreetKey('123 Loop Road').key).toBe('123 looprd');
   });
   it('returns null when there is no leading street number', () => {
     expect(normalizeStreetKey('PO Box 12')).toBe(null);
@@ -185,6 +195,17 @@ describe('findDuplicateGroups', () => {
     expect(groups[0].candidates[0].tier).toBe('green');
   });
 
+  it('never ships credential material to callers', async () => {
+    installDb(router({ customers: [{ ...complete, password_hash: 'hash', stripe_customer_id: 'cus_1' }, shell] }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].winner.password_hash).toBeUndefined();
+    expect(groups[0].winner.stripe_customer_id).toBeUndefined();
+    expect(groups[0].winner.has_portal_login).toBe(true);
+    expect(groups[0].winner.has_stripe).toBe(true);
+    expect(groups[0].candidates[0].loser.password_hash).toBeUndefined();
+    expect(groups[0].candidates[0].loser.has_portal_login).toBe(false);
+  });
+
   it('tiers a different-name different-address row red (winner has priority signals)', async () => {
     const winner = { ...complete, stripe_customer_id: 'cus_9' };
     installDb(router({ customers: [winner, stranger] }));
@@ -222,7 +243,7 @@ describe('executeMerge', () => {
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
   function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false }) {
-    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false };
+    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null };
     const route = (table, q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
@@ -240,13 +261,27 @@ describe('executeMerge', () => {
         state.journal = q.args('insert')[0];
         return [{ id: journalId }];
       }
+      if (table === 'notification_prefs' && prefsConflict) {
+        if (q.called('del')) { state.prefsDeleted = true; return 1; }
+        if (q.called('first')) {
+          const whereArgs = q.args('where');
+          return whereArgs[1] === loser.id
+            ? { id: 'p2', customer_id: loser.id, sms_enabled: false, email_enabled: true, created_at: 'x', updated_at: 'x' }
+            : { id: 'p1', customer_id: winner.id, sms_enabled: true, email_enabled: true, created_at: 'x', updated_at: 'x' };
+        }
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (payload.customer_id === winner.id && Object.keys(payload).length === 1) {
+            const err = new Error('duplicate key value violates unique constraint');
+            err.code = '23505';
+            throw err;
+          }
+          state.prefsMerged = payload;
+          return 1;
+        }
+      }
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
-        if (table === 'notification_prefs' && prefsConflict) {
-          const err = new Error('duplicate key value violates unique constraint');
-          err.code = '23505';
-          throw err;
-        }
         state.repointUpdates.push(table);
         return updates[table] ?? 1;
       }
@@ -288,7 +323,7 @@ describe('executeMerge', () => {
       .rejects.toThrow(/not a shell/);
   });
 
-  it('repoints FKs, drops the singleton prefs collision, retires the loser, and journals', async () => {
+  it('repoints FKs, merges the prefs collision most-restrictively, retires the loser, and journals', async () => {
     const winner = {
       id: WINNER, first_name: 'Diana', last_name: 'Blowers', email: null,
       address_line1: '4414 Ozark Ave', phone: '+16124074763',
@@ -303,8 +338,12 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
 
     expect(state.repointUpdates).toEqual(expect.arrayContaining(['leads', 'call_log']));
+    // Opted-out consent on the loser survives the merge: sms_enabled false
+    // wins over the winner's true, and only then is the loser's row dropped.
+    expect(state.prefsMerged.sms_enabled).toBe(false);
+    expect(state.prefsMerged.email_enabled).toBeUndefined();
     expect(state.prefsDeleted).toBe(true);
-    expect(result.repointed['notification_prefs.customer_id']).toMatch(/dropped/);
+    expect(result.repointed['notification_prefs.customer_id']).toMatch(/merged 1 fields/);
     // Loser retired with an unmatchable phone sentinel and cleared email
     expect(state.retired.phone).toBe(`merged-${LOSER.slice(0, 8)}`);
     expect(state.retired.email).toBe(null);
