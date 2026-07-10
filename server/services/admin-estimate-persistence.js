@@ -9,6 +9,7 @@ const {
 const {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
+  leadMatchesEstimateContact,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
@@ -772,6 +773,13 @@ function estimateReviseBlock(estimate, estimateData) {
   return null;
 }
 
+// Row-level keys that live INSIDE estimate_data but are linkage, not quote
+// content: the lead_id mirror (lead rows with no leads.estimate_id FK rely on
+// it for send/view/acceptance advancement) and the schedule-stitch pointer
+// the pipeline list + booking flows resolve appointments through. A revise
+// replaces estimate_data wholesale, so these must be carried across.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'scheduled_service_id'];
+
 // Revise an existing estimate in place: same body + pricing pipeline as
 // create, but the row keeps its id, token, status, expiry, creator, and
 // lead/customer linkage — so the link the customer already received simply
@@ -790,6 +798,12 @@ async function reviseAdminEstimate({
   if (!estimate) throw errorWithStatus('Estimate not found', 404);
   const block = estimateReviseBlock(estimate);
   if (block) throw errorWithStatus(block.message, block.statusCode);
+  // A revise is a full quote rewrite — without a payload it would null the
+  // stored blob (and silently orphan the linkage keys preserved below).
+  if (!body?.estimateData || typeof body.estimateData !== 'object') {
+    throw errorWithStatus('estimateData is required to revise an estimate.', 400);
+  }
+  const existingData = parseStoredEstimateData(estimate.estimate_data) || {};
 
   // The builder may reopen an estimate whose contact/customer linkage it did
   // not capture (auto-send or agent-drafted rows) — never let a blank field in
@@ -807,25 +821,82 @@ async function reviseAdminEstimate({
     recompute,
   });
 
+  // Carry the linkage keys across the wholesale estimate_data rewrite.
+  if (writeFields.estimate_data) {
+    let nextData = null;
+    try {
+      nextData = JSON.parse(writeFields.estimate_data);
+    } catch {
+      nextData = null;
+    }
+    if (nextData && typeof nextData === 'object') {
+      let preserved = false;
+      for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
+        if (existingData[key] !== undefined && nextData[key] === undefined) {
+          nextData[key] = existingData[key];
+          preserved = true;
+        }
+      }
+      if (preserved) writeFields.estimate_data = JSON.stringify(nextData);
+    }
+  }
+
+  // Lead-contact revalidation: the lead send/view/acceptance flows treat the
+  // linkage (leads.estimate_id FK, or the estimate_data.lead_id mirror) as
+  // authoritative and would advance/convert the ORIGINAL lead on the revised
+  // estimate's events. If the revise moves the estimate to a different
+  // contact, refuse — the operator should fix the lead or quote the other
+  // customer on a new estimate. Same contact-match rule as lead attach
+  // (normalized phone/email, so a pure reformat still passes). Gated on an
+  // actual contact change so a service-only edit on a row whose linkage was
+  // already imperfect never gets bricked by this check.
+  const contactChanged =
+    String(writeFields.customer_id ?? '') !== String(estimate.customer_id ?? '') ||
+    String(writeFields.customer_phone ?? '') !== String(estimate.customer_phone ?? '') ||
+    String(writeFields.customer_email ?? '') !== String(estimate.customer_email ?? '');
+  if (contactChanged) {
+    let linkedLead = await database('leads')
+      .where({ estimate_id: estimate.id })
+      .whereNull('deleted_at')
+      .first();
+    if (!linkedLead && existingData.lead_id) {
+      linkedLead = await database('leads')
+        .where({ id: existingData.lead_id })
+        .whereNull('deleted_at')
+        .first();
+    }
+    if (linkedLead && !leadMatchesEstimateContact(linkedLead, { ...estimate, ...writeFields })) {
+      throw errorWithStatus(
+        'This estimate is linked to a lead whose contact does not match the revised customer. Update the lead first, or create a new estimate for the other customer.',
+        409,
+      );
+    }
+  }
+
   // Atomic revise guard: the editability check above ran on a pre-read, so
   // scope the UPDATE to the same editable conditions — a customer accept or
   // an in-flight send landing between SELECT and UPDATE must win, not be
-  // silently overwritten. Replacing estimate_data wholesale also drops the
-  // prior send's pricing snapshot and any customer-picked preferences, which
-  // is intended: they described the PREVIOUS quote (the public view falls
-  // back to live pricing until the next send re-stamps a snapshot).
+  // silently overwritten. The category predicate closes the proposal race:
+  // PUT /:id/proposal is the only writer that turns a row into a commercial
+  // proposal and it always stamps category='COMMERCIAL' in the same UPDATE,
+  // so a conversion landing after our pre-read can't be clobbered either.
+  // Replacing estimate_data wholesale also drops the prior send's pricing
+  // snapshot and any customer-picked preferences, which is intended: they
+  // described the PREVIOUS quote (the public view falls back to live pricing
+  // until the next send re-stamps a snapshot).
   const [updated] = await database('estimates')
     .where({ id: estimate.id })
     .whereNull('price_locked_at')
     .whereNull('archived_at')
     .whereNotIn('status', REVISE_BLOCKED_STATUSES)
+    .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
     .update({
       ...writeFields,
       updated_at: now(),
     })
     .returning('*');
   if (!updated) {
-    throw errorWithStatus('Estimate was accepted or locked while you were editing. Refresh and retry.', 409);
+    throw errorWithStatus('Estimate was accepted, locked, or converted while you were editing. Refresh and retry.', 409);
   }
   clearEstimatePricingCache(estimate.id);
   return { estimate: updated };

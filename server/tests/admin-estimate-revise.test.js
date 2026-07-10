@@ -11,9 +11,32 @@ const { clearAllEstimatePricingCache } = require('../services/estimate-pricing-c
 // syncable pricing engine or a real customer-services lookup.
 const noRecompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
 
-function makeReviseDatabase({ estimate, updateReturnsEmpty = false }) {
+function makeReviseDatabase({ estimate, lead = null, updateReturnsEmpty = false }) {
   const updates = [];
+  const rawGuards = [];
   const database = (table) => {
+    if (table === 'leads') {
+      // FK lookup passes { estimate_id }; the mirror lookup passes { id }.
+      let clause = null;
+      const leadChain = {
+        where: (c) => {
+          clause = c;
+          return leadChain;
+        },
+        whereNull: () => leadChain,
+        first: async () => {
+          if (!lead) return null;
+          if (clause?.estimate_id !== undefined) {
+            return String(lead.estimate_id || '') === String(clause.estimate_id) ? lead : null;
+          }
+          if (clause?.id !== undefined) {
+            return String(lead.id) === String(clause.id) ? lead : null;
+          }
+          return null;
+        },
+      };
+      return leadChain;
+    }
     if (table !== 'estimates') {
       // Any side lookup (prior qualifying services, pricing sync) is
       // best-effort in the pipeline — throwing here proves the fallback path.
@@ -23,6 +46,10 @@ function makeReviseDatabase({ estimate, updateReturnsEmpty = false }) {
       where: () => chain,
       whereNull: () => chain,
       whereNotIn: () => chain,
+      whereRaw: (sql) => {
+        rawGuards.push(sql);
+        return chain;
+      },
       first: async () => estimate,
       update: (patch) => {
         updates.push(patch);
@@ -33,7 +60,7 @@ function makeReviseDatabase({ estimate, updateReturnsEmpty = false }) {
     };
     return chain;
   };
-  return { database, updates };
+  return { database, updates, rawGuards };
 }
 
 const sentEstimate = {
@@ -250,5 +277,117 @@ describe('reviseAdminEstimate', () => {
       body: reviseBody,
       recompute: noRecompute,
     })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  test('400s when the revise body carries no estimateData', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: null },
+      recompute: noRecompute,
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
+    const withLinkage = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        lead_id: 'lead-7',
+        scheduled_service_id: 'svc-3',
+      }),
+    };
+    // The mirror lead's contact matches (same phone), so a same-contact revise
+    // must succeed AND keep both linkage keys.
+    const { database, updates } = makeReviseDatabase({
+      estimate: withLinkage,
+      lead: { id: 'lead-7', estimate_id: null, phone: '9415550102', email: null, customer_id: null },
+    });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+    });
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(data.lead_id).toBe('lead-7');
+    expect(data.scheduled_service_id).toBe('svc-3');
+    // Still a full rewrite otherwise — stale snapshot stays dropped.
+    expect(data.sendSnapshot).toBeUndefined();
+  });
+
+  test('guards the atomic update against a concurrent commercial-proposal conversion', async () => {
+    const { database, rawGuards } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+    });
+    expect(rawGuards.some((sql) => String(sql).includes("'COMMERCIAL'"))).toBe(true);
+  });
+
+  test('409s when the revise moves the contact away from an FK-linked lead', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: sentEstimate,
+      lead: { id: 'lead-7', estimate_id: 'est-1', phone: '9415550102', email: 'beverly@example.com', customer_id: null },
+    });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: {
+        ...reviseBody,
+        customerName: 'Someone Else',
+        customerPhone: '9415559999',
+        customerEmail: 'someone.else@example.com',
+      },
+      recompute: noRecompute,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('allows a contact reformat that still matches the linked lead', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: sentEstimate,
+      lead: { id: 'lead-7', estimate_id: 'est-1', phone: '(941) 555-0102', email: null, customer_id: null },
+    });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      // Raw string differs from the row (digits vs formatted) but normalizes
+      // to the same phone — must not 409.
+      body: { ...reviseBody, customerPhone: '941-555-0102' },
+      recompute: noRecompute,
+    });
+    expect(updates).toHaveLength(1);
+  });
+
+  test('blocks a mirror-linked (no-FK) lead the same way', async () => {
+    const withMirror = {
+      ...sentEstimate,
+      customer_id: null,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        lead_id: 'lead-9',
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({
+      estimate: withMirror,
+      lead: { id: 'lead-9', estimate_id: null, phone: '9415550102', email: null, customer_id: null },
+    });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: {
+        ...reviseBody,
+        customerId: null,
+        customerPhone: '9415559999',
+        customerEmail: 'other@example.com',
+      },
+      recompute: noRecompute,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
   });
 });

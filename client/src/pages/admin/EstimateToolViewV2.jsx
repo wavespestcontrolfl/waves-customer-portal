@@ -2468,6 +2468,12 @@ export default function EstimateToolViewV2({
           customerName: d.customerName || "",
           customerPhone: d.customerPhone || "",
           customerEmail: d.customerEmail || "",
+          // Delivery flags too: the pipeline's 1×-option / invoice-mode
+          // toggles PATCH the row columns after the original save, so the
+          // stored inputs snapshot can be stale — saving it back would
+          // silently flip the row's settings.
+          showOneTimeOption: !!d.showOneTimeOption,
+          billByInvoice: !!d.billByInvoice,
         };
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
@@ -4026,6 +4032,11 @@ export default function EstimateToolViewV2({
       // Guarantee eligibility is per-job; the next property must re-confirm.
       ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
+    // Starting the next customer's quote ends any in-place edit — otherwise
+    // Save changes would still PUT the new quote over the estimate that was
+    // being edited.
+    setEditMode(null);
+    setEditLoadError(null);
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
@@ -7118,6 +7129,11 @@ export default function EstimateToolViewV2({
                       variant="ghost"
                       size="sm"
                       onClick={() => {
+                        // "New Estimate" forks to create semantics — clear
+                        // edit mode so the next save can't overwrite the
+                        // estimate that was being edited.
+                        setEditMode(null);
+                        setEditLoadError(null);
                         setEstimate(null);
                         setSavedId(null);
                         setSavedViewUrl(null);
