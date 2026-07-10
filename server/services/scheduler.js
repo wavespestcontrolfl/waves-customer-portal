@@ -3151,6 +3151,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // NIGHTLY 3:40 AM ET — Call-pipeline self-audit (zero-triage drift loop).
+  // Samples ~25 recent calls, DEEP-tier re-read, drift metrics to
+  // call_audit_findings; admin alert ONLY on threshold breach. Gated
+  // GATE_CALL_SELF_AUDIT (checked inside the service). Silence = healthy.
+  // =========================================================================
+  cron.schedule('40 3 * * *', async () => {
+    await runExclusive('call-self-audit', async () => {
+      try {
+        const { runSelfAudit } = require('./call-self-audit');
+        const result = await runSelfAudit();
+        if (!result.skipped) logger.info(`[self-audit] nightly run: ${JSON.stringify({ audited: result.audited, breaches: result.breaches })}`);
+      } catch (e) { logger.error(`Call self-audit failed: ${e.message}`); }
+    });
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Send scheduled review request SMS
   // Picks up review requests whose scheduled_for has passed.
   // =========================================================================

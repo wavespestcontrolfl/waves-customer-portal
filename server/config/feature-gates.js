@@ -330,6 +330,21 @@ const gates = {
   // get a non_mobile suppression row.
   proactiveLineTypeLookup: process.env.GATE_PROACTIVE_LINETYPE_LOOKUP === 'true',
 
+  // Zero-triage call pipeline (2026-07-10 mining mission) — all dark by
+  // default; see docs/call-mining-2026-07-10.md.
+  // Disposition rules layer: stamps a terminal disposition on every processed
+  // call (call_log.disposition). No behavior change beyond the stamp.
+  callDispositionV1: process.env.GATE_CALL_DISPOSITION_V1 === 'true',
+  // Layered spam classifier: records verdicts to call_spam_verdicts (100%
+  // precision offline; any discard action is a separate consumer decision).
+  callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
+  // Profile-enrichment writer: gate codes/pets/notes from extraction into
+  // property_preferences + customers.internal_notes (admin-edit-preserving).
+  callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
+  // Nightly self-audit: samples recent calls, strong-model re-read, drift
+  // metrics to call_audit_findings; alerts ONLY on threshold breach.
+  callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
+
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
   // about X — get your quote: …"). A customer-facing auto-send, so it FAILS

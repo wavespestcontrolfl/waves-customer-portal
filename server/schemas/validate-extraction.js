@@ -19,7 +19,11 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // 1.4.0: additive — top-level secondary_contacts ARRAY (up to 3 other
 // parties; first entry mirrors secondary_contact for older readers).
 // Optional/nullable: older payloads still validate.
-const SCHEMA_VERSION = '1.4.0';
+// 1.5.0: additive — top-level call_nature + recommended_disposition enums
+// (zero-triage disposition layer), spam_verdict object (content-signal input
+// to the layered spam classifier; never a discard decision alone), language.
+// All optional/nullable: 1.0.0–1.4.0 payloads still validate.
+const SCHEMA_VERSION = '1.5.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -124,9 +124,30 @@ CONSENT:
 - call_recording_disclosed: true if the greeting or agent mentioned recording/AI.
 - do_not_contact_request: true if caller explicitly asked not to be contacted.
 
-VOICEMAIL & SPAM:
-- is_voicemail: true if the recording is a one-sided voicemail message, not a two-party conversation.
-- is_spam: true if the call is spam, solicitation, robocall, wrong number, or vendor sales pitch.
+VOICEMAIL & SPAM (definitions tightened 2026-07 after a 1,000-call audit — these
+exact mistakes lost real leads; apply them literally):
+- is_voicemail: true ONLY for a one-sided message left after a greeting/beep. A
+  transcript where BOTH "Agent:" and "Caller:" each speak 3 or more turns is a
+  live conversation and is NEVER a voicemail, regardless of how it started. An
+  answering-machine greeting followed by the AGENT leaving a message IS a
+  voicemail (an outbound one).
+- is_spam: true ONLY when the CALLER is soliciting the business (sales pitch,
+  robocall, scam, vendor cold call, paid-placement promoters, collections
+  cold-calls). is_spam is NEVER true when the transcript contains a service
+  request, a service address, a quoted price, or scheduling discussion — even
+  when phrased oddly, relayed by a third party or an automated assistant, or
+  hard to follow. A prospect is never spam.
+- A wrong number or a competitor's confused customer is NOT spam: set
+  is_spam=false and lead_quality="wrong_number" instead.
+- Abstract failure patterns to avoid (not real calls):
+  1) "This is an automated assistant calling for a homeowner who needs a severe
+     bed-bug treatment quote at 123 Example St" -> is_spam=false, is_lead=true
+     (a relayed service request is a lead, not a robocall).
+  2) "You treated my house last month and I'm still seeing roaches, can someone
+     come back?" -> is_spam=false, is_lead=false (existing-customer re-service;
+     never a new lead, never spam).
+  3) Agent and caller discuss an appointment across many turns -> labeling it
+     voicemail silently kills the booking; is_voicemail=false.
 
 SENTIMENT & LEAD:
 - sentiment: Match caller's emotional state.
