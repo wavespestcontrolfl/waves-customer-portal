@@ -116,13 +116,23 @@ function lockReason(est) {
   return null;
 }
 
+// Mirrors the estimates-list canMarkEstimateWon rules as they apply to a
+// commercial proposal: the server only manually accepts sent/viewed estimates
+// and rejects any carrying the one-time option
+// (estimate-manual-acceptance.js), so never render a Mark won that is
+// guaranteed to fail — e.g. right after the save-draft estimator handoff.
+function canMarkProposalWon(est) {
+  if (!est || !['sent', 'viewed'].includes(est.status)) return false;
+  return est.showOneTimeOption !== true;
+}
+
 function summarizeSend(data) {
   const parts = [];
   if (data?.channels?.sms) {
-    parts.push(data.channels.sms.sent ? 'Text sent' : `Text failed: ${data.channels.sms.error || 'unknown error'}`);
+    parts.push(data.channels.sms.ok ? 'Text sent' : `Text failed: ${data.channels.sms.error || 'unknown error'}`);
   }
   if (data?.channels?.email) {
-    parts.push(data.channels.email.sent ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
+    parts.push(data.channels.email.ok ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
   }
   if (parts.length === 0) return data?.error || 'Estimate send failed';
   return parts.join(' / ');
@@ -677,13 +687,17 @@ export default function CommercialProposalPage() {
                 </div>
               )}
 
-              {estimate?.token && (
+              {/* A draft from the estimator handoff already carries a share
+                  token, but /estimate/<token> serves the full proposal — match
+                  the estimates list and only offer the customer link once the
+                  estimate is actually published (sent/viewed). */}
+              {['sent', 'viewed'].includes(estimate?.status) && estimate?.token && (
                 <Button variant="ghost" size="sm" className="w-full" onClick={copyLink}>
                   <LinkIcon size={14} /> {linkCopied ? 'Link copied' : 'Copy customer link'}
                 </Button>
               )}
 
-              {savedOnce && !estimate?.archivedAt && estimate?.status !== 'accepted' && (
+              {savedOnce && !estimate?.archivedAt && canMarkProposalWon(estimate) && (
                 <Button variant="secondary" className="w-full" onClick={markWon} disabled={markingWon}>
                   {markingWon ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Mark won
                 </Button>

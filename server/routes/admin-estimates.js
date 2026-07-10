@@ -1292,6 +1292,9 @@ router.get('/:id/proposal', async (req, res, next) => {
         archivedAt: estimate.archived_at,
         priceLockedAt: estimate.price_locked_at,
         billByInvoice: estimate.bill_by_invoice,
+        // The Mark-won gate mirrors the list's canMarkEstimateWon, which also
+        // blocks one-time-option estimates (manual accept rejects them).
+        showOneTimeOption: estimate.show_one_time_option,
         category: estimate.category,
       },
     });

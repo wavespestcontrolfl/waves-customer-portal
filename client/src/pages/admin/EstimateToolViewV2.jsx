@@ -504,7 +504,11 @@ function buildMosquitoRecommendations(form) {
   return recommendations;
 }
 
-function validateDeliveryOptions(form, estimate) {
+// deferInvoiceTotals: the commercial-proposal handoff saves a manual-quote
+// draft whose totals are zero until the proposal line items are authored —
+// the proposal PUT recomputes the billable totals immediately after, so the
+// zero-total bill-by-invoice guard below would block that flow at the save.
+function validateDeliveryOptions(form, estimate, { deferInvoiceTotals = false } = {}) {
   const oneTimeAmount = oneTimePestChoiceAmountForPreview(estimate?.results, form)
     || Number(estimate?.oneTime?.total || 0);
   const recurringAmount = Math.max(
@@ -524,7 +528,7 @@ function validateDeliveryOptions(form, estimate) {
       return "Offer one-time option requires a one-time total on the generated estimate.";
     }
   }
-  if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
+  if (form.billByInvoice && !deferInvoiceTotals && oneTimeAmount <= 0 && recurringAmount <= 0) {
     return "Bill by invoice requires a billable recurring or one-time total.";
   }
   return null;
@@ -3645,10 +3649,10 @@ export default function EstimateToolViewV2({
   // estimateOverride: callers that generate-then-save in one handler pass the
   // freshly returned estimate — the `estimate` state in this closure is still
   // the pre-generate value (React state doesn't update mid-handler).
-  async function doSave(estimateOverride = null) {
+  async function doSave(estimateOverride = null, { deferInvoiceTotals = false } = {}) {
     const estimateToSave = estimateOverride || estimate;
     if (!estimateToSave) return null;
-    const deliveryError = validateDeliveryOptions(form, estimateToSave);
+    const deliveryError = validateDeliveryOptions(form, estimateToSave, { deferInvoiceTotals });
     if (deliveryError) {
       alert(deliveryError);
       return null;
@@ -3732,7 +3736,10 @@ export default function EstimateToolViewV2({
   async function openProposalBuilder() {
     const generated = estimate || (await doGenerate());
     if (!generated) return;
-    const saved = await doSave(generated);
+    // Defer the bill-by-invoice zero-total guard: the manual-quote commercial
+    // draft has no billable totals until the proposal lines are authored on
+    // the page this navigates to.
+    const saved = await doSave(generated, { deferInvoiceTotals: true });
     if (saved?.id) navigate(`/admin/estimates/${saved.id}/proposal`);
   }
 
