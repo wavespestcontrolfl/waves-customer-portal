@@ -344,6 +344,75 @@ describe('admin projects routes', () => {
     });
   });
 
+  test('pre-treat certificate create seeds the applicator FDACS ID default', async () => {
+    const createdProject = {
+      id: 'project-cert-1',
+      customer_id: 'customer-1',
+      project_type: 'pre_treatment_termite_certificate',
+      status: 'draft',
+      created_by_tech_id: 'admin-1',
+    };
+    const projectInsert = chain({
+      returning: jest.fn().mockResolvedValue([createdProject]),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'projects') return projectInsert;
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: 'customer-1', project_type: 'pre_treatment_termite_certificate' }),
+      });
+      expect(res.status).toBe(200);
+      expect(projectInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        findings: expect.objectContaining({ applicator_fdacs_id: 'JE362022' }),
+      }));
+    });
+  });
+
+  test('pre-treat certificate create keeps an explicitly provided FDACS ID', async () => {
+    const createdProject = {
+      id: 'project-cert-2',
+      customer_id: 'customer-1',
+      project_type: 'pre_treatment_termite_certificate',
+      status: 'draft',
+      created_by_tech_id: 'admin-1',
+    };
+    const projectInsert = chain({
+      returning: jest.fn().mockResolvedValue([createdProject]),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'projects') return projectInsert;
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: 'customer-1',
+          project_type: 'pre_treatment_termite_certificate',
+          findings: { applicator_fdacs_id: 'JF000001', treatment_method: 'Bait system' },
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(projectInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        findings: expect.objectContaining({
+          applicator_fdacs_id: 'JF000001',
+          treatment_method: 'Bait system',
+        }),
+      }));
+    });
+  });
+
   test('managed project type stays creatable for a linked project_required appointment', async () => {
     // Phase-1 cutover makes one_time_pest_treatment appointment-managed via
     // OTHER keys, but general_appointment stays project_required — its linked

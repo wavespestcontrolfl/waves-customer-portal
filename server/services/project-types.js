@@ -946,7 +946,11 @@ const PROJECT_TYPES = {
         ],
       },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text' },
-      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text' },
+      // Adam Benetti is the only applicator, so his personal FDACS ID card
+      // number (distinct from the company JB license) pre-fills at project
+      // creation. Seeded once by applyFindingsDefaults — editable on the
+      // form, and an intentionally cleared value stays cleared.
+      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', default: 'JE362022' },
       // FBC 1816.1.7 requires an "authorized signature of the licensed
       // applicator." A typed attestation paired with the printed name +
       // FDACS ID + treatment date is the standard pattern for portal-
@@ -969,4 +973,20 @@ function isValidProjectType(key) {
   return Object.prototype.hasOwnProperty.call(PROJECT_TYPES, key);
 }
 
-module.exports = { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, getProjectType, isValidProjectType };
+// Merge `default` values from a type's findings fields into a findings
+// object, filling only blank/missing keys. Called once at project creation
+// (never on update) so a deliberately cleared field is not re-filled.
+function applyFindingsDefaults(typeKey, findings) {
+  const typeCfg = PROJECT_TYPES[typeKey];
+  const out = { ...(findings || {}) };
+  for (const field of typeCfg?.findingsFields || []) {
+    if (field.default === undefined) continue;
+    const current = out[field.key];
+    if (current === null || current === undefined || String(current).trim() === '') {
+      out[field.key] = field.default;
+    }
+  }
+  return out;
+}
+
+module.exports = { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, getProjectType, isValidProjectType, applyFindingsDefaults };
