@@ -254,8 +254,22 @@ async function upsertEmail(parsed) {
     }
   }
 
+  // Newsletter proof-approval replies are deterministic control messages —
+  // check them before AI classification. Gated + fail-closed inside the
+  // handler; a throw here must never break the sync loop. When the handler
+  // recognizes the email as proof traffic, skip classification entirely:
+  // a control message must not burn a classifier call or risk an
+  // auto-action archiving it.
+  let proofHandled = false;
+  try {
+    const { maybeHandleProofApproval } = require('../newsletter-proof');
+    proofHandled = await maybeHandleProofApproval(email);
+  } catch (err) {
+    logger.error(`[email-sync] Proof-approval check failed for ${email.id}: ${err?.message || err}`);
+  }
+
   // Classify in background (don't block sync)
-  if (!email.classification || email.classification === 'vendor') {
+  if (!proofHandled && (!email.classification || email.classification === 'vendor')) {
     setImmediate(() => {
       (async () => {
         const { classifyEmail } = require('./email-classifier');

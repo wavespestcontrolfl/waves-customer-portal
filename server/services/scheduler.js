@@ -1172,8 +1172,21 @@ function initScheduledJobs() {
       const { getCurrentNewsletterThursday } = require('./event-freshness');
       const weekOf = getCurrentNewsletterThursday();
       const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
-      // Only catch up weeks that were never attempted.
-      if (cal && cal.status !== 'planned') return;
+      // Only catch up weeks that were never attempted — but a drafted week
+      // may still be missing its owner proof (a transient SendGrid failure
+      // releases the proof claim), and autoDraftFlagship is never reached
+      // for those rows, so retry the idempotent proof send here.
+      if (cal && cal.status !== 'planned') {
+        if (cal.status === 'drafted' && cal.send_id) {
+          try {
+            const { sendNewsletterProof } = require('./newsletter-proof');
+            await sendNewsletterProof(cal.send_id);
+          } catch (e) {
+            logger.warn(`[newsletter-autopilot-catchup] proof retry failed: ${e.message}`);
+          }
+        }
+        return;
+      }
       const { autoDraftFlagship } = require('./newsletter-autopilot');
       const result = await autoDraftFlagship();
       logger.info(`[newsletter-autopilot-catchup] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
