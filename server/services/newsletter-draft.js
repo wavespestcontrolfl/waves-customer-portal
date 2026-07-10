@@ -515,12 +515,13 @@ const COLORS = {
   get rule() { return newsletterPalette().rule; },
 };
 
-// Animated circular mascot badge built from the CURRENT brand mascot
-// (client/public/waves-logo-2026.png art, wordmark cropped out — illegible
-// at divider size anyway), self-hosted on our CDN. Replaces the Beehiiv-era
-// mascot GIF that (a) was the old logo art and (b) lived on media.beehiiv.com,
-// a platform we left — that asset can vanish without notice.
-const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif';
+// Animated full-logo divider: the CURRENT brand logo (client/public/
+// waves-logo-2026.png) with the same gentle rocking motion as the
+// Beehiiv-era divider, self-hosted on our CDN. Owner rulings 2026-07-09/10:
+// same style as the original divider, just smaller and with the right
+// (current) logo — the circular mascot-crop v1 was rejected. Replaces the
+// old-logo GIF that lived on media.beehiiv.com, a platform we left.
+const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 // The exact words the hero poster letters into the artwork: the issue's
 // subject line, emoji stripped (image models render emoji glyphs as mush;
