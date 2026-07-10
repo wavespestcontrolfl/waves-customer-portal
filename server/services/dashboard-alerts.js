@@ -474,15 +474,19 @@ async function computeDashboardAlertsUncached() {
   try {
     const { findDuplicateGroups } = require('./customer-dedupe');
     const groups = await findDuplicateGroups();
-    const count = groups.reduce((n, g) => n + g.candidates.length, 0);
-    if (count > 0) {
+    const pairIds = groups.flatMap((g) => g.candidates.map((c) => `${g.winner.id}:${c.loser.id}`));
+    if (pairIds.length > 0) {
       alerts.push({
         id: 'customer_duplicates_review',
         kind: 'action',
         severity: 'warn',
-        count,
-        label: `${count} possible duplicate customer${count === 1 ? '' : 's'} to review`,
+        count: pairIds.length,
+        label: `${pairIds.length} possible duplicate customer${pairIds.length === 1 ? '' : 's'} to review`,
         href: '/admin/customers/duplicates',
+        // members lets a bell dismissal re-surface when the SET changes, not
+        // just the count — one pair resolved + one new pair must not stay
+        // hidden behind an unchanged count for the dismissal window.
+        members: queueMembers(pairIds),
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] customer_duplicates_review: ${err.message}`); }

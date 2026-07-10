@@ -98,10 +98,21 @@ function addressCompat(winner, loser) {
   const wz = String(winner.zip || '').slice(0, 5);
   const lz = String(loser.zip || '').slice(0, 5);
   if (wz && lz && wz !== lz) return { status: 'zip_conflict' };
+  // ZIP is nullable — when it can't disambiguate, the city must: the same
+  // street key exists in multiple service-area cities (100 Main St Bradenton
+  // vs Sarasota are different properties).
+  if (!(wz && lz)) {
+    const wc = String(winner.city || '').trim().toLowerCase();
+    const lc = String(loser.city || '').trim().toLowerCase();
+    if (wc && lc && wc !== lc) return { status: 'city_conflict' };
+  }
   return { status: 'match' };
 }
 
 const ADDRESS_COMPATIBLE = new Set(['match', 'loser_missing', 'winner_missing', 'both_missing']);
+// Every way two addresses can be POSITIVELY different (as opposed to merely
+// unknown). Any of these plus differing last names = two people = red.
+const ADDRESS_CONFLICTS = new Set(['conflict', 'unit_conflict', 'zip_conflict', 'city_conflict']);
 
 // ---------------------------------------------------------------------------
 // Hard blockers — what makes a losing row NOT a shell
@@ -176,7 +187,12 @@ function sanitizeCustomer(row) {
 }
 
 async function findDuplicateGroups(database = db) {
+  // Live rows only (active + not deleted, mirroring whereLiveCustomer): a
+  // churned inactive record must never be picked as a winner — its Stripe/
+  // portal signals would outrank a NEW active shell and the merge would
+  // retire the active row into a customer hidden from live surfaces.
   const rows = await database('customers')
+    .where('active', true)
     .whereNull('deleted_at')
     .whereRaw("COALESCE(phone, '') <> ''")
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
@@ -231,7 +247,9 @@ async function findDuplicateGroups(database = db) {
       let tier = 'green';
       const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
         && normName(winner.last_name) !== normName(loser.last_name);
-      if (lastNamesDiffer && addr.status === 'conflict') tier = 'red';
+      // Different last name at a POSITIVELY different address (different
+      // street, unit, ZIP, or city) = two people sharing a line.
+      if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
       else if (reasons.length) tier = 'yellow';
 
       candidates.push({
@@ -240,6 +258,18 @@ async function findDuplicateGroups(database = db) {
         reasons,
         evidence: { phone10: p10, names_compatible: namesOk, address: addr.status },
       });
+    }
+    // Once the phone is known to belong to conflicting identities (any red
+    // pair or name conflict in the group), an address-less/"Unknown" shell is
+    // no longer safely attributable to the picked winner — it could be the
+    // OTHER person. Demote greens to review; only clean groups auto-merge.
+    if (candidates.some((c) => c.tier === 'red' || c.reasons.includes('name_conflict'))) {
+      for (const c of candidates) {
+        if (c.tier === 'green') {
+          c.tier = 'yellow';
+          c.reasons.push('group_has_identity_conflict');
+        }
+      }
     }
     if (candidates.length) groups.push({ phone10: p10, winner: sanitizeCustomer(winner), candidates });
   }
@@ -256,11 +286,21 @@ const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_dup
 
 // One-row-per-customer preference tables: when both sides have a row, the
 // loser's row can't just be dropped — it may hold opted-OUT notification
-// consent or gate/pet details the winner's row lacks. Merge conservatively:
-// booleans take the AND (false = opted out / more restrictive always wins, so
-// a merge can never widen consent), empty winner fields fill from the loser,
-// then the loser's row is removed. Anything the merge doesn't copy survives in
-// the journal's loser snapshot.
+// consent or gate/pet/safety details the winner's row lacks. Boolean
+// semantics differ by table:
+//   notification_prefs   — booleans are CONSENT: AND (false/opted-out wins, a
+//                          merge can never widen consent). Its *_channel
+//                          strings (sms|email|both) take the LEAST-SMS value
+//                          (email > sms > both) so an explicit email-only
+//                          choice on either row can never resume SMS.
+//   property_preferences — booleans are FACTS (irrigation_system, ...): OR
+//                          (known-true survives; dropping a safety fact is
+//                          the failure mode).
+// Everything else: empty winner fields fill from the loser, then the loser's
+// row is removed. Anything not copied survives in the journal snapshot.
+const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_preferences: 'or' };
+const CHANNEL_RESTRICTIVENESS = { email: 2, sms: 1, both: 0 };
+
 async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   const loserRow = await trx(table).where(column, loserId).first();
   if (!loserRow) return 'no loser row';
@@ -269,12 +309,19 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
     return count;
   }
+  const booleanMode = SINGLETON_BOOLEAN_SEMANTICS[table] || 'and';
   const updates = {};
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
-      if (winnerVal && !loserVal) updates[col] = false;
+      if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
+      if (booleanMode === 'or' && !winnerVal && loserVal) updates[col] = true;
+    } else if (
+      table === 'notification_prefs' && col.endsWith('_channel')
+      && CHANNEL_RESTRICTIVENESS[winnerVal] !== undefined && CHANNEL_RESTRICTIVENESS[loserVal] !== undefined
+    ) {
+      if (CHANNEL_RESTRICTIVENESS[loserVal] > CHANNEL_RESTRICTIVENESS[winnerVal]) updates[col] = loserVal;
     } else if ((winnerVal === null || winnerVal === '') && loserVal !== null && loserVal !== '') {
       updates[col] = loserVal;
     }
@@ -319,14 +366,30 @@ const UNIQUE_COLLISION_HANDLERS = {
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
+  // Union of (a) DECLARED foreign keys referencing customers(id) — catches
+  // differently-named columns like referred_by_customer_id — and (b) any
+  // customer_id column on a base table, because several customer-owned
+  // tables in this repo (payment_plans, customer_discounts, ...) store
+  // customer_id WITHOUT a declared FK and would otherwise stay attached to
+  // the retired row after a merge.
   const result = await database.raw(`
-    SELECT tc.table_name, kcu.column_name
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-    JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND ccu.table_name = 'customers' AND ccu.column_name = 'id'
-    ORDER BY tc.table_name, kcu.column_name`);
+    SELECT DISTINCT table_name, column_name FROM (
+      SELECT tc.table_name, kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+      JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_schema = 'public'
+        AND ccu.table_name = 'customers' AND ccu.column_name = 'id'
+      UNION
+      SELECT c.table_name, c.column_name
+      FROM information_schema.columns c
+      JOIN information_schema.tables t
+        ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+      WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+        AND c.column_name = 'customer_id' AND c.table_name <> 'customers'
+    ) refs
+    ORDER BY table_name, column_name`);
   fkColumnsCache = result.rows.filter((r) => !REPOINT_EXCLUDED_TABLES.has(r.table_name));
   return fkColumnsCache;
 }
@@ -364,6 +427,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     const loser = locked.find((r) => r.id === loserId);
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
+    // The surviving row must be live: retiring an active customer into an
+    // inactive winner would hide them from every live-customer surface.
+    if (winner.active === false) throw new Error('executeMerge: winner is inactive — reactivate it first or keep the other row');
 
     if (winner.stripe_customer_id && loser.stripe_customer_id
       && winner.stripe_customer_id !== loser.stripe_customer_id) {
@@ -500,6 +566,7 @@ module.exports = {
     addressCompat,
     pickWinner,
     isEmptyValue,
+    mergeSingletonPrefRow,
     resetFkCache: () => { fkColumnsCache = null; },
   },
 };

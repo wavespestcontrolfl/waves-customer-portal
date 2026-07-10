@@ -25,6 +25,8 @@ const REASON_LABELS = {
   address_conflict: "Different addresses",
   address_unit_conflict: "Different units at the same address",
   address_zip_conflict: "Same street, different ZIP",
+  address_city_conflict: "Same street, different city",
+  group_has_identity_conflict: "Phone shared by conflicting identities",
   loser_has_stripe_customer_id: "Duplicate has a Stripe profile",
   loser_has_portal_login: "Duplicate has a portal login",
 };

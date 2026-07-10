@@ -12,7 +12,10 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 
 const db = require('../models/db');
 const dedupe = require('../services/customer-dedupe');
-const { phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner, resetFkCache } = dedupe._test;
+const {
+  phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner,
+  mergeSingletonPrefRow, resetFkCache,
+} = dedupe._test;
 
 // Chainable knex stub: every builder method returns the chain; awaiting the
 // chain resolves whatever the per-table router decides after inspecting the
@@ -140,6 +143,12 @@ describe('addressCompat', () => {
       { address_line1: '100 Oak Street', zip: '34293' },
     ).status).toBe('zip_conflict');
   });
+  it('city_conflict when ZIP cannot disambiguate the same street key', () => {
+    expect(addressCompat(
+      { address_line1: '100 Main St', city: 'Bradenton', zip: '' },
+      { address_line1: '100 Main Street', city: 'Sarasota', zip: null },
+    ).status).toBe('city_conflict');
+  });
 });
 
 describe('pickWinner', () => {
@@ -223,6 +232,31 @@ describe('findDuplicateGroups', () => {
     expect(groups[0].candidates[0].reasons).toContain('loser_has_invoices');
   });
 
+  it('tiers red on a different last name with a unit conflict, not just a street conflict', async () => {
+    const unitA = { ...complete, address_line1: '5350 Desoto Rd Apt 2', zip: '34243' };
+    const unitB = {
+      ...stranger,
+      id: 'aaaaaaaa-0000-0000-0000-000000000004',
+      address_line1: '5350 De Soto Rd Apt 1418',
+      zip: '34243',
+    };
+    installDb(router({ customers: [unitA, unitB] }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].candidates[0].tier).toBe('red');
+  });
+
+  it('demotes green shells to review when the group has an identity conflict', async () => {
+    // Nicole (different name+address = red) proves the phone is shared by two
+    // people — the address-less shell can no longer safely attach to Diana.
+    // Stripe on Diana pins her as the picked winner.
+    installDb(router({ customers: [{ ...complete, stripe_customer_id: 'cus_d' }, stranger, shell] }));
+    const groups = await dedupe.findDuplicateGroups();
+    const byId = Object.fromEntries(groups[0].candidates.map((c) => [c.loser.id, c]));
+    expect(byId[stranger.id].tier).toBe('red');
+    expect(byId[shell.id].tier).toBe('yellow');
+    expect(byId[shell.id].reasons).toContain('group_has_identity_conflict');
+  });
+
   it('excludes dismissed pairs', async () => {
     const [a, b] = [complete.id, shell.id].sort();
     installDb(router({
@@ -231,6 +265,57 @@ describe('findDuplicateGroups', () => {
     }));
     const groups = await dedupe.findDuplicateGroups();
     expect(groups).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Singleton preference-row merge semantics
+// ---------------------------------------------------------------------------
+
+describe('mergeSingletonPrefRow', () => {
+  function stubTrx({ loserRow, winnerRow }) {
+    const state = { updated: null, deleted: false };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('del')) { state.deleted = true; return 1; }
+      if (q.called('first')) return q.args('where')[1] === 'L' ? loserRow : winnerRow;
+      if (q.called('update')) { state.updated = q.args('update')[0]; return 1; }
+      return [];
+    }));
+    trx.fn = { now: () => 'NOW' };
+    return { trx, state };
+  }
+
+  it('notification_prefs: consent ANDs, channels take the least-SMS value, empty fields fill', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, billing_channel: 'sms', quiet_hours_start: null, created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', sms_enabled: false, billing_channel: 'email', quiet_hours_start: '22:00', created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated.sms_enabled).toBe(false);          // opted out survives
+    expect(state.updated.billing_channel).toBe('email');    // never resume SMS
+    expect(state.updated.quiet_hours_start).toBe('22:00');  // fill-if-empty
+    expect(state.deleted).toBe(true);
+  });
+
+  it('notification_prefs: never widens — winner email-only keeps email over loser both', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', billing_channel: 'email', created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', billing_channel: 'both', created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated).toBe(null);
+    expect(state.deleted).toBe(true);
+  });
+
+  it('property_preferences: booleans are facts and OR — safety details survive', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', irrigation_system: false, pet_details: null, created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', irrigation_system: true, pet_details: 'Large dog — gate must stay closed', created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
+    expect(state.updated.irrigation_system).toBe(true);
+    expect(state.updated.pet_details).toBe('Large dog — gate must stay closed');
+    expect(state.deleted).toBe(true);
   });
 });
 
