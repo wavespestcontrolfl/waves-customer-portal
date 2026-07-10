@@ -35,6 +35,7 @@ import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceBu
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
+import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
@@ -597,8 +598,11 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
+  // Name leads the contact block in the headline's own color (owner ask
+  // 2026-07-09, live review screen); email/phone/address follow in the same
+  // face at body size — no more uppercase caption treatment.
+  const nameLine = String(customerName || '').trim();
   const contactLines = [
-    customerName,
     customerEmail,
     phoneDisplay,
     address,
@@ -617,10 +621,6 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   };
   const issuedDisplay = fmtDate(createdAt);
   const expiresDisplay = fmtDate(expiresAt);
-  const dateLine = [
-    issuedDisplay ? `Estimate issued ${issuedDisplay}` : null,
-    expiresDisplay ? `Valid through ${expiresDisplay}` : null,
-  ].filter(Boolean).join(' · ');
   return (
     <div style={{ padding: '8px 0 24px' }}>
       <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 8 }}>
@@ -643,24 +643,32 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
           {subline}
         </p>
       ) : null}
-      {contactLines.length ? (
+      {(nameLine || contactLines.length) ? (
+        /* One uniform block (owner 2026-07-09): email/phone/address align
+           with the name — same face, size, weight, and color. data-gt="" on
+           every line: the glass auto-tier tags small text as caption/fine
+           and uppercases short names as eyebrows, which split this block
+           across different faces — the block styles itself. */
         <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
-          {contactLines.map((line) => (
-            <div key={line} style={{ ...HEADER_EYEBROW_STYLE, lineHeight: 1.5 }}>{line}</div>
+          {[nameLine, ...contactLines].filter(Boolean).map((line) => (
+            <div key={line} data-gt="" style={{ fontSize: 17, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.4 }}>{line}</div>
           ))}
         </div>
       ) : null}
-      {(slug || dateLine) ? (
-        /* Estimate # + dates at body size (design audit 2026-07-06): the
-           expiry is action-relevant — it should not carry the page's lowest
-           emphasis, and the quote number was not shown anywhere. Dates sit on
-           their own line under the number, same weight (owner ask 07-07). */
+      {(slug || issuedDisplay || expiresDisplay) ? (
+        /* Estimate # + expiration directly under the contact block on every
+           estimate (owner ask 2026-07-09; supersedes the 07-07 "Estimate
+           {slug} · dates" line format). Body size — the expiry is
+           action-relevant and must not carry the page's lowest emphasis. */
         <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.5 }}>
           {slug ? (
-            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong>
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate #: {slug}</strong>
           ) : null}
-          {dateLine ? (
-            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>{dateLine}</strong>
+          {issuedDisplay ? (
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate issued: {issuedDisplay}</strong>
+          ) : null}
+          {expiresDisplay ? (
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate expiration: {expiresDisplay}</strong>
           ) : null}
         </div>
       ) : null}
@@ -2665,10 +2673,30 @@ export default function EstimateViewPage() {
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
   const addServiceOffer = useMemo(
-    () => estimateAddServiceOffer(services, serviceMode, data?.estimate?.membership),
-    [services, serviceMode, data?.estimate?.membership]
+    // Accepted estimates always evaluate the offer in recurring terms (owner
+    // ask 2026-07-09): the accepted page upsells the next recurring service
+    // regardless of which mode the customer originally booked. data?.cta —
+    // the destructured `cta` binding doesn't exist until after the early
+    // returns below.
+    () => estimateAddServiceOffer(
+      services,
+      data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
+      data?.estimate?.membership,
+    ),
+    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership]
   );
   const reportShowcaseVariant = useMemo(() => reportShowcaseVariantForServices(services), [services]);
+  // Download PDF / Share / Print / Portal Login at the top of every estimate
+  // render (owner ask 2026-07-09, live review screen) — the same shared bar
+  // as the report/pay/receipt/contract pages. The PDF endpoint streams the
+  // same proposal generator as the admin download and the emailed attachment.
+  const estimateActionBar = (
+    <DocumentActionBar
+      pdfUrl={`${API_BASE}/estimates/${token}/pdf`}
+      pdfFileName="Waves_Estimate.pdf"
+      shareTitle="Your Waves estimate"
+    />
+  );
 
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
@@ -3502,24 +3530,54 @@ export default function EstimateViewPage() {
     // non-default-frequency booking — better to show just the terminal card
     // than a wrong recap. (New accepts always persist it.) Declined/expired
     // keep just the terminal card too.
-    const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
     // A commercial proposal is quote_required by design but its terminal card
     // says "Your formal proposal is ready." — the generic "in the works" hero
     // would contradict it, so proposals get their own status statement.
     const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
       ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
       : TERMINAL_HERO[cta.terminalState] || null;
+    if (cta.terminalState === 'accepted') {
+      // Accepted = concise onboarding page (owner ask 2026-07-09): booked
+      // hero, the booked-visit card, the Waves app invite, and the
+      // add-service upsell. The sales machinery — contact/estimate-# block,
+      // AI price-intelligence, pricing recap, report showcase, reviews, GBP
+      // proof — is deliberately GONE: they already said yes, and the PDF in
+      // the action bar carries the what-did-I-agree-to reference.
+      return (
+        <Page>
+          {adminDraftPreview ? <DraftPreviewBanner /> : null}
+          {/* Doc tools ABOVE the hero on every estimate (owner 2026-07-09). */}
+          {estimateActionBar}
+          <Header
+            customerFirstName={estimate.customerFirstName}
+            serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, estimate.acceptedServiceMode || null)}
+            headline={stateHero?.h1 || headline}
+            eyebrowOverride={stateHero ? stateHero.eyebrow : null}
+          />
+          <TerminalStateCard
+            state="accepted"
+            customerFirstName={estimate.customerFirstName}
+            address={estimate.address}
+            // Booked + upcoming visit → show the date, not "we'll follow up".
+            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            appointmentServiceType={existingAppointment?.serviceType || null}
+          />
+          <AppShowcaseCard />
+          <EstimateAddServiceRequestCard
+            offer={addServiceOffer}
+            requestState={addServiceRequestState}
+            onRequest={handleAddServiceRequest}
+          />
+        </Page>
+      );
+    }
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {estimateActionBar}
         <Header
           {...headerContactProps}
-          serviceLabel={getServiceLabel(
-            currentFrequency,
-            estimate,
-            pricing,
-            cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
-          )}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
@@ -3541,13 +3599,7 @@ export default function EstimateViewPage() {
           quoteReason={quoteRequiredReason}
           isProposal={isCommercialProposal}
           proposalPdfEmailed={proposalPdfEmailed}
-          // Booked + upcoming visit → show the date, not "we'll follow up".
-          appointmentLabel={cta.terminalState === 'accepted' && existingAppointment
-            ? formatAppointmentLabel(existingAppointment)
-            : null}
-          appointmentServiceType={cta.terminalState === 'accepted' ? existingAppointment?.serviceType || null : null}
         />
-        {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
         <AppShowcaseCard />
         <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
@@ -3559,6 +3611,7 @@ export default function EstimateViewPage() {
   if (ctaPhase === 'success') {
     return (
       <Page>
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
@@ -3604,6 +3657,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
@@ -3625,6 +3679,7 @@ export default function EstimateViewPage() {
   return (
     <Page>
       {adminDraftPreview ? <DraftPreviewBanner /> : null}
+      {estimateActionBar}
       <Header
         {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
