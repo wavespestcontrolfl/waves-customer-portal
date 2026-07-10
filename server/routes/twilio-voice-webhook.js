@@ -174,6 +174,19 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
     });
 }
 
+// Compact, parse-safe capture of Twilio's Marketplace `AddOns` webhook param
+// for the call_log metadata audit trail. Parsed object when valid JSON,
+// truncated string when not (still evidence of WHAT arrived), null when the
+// param is absent entirely.
+function parseAddOnsForAudit(addOnsRaw) {
+  if (!addOnsRaw) return null;
+  try {
+    return typeof addOnsRaw === 'string' ? JSON.parse(addOnsRaw) : addOnsRaw;
+  } catch {
+    return String(addOnsRaw).slice(0, 1000);
+  }
+}
+
 function metadataHasForwardAcceptance(metadata, { parentCallSid, dialCallSid }) {
   const acceptance = parseJsonObject(metadata).forward_acceptance || {};
   if (acceptance.accepted !== true) return false;
@@ -439,6 +452,10 @@ router.post('/voice', async (req, res) => {
     const { checkInboundBlock } = require('../middleware/spam-block');
     const blockResult = await checkInboundBlock({
       from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+      // Blocked calls return TwiML before the call_log insert below ever
+      // runs, so their spam evidence must ride the blocked_call_attempts
+      // audit row instead — same fields the allowed path stores in metadata.
+      signals: { stir_verstat: req.body.StirVerstat || null, addons: parseAddOnsForAudit(req.body.AddOns) },
       recordAttempt: firstDelivery,
     });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
@@ -483,6 +500,15 @@ router.post('/voice', async (req, res) => {
         // Read back after press-1 by connectingAnnouncement(). Stored server-side
         // so the caller's name never enters a callback URL (request-logger safe).
         screen_caller_name: spokenCallerName(customer),
+        // Spam-signal ground truth (2026-07-09): the STIR/SHAKEN attestation
+        // and the Marketplace AddOns verdicts arrive ONLY on this initial
+        // webhook and were previously dropped on the floor. Captured so
+        // screening accuracy can be judged from call_log against the
+        // pipeline's own spam classifications BEFORE any caller is ever
+        // challenged or blocked. NULL addons = Twilio attached nothing —
+        // that absence is itself a finding (Marchex was silent for months).
+        stir_verstat: req.body.StirVerstat || null,
+        addons: parseAddOnsForAudit(req.body.AddOns),
       }),
     });
     // call_log now committed — don't release the claim on a later error.
@@ -1378,6 +1404,7 @@ router._test = {
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
+  parseAddOnsForAudit,
   spokenCallerName,
   rememberForwardAccept,
   resolveCsrName,
