@@ -1251,6 +1251,39 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.annualPrepayEligible).toBe(true);
   });
 
+  test('a manual discount the floor blocks on EVERY cadence is suppressed on the payload and combined card', async () => {
+    // Lawn-only plan AT the $50/mo minimum with a $10/mo manual discount:
+    // every frequency row suppresses the discount (zero room under the
+    // floor), so the TOP-LEVEL payload.manualDiscount must be suppressed
+    // too — buildCombinedRecurring prefers it over the frequency rows and
+    // the React page renders combined.manualDiscount, which would otherwise
+    // show savings no selectable price reflects.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-floor-suppresses-top-level-discount-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', value: 120, amount: 120, scope: 'recurring_annual_after_waveguard' },
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 50, ann: 600, visitsPerYear: 6 }],
+          },
+          results: { lawn: [{ name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true }] },
+          oneTime: { total: 0, items: [] },
+        },
+      },
+    });
+
+    expect(payload.manualDiscountSuppressed).toBe(true);
+    expect(payload.manualDiscount || null).toBeNull();
+    expect((payload.frequencies || []).every((f) => !f.manualDiscount)).toBe(true);
+    expect(payload.combinedRecurring?.manualDiscount || null).toBeNull();
+  });
+
   test('no-engine fallback: a below-floor recurring-lawn estimate is quote-required, not rendered verbatim', async () => {
     // Legacy shape whose lawn row lives at the estData top level — no
     // result.* (so no v1 shape) and no engineInputs — takes the no-engine

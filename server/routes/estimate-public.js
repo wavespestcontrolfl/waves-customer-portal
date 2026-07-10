@@ -12469,7 +12469,17 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
     frequency?.annual,
   ) || 0);
   const parts = resolveRecurringMonthlyParts(estimate, estData);
-  const manualDiscount = payload.manualDiscount || legacyDefaultFrequency?.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData);
+  // The combined card's subtotals come from the DEFAULT frequency, so its
+  // savings line must too: a default row whose manual discount the lawn
+  // floor fully blocked shows NO discount here (the raw estData summary
+  // would resurrect savings the displayed price doesn't reflect), and a
+  // payload-level suppression (every frequency blocked) wins the same way.
+  const manualDiscountSuppressedForDefault = payload.manualDiscountSuppressed === true
+    || legacyDefaultFrequency?.manualDiscountSuppressed === true
+    || (!legacyDefaultFrequency && frequency?.manualDiscountSuppressed === true);
+  const manualDiscount = manualDiscountSuppressedForDefault
+    ? null
+    : (payload.manualDiscount || legacyDefaultFrequency?.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData));
   const baseMonthly = Number(parts.baseMonthly || parts.discountableBaseMonthly || 0);
   const savingsPerMonth = baseMonthly > 0 ? Math.max(0, roundMonthly(baseMonthly - monthlySubtotal)) : 0;
 
@@ -13024,6 +13034,17 @@ async function buildPricingBundle(estimate) {
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
     if (!manual) return payload;
+    // When the lawn program minimum fully blocks the discount on EVERY
+    // priced frequency, the top-level payload.manualDiscount must be
+    // suppressed too — buildCombinedRecurring prefers it over the frequency
+    // rows, so leaving it attached would show the customer combined-card
+    // savings that no selectable price reflects.
+    const frequencies = Array.isArray(payload.frequencies) ? payload.frequencies : null;
+    const allFrequenciesSuppressed = !!frequencies && frequencies.length > 0
+      && frequencies.every((frequency) => frequency?.manualDiscountSuppressed === true);
+    if (allFrequenciesSuppressed) {
+      return { ...payload, manualDiscount: null, manualDiscountSuppressed: true };
+    }
     const manualWithMonthly = {
       ...manual,
       // monthlyAmount is the per-month recurring figure, so it tracks only the
