@@ -546,6 +546,45 @@ function summarizeKnownCaller(customer) {
   };
 }
 
+// Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
+// shadow/AUDIT recompute — the saved shadow decision must hold exactly where
+// enforce would hold, or rollout metrics overstate safe fail-open bookings.
+// When address flags failed open (V2 heard no address) but legacy V1 captured
+// ANY address component (street, unit — line2 or embedded, city, ZIP) that
+// conflicts with — or can't be matched against — the caller's on-file
+// address, the booking demotes to the blocked path (address_review card).
+// Matching-only evidence books to the on-file address (it IS that address).
+// Same normalization family as the property-linkage exact match
+// (customer-properties), so this guard can't disagree with the stamp
+// downstream. Returns the (possibly demoted) routing result; never mutates.
+function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
+  if (!routingResult?.allowed
+    || !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+    return routingResult;
+  }
+  const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
+  const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+  const legacyV1Street = String(extracted?.address_line1 || '').trim();
+  const v1Unit = unitKey(extracted?.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
+  const v1City = cityKey(extracted?.city);
+  const v1Zip = normalizeZip(extracted?.zip);
+  if (!legacyV1Street && !v1Unit && !v1City && !v1Zip) return routingResult;
+  const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
+  const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
+  const v1AddressConflicts = (legacyV1Street
+    && (!onFileStreet || streetKey(legacyV1Street) !== streetKey(onFileStreet)))
+    || (v1Unit && v1Unit !== onFileUnit)
+    || (v1City && v1City !== cityKey(knownCaller?.addressCity))
+    || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
+  if (!v1AddressConflicts) return routingResult;
+  return {
+    allowed: false,
+    reason: 'v1_only_new_address',
+    flags: routingResult.flags,
+    appointmentBlockingFlags: ['address_unverified'],
+  };
+}
+
 // Call types that are NOT new sales leads. spam/voicemail are handled by their
 // own booleans + early return; these are the existing-customer/non-sales calls
 // the classifier now labels so they stop spawning leads. Kept narrow on purpose:
@@ -1377,7 +1416,7 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     const s = String(v == null ? '' : v).trim();
     return s ? s.slice(0, max) : null;
   };
-  const address = {
+  let address = {
     line1: clean(extracted.address_line1, 200),
     line2: clean(extracted.address_line2, 100),
     city: clean(extracted.city, 50),
@@ -1388,28 +1427,28 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     // The caller didn't state an address on this call (e.g. an existing
     // customer confirming a re-service). Dispatch to their on-file,
     // Google-verified address instead of leaving the visit address blank —
-    // never book a location-less appointment.
+    // never book a location-less appointment. Falls THROUGH to the exact
+    // property match below: the on-file address may itself be an active
+    // customer_properties row whose property_id + geocode the visit should
+    // carry (map pin), same as a caller-stated address.
+    let onFile = null;
     try {
       const cust = await trx('customers').where({ id: customerId })
         .first('address_line1', 'address_line2', 'city', 'state', 'zip');
       if (cust && String(cust.address_line1 || '').trim()) {
-        return {
-          propertyId: null,
-          address: {
-            line1: clean(cust.address_line1, 200),
-            line2: clean(cust.address_line2, 100),
-            city: clean(cust.city, 50),
-            state: clean(cust.state, 2),
-            zip: clean(cust.zip, 10),
-          },
-          lat: null,
-          lng: null,
+        onFile = {
+          line1: clean(cust.address_line1, 200),
+          line2: clean(cust.address_line2, 100),
+          city: clean(cust.city, 50),
+          state: clean(cust.state, 2),
+          zip: clean(cust.zip, 10),
         };
       }
     } catch (e) {
       logger.warn(`[call-proc] on-file address fallback failed for booking: ${e.code || e.message}`);
     }
-    return { propertyId: null, address: null, lat: null, lng: null };
+    if (!onFile) return { propertyId: null, address: null, lat: null, lng: null };
+    address = onFile;
   }
   let propertyId = null;
   let lat = null;
@@ -3465,10 +3504,13 @@ const CallRecordingProcessor = {
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
     // the secondary-contact fan-out at the send site requires it even when V2
     // runs in shadow (or routing is legacy), where the enforce branch below
-    // never executes. Read it from the V2 extraction whenever one exists; with
-    // no V2 extraction there is no consent evidence and it stays false, so the
-    // fan-out remains fail-closed exactly as before.
-    v2SmsConsentExplicit = v2Result?.extraction?.consent?.sms_consent_given === true;
+    // never executes. Only a VALID extraction counts — a schema_failed/
+    // normalization_failed payload is untrusted model output and must not
+    // authorize texting anyone. With no valid V2 extraction there is no
+    // consent evidence and it stays false (fan-out fail-closed as before).
+    v2SmsConsentExplicit = v2Result?.status === 'valid'
+      && isV2Extraction(v2Result?.extraction)
+      && v2Result.extraction?.consent?.sms_consent_given === true;
 
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
@@ -3501,50 +3543,16 @@ const CallRecordingProcessor = {
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
           });
           // Address fail-open is only safe when the on-file address really is
-          // the booking address. If legacy V1 captured an address that
-          // CONFLICTS with the on-file one while V2 heard nothing (that's the
-          // only way address flags fail open), V1 may have heard a rental/
-          // secondary address V2 missed — a should-review new-address booking,
-          // not a confirmed visit at the primary. Conflict is judged on the
-          // FULL address, not just the street: same street but a different
-          // unit/city/ZIP ("Unit B" at the saved building) must hold exactly
-          // like a different street. Only components V1 actually captured can
-          // conflict — a street-only V1 echo of the on-file street is a
-          // duplicate, not new-address evidence. Demote to the normal blocked
-          // path (address_review card) BEFORE the route decision is recorded.
-          // No address values in the log — PII; the review card carries them.
-          if (routingResult.allowed
-            && (routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
-            // Same normalization family as the property-linkage exact match
-            // (customer-properties), so this guard can't disagree with the
-            // stamp downstream. The check runs on ANY V1-captured component —
-            // a partial capture (city/ZIP/unit with no street) is still
-            // address evidence and must not slip past a street-only guard.
-            // Matching-only evidence books to the on-file address (it IS that
-            // address); any conflicting or un-matchable component holds.
-            const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
-            const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
-            const legacyV1Street = String(extracted.address_line1 || '').trim();
-            const v1Unit = unitKey(extracted.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
-            const v1City = cityKey(extracted.city);
-            const v1Zip = normalizeZip(extracted.zip);
-            if (legacyV1Street || v1Unit || v1City || v1Zip) {
-              const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
-              const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
-              const v1AddressConflicts = (legacyV1Street
-                && (!onFileStreet || streetKey(legacyV1Street) !== streetKey(onFileStreet)))
-                || (v1Unit && v1Unit !== onFileUnit)
-                || (v1City && v1City !== cityKey(knownCaller?.addressCity))
-                || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
-              if (v1AddressConflicts) {
-                logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only address evidence conflicts with the on-file address`);
-                routingResult = {
-                  allowed: false,
-                  reason: 'v1_only_new_address',
-                  flags: routingResult.flags,
-                  appointmentBlockingFlags: ['address_unverified'],
-                };
-              }
+          // the booking address — V1-captured address evidence that conflicts
+          // with it demotes to the address-review hold BEFORE the route
+          // decision is recorded (see demoteFailOpenOnV1AddressConflict; the
+          // audit path applies the same rule so shadow metrics agree). No
+          // address values in the log — PII; the review card carries them.
+          {
+            const demoted = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+            if (demoted !== routingResult) {
+              logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only address evidence conflicts with the on-file address`);
+              routingResult = demoted;
             }
           }
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
@@ -5176,8 +5184,11 @@ const CallRecordingProcessor = {
           // fire an identical confirmation that the customer just got.
           let alreadySent = false;
           try {
+            // Dedupe against the ACTUAL recipient (smsRecipient) — an
+            // implied-consent send redirected to the ANI must be found here
+            // on a reprocess/retry, or the caller gets the same text twice.
             const existing = await db('sms_log')
-              .where({ to_phone: smsPhone, message_type: 'confirmation' })
+              .where({ to_phone: smsRecipient, message_type: 'confirmation' })
               .where('message_body', smsBody)
               .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
               .first();
@@ -6096,6 +6107,10 @@ const CallRecordingProcessor = {
           callerAni: contactPhone,
           knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
         });
+        // Mirror the enforce path's V1 address-conflict demotion — the saved
+        // shadow decision must hold exactly where enforce would hold, or
+        // rollout metrics overstate safe fail-open bookings.
+        routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
 
         if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
           const shadowDecision = buildRouteDecision({
@@ -6456,6 +6471,7 @@ CallRecordingProcessor._test = {
   resolveCallSecondaryContacts,
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
+  demoteFailOpenOnV1AddressConflict,
   sameFirstName,
   firstNameVariants,
   v2IsoToEtWallClock,

@@ -389,11 +389,15 @@ function canAutoRoute(extraction, opts = {}) {
     // unverified for must still stay blocked, or the booking fallback would
     // stamp the customer's on-file primary address instead of the stated one.
     // raw_text counts too: a spoken address the parser couldn't split into
-    // components survives ONLY there, and it's still a new address.
+    // components survives ONLY there, and it's still a new address. State/
+    // region alone does NOT count — this is a Florida-only portal, "FL" by
+    // itself locates nothing (buildAddressLines ignores state-only addresses
+    // for the same reason), and treating it as evidence would keep the
+    // on-file-address recovery dark for confirmed known-customer bookings.
     const sa = extraction.property?.service_address || {};
     const newAddressGiven = [
       'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
-      'city', 'locality', 'state', 'region', 'postal_code', 'zip', 'zip_code',
+      'city', 'locality', 'postal_code', 'zip', 'zip_code',
       'raw_text',
     ].some((k) => String(sa[k] || '').trim());
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {

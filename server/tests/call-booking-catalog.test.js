@@ -107,6 +107,11 @@ describe('rodent intent → catalog service (owner directive)', () => {
     expect(R('No, it is not rats, just ants everywhere in the kitchen')).toBeUndefined();
     expect(R("We don't have mice, the problem is fleas in the carpet")).toBeUndefined();
   });
+  test('coordinated negation ("no mice or rats") does NOT map to a rodent service (P2)', () => {
+    expect(R('No mice or rats, just ants everywhere')).toBeUndefined();
+    expect(R("We don't have rats and mice, the issue is fleas")).toBeUndefined();
+    expect(R('never had rats, mice, or rodents — spraying for spiders')).toBeUndefined();
+  });
   test('historical rodent mention does NOT anchor the booking (P2)', () => {
     expect(R('We had mice last time but now we need the spiders treated')).toBeUndefined();
     expect(R('Last visit it was rats; this time the lawn needs treatment')).toBeUndefined();

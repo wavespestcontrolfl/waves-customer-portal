@@ -107,6 +107,15 @@ describe('canAutoRoute fail-open booking', () => {
     expect(r.allowed).toBe(true);
   });
 
+  test('state-only service_address ("FL") is NOT new-address evidence — fail-open still books (P2)', () => {
+    // Florida-only portal: a bare state locates nothing and must not keep the
+    // on-file-address recovery dark for a confirmed known-customer booking.
+    const ex = extraction(['address_unverifiable', 'missing_service_address'], 0.9);
+    ex.property = { service_address: { state: 'FL' } };
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(true);
+  });
+
   test('hard blocks are NEVER failed open', () => {
     for (const hard of ['out_of_service_area', 'caller_not_authorized', 'spam_or_wrong_number']) {
       const r = canAutoRoute(extraction([hard]), { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });

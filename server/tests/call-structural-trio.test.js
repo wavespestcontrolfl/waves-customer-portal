@@ -363,6 +363,53 @@ describe('resolveCallBookingPropertyLinkage', () => {
     expect(out.propertyId).toBeNull();
     expect(out.address.line1).toBe('456 Pine Ave');
   });
+
+  test('no call address + on-file address matching an active property → linked with geocode (codex P2)', async () => {
+    const cust = { address_line1: '123 Oak Street', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' };
+    const props = [{ id: 'prop-home', address_line1: '123 Oak St', address_line2: null, city: 'Venice', zip: '34285', latitude: 27.1, longitude: -82.4 }];
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        first: () => Promise.resolve(table === 'customers' ? cust : null),
+        select: () => Promise.resolve(table === 'customer_properties' ? props : []),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-1', {}, trx);
+    expect(out.propertyId).toBe('prop-home');
+    expect(out.address.line1).toBe('123 Oak Street');
+    expect(out.lat).toBe(27.1);
+    expect(out.lng).toBe(-82.4);
+  });
+});
+
+// ─── Fail-open V1 address-conflict demotion (codex r7: shared enforce+audit) ─
+describe('demoteFailOpenOnV1AddressConflict', () => {
+  const { demoteFailOpenOnV1AddressConflict } = _test;
+  const allowed = { allowed: true, failedOpenFlags: ['address_unverifiable'], flags: ['address_unverifiable'] };
+  const kc = { addressLine1: '100 Main St', addressLine2: 'Apt A', addressCity: 'Venice', addressZip: '34285' };
+
+  test('no V1 address evidence → unchanged', () => {
+    expect(demoteFailOpenOnV1AddressConflict(allowed, {}, kc)).toBe(allowed);
+  });
+  test('V1 echo of the on-file address (suffix/ZIP+4 variants) → unchanged, books to on-file', () => {
+    const v1 = { address_line1: '100 Main Street', address_line2: 'Apt A', city: 'Venice', zip: '34285-1234' };
+    expect(demoteFailOpenOnV1AddressConflict(allowed, v1, kc)).toBe(allowed);
+  });
+  test('same street, different unit → demoted to address review', () => {
+    const r = demoteFailOpenOnV1AddressConflict(allowed, { address_line1: '100 Main St', address_line2: 'Unit B' }, kc);
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toBe('v1_only_new_address');
+    expect(r.appointmentBlockingFlags).toEqual(['address_unverified']);
+  });
+  test('partial V1 evidence (conflicting city only, no street) → demoted', () => {
+    const r = demoteFailOpenOnV1AddressConflict(allowed, { city: 'Sarasota' }, kc);
+    expect(r.allowed).toBe(false);
+  });
+  test('address flags did not fail open → untouched even with a conflicting V1 street', () => {
+    const noAddr = { allowed: true, failedOpenFlags: ['caller_phone_missing'] };
+    expect(demoteFailOpenOnV1AddressConflict(noAddr, { address_line1: '9 Elsewhere Rd' }, kc)).toBe(noAddr);
+  });
 });
 
 // ─── Stamped-address divergence rule (codex round-4 P1) ─────────────────────
