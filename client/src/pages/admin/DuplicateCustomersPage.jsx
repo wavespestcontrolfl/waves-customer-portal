@@ -153,7 +153,7 @@ export default function DuplicateCustomersPage() {
 
       <div className="grid gap-3">
         {groups.map((group) => (
-          <Card key={group.phone10}>
+          <Card key={group.winner.id}>
             <CardBody>
               <div className="mb-2 flex items-center gap-2">
                 <span className="u-label text-ink-secondary">Shared phone</span>
@@ -169,13 +169,17 @@ export default function DuplicateCustomersPage() {
               <div className="grid gap-2">
                 {group.candidates.map(({ customer, tier, reasons }) => {
                   const acting = actionKey.startsWith(`${customer.id}:`);
-                  const addressConflict = reasons.some((r) => r.startsWith("address_conflict"));
+                  // Every positive address disagreement (street, unit, ZIP,
+                  // city) is a potential second property worth preserving.
+                  const addressConflict = reasons.some((r) => r.startsWith("address_"));
                   return (
                     <div
                       key={customer.id}
                       className="flex flex-wrap items-start justify-between gap-3 rounded-sm border-hairline border-zinc-200 px-3 py-2"
                     >
-                      <div className="min-w-0 flex-1">
+                      {/* min-w forces the action buttons to WRAP below on
+                          phones instead of crushing this column to slivers */}
+                      <div className="min-w-[240px] flex-1">
                         <CustomerLine customer={customer} />
                         <div className="mt-1 flex flex-wrap items-center gap-1.5">
                           <Badge tone={TIER_TONE[tier] || "neutral"}>{TIER_LABEL[tier] || tier}</Badge>

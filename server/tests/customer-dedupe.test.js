@@ -137,6 +137,22 @@ describe('addressCompat', () => {
       { address_line1: '5350 De Soto Rd Apt 1418', zip: '34243' },
     ).status).toBe('unit_conflict');
   });
+  it('unit_conflict when the units live in address_line2', () => {
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd', address_line2: 'Apt 2', zip: '34243' },
+      { address_line1: '5350 De Soto Rd', address_line2: '#1418', zip: '34243' },
+    ).status).toBe('unit_conflict');
+    // A bare token in line2 is a unit too
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd', address_line2: '2', zip: '34243' },
+      { address_line1: '5350 De Soto Rd', address_line2: '1418', zip: '34243' },
+    ).status).toBe('unit_conflict');
+    // One side without a unit is not a conflict
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd', address_line2: null, zip: '34243' },
+      { address_line1: '5350 De Soto Rd', address_line2: 'Apt 1418', zip: '34243' },
+    ).status).toBe('match');
+  });
   it('zip_conflict on same street key in different ZIPs', () => {
     expect(addressCompat(
       { address_line1: '100 Oak St', zip: '34205' },
@@ -265,6 +281,53 @@ describe('findDuplicateGroups', () => {
     }));
     const groups = await dedupe.findDuplicateGroups();
     expect(groups).toHaveLength(0);
+  });
+
+  it('keeps shells demoted after the conflicting pair is dismissed', async () => {
+    // Dismissing the red Diana↔Nicole pair hides it from the queue, but
+    // Nicole still exists on the phone — the shell must NOT re-green.
+    const winner = { ...complete, stripe_customer_id: 'cus_d' };
+    const [a, b] = [winner.id, stranger.id].sort();
+    installDb(router({
+      customers: [winner, stranger, shell],
+      dismissals: [{ customer_id_a: a, customer_id_b: b }],
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    const shellCandidate = groups.flatMap((g) => g.candidates).find((c) => c.loser.id === shell.id);
+    expect(shellCandidate.tier).toBe('yellow');
+    expect(shellCandidate.reasons).toContain('group_has_identity_conflict');
+    expect(groups.flatMap((g) => g.candidates).some((c) => c.loser.id === stranger.id)).toBe(false);
+  });
+
+  it('surfaces second-identity duplicates as their own mergeable group', async () => {
+    const john = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000011',
+      first_name: 'John', last_name: 'Alpha', phone: '+16124074763',
+      address_line1: '1 First St', zip: '34205',
+      pipeline_stage: 'active_customer', created_at: '2026-06-01', stripe_customer_id: 'cus_j',
+    };
+    const mary = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000012',
+      first_name: 'Mary', last_name: 'Beta', phone: '6124074763',
+      address_line1: '2 Second St', zip: '34205',
+      pipeline_stage: 'active_customer', created_at: '2026-06-05',
+    };
+    const maryDup = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000013',
+      first_name: 'Mary', last_name: 'Beta', phone: '(612) 407-4763',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-07-01',
+    };
+    installDb(router({ customers: [john, mary, maryDup] }));
+    const groups = await dedupe.findDuplicateGroups();
+    // Mary's own duplicate is mergeable under Mary, not stuck behind John.
+    const maryGroup = groups.find((g) => g.winner.id === mary.id);
+    expect(maryGroup).toBeTruthy();
+    expect(maryGroup.candidates[0].loser.id).toBe(maryDup.id);
+    expect(maryGroup.candidates[0].tier).toBe('yellow'); // demoted: shared-phone identities
+    // The cross-identity conflict still surfaces once, under John's group.
+    const johnGroup = groups.find((g) => g.winner.id === john.id);
+    expect(johnGroup.candidates.some((c) => c.loser.id === mary.id)).toBe(true);
   });
 });
 

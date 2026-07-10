@@ -87,6 +87,18 @@ function namesCompatible(a, b) {
     && ok(normName(a.last_name), normName(b.last_name));
 }
 
+// A unit can live in address_line2 ("Apt 4", "#4", or a bare "4") instead of
+// embedded in line1 — both must feed the unit comparison or same-building
+// different-unit rows read as a clean match.
+function unitFromLine2(line2) {
+  if (!line2) return null;
+  const s = String(line2).toLowerCase().replace(/[.,#-]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  const m = s.match(UNIT_RE);
+  if (m) return m[1];
+  return /^[a-z0-9]{1,6}$/.test(s) ? s : null;
+}
+
 function addressCompat(winner, loser) {
   const wk = normalizeStreetKey(winner.address_line1);
   const lk = normalizeStreetKey(loser.address_line1);
@@ -94,7 +106,9 @@ function addressCompat(winner, loser) {
   if (!lk) return { status: 'loser_missing' };
   if (!wk) return { status: 'winner_missing' };
   if (wk.key !== lk.key) return { status: 'conflict' };
-  if (wk.unit && lk.unit && wk.unit !== lk.unit) return { status: 'unit_conflict' };
+  const wUnit = wk.unit || unitFromLine2(winner.address_line2);
+  const lUnit = lk.unit || unitFromLine2(loser.address_line2);
+  if (wUnit && lUnit && wUnit !== lUnit) return { status: 'unit_conflict' };
   const wz = String(winner.zip || '').slice(0, 5);
   const lz = String(loser.zip || '').slice(0, 5);
   if (wz && lz && wz !== lz) return { status: 'zip_conflict' };
@@ -218,60 +232,94 @@ async function findDuplicateGroups(database = db) {
     logger.warn(`[customer-dedupe] dismissals read failed (continuing without): ${e.message}`);
   }
 
-  // Batch the blocker lookups across every group's losers up front.
-  const allLosers = [];
+  // Batch the blocker lookups across every duplicate-phone member up front —
+  // cross-identity candidates need them too, not just same-cluster losers.
+  const allMembers = [];
   for (const members of byPhone.values()) {
-    if (members.length < 2) continue;
-    const winner = pickWinner(members);
-    members.forEach((m) => { if (m.id !== winner.id) allLosers.push(m); });
+    if (members.length >= 2) allMembers.push(...members);
   }
-  const blockersById = await batchAutoBlockers(database, allLosers);
+  const blockersById = await batchAutoBlockers(database, allMembers);
+
+  const evaluatePair = (winner, loser) => {
+    const addr = addressCompat(winner, loser);
+    const namesOk = namesCompatible(winner, loser);
+    const blockers = blockersById.get(loser.id) || [];
+    const reasons = [];
+    if (!namesOk) reasons.push('name_conflict');
+    if (!ADDRESS_COMPATIBLE.has(addr.status)) reasons.push(`address_${addr.status}`);
+    blockers.forEach((blocker) => reasons.push(`loser_has_${blocker}`));
+    const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
+      && normName(winner.last_name) !== normName(loser.last_name);
+    let tier = 'green';
+    // Different last name at a POSITIVELY different address (different
+    // street, unit, ZIP, or city) = two people sharing a line.
+    if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
+    else if (reasons.length) tier = 'yellow';
+    return { loser, tier, reasons, namesOk, addrStatus: addr.status };
+  };
 
   const groups = [];
   for (const [p10, members] of byPhone) {
     if (members.length < 2) continue;
-    const winner = pickWinner(members);
-    const candidates = [];
-    for (const loser of members) {
-      if (loser.id === winner.id) continue;
-      const [a, b] = pairKey(winner.id, loser.id);
-      if (dismissed.has(`${a}:${b}`)) continue;
-      const addr = addressCompat(winner, loser);
-      const namesOk = namesCompatible(winner, loser);
-      const blockers = blockersById.get(loser.id) || [];
-      const reasons = [];
-      if (!namesOk) reasons.push('name_conflict');
-      if (!ADDRESS_COMPATIBLE.has(addr.status)) reasons.push(`address_${addr.status}`);
-      blockers.forEach((blocker) => reasons.push(`loser_has_${blocker}`));
-
-      let tier = 'green';
-      const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
-        && normName(winner.last_name) !== normName(loser.last_name);
-      // Different last name at a POSITIVELY different address (different
-      // street, unit, ZIP, or city) = two people sharing a line.
-      if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
-      else if (reasons.length) tier = 'yellow';
-
-      candidates.push({
-        loser: sanitizeCustomer(loser),
-        tier,
-        reasons,
-        evidence: { phone10: p10, names_compatible: namesOk, address: addr.status },
-      });
+    // Partition the phone group into IDENTITY CLUSTERS: repeatedly pick the
+    // strongest remaining row and pull in every name-compatible member.
+    // Multiple clusters = the phone is shared by multiple identities. Each
+    // cluster gets its own group + winner, so loser-vs-loser duplicates of a
+    // second identity are surfaced and mergeable — not stuck behind a single
+    // picked winner they conflict with.
+    let pool = members;
+    const clusters = [];
+    while (pool.length) {
+      const w = pickWinner(pool);
+      const mine = [w];
+      const rest = [];
+      for (const m of pool) {
+        if (m.id === w.id) continue;
+        (namesCompatible(w, m) ? mine : rest).push(m);
+      }
+      clusters.push(mine);
+      pool = rest;
     }
-    // Once the phone is known to belong to conflicting identities (any red
-    // pair or name conflict in the group), an address-less/"Unknown" shell is
-    // no longer safely attributable to the picked winner — it could be the
-    // OTHER person. Demote greens to review; only clean groups auto-merge.
-    if (candidates.some((c) => c.tier === 'red' || c.reasons.includes('name_conflict'))) {
-      for (const c of candidates) {
-        if (c.tier === 'green') {
-          c.tier = 'yellow';
-          c.reasons.push('group_has_identity_conflict');
+    // Conflict evidence is structural (cluster count), NOT queue-visibility:
+    // dismissing a red pair hides it from the queue, but the other identity
+    // still exists as a cluster, so the shells stay demoted below.
+    const multiIdentity = clusters.length > 1;
+
+    clusters.forEach((cluster, idx) => {
+      const winner = cluster[0];
+      const candidates = cluster.slice(1).map((loser) => evaluatePair(winner, loser));
+      // Cross-identity pairs surface once, on the first cluster's card, so
+      // the shared-phone conflict stays visible and dismissable.
+      if (idx === 0) {
+        for (const other of clusters.slice(1)) candidates.push(evaluatePair(winner, other[0]));
+      }
+      if (multiIdentity) {
+        for (const c of candidates) {
+          if (c.tier === 'green') {
+            c.tier = 'yellow';
+            c.reasons.push('group_has_identity_conflict');
+          }
         }
       }
-    }
-    if (candidates.length) groups.push({ phone10: p10, winner: sanitizeCustomer(winner), candidates });
+      // Dismissals filter the VISIBLE queue only — after demotion, so
+      // adjudicating one pair never re-greens the rest of the group.
+      const visible = candidates.filter((c) => {
+        const [a, b] = pairKey(winner.id, c.loser.id);
+        return !dismissed.has(`${a}:${b}`);
+      });
+      if (visible.length) {
+        groups.push({
+          phone10: p10,
+          winner: sanitizeCustomer(winner),
+          candidates: visible.map((c) => ({
+            loser: sanitizeCustomer(c.loser),
+            tier: c.tier,
+            reasons: c.reasons,
+            evidence: { phone10: p10, names_compatible: c.namesOk, address: c.addrStatus },
+          })),
+        });
+      }
+    });
   }
   return groups;
 }
@@ -334,18 +382,24 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
 }
 
 // customer_properties carries two partial uniques — one primary per customer,
-// one active row per (customer, address_key). Repoint row-by-row: demote the
-// loser's properties from primary (the winner keeps its own primary), and an
-// address the winner already has active comes across deactivated instead of
-// colliding (the winner's copy of that address is the live one).
+// one active row per (customer, address_key). Repoint row-by-row: the loser's
+// properties demote from primary ONLY when the winner already has a live
+// primary (an address-less shell winner inherits the loser's primary intact —
+// otherwise the merged customer ends up with no primary service address), and
+// an address the winner already holds active comes across deactivated instead
+// of colliding (the winner's copy of that address is the live one).
 async function repointCustomerProperties(trx, table, column, winnerId, loserId) {
+  const winnerPrimary = await trx(table)
+    .where({ [column]: winnerId, is_primary: true, active: true })
+    .first('id');
+  const demote = winnerPrimary ? { is_primary: false } : {};
   const rows = await trx(table).where(column, loserId).select('id');
   let moved = 0;
   let deactivated = 0;
   for (const { id } of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id }).update({ [column]: winnerId, is_primary: false });
+        await sp(table).where({ id }).update({ [column]: winnerId, ...demote });
       });
       moved += 1;
     } catch (e) {
@@ -367,11 +421,13 @@ let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
   // Union of (a) DECLARED foreign keys referencing customers(id) — catches
-  // differently-named columns like referred_by_customer_id — and (b) any
-  // customer_id column on a base table, because several customer-owned
-  // tables in this repo (payment_plans, customer_discounts, ...) store
-  // customer_id WITHOUT a declared FK and would otherwise stay attached to
-  // the retired row after a merge.
+  // FK columns with any name — and (b) every `customer_id` or
+  // `*_customer_id` column on a base table, because many customer-owned
+  // tables in this repo store the pointer WITHOUT a declared FK
+  // (payment_plans, customer_discounts, leads) or under a soft-pointer name
+  // (geofence_events.matched_customer_id, route_decisions.created_customer_id,
+  // outbox_messages.related_customer_id) and their history would otherwise
+  // stay attached to the retired row after a merge.
   const result = await database.raw(`
     SELECT DISTINCT table_name, column_name FROM (
       SELECT tc.table_name, kcu.column_name
@@ -387,7 +443,7 @@ async function customerFkColumns(database) {
       JOIN information_schema.tables t
         ON t.table_schema = c.table_schema AND t.table_name = c.table_name
       WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-        AND c.column_name = 'customer_id' AND c.table_name <> 'customers'
+        AND c.column_name ~ '(^|_)customer_id$' AND c.table_name <> 'customers'
     ) refs
     ORDER BY table_name, column_name`);
   fkColumnsCache = result.rows.filter((r) => !REPOINT_EXCLUDED_TABLES.has(r.table_name));
