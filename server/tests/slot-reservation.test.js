@@ -25,6 +25,25 @@ const db = require('../models/db');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const reservationHoldMigration = require('../models/migrations/20260516000016_allow_scheduled_service_reservation_holds');
+const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+
+// Mint the exact slotId shape the generator returns — base id + `.exp.sig`
+// (signCustomerFacingSlots). durationMinutes must match what reserveSlot
+// resolves from the (mocked) service profile, since the HMAC binds it.
+// Call under the test's fake timers so exp is anchored to the pinned clock.
+function signedSlotId({ estimateId, date, hhmm, techId, durationMinutes = 90 }) {
+  const base = `${date}_${hhmm.replace(':', '-')}_${techId || 'unassigned'}`;
+  const [h, m] = hhmm.split(':').map(Number);
+  const offer = signSlotOffer({
+    surface: 'estimate',
+    scopeId: String(estimateId),
+    date,
+    startMinutes: h * 60 + m,
+    technicianId: techId || null,
+    durationMinutes,
+  });
+  return appendOfferToSlotId(base, offer);
+}
 
 describe('slot reservation helpers', () => {
   beforeEach(() => {
@@ -154,7 +173,7 @@ describe('slot reservation helpers', () => {
 
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-05-20_09-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
         selectedFrequency: 'quarterly',
       })).resolves.toEqual({
         scheduledServiceId: 'scheduled-123',
@@ -210,7 +229,7 @@ describe('slot reservation helpers', () => {
 
       await slotReservation.reserveSlot({
         estimateId: 'estimate-789',
-        slotId: '2027-05-20_09-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-789', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 60 }),
         serviceMode: 'one_time',
       });
 
@@ -378,7 +397,7 @@ describe('slot reservation helpers', () => {
     try {
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-07-14_12-30_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-14', hhmm: '12:30', techId: 'tech-1' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       expect(db.transaction).not.toHaveBeenCalled();
     } finally {
@@ -395,7 +414,7 @@ describe('slot reservation helpers', () => {
       // 13:30 ET start = 150 minutes out — bookable.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-07-14_13-30_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-14', hhmm: '13:30', techId: 'tech-1' }),
       })).rejects.toThrow('REACHED_DB');
       expect(db.transaction).toHaveBeenCalled();
     } finally {
@@ -412,7 +431,7 @@ describe('slot reservation helpers', () => {
       // startMin >= earliest offers it, so the guard must not 409 it.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-07-14_13-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-14', hhmm: '13:00', techId: 'tech-1' }),
       })).rejects.toThrow('REACHED_DB');
       expect(db.transaction).toHaveBeenCalled();
     } finally {
@@ -426,10 +445,12 @@ describe('slot reservation helpers', () => {
     db.transaction = jest.fn();
     try {
       // 03:00 is format-valid but before the 8 AM day start — no generator
-      // ever offers it, so it must be rejected before any db work.
+      // ever offers it, so it must be rejected before any db work. Signed
+      // here so the DAY-START guard (not the signature gate) is what fires —
+      // the coarse policy checks stay live as defense-in-depth.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-05-20_03-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '03:00', techId: 'tech-1' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       expect(db.transaction).not.toHaveBeenCalled();
     } finally {
@@ -445,7 +466,7 @@ describe('slot reservation helpers', () => {
       // 2027-09-01 is 123 days out — beyond every offer surface's clamp.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-09-01_09-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-09-01', hhmm: '09:00', techId: 'tech-1' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       expect(db.transaction).not.toHaveBeenCalled();
 
@@ -453,7 +474,7 @@ describe('slot reservation helpers', () => {
       // pre-txn policy guards (sentinel proves the db was reached).
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-07-30_09-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-07-30', hhmm: '09:00', techId: 'tech-1' }),
       })).rejects.toThrow('REACHED_DB');
     } finally {
       jest.useRealTimers();
@@ -474,9 +495,12 @@ describe('slot reservation helpers', () => {
       const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
       db.transaction = jest.fn(async (callback) => callback(trx));
 
+      // Signed for tech-ghost (a signed offer's tech can be DEACTIVATED
+      // between browse and reserve) — proves the active-tech check still
+      // fires behind the signature gate.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-05-20_09-00_tech-ghost',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-ghost' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-ghost', active: true });
       // Rejected before any scheduled_services query or insert.
@@ -508,9 +532,11 @@ describe('slot reservation helpers', () => {
       const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
       db.transaction = jest.fn(async (callback) => callback(trx));
 
+      // Signed over the 180-minute profile duration so the HMAC passes and
+      // the DAY-END guard is what rejects (defense-in-depth stays live).
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-05-20_15-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '15:00', techId: 'tech-1', durationMinutes: 180 }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       // Rejected before the hold/conflict/insert queries ran.
       expect(scheduledBuilders).toHaveLength(0);
@@ -554,7 +580,7 @@ describe('slot reservation helpers', () => {
       // treated as a conflicting booking.
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-05-20_09-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
         selectedFrequency: 'quarterly',
       })).resolves.toEqual({
         scheduledServiceId: 'held-1',
@@ -602,7 +628,7 @@ describe('slot reservation helpers', () => {
 
       await expect(slotReservation.reserveSlot({
         estimateId: 'estimate-456',
-        slotId: '2027-05-20_09-00_tech-1',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
         selectedFrequency: 'quarterly',
       })).resolves.toEqual({
         scheduledServiceId: 'scheduled-new',
@@ -619,6 +645,160 @@ describe('slot reservation helpers', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('reserveSlot signed-offer gate (booking-audit round 2)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // Local mini-harness (the shared builder factories live inside the first
+  // describe's scope): estimate row loads fine, and any scheduled_services /
+  // technicians touch is observable — the gate must fire before both.
+  function makeVerifyHarness() {
+    const estimateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      }),
+    };
+    const technicianBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ id: 'tech-1' }),
+    };
+    const scheduledBuilders = [];
+    const trx = jest.fn((table) => {
+      if (table === 'estimates') return estimateBuilder;
+      if (table === 'technicians') return technicianBuilder;
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    return { technicianBuilder, scheduledBuilders };
+  }
+
+  test('an UNSIGNED slotId — including a crafted _unassigned one — is rejected before any db work', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    db.transaction = jest.fn();
+    try {
+      for (const bare of ['2027-05-20_09-00_tech-1', '2027-05-20_09-00_unassigned']) {
+        await expect(slotReservation.reserveSlot({
+          estimateId: 'estimate-456',
+          slotId: bare,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      }
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an EXPIRED offer is rejected before any db work (409 → client refreshes slots)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    db.transaction = jest.fn();
+    try {
+      const stale = signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1' });
+      jest.setSystemTime(new Date('2027-05-01T15:46:00Z')); // 46 min later > 45-min TTL
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: stale,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a TAMPERED signature fails the in-txn HMAC before any scheduling query', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const { technicianBuilder, scheduledBuilders } = makeVerifyHarness();
+      const good = signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 });
+      const tampered = good.slice(0, -1) + (good.slice(-1) === 'A' ? 'B' : 'A');
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: tampered,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(scheduledBuilders).toHaveLength(0);
+      expect(technicianBuilder.where).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an offer signed for ANOTHER estimate is rejected (scope binding)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const { scheduledBuilders } = makeVerifyHarness();
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-OTHER', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a RETIMED signed offer (same estimate, shifted start) fails the HMAC', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const { scheduledBuilders } = makeVerifyHarness();
+      // Take a legitimate 09:00 offer's exp+sig and splice them onto 10:00.
+      const good = signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 });
+      const [, exp, sig] = good.match(/^(?:.+?)\.(\d+)\.(.+)$/).slice(0);
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: `2027-05-20_10-00_tech-1.${exp}.${sig}`,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an impossible calendar date (2027-09-31) is INVALID_SLOT_ID even when signed', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    db.transaction = jest.fn();
+    try {
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-09-31', hhmm: '09:00', techId: 'tech-1' }),
+      })).rejects.toMatchObject({ code: 'INVALID_SLOT_ID' });
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('parseSlotId still reads SIGNED ids (accept-time reservation lookup) and rejects fake dates', () => {
+    const { parseSlotId } = slotReservation._internals;
+    const signed = signedSlotId({ estimateId: 'e', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1' });
+    expect(parseSlotId(signed)).toMatchObject({
+      date: '2027-05-20',
+      windowStart: '09:00:00',
+      techId: 'tech-1',
+      offerExp: expect.any(Number),
+      offerSig: expect.any(String),
+    });
+    // Unsigned base ids still PARSE (enforcement is reserveSlot's job).
+    expect(parseSlotId('2027-05-20_09-00_unassigned')).toMatchObject({
+      date: '2027-05-20', techId: null, offerExp: null, offerSig: null,
+    });
+    expect(parseSlotId('2027-09-31_09-00_tech-1')).toBeNull();
+    expect(parseSlotId('2027-02-29_09-00_tech-1')).toBeNull(); // 2027 is not a leap year
   });
 });
 

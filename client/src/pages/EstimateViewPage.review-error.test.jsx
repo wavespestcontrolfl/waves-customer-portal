@@ -9,7 +9,14 @@
 // 3. A slot search started BEFORE the submit retains a selectSlot callback
 //    with the old ctaPhase in its closure — when it resolves mid-accept its
 //    selectSlot(null) must not clear the slot the request is committing
-//    (only the synchronously updated submittingRef can catch it).
+//    (only the synchronously updated ctaPhaseRef can catch it).
+// 4. The same stale search can also resolve AFTER the page enters review —
+//    when nothing is submitting but a reservation is live — so the guard
+//    must reject on the live phase (review/submitting/success), not just on
+//    a submitting flag.
+// 5. The one-time add-on toggles render inside the configure layout too —
+//    they must be frozen while the accept is in flight or a toggle repricing
+//    the estimate lands underneath the request.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -32,7 +39,7 @@ function jsonResponse(body, { ok = true, status = 200 } = {}) {
   };
 }
 
-function recurringPayload() {
+function recurringPayload({ renderFlags = {}, addOns = [] } = {}) {
   return {
     estimate: {
       customerFirstName: 'Rae',
@@ -62,14 +69,14 @@ function recurringPayload() {
           monthly: 50,
           annual: 600,
           included: [{ key: 'service', label: 'Recurring service' }],
-          addOns: [],
+          addOns,
         }],
         copy: { priceWording: {} },
       }],
       askChips: [],
       anchorOneTimePrice: 250,
       defaultServiceMode: 'recurring',
-      renderFlags: {},
+      renderFlags,
     },
     cta: {
       canAccept: true,
@@ -96,7 +103,7 @@ function slotsPayload() {
 // the /accept outcome (500 vs. hanging forever), findSlotsImpl the AI-search
 // /find-slots outcome. Order matters: match the specific booking endpoints
 // before the catch-all /data.
-function makeFetchMock(acceptImpl, { findSlotsImpl = null } = {}) {
+function makeFetchMock(acceptImpl, { findSlotsImpl = null, payload = null } = {}) {
   return vi.fn(async (url) => {
     const u = String(url);
     if (findSlotsImpl && u.includes('/find-slots')) return findSlotsImpl();
@@ -108,7 +115,7 @@ function makeFetchMock(acceptImpl, { findSlotsImpl = null } = {}) {
       });
     }
     if (u.includes('/accept')) return acceptImpl();
-    if (u.includes('/data')) return jsonResponse(recurringPayload());
+    if (u.includes('/data')) return jsonResponse(payload || recurringPayload());
     return jsonResponse({});
   });
 }
@@ -241,5 +248,87 @@ describe('EstimateViewPage review-phase accept failure', () => {
     const slotsAfter = screen.getAllByRole('button', { name: /Arrival window/i });
     expect(slotsAfter[0]).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /Pay per application/i })).toBeInTheDocument();
+  });
+
+  it('a slot search resolving after entering review does not clear the slot behind the live reservation', async () => {
+    stubLocalStorage();
+    // Nothing is submitting when the stale search resolves here — the page
+    // sits in REVIEW with a live reservation, which a submitting-only flag
+    // would wave straight through. The guard must read the live phase.
+    let releaseFindSlots;
+    const findSlotsGate = new Promise((resolve) => { releaseFindSlots = resolve; });
+    vi.stubGlobal('fetch', makeFetchMock(
+      () => jsonResponse({}), // /accept is never reached in this test
+      { findSlotsImpl: () => findSlotsGate },
+    ));
+
+    render(<EstimateViewPage />);
+
+    // Pick a slot, then start an AI search that hangs on the gate.
+    const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+    fireEvent.click(slotButtons[0]);
+    const searchInput = screen.getByLabelText('Search for a service date or time');
+    fireEvent.change(searchInput, { target: { value: 'anything next tuesday' } });
+    fireEvent.submit(searchInput.closest('form'));
+
+    // Reserve → review (live reservation, ctaPhase 'review').
+    fireEvent.click(await screen.findByRole('button', { name: /Pay per application/i }));
+    await screen.findByRole('button', { name: 'Confirm booking' });
+
+    // The pre-reserve search resolves now and its retained callback fires
+    // selectSlot(null) — with the reservation still held server-side.
+    await act(async () => {
+      releaseFindSlots(jsonResponse({ primary: [], expander: [], summary: 'Found a match' }));
+      await findSlotsGate;
+      // Drain the search continuation (res.json() → selectSlot → setState).
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Review state survives untouched.
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeInTheDocument();
+
+    // Go back keeps the selected slot by design (the hold stays live) — if
+    // the stale search had cleared it, the slot would be unpressed and the
+    // payment section (gated on selectedSlotId) gone.
+    fireEvent.click(screen.getByRole('button', { name: 'Go back' }));
+    const slotsAfter = await screen.findAllByRole('button', { name: /Arrival window/i });
+    expect(slotsAfter[0]).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /Pay per application/i })).toBeInTheDocument();
+  });
+
+  it('freezes the one-time add-on toggles while the accept is in flight', async () => {
+    stubLocalStorage();
+    const payload = recurringPayload({
+      renderFlags: { showOneTimePestAddOns: true },
+      addOns: [{ key: 'interior_spray', label: 'Interior spraying', detail: 'Save $10 if removed', preChecked: true }],
+    });
+    // /accept never resolves → the page stays in ctaPhase 'submitting',
+    // which renders the one-time configure layout (incl. AddOnsBlock).
+    const fetchMock = makeFetchMock(() => new Promise(() => {}), { payload });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<EstimateViewPage />);
+
+    // Switch to the one-time mode — its layout renders the add-on toggles.
+    fireEvent.click(await screen.findByRole('button', { name: 'One-Time Pest Control' }));
+    expect(await screen.findByRole('checkbox')).toBeEnabled();
+
+    // Book: slot → payment preference → confirm (hangs → 'submitting').
+    const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+    fireEvent.click(slotButtons[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Book + pay on service day' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm booking' }));
+
+    // Submitting drops back to the configure layout with the toggle pills
+    // disabled — and the add-on switch must be frozen too.
+    expect(await screen.findByRole('button', { name: 'One-Time Pest Control' })).toBeDisabled();
+    const addOnSwitch = screen.getByRole('checkbox');
+    expect(addOnSwitch).toBeDisabled();
+
+    // A click mid-submit must not fire the repricing PUT /preferences.
+    fireEvent.click(addOnSwitch);
+    const preferenceCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/preferences'));
+    expect(preferenceCalls).toHaveLength(0);
   });
 });

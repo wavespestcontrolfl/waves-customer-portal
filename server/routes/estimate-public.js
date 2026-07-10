@@ -6955,6 +6955,16 @@ router.put('/:token/accept', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
     if (estimate.status === 'accepted') {
+      // An archived accepted estimate is no longer customer-viewable (the
+      // /:token/data gate rejects archived_at outright), so never rebuild
+      // invoice amounts or the bearer /pay link for it — return the same
+      // 409 the active gate below hands every other archived estimate.
+      // Pre-payload-rebuild this token got only the bare
+      // { success, alreadyAccepted } shape; blocking outright is strictly
+      // tighter and consistent with the rest of the route.
+      if (!isEstimateCustomerViewable(estimate)) {
+        return res.status(409).json({ error: 'Estimate is no longer active' });
+      }
       // Retry of an already-accepted estimate (e.g. the first response was
       // lost in transit): rebuild the FULL success payload from persisted
       // state so the customer still sees their real next step (pay link /
@@ -8311,8 +8321,13 @@ router.put('/:token/accept', async (req, res, next) => {
     // The standard conversion runs in-transaction with skipMembershipEmail,
     // so the membership.started email fires here post-commit (mirrors
     // estimate-manual-acceptance). Annual prepay intentionally sends none —
-    // same as this route's pre-atomicity behavior and manual accepts.
-    if (!annualPrepaySelected && standardConversion?.membershipEmail) {
+    // same as this route's pre-atomicity behavior and manual accepts. A
+    // SKIPPED conversion (converter found nothing to convert) may still
+    // return a membershipEmail payload — no membership started, so send
+    // nothing for it.
+    if (!annualPrepaySelected
+      && standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true) {
       const AccountMembershipEmail = require('../services/account-membership-email');
       void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
         .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
@@ -10572,7 +10587,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
 
   let invoice = null;
   if (prepayTerm?.prepay_invoice_id) {
-    invoice = await db('invoices').where({ id: prepayTerm.prepay_invoice_id }).first();
+    // Same non-void predicate as the fallback below: a voided prepay invoice's
+    // pay link is dead — fall through to the current live accept-mint invoice
+    // (if any) rather than hand the customer a dead /pay token.
+    invoice = await db('invoices')
+      .where({ id: prepayTerm.prepay_invoice_id })
+      .whereNot('status', 'void')
+      .first();
   }
   if (!invoice) {
     invoice = await db('invoices')
@@ -10595,12 +10616,21 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
 
   // One-time accepts that never booked get the self-serve booking link again.
   // Minting a fresh short link is not a comms send (the accept-time code is
-  // not recoverable from here); the service label falls back to the first
-  // one-time line — same source the accept-time label derives from.
+  // not recoverable from here). The service label is derived exactly as the
+  // fresh accept derives it — buildOneTimeInvoiceServiceLabel skips discount/
+  // setup/non-billable rows and honors label/service fields — so a lawn
+  // estimate whose FIRST row is a discount line still routes to the lawn
+  // funnel instead of bookingServiceFor('')'s pest-control default.
   let bookingUrl = null;
   if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
     const { oneTimeList } = acceptanceServiceLists(estData);
-    const bookingSvc = bookingServiceFor(oneTimeList?.[0]?.name || '');
+    const retryServiceLabel = buildOneTimeInvoiceServiceLabel({
+      estimate,
+      estData,
+      pricingBundle: null,
+      oneTimeList,
+    });
+    const bookingSvc = bookingServiceFor(retryServiceLabel || oneTimeList?.[0]?.name || '');
     bookingUrl = await shortenOrPassthrough(
       `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept`,
       {

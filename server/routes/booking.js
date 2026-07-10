@@ -9,6 +9,12 @@ const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
+const {
+  mintSlotOfferField,
+  verifySlotOfferField,
+  isRealCalendarDate,
+  generateConfirmationCode,
+} = require('../utils/slot-offer-token');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -672,6 +678,13 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
 // Returns null when the date is bookable, else a customer-facing rejection.
 // `now` is injectable for tests only.
 function validateBookingSlotDate(slotDateStr, config = {}, now = new Date()) {
+  // Round-trip the calendar day FIRST: the upstream regex admits impossible
+  // dates like 2026-09-31, which sit lexically inside the bounds below and
+  // previously only exploded inside Postgres — AFTER the route had created
+  // the customer row, stranding an orphan profile (booking-audit round 2).
+  if (!isRealCalendarDate(slotDateStr)) {
+    return 'That date isn\'t a real calendar day — please pick another.';
+  }
   const minDate = etDateString(addETDays(now, config.advance_days_min ?? 1));
   const maxDate = etDateString(addETDays(now, MAX_BOOKING_HORIZON_DAYS));
   if (slotDateStr < minDate) {
@@ -696,21 +709,10 @@ function roundPublicCoord(value) {
     : Math.round(Number(value) * 100) / 100;
 }
 
-// Confirmation codes are the ONLY factor on GET /status/:code, which returns
-// booking + customer details — so they must be unguessable. 10 chars from a
-// 32-symbol alphabet ≈ 50 bits via a CSPRNG (32 divides 256, so the modulo
-// is unbiased). Legacy 4-char codes already in customers' hands still
-// resolve; the dedicated /status rate limiter bounds enumeration of those.
-const CONFIRMATION_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const CONFIRMATION_CODE_LENGTH = 10;
-function generateConfirmationCode() {
-  const bytes = crypto.randomBytes(CONFIRMATION_CODE_LENGTH);
-  let code = 'WPC-';
-  for (let i = 0; i < CONFIRMATION_CODE_LENGTH; i += 1) {
-    code += CONFIRMATION_CODE_ALPHABET[bytes[i] % CONFIRMATION_CODE_ALPHABET.length];
-  }
-  return code;
-}
+// Confirmation codes: the shared CSPRNG generator lives in
+// utils/slot-offer-token.js (imported above) so EVERY writer of
+// confirmation_code — this route AND services/availability.js's zone-engine
+// confirmBooking — mints the same ≈50-bit codes; /status/:code serves both.
 
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
@@ -776,6 +778,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       ...labels,
       start_time: startTime,
       end_time: fmt(endMin),
+      // Signed offer (booking-audit round 2): /confirm requires this exact
+      // (date, start, technician, duration) tuple back with a live HMAC —
+      // see utils/slot-offer-token.js. The client passes it through as-is.
+      slot_sig: mintSlotOfferField({
+        surface: 'booking',
+        scopeId: '',
+        date: slot.date,
+        startMinutes: startMin,
+        technicianId: slot.technician.id || null,
+        durationMinutes: duration,
+      }),
       start_label: minToTime12(startMin),
       end_label: minToTime12(endMin),
       detour_minutes: slot.detour_minutes,
@@ -822,6 +835,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       reason: proximityReason(slot.detour_minutes),
       // Opaque identifiers the confirm step will replay
       technician_id: slot.technician_id,
+      slot_sig: slot.slot_sig,
       rank: slot.rank,
       // Legacy aliases (existing BookingPage reads these)
       startTime24: slot.start_time,
@@ -904,9 +918,9 @@ router.get('/availability', async (req, res, next) => {
     let rangeTo = clamp(date_to, defaultTo);
     if (rangeTo < rangeFrom) rangeTo = rangeFrom;
 
-    const duration = duration_minutes
-      ? parseInt(duration_minutes)
-      : (config.slot_duration_minutes || 60);
+    // Server-clamped duration (same 45–90 catalog range /confirm enforces):
+    // the builder must never shape — or SIGN — offers around a forged value.
+    const duration = resolveBookingDuration(duration_minutes, config);
 
     const availability = await buildBookingAvailability({
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
@@ -976,9 +990,9 @@ router.post('/find-slots', async (req, res, next) => {
       defaultWindowDays: config.advance_days_max ?? 14,
     });
 
-    const duration = duration_minutes
-      ? parseInt(duration_minutes)
-      : (config.slot_duration_minutes || 60);
+    // Same server-side clamp as /availability — signed offers must only ever
+    // cover durations the funnel catalog genuinely emits.
+    const duration = resolveBookingDuration(duration_minutes, config);
 
     const availability = await buildBookingAvailability({
       lat: resolvedLat, lng: resolvedLng, duration,
@@ -1020,6 +1034,7 @@ async function createSelfBooking(payload = {}) {
     const {
       estimate_id, estimate_share_token, pricing_estimate_id, estimate_token, customer_id, lead_id,
       slot_date, slot_start, slot_end,
+      slot_sig,
       technician_id,
       service_type,
       quoted_service_label,
@@ -1206,6 +1221,26 @@ async function createSelfBooking(payload = {}) {
     });
     if (geometryError) {
       return { ok: false, status: 400, error: geometryError };
+    }
+
+    // Signed-offer proof (booking-audit round 2): the date/geometry/duration
+    // mirrors above are defense-in-depth, but they can't prove this exact
+    // (date, start, technician, duration) tuple was ever OFFERED — a crafted
+    // /confirm could still book any in-range weekday/weekend with an optional
+    // tech. Require the HMAC the availability builder attached to the slot
+    // (mintSlotOfferField in buildBookingAvailability; ~45-min expiry).
+    // Missing / expired / tampered → the same "pick another" 409 the funnel
+    // already recovers from (stepping back re-fetches availability) — which
+    // is also the one-time cost for a customer holding a pre-deploy slot list.
+    if (!verifySlotOfferField({
+      surface: 'booking',
+      scopeId: '',
+      date: slotDateStr,
+      startMinutes: timeToMin(slot_start),
+      technicianId: technician_id || null,
+      durationMinutes: duration,
+    }, slot_sig)) {
+      return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
 
     // technician_id comes straight from the client (an opaque id echoed from

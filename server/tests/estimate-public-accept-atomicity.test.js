@@ -15,6 +15,16 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
  *    accept 400s BEFORE the transaction (nothing commits) instead of
  *    committing an acceptance whose reservation binding + conversion were
  *    silently skipped.
+ *
+ * Pre-push audit round 2 (P0 + P1s on the retry rebuild / deferred comms):
+ * 4. Archived accepted retry is REJECTED (409) before any payload rebuild —
+ *    no invoice amounts, no bearer /pay or /book links.
+ * 5. The deferred membership-started email is suppressed when the converter
+ *    reported recurringConversionSkipped.
+ * 6. A voided annual-prepay invoice is never surfaced on retry — the rebuild
+ *    falls back to the live accept-mint invoice.
+ * 7. The retry booking link derives its service canonically (skipping
+ *    discount/setup rows), not from oneTimeList[0].name.
  */
 
 // ── In-memory fake knex ────────────────────────────────────────────────────
@@ -430,6 +440,181 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
     expect(res.data.bookingUrl).toContain('/book?service=');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('AUDIT P0 — archived accepted retry is rejected before the payload rebuild', () => {
+  test('archived accepted estimate gets 409 with no invoice amounts, no pay URL, no booking URL', async () => {
+    const archived = recurringPestEstimate({
+      id: 'est-archived-1',
+      token: 'tok-archived-1',
+      status: 'accepted',
+      customer_id: 'cust-9',
+      accepted_service_mode: 'recurring',
+      price_locked_at: new Date(),
+      archived_at: new Date(),
+    });
+    resetStore(archived);
+    // A real linked invoice exists — the guard must reject BEFORE the rebuild
+    // would find it, so none of these fields may leak.
+    db.__state.tables.invoices = [{
+      id: 'inv-arch',
+      token: 'archtok',
+      total: '159.00',
+      status: 'sent',
+      sent_at: new Date(),
+      payer_id: null,
+      created_at: new Date(),
+      title: 'WaveGuard Membership Setup + First Application',
+      notes: 'Auto-generated from accepted estimate #est-archived-1. Setup + first application.',
+    }];
+
+    const res = await putAccept('tok-archived-1');
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/no longer active/i);
+    // No secondary credentials or amounts anywhere in the response.
+    const raw = JSON.stringify(res.data);
+    expect(raw).not.toContain('archtok');
+    expect(raw).not.toContain('/pay/');
+    expect(raw).not.toContain('/book');
+    expect(raw).not.toContain('159');
+    expect(res.data.success).toBeUndefined();
+    expect(res.data.invoicePayUrl).toBeUndefined();
+    expect(res.data.invoiceAmount).toBeUndefined();
+    expect(res.data.bookingUrl).toBeUndefined();
+    // Read-only rejection: no side effects, estimate untouched.
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(storedEstimate().status).toBe('accepted');
+  });
+});
+
+describe('AUDIT P1 — membership-started email suppressed for skipped conversions', () => {
+  test('membershipEmail is NOT sent when recurringConversionSkipped is true', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-skip-1', token: 'tok-skip-1' }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: true,
+      welcomeSms: null,
+      membershipEmail: { customerId: 'cust-1', tier: 'Bronze' },
+      deferredFollowUpReminderRows: [],
+    });
+
+    const res = await putAccept('tok-skip-1');
+    expect(res.status).toBe(200);
+    expect(res.data.success).toBe(true);
+    const AccountMembershipEmail = require('../services/account-membership-email');
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
+  });
+
+  test('control: membershipEmail IS sent when the conversion actually ran', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-noskip-1', token: 'tok-noskip-1' }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: { customerId: 'cust-1', tier: 'Bronze' },
+      deferredFollowUpReminderRows: [],
+    });
+
+    const res = await putAccept('tok-noskip-1');
+    expect(res.status).toBe(200);
+    const AccountMembershipEmail = require('../services/account-membership-email');
+    expect(AccountMembershipEmail.sendMembershipStarted)
+      .toHaveBeenCalledWith({ customerId: 'cust-1', tier: 'Bronze' });
+  });
+});
+
+describe('AUDIT P1 — voided annual-prepay invoice is not surfaced on retry', () => {
+  test('retry skips the voided prepay-term invoice and falls back to the live accept-mint invoice', async () => {
+    const accepted = recurringPestEstimate({
+      id: 'est-prepay-1',
+      token: 'tok-prepay-1',
+      status: 'accepted',
+      customer_id: 'cust-9',
+      accepted_service_mode: 'recurring',
+      price_locked_at: new Date(),
+    });
+    resetStore(accepted);
+    db.__state.tables.annual_prepay_terms = [{
+      id: 'apt-1',
+      source_estimate_id: 'est-prepay-1',
+      prepay_invoice_id: 'inv-void',
+      created_at: new Date(),
+    }];
+    db.__state.tables.invoices = [
+      {
+        id: 'inv-void',
+        token: 'voidtok',
+        total: '684.00',
+        status: 'void',
+        sent_at: new Date(),
+        payer_id: null,
+        created_at: new Date(),
+        title: 'Annual prepay',
+        notes: 'Auto-generated from accepted estimate #est-prepay-1. Annual prepay.',
+      },
+      {
+        id: 'inv-live',
+        token: 'livetok',
+        total: '700.00',
+        status: 'sent',
+        sent_at: new Date(),
+        payer_id: null,
+        created_at: new Date(),
+        title: 'Annual prepay (rebilled)',
+        notes: 'Auto-generated from accepted estimate #est-prepay-1. Annual prepay rebilled.',
+      },
+    ];
+
+    const res = await putAccept('tok-prepay-1');
+    expect(res.status).toBe(200);
+    expect(res.data.alreadyAccepted).toBe(true);
+    // The dead /pay token never appears; the live invoice does.
+    expect(JSON.stringify(res.data)).not.toContain('voidtok');
+    expect(res.data.invoiceId).toBe('inv-live');
+    expect(res.data.invoicePayUrl).toContain('/pay/livetok');
+    expect(res.data.billingTerm).toBe('prepay_annual');
+  });
+});
+
+describe('AUDIT P1 — retry booking link uses canonical service selection', () => {
+  test('a lawn one-time estimate whose FIRST row is a discount line still routes to the lawn funnel', async () => {
+    const accepted = recurringPestEstimate({
+      id: 'est-lawnretry-1',
+      token: 'tok-lawnretry-1',
+      status: 'accepted',
+      accepted_service_mode: 'one_time',
+      price_locked_at: new Date(),
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 275,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { services: [] },
+          oneTime: {
+            items: [
+              // Non-billable discount row first — the old oneTimeList[0].name
+              // derivation fed this to bookingServiceFor and defaulted the
+              // customer into the pest-control funnel.
+              { name: 'Bundle Discount', service: 'one_time_adjustment', price: -25 },
+              { name: 'Lawn Aeration & Overseed', service: 'lawn_care', price: 300 },
+            ],
+            membershipFee: 0,
+          },
+        },
+      }),
+    });
+    resetStore(accepted);
+
+    const res = await putAccept('tok-lawnretry-1');
+    expect(res.status).toBe(200);
+    expect(res.data.alreadyAccepted).toBe(true);
+    expect(res.data.nextStep).toBe('book_one_time');
+    expect(res.data.bookingUrl).toContain('service=lawn_care');
+    expect(res.data.bookingUrl).not.toContain('service=pest_control');
   });
 });
 

@@ -30,6 +30,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('./estimate-pricing-bundle-utils');
@@ -1115,6 +1116,27 @@ function filterPastSlotsForToday(slots, { now = new Date(), minimumLeadMinutes =
   });
 }
 
+// Sign the final customer-facing slots (booking-audit round 2): the HMAC
+// binds surface + THIS estimate + date/start/tech/duration + expiry, and the
+// sig+exp ride INSIDE the slotId (`base.exp.sig`) so every client — SlotPicker,
+// EstimateViewPage, the server-rendered estimate page — keeps sending
+// `{ slotId }` untouched. reserveSlot refuses any slotId that doesn't verify,
+// so the constraint checks it also runs are defense-in-depth, not the gate.
+// Runs LAST (after dedupe/spread/selection, which key off the base slotId).
+function signCustomerFacingSlots(slots, estimateId) {
+  return (Array.isArray(slots) ? slots : []).map((slot) => {
+    const offer = signSlotOffer({
+      surface: 'estimate',
+      scopeId: String(estimateId),
+      date: slot.date,
+      startMinutes: timeToMinutes(slot.windowStart),
+      technicianId: slot.techId || null,
+      durationMinutes: slot.durationMinutes,
+    });
+    return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+  });
+}
+
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -1225,8 +1247,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const fallback = {
-      primary,
-      expander,
+      primary: signCustomerFacingSlots(primary, estimateId),
+      expander: signCustomerFacingSlots(expander, estimateId),
       nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
         // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -1295,8 +1317,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
-    primary,
-    expander,
+    // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
+    // well inside the offer TTL (see slot-offer-token.js).
+    primary: signCustomerFacingSlots(primary, estimateId),
+    expander: signCustomerFacingSlots(expander, estimateId),
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
       // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -1482,6 +1506,7 @@ module.exports = {
     resolveEstimateSlotProfile,
     addMinutesToHHMM,
     slotWindowFitsDay,
+    signCustomerFacingSlots,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
   },
 };

@@ -159,6 +159,24 @@ describe('validateBookingSlotDate — commit mirrors the builder\'s ET date boun
     expect(validateBookingSlotDate(day(MAX_BOOKING_HORIZON_DAYS + 1), {}, now)).toMatch(/beyond our online booking window/i);
     expect(validateBookingSlotDate('2099-01-01', {}, now)).toMatch(/beyond our online booking window/i);
   });
+
+  test('rejects IMPOSSIBLE calendar dates that sit lexically inside the bounds (2026-09-31)', () => {
+    // Regex + lexical bounds admitted these; Postgres then rejected the date
+    // AFTER the customer insert, stranding an orphan profile (audit round 2).
+    expect(validateBookingSlotDate('2026-09-31', {}, now)).toMatch(/calendar day/i);
+    expect(validateBookingSlotDate('2026-08-32', {}, now)).toMatch(/calendar day/i);
+    expect(validateBookingSlotDate('2027-02-29', {}, now)).toMatch(/calendar day/i); // 2027 is no leap year
+    // …while real days keep validating on the bounds alone.
+    expect(validateBookingSlotDate(day(30), {}, now)).toBeNull();
+  });
+
+  test('the calendar round-trip runs BEFORE the bound checks (source order)', () => {
+    const fnStart = src.indexOf('function validateBookingSlotDate(');
+    const roundTripIdx = src.indexOf('isRealCalendarDate(slotDateStr)', fnStart);
+    const boundIdx = src.indexOf('const minDate = etDateString(', fnStart);
+    expect(roundTripIdx).toBeGreaterThan(fnStart);
+    expect(roundTripIdx).toBeLessThan(boundIdx);
+  });
 });
 
 describe('createSelfBooking — DB-free forged-payload rejections', () => {
@@ -212,10 +230,11 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     const insertIdx = src.indexOf("await db('customers').insert(applyContactNormalization(");
     expect(insertIdx).toBeGreaterThan(-1);
     for (const validation of [
-      'const slotDateError = validateBookingSlotDate(slotDateStr, config);', // ET date bounds
+      'const slotDateError = validateBookingSlotDate(slotDateStr, config);', // ET date bounds + calendar round-trip
       'const duration = resolveBookingDuration(duration_minutes, config);', // server duration
       'if (slot_end && timeToMin(slot_end) !== endMin)', // slot_end agreement
       'const geometryError = validateBookingSlotGeometry({', // grid/hours/lunch
+      'if (!verifySlotOfferField({', // signed-offer proof (audit round 2)
       "await db('technicians').where('id', techIdStr).first('id', 'active')", // real active tech
     ]) {
       const idx = src.indexOf(validation);
@@ -262,6 +281,37 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
 
   test('DAY_FULL rides the SLOT_TAKEN catch (409 + created-profile rollback)', () => {
     expect(src).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'DAY_FULL'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signed slot offers (audit round 2) — /book surface wiring
+// ---------------------------------------------------------------------------
+
+describe('signed slot offers on the /book surface (source guards)', () => {
+  test('the availability builder SIGNS every candidate over (date, start, tech, duration)', () => {
+    expect(src).toMatch(/slot_sig: mintSlotOfferField\(\{\s*\n\s*surface: 'booking',/);
+    // the day-bucket copies carry the sig through to the client
+    expect(src).toMatch(/technician_id: slot\.technician_id,\s*\n\s*slot_sig: slot\.slot_sig,/);
+  });
+
+  test('/availability and /find-slots clamp the duration BEFORE shaping/signing offers', () => {
+    // both routes + createSelfBooking = 3 call sites of the shared clamp;
+    // the old raw parseInt(duration_minutes) form is gone.
+    expect((src.match(/const duration = resolveBookingDuration\(duration_minutes, config\);/g) || []).length).toBe(3);
+    expect(src).not.toMatch(/\? parseInt\(duration_minutes\)/);
+  });
+
+  test('createSelfBooking requires the signed offer and rejects with the plain-string 409', () => {
+    const gateIdx = src.indexOf('if (!verifySlotOfferField({');
+    expect(gateIdx).toBeGreaterThan(-1);
+    const gate = src.slice(gateIdx, gateIdx + 600);
+    expect(gate).toMatch(/surface: 'booking'/);
+    expect(gate).toMatch(/date: slotDateStr/);
+    expect(gate).toMatch(/startMinutes: timeToMin\(slot_start\)/);
+    expect(gate).toMatch(/technicianId: technician_id \|\| null/);
+    expect(gate).toMatch(/durationMinutes: duration/);
+    expect(gate).toMatch(/status: 409/);
   });
 });
 
@@ -317,9 +367,19 @@ describe('confirmation codes', () => {
     expect(seen.size).toBe(500);
   });
 
-  test('generation is crypto.randomBytes — Math.random is gone from the route file', () => {
-    expect(src).toMatch(/crypto\.randomBytes\(CONFIRMATION_CODE_LENGTH\)/);
+  test('generation is the SHARED crypto.randomBytes generator — Math.random is gone from every confirmation-code writer', () => {
+    // The generator moved to utils/slot-offer-token.js so BOTH writers of
+    // confirmation_code (this route and services/availability.js's zone-engine
+    // confirmBooking) mint the same ≈50-bit codes.
+    const utilSrc = fs.readFileSync(path.join(__dirname, '../utils/slot-offer-token.js'), 'utf8');
+    expect(utilSrc).toMatch(/crypto\.randomBytes\(CONFIRMATION_CODE_LENGTH\)/);
+    expect(src).toMatch(/generateConfirmationCode,?\s*\n?\} = require\('\.\.\/utils\/slot-offer-token'\)/);
     expect(src).not.toMatch(/Math\.random/);
+
+    const availabilitySrc = fs.readFileSync(path.join(__dirname, '../services/availability.js'), 'utf8');
+    expect(availabilitySrc).toMatch(/require\('\.\.\/utils\/slot-offer-token'\)/);
+    expect(availabilitySrc).toMatch(/const confCode = generateConfirmationCode\(\);/);
+    expect(availabilitySrc).not.toMatch(/Math\.random/);
   });
 
   test('legacy 4-char codes still resolve: /status matches by plain equality, no format gate', () => {

@@ -33,6 +33,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
+const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -54,21 +55,34 @@ const ROUND_UP_GRACE_MINUTES = 59;
 
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
-// e.g. "2026-04-29_10-00_7d34c5e6-..."
+// with the signed-offer segments appended by signCustomerFacingSlots:
+//   `${base}.${exp}.${sig}`
+// e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
 function parseSlotId(slotId) {
   if (!slotId || typeof slotId !== 'string') return null;
-  const m = slotId.match(SLOT_ID_RE);
+  // Splitting is deliberately lenient here — ENFORCEMENT (presence, expiry,
+  // HMAC) lives in reserveSlot. Accept-time callers (estimate-public.js)
+  // re-parse the committed slotId only to locate the reservation row, and
+  // must keep working after the offer's exp has passed.
+  const signed = splitSignedSlotId(slotId);
+  const base = signed ? signed.baseSlotId : slotId;
+  const m = base.match(SLOT_ID_RE);
   if (!m) return null;
   const [, date, hh, mm, techRaw] = m;
   const h = Number(hh);
   const min = Number(mm);
   if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) return null;
+  // Round-trip the calendar day: the regex alone admits 2026-09-31, which
+  // survives every lexical bound check and only explodes inside Postgres.
+  if (!isRealCalendarDate(date)) return null;
   return {
     date,
     windowStart: `${hh}:${mm}:00`,
     techId: techRaw === 'unassigned' ? null : techRaw,
+    offerExp: signed ? signed.exp : null,
+    offerSig: signed ? signed.sig : null,
   };
 }
 
@@ -204,7 +218,22 @@ async function reserveSlot({
     err.code = 'INVALID_SLOT_ID';
     throw err;
   }
-  const { date, windowStart, techId } = parsed;
+  const { date, windowStart, techId, offerExp, offerSig } = parsed;
+
+  // Signed-offer gate (booking-audit round 2): every slot the generator
+  // returns carries `.exp.sig` inside its slotId — a bare/hand-crafted id
+  // (including a crafted `_unassigned` one) was never offered. Presence and
+  // expiry are checked here before any DB work; the HMAC itself is verified
+  // in-txn once the effective duration is known. Rejected with the same
+  // SLOT_UNAVAILABLE the client already recovers from by refreshing slots —
+  // which is also exactly what a customer holding a pre-deploy (unsigned)
+  // slot list needs: one 409, then the refreshed list is signed.
+  if (!offerSig || !Number.isFinite(offerExp) || Date.now() > offerExp) {
+    const err = new Error('slot offer is missing or expired');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
 
   // Stale-slot guard: the slot list is generated minutes before the customer
   // taps it, and a page left open can hold windows the generator would no
@@ -295,6 +324,57 @@ async function reserveSlot({
         throw err;
       }
 
+      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
+        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+          serviceMode,
+          selectedFrequency,
+          durationMinutes,
+        })
+        : null;
+      const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
+        ? Number(serviceProfile.durationMinutes)
+        : DEFAULT_DURATION_MINUTES;
+      const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
+
+      // Exact offer-membership proof: the HMAC binds surface, THIS estimate,
+      // date, start, technician (null = unassigned), the profile-resolved
+      // duration, and the expiry — signed by signCustomerFacingSlots on the
+      // very slots getAvailableSlots returned. A token holder can no longer
+      // reserve any tuple the generator never offered; a legitimately offered
+      // `_unassigned` slot verifies like any other, while an UNSIGNED
+      // unassigned id died at the presence gate above. Verified here (not
+      // pre-txn) because the duration needs the estimate's profile — the
+      // coarse policy checks below stay as defense-in-depth.
+      if (!verifySlotOffer({
+        surface: 'estimate',
+        scopeId: String(estimateId),
+        date,
+        startMinutes: slotStartMinutes,
+        technicianId: techId,
+        durationMinutes: effectiveDurationMinutes,
+        exp: offerExp,
+      }, offerSig)) {
+        const err = new Error('slot was not offered for this estimate');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+
+      // Working-day end: every legitimate offer ends by SLOT_DAY_END_MINUTES
+      // (find-time's dayClose / slotWindowFitsDay), plus the round-up grace —
+      // see ROUND_UP_GRACE_MINUTES. Needs the profile-resolved duration, so
+      // it lives in-txn with the signature check rather than with the pre-txn
+      // policy guards.
+      if (slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+        const err = new Error('slot runs past the end of the working day');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
+      const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
+      const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+
       // Active-technician check: find-time only generates slots for
       // technicians where({ active: true }), so a slotId naming an inactive
       // or unknown tech was never offered. A crafted non-uuid techId makes
@@ -355,30 +435,8 @@ async function reserveSlot({
         ['slot-reserve', `zone:${reserveZone?.id || 'unknown'}:${date}`],
       );
 
-      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
-        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
-          serviceMode,
-          selectedFrequency,
-          durationMinutes,
-        })
-        : null;
-      const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
-        ? Number(serviceProfile.durationMinutes)
-        : DEFAULT_DURATION_MINUTES;
-      const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
-      // Working-day end: every legitimate offer ends by SLOT_DAY_END_MINUTES
-      // (find-time's dayClose / slotWindowFitsDay), plus the round-up grace —
-      // see ROUND_UP_GRACE_MINUTES. Checked here (not with the pre-txn policy
-      // guards) because the effective duration needs the estimate's profile.
-      if (slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
-        const err = new Error('slot runs past the end of the working day');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
-      }
-      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
-      const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
-      const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+      // (service profile / duration / day-end / signature were all resolved
+      // and verified ABOVE, right after the estimate row's state checks.)
 
       // Idempotent self-hold handling: the conflict checks below have no
       // self-exclusion, so this estimate's OWN live hold would 409 the

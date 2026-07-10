@@ -2553,6 +2553,13 @@ export function ServiceSection({
   );
 }
 
+// Phases where slot (re)selection must be inert: 'submitting' has a
+// reserve/accept in flight, 'review' holds a live reservation, 'success' is
+// booked. 'configure' / 'slot_conflict' / 'reservation_expired' stay out of
+// this set — those render the picker for the customer to (re)pick a slot,
+// and every path back to them clears the reservation first.
+const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -2589,16 +2596,18 @@ export default function EstimateViewPage() {
   const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
   const [ctaPhase, setCtaPhaseState] = useState('configure');
-  // Mirrors ctaPhase === 'submitting' SYNCHRONOUSLY. ctaPhase is React state,
-  // so async work started before a submit — e.g. a SlotPicker AI slot search —
-  // captures the OLD phase in its closure: when it resolved mid-submission its
-  // selectSlot(null) passed the state guard and cleared the slot the in-flight
-  // accept was committing. The ref object is stable across renders, so even a
-  // stale callback reads the live value. Every phase transition goes through
-  // setCtaPhase below, keeping the ref in lockstep on all submit/exit paths.
-  const submittingRef = useRef(false);
+  // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
+  // started before a phase change — e.g. a SlotPicker AI slot search —
+  // captures the OLD phase in its closure: when it resolved mid-submission
+  // (or after the page entered review with a live reservation) its
+  // selectSlot(null) passed the state guard and cleared the slot the
+  // in-flight accept / held reservation was committing. The ref object is
+  // stable across renders, so even a stale callback reads the live value.
+  // Every phase transition goes through setCtaPhase below, keeping the ref
+  // in lockstep on all submit/exit paths.
+  const ctaPhaseRef = useRef('configure');
   const setCtaPhase = useCallback((phase) => {
-    submittingRef.current = phase === 'submitting';
+    ctaPhaseRef.current = phase;
     setCtaPhaseState(phase);
   }, []);
   const [reservation, setReservation] = useState(null);
@@ -2865,6 +2874,12 @@ export default function EstimateViewPage() {
   }, [reservation]);
 
   const onToggleAddOn = useCallback(async (sectionKey, key) => {
+    // Live-ref submit lock (mirror of the SlotPicker onSelect guards): the
+    // disabled prop freezes the rendered toggles, but a callback retained
+    // from before the submit — or a keyboard/synthetic change that skips the
+    // disabled attribute — must not reprice the estimate underneath an
+    // in-flight reserve/accept.
+    if (ctaPhaseRef.current === 'submitting') return;
     // Draft preview: PUT /preferences persists into estimate_data, and the
     // server 400s a draft anyway (isEstimateAcceptActive) — but its "no
     // longer active" message reads like a broken draft. Explain instead.
@@ -3561,6 +3576,12 @@ export default function EstimateViewPage() {
                   addOns={frequency?.addOns || []}
                   selectedKeys={selectedAddOns[section.key] || new Set()}
                   onToggle={(key) => onToggleAddOn(section.key, key)}
+                  // This one-time configure layout is what renders while
+                  // ctaPhase is 'submitting' (reserve/accept in flight) — a
+                  // toggle mid-submit would reprice the booking underneath
+                  // the request. readOnly is false on this branch, so this
+                  // is exactly the submit lock.
+                  disabled={cardsDisabled}
                 />
               );
             })
@@ -3870,9 +3891,14 @@ export default function EstimateViewPage() {
               // renders this configure layout): pointer-events blocks taps,
               // the guarded handlers block keyboard selection, and the wrapper
               // stays mounted either way so the slot fetch doesn't restart.
-              // The handler guards read submittingRef, NOT ctaPhase — a slot
+              // The handler guards read ctaPhaseRef, NOT ctaPhase — a slot
               // search started before the submit retains a callback with the
               // old phase in its closure, and only the ref stays live there.
+              // They reject on every locked phase, not just 'submitting': a
+              // pre-reserve search can also resolve after the page enters
+              // review (or after a failed accept returns to review), where
+              // its selectSlot(null) would clear the slot behind the
+              // still-live reservation.
               <div
                 aria-disabled={ctaPhase === 'submitting' || undefined}
                 style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
@@ -3881,8 +3907,8 @@ export default function EstimateViewPage() {
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
-                  onSelect={(slotId) => { if (!submittingRef.current) setSelectedSlotId(slotId); }}
-                  onSelectMeta={(meta) => { if (!submittingRef.current) setSelectedSlotMeta(meta); }}
+                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
+                  onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
                   selectedSlotFallbackMeta={selectedSlotMeta}
                   licenseNumber={estimate.licenseNumber}
                   refreshSignal={slotsRefreshSignal}

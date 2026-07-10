@@ -8,6 +8,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { generateConfirmationCode } = require('../utils/slot-offer-token');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
@@ -203,7 +204,10 @@ class AvailabilityEngine {
       }
     }
 
-    const confCode = 'WPC-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+    // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
+    // by the same public /booking/status/:code as the /book confirm path, so a
+    // guessable four-char code here would undercut the ≈50-bit codes there.
+    const confCode = generateConfirmationCode();
     const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
     const zoneCities = zone?.cities || [];
 

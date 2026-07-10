@@ -353,6 +353,9 @@ export default function PublicBookingPage() {
           slot_start: selectedSlot.start_time,
           slot_end: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id,
+          // Server-signed offer from the availability response — pure
+          // passthrough; /confirm rejects slots it never offered without it.
+          slot_sig: selectedSlot.slot_sig,
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,
           duration_minutes: service.duration,
