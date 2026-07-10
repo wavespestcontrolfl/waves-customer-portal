@@ -14,7 +14,7 @@ const db = require('../models/db');
 const dedupe = require('../services/customer-dedupe');
 const {
   phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner,
-  mergeSingletonPrefRow, resetFkCache,
+  mergeSingletonPrefRow, repointRowwiseDropCollisions, resetFkCache,
 } = dedupe._test;
 
 // Chainable knex stub: every builder method returns the chain; awaiting the
@@ -299,6 +299,58 @@ describe('findDuplicateGroups', () => {
     expect(groups.flatMap((g) => g.candidates).some((c) => c.loser.id === stranger.id)).toBe(false);
   });
 
+  it('prefers a newer billed row over an older shell as the kept winner', async () => {
+    const oldShell = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000021',
+      first_name: 'Kim', last_name: 'Gilliam', phone: '+19995550001',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-05-01',
+    };
+    const billed = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000022',
+      first_name: 'Kim', last_name: 'Gilliam', phone: '9995550001',
+      address_line1: '10 Pine St', zip: '34205',
+      pipeline_stage: 'new_lead', created_at: '2026-06-20',
+    };
+    installDb(router({
+      customers: [oldShell, billed],
+      blockerRows: { invoices: [{ customer_id: billed.id, n: '3' }] },
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    // Without the business boost, oldest-first tiebreak would keep the shell
+    // and retire the row that owns the invoices' account state.
+    expect(groups[0].winner.id).toBe(billed.id);
+    expect(groups[0].candidates[0].loser.id).toBe(oldShell.id);
+  });
+
+  it('never lets an unknown-name row seed a cluster and hide identity conflicts', async () => {
+    const oldUnknown = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000031',
+      first_name: 'Unknown', last_name: '', phone: '+19995550002',
+      address_line1: null, zip: null,
+      pipeline_stage: 'active_customer', created_at: '2026-04-01',
+    };
+    const john = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000032',
+      first_name: 'John', last_name: 'Alpha', phone: '9995550002',
+      address_line1: '1 First St', zip: '34205',
+      pipeline_stage: 'new_lead', created_at: '2026-06-01',
+    };
+    const mary = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000033',
+      first_name: 'Mary', last_name: 'Beta', phone: '(999) 555-0002',
+      address_line1: '2 Second St', zip: '34205',
+      pipeline_stage: 'new_lead', created_at: '2026-06-02',
+    };
+    installDb(router({ customers: [oldUnknown, john, mary] }));
+    const groups = await dedupe.findDuplicateGroups();
+    const candidates = groups.flatMap((g) => g.candidates);
+    // Two known identities share the phone — NOTHING may tier green, and the
+    // unknown shell must not have absorbed John and Mary into one cluster.
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.tier !== 'green')).toBe(true);
+  });
+
   it('surfaces second-identity duplicates as their own mergeable group', async () => {
     const john = {
       id: 'aaaaaaaa-0000-0000-0000-000000000011',
@@ -368,6 +420,26 @@ describe('mergeSingletonPrefRow', () => {
     await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
     expect(state.updated).toBe(null);
     expect(state.deleted).toBe(true);
+  });
+
+  it('repointRowwiseDropCollisions: keeps winner rows, drops colliding loser snapshots', async () => {
+    const state = { updated: [], deleted: [] };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('select')) return [{ id: 's1' }, { id: 's2' }];
+      if (q.called('del')) { state.deleted.push(q.args('where')[0].id); return 1; }
+      if (q.called('update')) {
+        const rowId = q.args('where')[0].id;
+        if (rowId === 's2') { const e = new Error('duplicate key'); e.code = '23505'; throw e; }
+        state.updated.push(rowId);
+        return 1;
+      }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    const result = await repointRowwiseDropCollisions(trx, 'customer_mrr_snapshots', 'customer_id', 'W', 'L');
+    expect(state.updated).toEqual(['s1']);
+    expect(state.deleted).toEqual(['s2']);
+    expect(result).toMatch(/moved 1, dropped 1/);
   });
 
   it('property_preferences: booleans are facts and OR — safety details survive', async () => {

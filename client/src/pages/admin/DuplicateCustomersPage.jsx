@@ -98,14 +98,15 @@ export default function DuplicateCustomersPage() {
     load();
   }, [load]);
 
-  const runAction = async ({ key, endpoint, body, confirmText, successText }) => {
+  const runAction = async ({ key, endpoint, body, confirmText, successText, onResult }) => {
     if (confirmText && !window.confirm(confirmText)) return;
     setActionKey(key);
     setError("");
     setToast("");
     try {
-      await api(endpoint, { method: "POST", body: JSON.stringify(body) });
-      setToast(successText);
+      const result = await api(endpoint, { method: "POST", body: JSON.stringify(body) });
+      if (onResult) onResult(result);
+      else setToast(successText);
       await load();
     } catch (err) {
       setError(err.message || "Action failed");
@@ -217,7 +218,13 @@ export default function DuplicateCustomersPage() {
                               endpoint: "/admin/customer-duplicates/link-as-property",
                               body: { winnerId: group.winner.id, loserId: customer.id },
                               confirmText: `Merge ${displayName(customer)} into ${displayName(group.winner)} and keep ${customer.address_line1} as an additional property?`,
-                              successText: "Merged — address saved as a property",
+                              // The merge can commit while the property write
+                              // fails — never claim the address was saved
+                              // unless the server says it was.
+                              onResult: (res) => {
+                                if (res?.propertyLinked) setToast("Merged — address saved as a property");
+                                else setError("Merged, but the address could NOT be saved as a property — add it to the kept customer manually.");
+                              },
                             })}
                           >
                             Merge + keep address
