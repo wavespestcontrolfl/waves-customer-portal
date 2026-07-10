@@ -2989,6 +2989,7 @@ const CallRecordingProcessor = {
     // supply a real transcript; the terminal rejection only fires if the
     // fallback is also missing/implausible.
     let primaryTranscriptRejected = false;
+    let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
 
     if (call.recording_url) {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
@@ -3000,6 +3001,7 @@ const CallRecordingProcessor = {
       if (transcription && isImplausibleTranscript(transcription, recordingSecondsForGate)) {
         logger.warn(`[call-proc] Primary transcript implausible for ${maskSid(callSid)}: ${transcription.length} chars / ${recordingSecondsForGate}s — discarding, trying Twilio fallback`);
         primaryTranscriptRejected = true;
+        rejectedPrimaryChars = transcription.length; // keep the metric before discarding
         transcription = null;
         contactPassTranscript = null;
       }
@@ -3042,10 +3044,14 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL
+    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL.
+    // The rejection sentinel is NOT a usable transcript — on an admin
+    // force-reprocess of an already-rejected call it's what's stored in
+    // call_log.transcription, so treat it (and cached copies of it) as no fallback.
+    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
-      if (freshCall?.transcription) {
+      if (isUsableFallback(freshCall?.transcription)) {
         transcription = freshCall.transcription;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
@@ -3064,7 +3070,7 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         });
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
-      } else if (call.transcription) {
+      } else if (isUsableFallback(call.transcription)) {
         transcription = call.transcription;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
@@ -3099,8 +3105,12 @@ const CallRecordingProcessor = {
     // (which would retry and re-hallucinate). A plausible Twilio fallback after a
     // rejected primary flows through normally.
     if (fallbackImplausible || (!transcription && primaryTranscriptRejected)) {
-      const rawChars = transcription ? transcription.length : 0;
-      const cps = fallbackImplausible ? Math.round(spokenCharCount(transcription) / recordingSeconds) : null;
+      // Provenance: for the primary-hallucinated path `transcription` was already
+      // nulled, so use the char count captured before discarding it.
+      const rawChars = transcription ? transcription.length : rejectedPrimaryChars;
+      const cps = recordingSeconds && rawChars
+        ? Math.round((fallbackImplausible ? spokenCharCount(transcription) : rawChars) / recordingSeconds)
+        : null;
       logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
       let priorMeta = {};
       try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
@@ -3123,6 +3133,10 @@ const CallRecordingProcessor = {
           v2_extraction_status: null,
           disposition: null,
           review_status: null,
+          // A prior hallucinated extraction (force-reprocess path) may have
+          // linked this empty voicemail to a phantom customer; the unified
+          // voice sync attaches messages whenever customer_id is set, so unlink.
+          customer_id: null,
           processing_token: null,
           processing_started_at: null,
           updated_at: new Date(),
@@ -3130,6 +3144,18 @@ const CallRecordingProcessor = {
       if (rejected === 0) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+      }
+      // Dismiss any open Needs Review cards a prior hallucinated extraction
+      // filed for this call — clearing review_status alone doesn't remove them
+      // (the inbox lists from triage_items.status), so they'd stay actionable.
+      try {
+        const dismissed = await db('triage_items')
+          .where({ call_log_id: call.id })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
+      } catch (trErr) {
+        logger.warn(`[call-proc] stale-triage dismissal skipped for ${maskSid(callSid)}: ${trErr.message}`);
       }
       // Retire phantom lead artifacts a PRIOR hallucinated extraction created
       // (admin force-reprocess path): soft-delete unconverted leads keyed by
