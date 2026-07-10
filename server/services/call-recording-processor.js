@@ -69,6 +69,11 @@ const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-valida
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
+// Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
+const { isEnabled } = require('../config/feature-gates');
+const { decideDisposition } = require('./call-disposition');
+const { classifyCall, recordVerdict } = require('./call-spam-classifier');
+const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines } = require('./address-validation');
@@ -5879,6 +5884,44 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
     } else if (finalStatus === 'customer_creation_failed') {
       logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
+    }
+
+    // ── Zero-triage layers (2026-07-10, all dark-gated; failures never fail the call) ──
+    // The spam classifier records its verdict; the disposition layer stamps
+    // the terminal enum on call_log.disposition; the enrichment writer
+    // persists gate codes / pets / internal color the model captured. Order
+    // matters: the classifier verdict feeds the disposition decision.
+    try {
+      const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
+      let spamVerdictResult = null;
+      if (isEnabled('callSpamClassifier')) {
+        const lineTypeRow = await db('phone_line_types')
+          .where({ phone: contactPhone }).first().catch(() => null);
+        spamVerdictResult = await classifyCall({
+          call, extraction: v2ForDisposition, legacy: extracted,
+          lineType: lineTypeRow ? { type: lineTypeRow.line_type, caller_name: null } : null,
+        });
+        await recordVerdict(call.id, spamVerdictResult);
+      }
+      if (isEnabled('callDispositionV1')) {
+        const { disposition, reason } = decideDisposition({
+          extraction: v2ForDisposition,
+          legacy: extracted,
+          spamVerdict: spamVerdictResult,
+          outcome: {
+            appointmentCreated: !!appointmentResult?.scheduledServiceId,
+            customerId: customerId || null,
+            isKnownCustomer: !!call.customer_id || !!customerId,
+          },
+        });
+        await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
+        logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+      }
+      if (customerId) {
+        await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
+      }
+    } catch (zeroTriageErr) {
+      logger.warn(`[call-proc] zero-triage layer error for ${maskSid(callSid)}: ${zeroTriageErr.message}`);
     }
 
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
