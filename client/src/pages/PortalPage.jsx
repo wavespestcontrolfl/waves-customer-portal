@@ -1344,9 +1344,9 @@ function formatPostDate(d) {
 // Facebook, the Waves blog, Instagram, and the newsletter — each a swipeable
 // card rail mirroring the wavespestcontrol.com Social Hub cards (View Post +
 // Share, no quote CTA). Hidden entirely while its feed is empty or
-// unreachable. Titles are the branded names (owner 2026-07-09) — playful
-// over literal; the icon tile + CTA label carry the "where does this go"
-// signal.
+// unreachable. Titles are deliberately plain and uniform (owner 2026-07-10
+// — reverted the playful set); the icon tile + CTA label carry the "where
+// does this go" signal.
 function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
@@ -2015,7 +2015,7 @@ function DashboardTab({ customer, onSwitchTab }) {
           Facebook → blog → Instagram → newsletter. */}
       <HomeContentRow
         compact={compact}
-        title="Making Waves on Facebook"
+        title="Waves on Facebook"
         ctaLabel="View Post"
         iconTile={(
           <span style={{
@@ -2032,7 +2032,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       />
       <HomeContentRow
         compact={compact}
-        title="The Buzz — Fresh from the Blog"
+        title="From the Blog"
         ctaLabel="Read Post"
         iconTile={<ShellIconTile icon="waves" size={compact ? 30 : 38} />}
         posts={blogPosts.map((p) => ({
@@ -2041,7 +2041,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       />
       <HomeContentRow
         compact={compact}
-        title="Fresh Catch on Instagram"
+        title="Waves on Instagram"
         ctaLabel="View Post"
         iconTile={(
           <span style={{
@@ -2059,7 +2059,7 @@ function DashboardTab({ customer, onSwitchTab }) {
       />
       <HomeContentRow
         compact={compact}
-        title="The Tide Report — Our Newsletter"
+        title="The Waves Newsletter"
         ctaLabel="Read Issue"
         iconTile={<ShellIconTile icon="waves" size={compact ? 30 : 38} />}
         posts={newsletterPosts.map((p) => ({
