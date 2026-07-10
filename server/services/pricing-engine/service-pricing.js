@@ -1841,6 +1841,11 @@ function priceLawnCare(property, options = {}) {
     lawnFreq,
     useLawnCostFloor = true,
     includeHiddenTiers = false,
+    // Internal-only escape hatch for callers that need the raw market
+    // baseline (one-time lawn derives its base from recurring perApp and
+    // must not inherit the recurring program minimum). NOT wired to
+    // estimate-engine input — sold recurring plans always get the floor.
+    applyProgramMinimum = true,
   } = options;
 
   const normalizedTrack = normalizeGrassType(track);
@@ -1873,6 +1878,15 @@ function priceLawnCare(property, options = {}) {
 
   // ── Tier array: 4 Apps / 6 Apps / 9 Apps / 12 Apps ──
   const TIER_LIST = includeHiddenTiers ? Object.keys(LAWN_TIERS) : LAWN_SOLD_TIERS;
+  // Program minimum (owner directive 2026-07-09): every sold lawn plan bills
+  // at least this per month regardless of track/size/cadence. Annual is the
+  // source of truth; ceil to a whole-dollar-per-app multiple like the cost
+  // floor so perApp stays clean.
+  const programMinimumMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  const programMinimumAnnual = applyProgramMinimum
+    && Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0
+    ? Math.round(programMinimumMonthly * 12 * 100) / 100
+    : 0;
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
@@ -1887,7 +1901,9 @@ function priceLawnCare(property, options = {}) {
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPriceFor55;
     const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
-    const ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
+    if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
       tier: t,
@@ -1899,8 +1915,14 @@ function priceLawnCare(property, options = {}) {
       monthly: Math.round(ann / 12 * 100) / 100,
       label: tc.label,
       recommended: t === selectedTier,
-      pricingBasis: costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis,
-      pricingSource: costFloorApplied ? 'COST_FLOOR' : market.pricingSource,
+      pricingBasis: programMinimumApplied
+        ? 'PROGRAM_MINIMUM_MONTHLY'
+        : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis),
+      pricingSource: programMinimumApplied
+        ? 'PROGRAM_MINIMUM'
+        : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource),
+      programMinimumApplied,
+      programMinimumMonthly: programMinimumAnnual > 0 ? programMinimumMonthly : null,
       marketMonthly,
       marketAnnual,
       marketSource: market.pricingSource,
@@ -1960,6 +1982,8 @@ function priceLawnCare(property, options = {}) {
     },
     costFloorAnnual: selected.costFloorAnnual,
     costFloorApplied: selected.costFloorApplied,
+    programMinimumApplied: selected.programMinimumApplied === true,
+    programMinimumMonthly: selected.programMinimumMonthly ?? null,
     costs: {
       annualMaterial: roundMoney(selectedCosts.annualMaterial ?? scaledMaterial),
       annualLabor: roundMoney(selectedCosts.annualLabor ?? annualLabor),
@@ -4580,6 +4604,9 @@ function priceOneTimeLawn(property, options = {}) {
     tier,
     lawnFreq,
     useLawnCostFloor: false,
+    // One-time derives from the raw recurring per-app market rate; the
+    // recurring program minimum (a floor on sold PLANS) must not inflate it.
+    applyProgramMinimum: false,
   });
   const base = Math.max(ONE_TIME.lawn.floor, Math.round(lawnResult.perApp * ONE_TIME.lawn.oneTimeMultiplier));
 

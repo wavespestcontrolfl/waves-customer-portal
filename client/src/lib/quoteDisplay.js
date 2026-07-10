@@ -10,6 +10,12 @@ const FRIENDLY_QUOTE_REASONS = {
     "Your Waves account manager will confirm this commercial service plan with you before it’s finalized.",
   commercial_low_confidence_site_confirmation:
     "This commercial estimate needs a quick site confirmation — your Waves account manager will confirm the price with you before it’s finalized.",
+  retired_lawn_cadence_requote:
+    "Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.",
+  retired_lawn_cadence_selection:
+    "This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.",
+  legacy_lawn_pricing_requote:
+    "Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.",
 };
 
 export function humanizeQuoteReason(value) {

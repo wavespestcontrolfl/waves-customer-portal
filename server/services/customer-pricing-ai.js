@@ -190,33 +190,32 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     return generic ? all.slice(0, 1) : all;
   }
   if (serviceKey === 'lawn_care') {
-    // 'basic' (lawnFreq 4) is now a sold tier and prices distinctly as the
-    // 4-application plan, so it is offered alongside Standard/Enhanced/Premium.
-    // Standard stays first so the portal panel (which auto-selects options[0])
-    // keeps defaulting to the 6-application plan, not the new 4-application one.
+    // 'basic' (lawnFreq 4) is RETIRED for new sales (owner directive
+    // 2026-07-09) — never offer or price it here. Standard stays first so
+    // the portal panel (which auto-selects options[0]) keeps defaulting to
+    // the 6-application plan.
     const all = [
       { id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' },
       { id: 'lawn-enhanced', serviceKey, label: 'Lawn care — 9x applications/yr', tier: 'enhanced', lawnFreq: 9, cadence: '9 applications/yr' },
       { id: 'lawn-premium', serviceKey, label: 'Lawn care — 12x applications/yr', tier: 'premium', lawnFreq: 12, cadence: '12 applications/yr' },
-      { id: 'lawn-basic', serviceKey, label: 'Lawn care — 4x applications/yr', tier: 'basic', lawnFreq: 4, cadence: '4 applications/yr' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
     // Tier-intent narrowing uses the tier name or application-count wording only.
     // The count form accepts an optional "x" so the "Nx applications/yr" labels
-    // a customer can copy from an option ("12x applications/yr", "9x", "4x") map
+    // a customer can copy from an option ("12x applications/yr", "9x") map
     // to the right tier; a bare "Nx" token counts too. 6x is Standard, which is
     // the default returned by the fallthrough below, so it needs no branch.
     // Bare cadence words ("quarterly"/"monthly") are NOT matched: in a prompt
     // like "I have quarterly pest and want lawn care" the cadence refers to the
     // existing pest plan, so matching it would wrongly hide the other lawn tiers.
+    // "basic"/"4x" prompts intentionally fall through to the full sold ladder —
+    // the retired 4-application plan must neither be advertised nor silently
+    // priced as a different tier under its old label.
     if (/\bpremium\b|\b12x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b12x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-premium');
     }
     if (/\benhanced\b|\b9x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b9x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-enhanced');
-    }
-    if (/\bbasic\b|\b4x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b4x\b/i.test(prompt)) {
-      return all.filter(o => o.id === 'lawn-basic');
     }
     return all;
   }

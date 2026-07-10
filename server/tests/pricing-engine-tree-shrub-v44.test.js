@@ -408,12 +408,18 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(ts.finalAnnual).toBeLessThanOrEqual(ts.preDiscountAnnual);
     });
 
-    test('only guarded services (Tree & Shrub, Pest) carry margin-guard fields', () => {
+    test('only guarded services (Tree & Shrub, Pest, Lawn) carry guard fields', () => {
       constants.WAVEGUARD.tiers.platinum.discount = 0.40;
       const estimate = generateEstimate(makeBaseEstimateInput());
       for (const item of estimate.lineItems) {
-        // Tree & Shrub and Pest Control are both auto-discount margin-guarded.
+        // Tree & Shrub and Pest Control are auto-discount margin-guarded;
+        // Lawn carries the $45/mo program-minimum guard (owner 2026-07-09),
+        // which sets discountCapped when the floor caps a discount.
         if (item.service === 'tree_shrub' || item.service === 'pest_control') continue;
+        if (item.service === 'lawn_care') {
+          expect(item.marginGuardApplied).toBeUndefined();
+          continue;
+        }
         expect(item.marginGuardApplied).toBeUndefined();
         expect(item.discountCapped).toBeUndefined();
       }

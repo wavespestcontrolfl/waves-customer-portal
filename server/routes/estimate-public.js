@@ -19,7 +19,7 @@ const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/con
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
-const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
+const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
 const {
@@ -1802,6 +1802,12 @@ const FRIENDLY_QUOTE_REASONS = {
     'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.',
   commercial_low_confidence_site_confirmation:
     'This commercial estimate needs a quick site confirmation — your Waves account manager will confirm the price with you before it’s finalized.',
+  retired_lawn_cadence_requote:
+    'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
+  retired_lawn_cadence_selection:
+    'This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.',
+  legacy_lawn_pricing_requote:
+    'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
 };
 
 function humanizeQuoteReason(value) {
@@ -3991,12 +3997,32 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
   const prepayDiscountAmount = annualPrepayWaivesMembership ? 0 : prepayResolved.discount;
   const prepayDiscountRate = annualPrepayWaivesMembership ? 0 : prepayResolved.rate;
-  const prepayDiscountPctLabel = `${Math.round(prepayDiscountRate * 100)}%`;
+  // Components for the client-side refresh (refreshBillingAmounts): when a
+  // preference toggle changes the annual, the page must re-derive the prepay
+  // total with the SAME floor-aware math as resolveAnnualPrepayInvoiceTotal —
+  // the effective rate above is a function of THIS annual and goes stale the
+  // moment the annual moves (a flat re-multiply can undercut the lawn floor).
+  const prepayComponents = require('../services/estimate-converter').annualPrepayDiscountComponents({
+    recurringServices: recurring,
+    estimateData: estData,
+  });
+  const prepayRefreshFloor = annualPrepayWaivesMembership ? 0 : prepayComponents.protectedFloor;
+  const prepayRefreshRate = annualPrepayWaivesMembership ? 0 : prepayComponents.discountRate;
+  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"`;
+  // Effective rate can drop below 1% when the lawn program minimum (or the
+  // non-discountable margin floor) protects most of the base — show one
+  // decimal there so the copy never reads "save 0%".
+  const prepayDiscountPctLabel = prepayDiscountRate >= 0.01 || prepayDiscountRate <= 0
+    ? `${Math.round(prepayDiscountRate * 100)}%`
+    : `${Math.round(prepayDiscountRate * 1000) / 10}%`;
   // Annual prepay is offered to NEW customers only (unchanged invariant) and only
   // when it carries an incentive: the setup waiver (pest/mosquito) or the prepay
   // discount (no-fee services). Existing members stay pay-per-application only.
+  // Sub-0.1% effective rates (e.g. a $3 headroom on a floor-priced $603/yr
+  // lawn plan) are not a sellable incentive — treat them like the at-floor
+  // case and hide the prepay option instead of advertising ~$0 savings.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && (annualPrepayWaivesMembership || prepayDiscountAmount > 0);
+    && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   const prepayInvoiceTotal = annualPrepayWaivesMembership
     ? annualTotal
     : (() => {
@@ -4074,11 +4100,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
-          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">${est.depositPolicy?.required
-          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
-          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
+          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
+          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -5122,15 +5148,22 @@ ${shellQuestionsBar()}
     document.querySelectorAll('[data-annual-total]').forEach((el) => {
       el.textContent = fmt(annual);
     });
+    // Mirror resolveAnnualPrepayInvoiceTotal exactly: the configured % applies
+    // only ABOVE the floor-protected slice (non-discountable lines + the lawn
+    // program minimum), so the prepay total for a NEW annual cannot be a flat
+    // effective-rate multiply — the effective rate changes with the annual.
+    const prepayTotalFor = (el) => {
+      const rate = Number(el.dataset.prepayConfiguredRate || 0);
+      const protectedFloor = Number(el.dataset.prepayProtectedFloor || 0);
+      const floor = Math.min(annual, protectedFloor);
+      const discountable = Math.max(0, roundMoney(annual - floor));
+      return Math.max(0, roundMoney(floor + discountable * (1 - rate)));
+    };
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
-      const discountRate = Number(el.dataset.prepayDiscountRate || 0);
-      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
-      el.textContent = fmt(invoiceTotal);
+      el.textContent = fmt(prepayTotalFor(el));
     });
     document.querySelectorAll('[data-prepay-copy-total]').forEach((el) => {
-      const discountRate = Number(el.dataset.prepayDiscountRate || 0);
-      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
-      el.textContent = fmt(invoiceTotal);
+      el.textContent = fmt(prepayTotalFor(el));
     });
     let firstVisitTotal = 0;
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
@@ -6749,6 +6782,17 @@ async function handleEstimateView(req, res, next) {
       logger.warn(`[estimate-view] pricing bundle quote guard skipped: ${e.message}`);
     }
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundleForView, estData);
+    // SSR-only lawn floor guard: this legacy server-HTML page renders its
+    // hero/billing figures from the STORED rows and totals (not the clamped
+    // pricing bundle), so a pre-floor sold-cadence lawn link would display a
+    // below-$50/mo price while accept bills the clamped amount. Show those
+    // links the call-to-refresh state here; the React /data flow keeps
+    // self-serve because it renders the clamped ladder.
+    const ssrLawnFloorRequote = !quoteRequirement.quoteRequired
+      && storedLawnRowBelowProgramFloor(estData);
+    const pageQuoteRequirement = ssrLawnFloorRequote
+      ? { ...quoteRequirement, quoteRequired: true, reason: 'legacy_lawn_pricing_requote' }
+      : quoteRequirement;
 
     // One-time alternative price for the inline toggle. Mirrors the
     // resolveAcceptOneTimeTotal logic on accept so the customer sees the
@@ -6808,9 +6852,9 @@ async function handleEstimateView(req, res, next) {
       id: estimate.id,
       status: estimate.status === 'accepted'
         ? estimate.status
-        : (quoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
-      quoteRequired: quoteRequirement.quoteRequired,
-      quoteRequiredReason: quoteRequirement.reason || null,
+        : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
+      quoteRequired: pageQuoteRequirement.quoteRequired,
+      quoteRequiredReason: pageQuoteRequirement.reason || null,
       customerName: contact.customerName,
       customerEmail: contact.customerEmail,
       customerPhone: contact.customerPhone,
@@ -7025,6 +7069,8 @@ router.put('/:token/accept', async (req, res, next) => {
       const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
       const commercialRiskType = quoteRequirement.reason === 'commercial_risk_type_review';
       const commercialLowConfidence = quoteRequirement.reason === 'commercial_low_confidence_site_confirmation';
+      const retiredLawnRequote = quoteRequirement.reason === 'retired_lawn_cadence_requote'
+        || quoteRequirement.reason === 'legacy_lawn_pricing_requote';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
@@ -7034,6 +7080,8 @@ router.put('/:token/accept', async (req, res, next) => {
           ? 'Your Waves account manager will confirm this commercial service plan with you before it’s finalized.'
           : commercialLowConfidence
           ? 'This estimate needs a quick site confirmation before it’s finalized — your Waves account manager will confirm the price with you.'
+          : retiredLawnRequote
+          ? 'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.'
           : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
         managerApprovalRequired: needsManagerApproval,
@@ -7423,6 +7471,18 @@ router.put('/:token/accept', async (req, res, next) => {
           acceptedEstDataForPricing = applySelectedMosquitoTierToEstimateData(acceptedEstDataForPricing, tierEntry);
         }
       }
+    }
+    // Retired lawn cadence backstop (owner directive 2026-07-09): if the
+    // recurring lawn row is STILL at a retired cadence after every restamp
+    // above, the converter would schedule the retired 4-visit program (only
+    // its price was floored). The real UI always restamps lawn to a sold
+    // cadence via selectedFrequency/serviceCadences — this only rejects
+    // stale/crafted accepts and legacy shapes with no selectable lawn axis.
+    if (!treatAsOneTime && recurringLawnRowAtRetiredCadence(acceptedEstDataForPricing)) {
+      return res.status(409).json({
+        error: 'This estimate’s lawn plan uses a retired schedule — pick one of the current lawn plan options, or call Waves and we’ll refresh your quote.',
+        reason: 'retired_lawn_cadence_selection',
+      });
     }
     if (acceptedEstDataForPricing !== estData) {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
@@ -9654,6 +9714,123 @@ function normalizeOneTimeBreakdown(estData) {
   };
 }
 
+// An estimate whose stored lawn cadence rows are ALL retired (e.g. a legacy
+// quote that stored only the Basic/4-app row) has no sellable lawn cadence
+// left after the 2026-07-09 quarterly retirement: the ladder builders filter
+// every row, and the fallback paths would either silently bill the old
+// below-floor total (lawn-only) or accept a MIXED bundle whose lawn line
+// still schedules at the retired 4-visit cadence — the converter reads the
+// stored service row, and only its price is floored. Surface it as
+// quote-required so the public view shows the call-to-confirm state and the
+// accept endpoint refuses online acceptance — the requote prices the
+// current 6/9/12 ladder. Applies to any service mix that includes a
+// recurring lawn line; estimates whose rows still include a sold cadence
+// keep self-serve accept.
+function retiredLawnRequoteNeeded(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const resultStats = recurringResultStats(estData);
+  const rows = Array.isArray(resultStats?.lawn) ? resultStats.lawn : [];
+  const tierKeys = rows
+    .map((row) => lawnTierKey(row))
+    .filter((key) => ['basic', 'standard', 'enhanced', 'premium'].includes(key));
+  // No lawn tier rows to inspect (legacy/mixed shape):
+  //  1. A stored lawn row EXPLICITLY at a retired cadence requotes up front
+  //     — the accept-time backstop alone would 409 only AFTER /data and
+  //     /deposit-intent had let the customer pay the deposit.
+  //  2. Engine-invocation estimates rebuild the live 6/9/12 ladder
+  //     (lawnFrequenciesFromEngineResult), so a sold restamp is available —
+  //     keep self-serve.
+  //  3. Otherwise the v1/no-engine bundle paths fall back to a generic
+  //     'quarterly'-keyed frequency, and a lawn row with NO provable cadence
+  //     (converter reads the ROW, never the accepted selection, for lawn)
+  //     could schedule the retired 4-visit program with only its price
+  //     clamped — uninspectable, so requote. Rows with an explicit SOLD
+  //     cadence keep self-serve: the converter schedules them correctly.
+  if (!tierKeys.length) {
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    const lawnRows = (recurringSvcList || []).filter((svc) => recurringServiceKey(svc) === 'lawn_care');
+    if (!lawnRows.length) return false;
+    if (recurringLawnRowAtRetiredCadence(estData)) return true;
+    // The engine-invocation carve-out applies ONLY to lawn-only mixes: the
+    // engine's no-pest path rebuilds the live 6/9/12 ladder
+    // (lawnFrequenciesFromEngineResult), so a sold restamp is available. A
+    // MIXED pest+lawn engine estimate exposes only pest frequencies — accept
+    // never restamps the lawn row, and the converter falls back to the
+    // accepted pest cadence (typically the retired quarterly) — so its lawn
+    // rows still need a provable sold cadence of their own.
+    const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
+    const lawnOnlyMix = recurringKeys.length > 0 && recurringKeys.every((key) => key === 'lawn_care');
+    if (lawnOnlyMix && extractEngineInputs(estData)) return false;
+    const converter = require('../services/estimate-converter');
+    return lawnRows.some((svc) => !converter.explicitServiceCadence(svc));
+  }
+  if (!tierKeys.every((key) => isRetiredLawnTierKey(key))) return false;
+  const { recurringSvcList } = acceptanceServiceLists(estData);
+  const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
+  return recurringKeys.includes('lawn_care');
+}
+
+// Does the estimate STORE a recurring lawn price below the program minimum?
+// The React view re-clamps stored rows at render (clampLawnLadderEntry), but
+// the legacy SSR page derives its hero/billing figures straight from the
+// stored rows and estimate.monthly_total — a pre-floor sold-cadence link
+// would display (and let the customer approve) totals below what the clamped
+// accept path actually bills. Those links go to the requote state on the SSR
+// page instead; the React flow is unaffected (it renders the clamped ladder).
+function storedLawnRowBelowProgramFloor(estData = null) {
+  const minMonthly = lawnProgramMinimumMonthly();
+  if (!(minMonthly > 0) || !estData || typeof estData !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estData);
+  return (recurringSvcList || []).some((svc) => {
+    if (recurringServiceKey(svc) !== 'lawn_care') return false;
+    const monthly = firstPositiveNumber(svc?.mo, svc?.monthly, svc?.monthlyTotal);
+    const annual = firstPositiveNumber(svc?.ann, svc?.annual, svc?.annualAfterDiscount);
+    const effectiveMonthly = monthly ?? (annual != null ? annual / 12 : null);
+    return effectiveMonthly != null && effectiveMonthly < minMonthly - 0.005;
+  });
+}
+
+// Is a recurring lawn service row (still) at a RETIRED cadence? Used by the
+// accept handler AFTER all tier restamps: the converter schedules from these
+// rows, so an old mixed estimate whose stored/selected lawn row is Basic
+// would create a 4-visit program at the floored price if the accept request
+// carried no lawn cadence selection (stale/crafted client, or a legacy shape
+// with no selectable lawn axis). Cadence is only inferred from EXPLICIT
+// data — a lawn row with no visit count/cadence stays unflagged rather than
+// defaulting to quarterly.
+function recurringLawnRowAtRetiredCadence(estDataLike = null) {
+  if (!estDataLike || typeof estDataLike !== 'object') return false;
+  const retiredFreqs = new Set(Object.values(LAWN_TIERS || {})
+    .filter((t) => t && t.hidden === true)
+    .map((t) => Number(t.freq))
+    .filter((n) => Number.isFinite(n) && n > 0));
+  if (!retiredFreqs.size) return false;
+  const { recurringSvcList } = acceptanceServiceLists(estDataLike);
+  const converter = require('../services/estimate-converter');
+  return (recurringSvcList || []).some((svc) => {
+    if (recurringServiceKey(svc) !== 'lawn_care') return false;
+    // Resolve the cadence with the CONVERTER'S OWN reader
+    // (explicitServiceCadence: frequency/frequencyKey/frequency_key/
+    // recurringPattern/recurring_pattern → visit-count aliases
+    // visitsPerYear/appsPerYear/visits/apps/treatmentsPerYear → label/name
+    // text, all via the seeder's normalizeRecurringPattern) so this backstop
+    // can never drift from what scheduling actually does — including the
+    // same precedence (an explicit sold cadence field beats stale quarterly
+    // text, exactly as the converter would schedule it).
+    const pattern = converter.explicitServiceCadence(svc);
+    if (pattern) return pattern === 'quarterly' && retiredFreqs.has(4);
+    // Aliases the converter's reader skips but older rows still carry: bare
+    // `v` visit counts (tier-row shorthand) and cadence tokens inside
+    // service keys ('lawn_care_quarterly'). Rows with none of it stay
+    // unflagged — never inferred as quarterly by default.
+    const vAlias = Number(svc?.v);
+    if (Number.isFinite(vAlias) && vAlias > 0) return retiredFreqs.has(vAlias);
+    const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
+      .filter(Boolean).join(' ').toLowerCase();
+    return /\bquarterly\b|_quarterly\b/.test(keyText) && retiredFreqs.has(4);
+  });
+}
+
 function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown
     || (estData ? normalizeOneTimeBreakdown(estData) : null);
@@ -9686,13 +9863,17 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const commercialLowConfidenceSiteQuote = commercialLowConfidenceRequiresSiteQuote(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  const retiredLawnRequote = retiredLawnRequoteNeeded(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
     || managerApprovalRequired
     || commercialProposal
     || commercialRiskTypeReview
-    || commercialLowConfidenceSiteQuote;
+    || commercialLowConfidenceSiteQuote
+    || retiredLawnRequote;
 
   return {
     quoteRequired,
@@ -9701,7 +9882,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
       : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason
         || (commercialProposal ? 'commercial_proposal' : null)
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
-        || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)),
+        || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
+        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -9714,6 +9896,41 @@ function annualPrepayEligibleForEstimateData(estData) {
   if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+}
+
+// Does annual prepay carry a SELLABLE incentive for this estimate? Mirrors
+// the SSR showAnnualPrepayOption gate for the React /data flow, whose
+// PaymentPreferenceButtons renders the prepay option off annualPrepayEligible
+// alone: pest/mosquito mixes keep the setup-waiver incentive; every other mix
+// must offer an effective discount ≥ 0.1%. A lawn plan clamped at the program
+// minimum (or with sub-0.1% headroom) saves the customer nothing on prepay —
+// don't offer it in EITHER flow. With no stored annual to price against,
+// eligibility stays with the service-mix rule (fail open — the shared
+// converter calc still bills the correct floor-clamped total either way).
+function annualPrepayHasSellableIncentive(estimate = {}, estData = null, payload = {}) {
+  const converter = require('../services/estimate-converter');
+  const { recurringSvcList } = acceptanceServiceLists(estData || {});
+  if (converter.hasWaveGuardSetupService(recurringSvcList || [])) return true;
+  // Accept invoices from the SELECTED frequency's annual, so the incentive
+  // exists if ANY offered cadence clears it — a lawn-only quote whose
+  // default sits at the floor still earns a real discount on the
+  // Premium/monthly cadence, and hiding prepay for the whole payload would
+  // deny it. (The stored annual_total is the default-cadence candidate.)
+  const candidateAnnuals = [
+    Number(estimate.annual_total ?? estimate.annualTotal) || 0,
+    ...(Array.isArray(payload.frequencies)
+      ? payload.frequencies.map((f) => Number(f?.annual) || 0)
+      : []),
+  ].filter((n) => n > 0);
+  if (!candidateAnnuals.length) return true;
+  return candidateAnnuals.some((baseAnnual) => {
+    const resolved = converter.resolveAnnualPrepayInvoiceTotal({
+      baseAnnual,
+      recurringServices: recurringSvcList || [],
+      estimateData: estData || {},
+    });
+    return resolved.discount > 0 && resolved.rate >= 0.001;
+  });
 }
 
 function attachQuoteRequirement(payload, estData = null) {
@@ -10991,6 +11208,82 @@ function lawnTierKey(row = {}) {
 
 const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: '9 visits / yr', premium: 'Monthly' };
 
+// ── Lawn program minimum + retired cadences (owner directive 2026-07-09) ─────
+// The engine floors NEW quotes (priceLawnCare), but stored estimates carry
+// pre-floor tier rows and the WaveGuard/manual discounts are applied HERE at
+// view/accept time — so the ladder builders re-clamp post-discount and drop
+// retired (hidden) cadences. Both constants objects are live references that
+// db-bridge mutates from pricing_config, so DB edits apply without a deploy.
+function lawnProgramMinimumMonthly() {
+  const n = Number(LAWN_PRICING_V2?.programMinimumMonthly);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function isRetiredLawnTierKey(tierKey) {
+  return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
+}
+
+// Clamp a customer-facing lawn ladder entry to the program minimum AFTER
+// discounts. Annual re-derives from the clamped monthly so monthly/annual/
+// per-app never disagree, the pre-discount anchor never drops below the net
+// price, and the reported manual discount shrinks to what the floor actually
+// let through (never display savings the price doesn't reflect).
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount }) {
+  const minMonthly = lawnProgramMinimumMonthly();
+  if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
+  const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
+  let clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
+  const monthlyWasClamped = monthly != null && clampedMonthly !== monthly;
+  // Only re-derive annual/per-app when the floor actually moved a number —
+  // untouched rows keep their stored annual (it is the billing source of
+  // truth and carries exact cents the monthly×12 round-trip would lose).
+  const clampedAnnual = monthlyWasClamped
+    ? roundMonthly(clampedMonthly * 12)
+    : (annual != null && monthly == null ? Math.max(annual, roundMonthly(minMonthly * 12)) : annual);
+  const annualWasClamped = clampedAnnual != null && annual != null && clampedAnnual !== annual;
+  // An annual-only row the floor moved must ALSO carry a derived monthly:
+  // accept reads selectedFrequency.monthly first and otherwise falls back to
+  // the estimate's stored (pre-floor) monthly_total — without this, the row
+  // could show a floored annual while still locking the old monthly charge.
+  if (monthly == null && annualWasClamped) {
+    clampedMonthly = roundMonthly(clampedAnnual / 12);
+  }
+  const clampedPerTreatment = (monthlyWasClamped || annualWasClamped) && clampedAnnual != null && visits
+    ? roundMonthly(clampedAnnual / visits)
+    : perTreatment;
+  let clampedManualDiscount = manualDiscount || null;
+  // Fully blocked discounts are SUPPRESSED, not just nulled — the
+  // buildPricingBundle wrapper back-fills any frequency without a manual
+  // discount from the raw estimate discount, which would re-display savings
+  // the floor didn't let through. The flag tells it to leave the row alone.
+  let manualDiscountSuppressed = false;
+  if (clampedManualDiscount && clampedMonthlyBase != null && clampedMonthly != null) {
+    const effMonthlyOff = Math.max(0, roundMonthly(clampedMonthlyBase - clampedMonthly));
+    if (effMonthlyOff <= 0) {
+      clampedManualDiscount = null;
+      manualDiscountSuppressed = true;
+    } else if (effMonthlyOff < Number(clampedManualDiscount.monthlyAmount || 0)) {
+      const effAmount = roundMonthly(effMonthlyOff * 12);
+      clampedManualDiscount = {
+        ...clampedManualDiscount,
+        amount: effAmount,
+        recurringAmount: effAmount,
+        monthlyAmount: effMonthlyOff,
+        capped: true,
+        capReason: 'lawn_program_minimum',
+      };
+    }
+  }
+  return {
+    monthlyBase: clampedMonthlyBase,
+    monthly: clampedMonthly,
+    annual: clampedAnnual,
+    perTreatment: clampedPerTreatment,
+    manualDiscount: clampedManualDiscount,
+    manualDiscountSuppressed,
+  };
+}
+
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
@@ -11017,26 +11310,39 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
     .map((row) => {
       const tierKey = lawnTierKey(row);
       if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
+      // Retired cadences (basic/Quarterly) stay in stored result rows on old
+      // estimates — never re-offer them for selection or acceptance.
+      if (isRetiredLawnTierKey(tierKey)) return null;
       seen.add(tierKey);
       const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
-      const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
+      const rawMonthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
       const annualBase = finiteNumberOrNull(row.ann ?? row.annual);
       const perTreatmentBase = finiteNumberOrNull(row.pa ?? row.perTreatment ?? row.perApp ?? row.perVisit);
       const discountBaseAnnual = annualBase != null
         ? annualBase
-        : (monthlyBase != null ? roundMonthly(monthlyBase * 12) : 0);
-      const manualDiscount = manualDiscountForRecurringBase(rawManualDiscount, discountBaseAnnual);
-      const manualDiscountAmount = Number(manualDiscount?.amount || 0);
-      const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
-      const monthly = monthlyBase != null
-        ? Math.max(0, roundMonthly(monthlyBase - manualDiscountMonthly))
+        : (rawMonthlyBase != null ? roundMonthly(rawMonthlyBase * 12) : 0);
+      const rawManualDiscountForTier = manualDiscountForRecurringBase(rawManualDiscount, discountBaseAnnual);
+      const manualDiscountAmount = Number(rawManualDiscountForTier?.amount || 0);
+      const manualDiscountMonthly = Number(rawManualDiscountForTier?.monthlyAmount || 0);
+      const rawMonthly = rawMonthlyBase != null
+        ? Math.max(0, roundMonthly(rawMonthlyBase - manualDiscountMonthly))
         : null;
-      const annual = annualBase != null
+      const rawAnnual = annualBase != null
         ? Math.max(0, roundMonthly(annualBase - manualDiscountAmount))
-        : (monthly != null ? roundMonthly(monthly * 12) : null);
-      const perTreatment = perTreatmentBase != null
+        : (rawMonthly != null ? roundMonthly(rawMonthly * 12) : null);
+      const rawPerTreatment = perTreatmentBase != null
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
+      const {
+        monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed,
+      } = clampLawnLadderEntry({
+        monthlyBase: rawMonthlyBase,
+        monthly: rawMonthly,
+        annual: rawAnnual,
+        perTreatment: rawPerTreatment,
+        visits,
+        manualDiscount: rawManualDiscountForTier,
+      });
       const labelBase = LAWN_CADENCE_LABEL[tierKey] || 'Lawn care';
       return {
         key: tierKey,
@@ -11050,6 +11356,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
         manualDiscount: manualDiscount || null,
+        ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
         included: [
@@ -11138,9 +11445,18 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
   // must carry the same discounted price the line total reflects.
   const beforeAnnual = finiteNumberOrNull(lawnLine?.annualBeforeDiscount);
   const afterAnnual = finiteNumberOrNull(lawnLine?.annualAfterDiscount);
-  const discountFactor = (beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
-    ? afterAnnual / beforeAnnual
-    : 1;
+  // When the program minimum capped the SELECTED line, after/before reads as
+  // (nearly) 1 and would strip the WaveGuard discount from the above-floor
+  // alternate tiers. Use the engine's requested rate instead — each tier is
+  // discounted at that rate and then re-clamped at the floor individually by
+  // lawnFrequenciesFromRows, so only floor-bound tiers are capped.
+  const requestedLawnDiscountPct = finiteNumberOrNull(lawnLine?.requestedDiscountPct)
+    ?? finiteNumberOrNull(lawnLine?.discount?.effectiveDiscount);
+  const discountFactor = lawnLine?.programMinimumGuardApplied === true && requestedLawnDiscountPct != null
+    ? Math.min(1, Math.max(0, 1 - requestedLawnDiscountPct))
+    : ((beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
+      ? afterAnnual / beforeAnnual
+      : 1);
 
   // After acceptance the chosen tier is persisted in customerSelection (the
   // engine inputs are NOT restamped), so honor it when marking the selected row;
@@ -12094,11 +12410,25 @@ function nonPestTierBaseMap(resultStats = {}) {
     for (const row of rows) {
       const tierKey = tierKeyFn(row);
       if (!tierKey || tiers[tierKey]) continue;
+      // Retired lawn cadences (basic/Quarterly) must not be a selectable
+      // combo axis on old stored estimates either.
+      if (serviceKey === 'lawn_care' && isRetiredLawnTierKey(tierKey)) continue;
       const v = finiteNumberOrNull(row.v ?? row.visits ?? row.visitsPerYear ?? row.frequency);
-      const mo = finiteNumberOrNull(row.mo ?? row.monthly);
-      const ann = finiteNumberOrNull(row.ann ?? row.annual) ?? (mo != null ? roundMonthly(mo * 12) : null);
-      const pa = finiteNumberOrNull(row.pa ?? row.pv ?? row.perTreatment ?? row.perApp ?? row.perVisit);
+      let mo = finiteNumberOrNull(row.mo ?? row.monthly);
+      let ann = finiteNumberOrNull(row.ann ?? row.annual) ?? (mo != null ? roundMonthly(mo * 12) : null);
+      let pa = finiteNumberOrNull(row.pa ?? row.pv ?? row.perTreatment ?? row.perApp ?? row.perVisit);
       if (mo == null && ann == null) continue;
+      // Stored lawn rows on old estimates predate the program minimum —
+      // clamp the combo base so shapeFromV1 never sums a below-floor lawn
+      // component (its per-service discount hook re-clamps post-WaveGuard).
+      if (serviceKey === 'lawn_care') {
+        const minMonthly = lawnProgramMinimumMonthly();
+        if (minMonthly > 0 && mo != null && mo < minMonthly) {
+          mo = minMonthly;
+          ann = roundMonthly(mo * 12);
+          pa = v ? roundMonthly(ann / v) : pa;
+        }
+      }
       tiers[tierKey] = {
         mo, ann, pa, v,
         recommended: row.recommended === true || row.isRecommended === true,
@@ -12210,10 +12540,13 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   const entries = extractor(estData);
   if (!Array.isArray(entries) || entries.length < 2) return null;
   const d = recurringServiceReceivesTierDiscount(recurringService) ? (Number(recurringDiscount) || 0) : 0;
+  // Lawn program minimum re-clamps AFTER the WaveGuard % — a Platinum 20% on
+  // a floor-priced lawn section must not sell below the floor.
+  const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthly() : 0;
   return entries.map((e) => {
     const base = Number(e.monthlyBase);
     if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
-    const monthly = roundMonthly(base * (1 - d));
+    const monthly = Math.max(roundMonthly(base * (1 - d)), sectionMinMonthly);
     const visits = Number(e.visitsPerYear) || null;
     const perTreatment = visits ? roundMonthly((monthly * 12) / visits) : (e.perTreatment ?? null);
     return {
@@ -12405,7 +12738,17 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
     frequency?.annual,
   ) || 0);
   const parts = resolveRecurringMonthlyParts(estimate, estData);
-  const manualDiscount = payload.manualDiscount || legacyDefaultFrequency?.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData);
+  // The combined card's subtotals come from the DEFAULT frequency, so its
+  // savings line must too: a default row whose manual discount the lawn
+  // floor fully blocked shows NO discount here (the raw estData summary
+  // would resurrect savings the displayed price doesn't reflect), and a
+  // payload-level suppression (every frequency blocked) wins the same way.
+  const manualDiscountSuppressedForDefault = payload.manualDiscountSuppressed === true
+    || legacyDefaultFrequency?.manualDiscountSuppressed === true
+    || (!legacyDefaultFrequency && frequency?.manualDiscountSuppressed === true);
+  const manualDiscount = manualDiscountSuppressedForDefault
+    ? null
+    : (payload.manualDiscount || legacyDefaultFrequency?.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData));
   const baseMonthly = Number(parts.baseMonthly || parts.discountableBaseMonthly || 0);
   const savingsPerMonth = baseMonthly > 0 ? Math.max(0, roundMonthly(baseMonthly - monthlySubtotal)) : 0;
 
@@ -12660,6 +13003,13 @@ function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
+  // Floor-capped prepay has no sellable incentive — mirror the SSR
+  // showAnnualPrepayOption gate here so the React /data flow hides the
+  // annual-prepay option too (it renders off annualPrepayEligible alone).
+  if (withQuoteState.annualPrepayEligible === true
+    && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
+    withQuoteState.annualPrepayEligible = false;
+  }
   const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
@@ -12766,7 +13116,15 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const discountMonthly = (monthly, svc) => {
     const n = Number(monthly || 0);
     const discount = recurringServiceReceivesTierDiscount(svc) ? v1.discount : 0;
-    return n * (1 - discount);
+    const after = n * (1 - discount);
+    // Lawn program minimum holds POST-WaveGuard: a % discount on a bundle
+    // must not pull the lawn component below the floor. Guard on n > 0 so a
+    // missing/zero lawn row is never inflated to the minimum.
+    if (n > 0 && recurringServiceKey(svc) === 'lawn_care') {
+      const minMonthly = lawnProgramMinimumMonthly();
+      if (minMonthly > 0 && after < minMonthly) return minMonthly;
+    }
+    return after;
   };
   const pestMoDiscounted = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
   const pestMoAfter = pestFloorMo !== null ? Math.max(pestMoDiscounted, pestFloorMo) : pestMoDiscounted;
@@ -12780,8 +13138,43 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       return sum + discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc) * 12;
     }, 0))
   ) * 100) / 100;
-  const manualDiscount = manualDiscountForRecurringBase(v1.manualDiscount, manualDiscountableAnnual);
-  const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
+  let manualDiscount = manualDiscountForRecurringBase(v1.manualDiscount, manualDiscountableAnnual);
+  let manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
+  // Lawn program minimum: the bundle-level manual discount may spend all
+  // non-lawn room plus lawn's above-floor headroom, never the floor itself
+  // — otherwise a floor-priced lawn component is displayed and accepted
+  // below the minimum whenever a manual recurring discount is present.
+  // The surfaced discount shrinks to what the floor lets through; a fully
+  // blocked one is suppressed (flag consumed by buildPricingBundle's
+  // manual-discount wrapper so it is not re-attached).
+  let manualDiscountSuppressed = false;
+  const lawnFloorProtectedMonthly = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
+    if (recurringServiceKey(svc) !== 'lawn_care') return sum;
+    const minMonthly = lawnProgramMinimumMonthly();
+    if (!(minMonthly > 0)) return sum;
+    const after = discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
+    return after > 0 ? sum + Math.min(after, minMonthly) : sum;
+  }, 0);
+  if (manualDiscountMonthly > 0 && lawnFloorProtectedMonthly > 0) {
+    const manualHeadroomMonthly = Math.max(0, roundMonthly(pestMoAfter + nonPestMoAfter - monthlyOff - lawnFloorProtectedMonthly));
+    if (manualDiscountMonthly > manualHeadroomMonthly) {
+      manualDiscountMonthly = manualHeadroomMonthly;
+      if (manualDiscountMonthly > 0) {
+        const cappedAnnual = roundMonthly(manualDiscountMonthly * 12);
+        manualDiscount = {
+          ...manualDiscount,
+          amount: cappedAnnual,
+          recurringAmount: cappedAnnual,
+          monthlyAmount: manualDiscountMonthly,
+          capped: true,
+          capReason: 'lawn_program_minimum',
+        };
+      } else {
+        manualDiscount = null;
+        manualDiscountSuppressed = true;
+      }
+    }
+  }
   const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 100) / 100);
   let totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
   // Acceptance amount keeps the EXACT floor: floorMo rounds to cents for the
@@ -12850,11 +13243,24 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     nonPestServices.forEach((svc) => {
       const pa = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit);
       const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
+      let displayPrice = treatmentDisplayPrice(pa, svc);
+      // Lawn program minimum: the discounted per-visit display drives the
+      // first-application invoice, so it must match the floor-clamped
+      // monthly (min × 12 ÷ visits) whenever the % discount would price a
+      // visit below it — otherwise the first visit bills under the floor
+      // the plan itself charges.
+      if (displayPrice != null && recurringServiceKey(svc) === 'lawn_care'
+        && Number.isFinite(visits) && visits > 0) {
+        const minMonthly = lawnProgramMinimumMonthly();
+        if (minMonthly > 0) {
+          displayPrice = Math.max(displayPrice, roundMonthly((minMonthly * 12) / visits));
+        }
+      }
       perServiceTreatments.push({
         service: svc?.service || (svc?.name || '').toLowerCase().replace(/\s+/g, '_'),
         label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
-        displayPrice: treatmentDisplayPrice(pa, svc),
+        displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
       });
@@ -12873,11 +13279,96 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     perVisit: pestTier ? (Number(pestTier.pa) || null) : null,
     oneTimeTotal: v1.oneTimeTotal || null,
     manualDiscount,
+    ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
     included,
     addOns,
     perServiceTreatments,
     sameDayTreatmentTotal: Math.round(sameDayTreatmentTotal * 100) / 100,
   };
+}
+
+// Does a (snapshotted) pricing bundle violate the lawn program policy —
+// a retired (hidden) lawn cadence still offered, or a lawn-identifiable
+// price below the program minimum? Checked over top-level frequency rows,
+// per-section ladders, per-service treatment rows, and combo axes. Used to
+// bypass the send-snapshot fast path in buildPricingBundle: snapshots taken
+// before the 2026-07-09 retirement/floor carry Basic cadences and below-floor
+// lawn prices verbatim, and accept resolves selectedFrequency from this
+// bundle. Compliant snapshots (including everything snapshotted after the
+// floor shipped) keep the fast path. Legacy bundle rows whose lawn slice is
+// not itemized (no lawn perServiceTreatments row) cannot be attributed and
+// are intentionally left alone.
+// Does the ESTIMATE carry a recurring lawn service? (Bundle-independent —
+// used to detect snapshots whose lawn slice is unitemized.)
+function estimateDataHasRecurringLawn(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estData);
+  return (recurringSvcList || []).some((svc) => recurringServiceKey(svc) === 'lawn_care');
+}
+
+// Does the bundle carry ANY lawn-identifiable element the policy check can
+// inspect — a lawn-tagged frequency row (top-level or per-section), a lawn
+// per-service treatment row, or a lawn combo axis? This must mirror EXACTLY
+// the elements pricingBundleViolatesLawnPolicy reads: a section merely KEYED
+// lawn_care whose frequencies are generic (no serviceCategory, no lawn
+// treatment rows — e.g. an old snapshot of the no-engine fallback) is NOT
+// identifiable, because the policy check cannot attribute those rows to lawn
+// and a below-floor/quarterly snapshot would fast-path unchecked. Such
+// shapes must recompute instead.
+function pricingBundleHasLawnIdentifiableRow(bundle = {}) {
+  const hasLawnTreatmentRow = (rows) => Array.isArray(rows)
+    && rows.some((r) => recurringServiceKey(r) === 'lawn_care');
+  const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  const services = Array.isArray(bundle.services) ? bundle.services : [];
+  for (const s of services) {
+    if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
+  }
+  for (const f of frequencyRows) {
+    if (f?.serviceCategory === 'lawn_care') return true;
+    if (hasLawnTreatmentRow(f?.perServiceTreatments)) return true;
+  }
+  const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
+  return combos.some((c) => (c?.selection && Object.prototype.hasOwnProperty.call(c.selection, 'lawn_care'))
+    || hasLawnTreatmentRow(c?.perServiceTreatments));
+}
+
+function pricingBundleViolatesLawnPolicy(bundle = {}) {
+  const minMonthly = lawnProgramMinimumMonthly();
+  const belowFloor = (monthly) => minMonthly > 0
+    && Number.isFinite(monthly) && monthly > 0 && monthly < minMonthly - 0.005;
+  // A lawn row at a retired visit cadence violates the policy even when its
+  // price sits at/above the floor — a snapshotted 4-visit lawn row priced at
+  // exactly the floor is still the retired Quarterly plan.
+  const retiredLawnVisits = new Set(Object.values(LAWN_TIERS || {})
+    .filter((t) => t && t.hidden === true)
+    .map((t) => Number(t.freq))
+    .filter((n) => Number.isFinite(n) && n > 0));
+  const lawnTreatmentRowViolates = (rows) => Array.isArray(rows) && rows.some((r) => {
+    if (recurringServiceKey(r) !== 'lawn_care') return false;
+    const visits = Number(r?.visitsPerYear ?? r?.visits);
+    if (Number.isFinite(visits) && retiredLawnVisits.has(visits)) return true;
+    const per = Number(r?.displayPrice ?? r?.perTreatment);
+    if (!Number.isFinite(per) || per <= 0 || !Number.isFinite(visits) || visits <= 0) return false;
+    return belowFloor((per * visits) / 12);
+  });
+
+  const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  const services = Array.isArray(bundle.services) ? bundle.services : [];
+  for (const s of services) {
+    if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
+  }
+  for (const f of frequencyRows) {
+    if (f?.serviceCategory === 'lawn_care') {
+      if (isRetiredLawnTierKey(f.serviceTierKey ?? f.key)) return true;
+      if (retiredLawnVisits.has(Number(f.visitsPerYear))) return true;
+      if (belowFloor(Number(f.monthly))) return true;
+    }
+    if (lawnTreatmentRowViolates(f?.perServiceTreatments)) return true;
+  }
+
+  const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
+  return combos.some((c) => (c?.selection && isRetiredLawnTierKey(c.selection.lawn_care))
+    || lawnTreatmentRowViolates(c?.perServiceTreatments));
 }
 
 function invalidateSendSnapshotPricingBundle(estData = {}) {
@@ -12909,6 +13400,17 @@ async function buildPricingBundle(estimate) {
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
     if (!manual) return payload;
+    // When the lawn program minimum fully blocks the discount on EVERY
+    // priced frequency, the top-level payload.manualDiscount must be
+    // suppressed too — buildCombinedRecurring prefers it over the frequency
+    // rows, so leaving it attached would show the customer combined-card
+    // savings that no selectable price reflects.
+    const frequencies = Array.isArray(payload.frequencies) ? payload.frequencies : null;
+    const allFrequenciesSuppressed = !!frequencies && frequencies.length > 0
+      && frequencies.every((frequency) => frequency?.manualDiscountSuppressed === true);
+    if (allFrequenciesSuppressed) {
+      return { ...payload, manualDiscount: null, manualDiscountSuppressed: true };
+    }
     const manualWithMonthly = {
       ...manual,
       // monthlyAmount is the per-month recurring figure, so it tracks only the
@@ -12920,7 +13422,12 @@ async function buildPricingBundle(estimate) {
       manualDiscount: payload.manualDiscount || manualWithMonthly,
       frequencies: Array.isArray(payload.frequencies)
         ? payload.frequencies.map((frequency) => (
-            frequency?.manualDiscount ? frequency : { ...frequency, manualDiscount: manualWithMonthly }
+            // A row whose manual discount the lawn program minimum fully
+            // blocked is suppressed, not missing — never back-fill it with
+            // savings the price doesn't reflect.
+            (frequency?.manualDiscount || frequency?.manualDiscountSuppressed === true)
+              ? frequency
+              : { ...frequency, manualDiscount: manualWithMonthly }
           ))
         : payload.frequencies,
     };
@@ -12944,6 +13451,16 @@ async function buildPricingBundle(estimate) {
     snapshotBundle
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    // Snapshots that violate the lawn program policy (retired Quarterly
+    // cadence, or an itemized lawn price below the program minimum) must NOT
+    // short-circuit — they re-derive through the clamped ladder builders so
+    // outstanding links can't sell the retired/below-floor plan. A snapshot
+    // for an estimate with a recurring LAWN service that carries no
+    // lawn-identifiable element at all can't be policy-checked — those
+    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
+    // not fast-path just because its lawn slice is unitemized).
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle)
+    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
@@ -13071,7 +13588,20 @@ async function buildPricingBundle(estimate) {
       ? oneTimeChoiceAmountForEstimate(estimate, estData, { oneTimeBreakdown: storedOneTimeBreakdown })
       : null;
     const manualDiscount = normalizeManualDiscountSummary(estData);
+    // A recurring-LAWN estimate on this fallback is uninspectable: the stored
+    // totals render verbatim (no ladder rebuild, no clamp) AND the single
+    // fallback frequency below is keyed 'quarterly' — so even a lawn-only
+    // link whose price satisfies the floor cannot prove (or restamp to) a
+    // current 6/9/12 cadence, and a sparse lawn row with no explicit cadence
+    // would let the converter schedule the retired 4-visit program off that
+    // fallback key. No exception is safe here: every no-engine recurring-lawn
+    // shape goes quote-required (accept + deposit-intent gate on the same
+    // resolver) and shows the call-to-refresh copy.
+    const legacyLawnRequote = estimateDataHasRecurringLawn(estData);
     const payload = finalizePricingBundle(withManualDiscount({
+      ...(legacyLawnRequote
+        ? { quoteRequired: true, quoteRequiredReason: 'legacy_lawn_pricing_requote' }
+        : {}),
       frequencies: [{
         key: 'quarterly',
         label: 'Quarterly',
@@ -13739,6 +14269,8 @@ module.exports.bundleSectionLadderForService = bundleSectionLadderForService;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
+module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
+module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;

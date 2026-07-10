@@ -212,9 +212,14 @@ const PEST = {
 // ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
-// Tiers: basic(4x), standard(6x), enhanced(9x), premium(12x) are sold.
+// Tiers: standard(6x), enhanced(9x), premium(12x) are sold. basic(4x) is
+// RETIRED for new sales (owner directive 2026-07-09: no more $25–34/mo
+// quarterly lawn plans) — hidden:true drops it from the sold ladder while
+// keeping it priceable via includeHiddenTiers for legacy/admin flows. The
+// flag is DB-tunable (lawn_pricing_v2.tiers.basic.hidden via db-bridge), so
+// re-enabling quarterly needs no deploy.
 const LAWN_TIERS = {
-  basic:    { freq: 4,  index: 0, label: '4x applications/yr' },
+  basic:    { freq: 4,  index: 0, label: '4x applications/yr', hidden: true },
   standard: { freq: 6,  index: 1, label: '6x applications/yr' },
   enhanced: { freq: 9,  index: 2, label: '9x applications/yr' },
   premium:  { freq: 12, index: 3, label: '12x applications/yr' },
@@ -222,6 +227,13 @@ const LAWN_TIERS = {
 const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
+  // Hard program minimum (owner directive 2026-07-09, raised $45→$50 same
+  // day): no recurring lawn plan is sold below this monthly price, on ANY
+  // track/size/cadence, and the customer-facing ladder re-clamps AFTER
+  // WaveGuard/manual discounts AND the annual-prepay % (prepay is NOT
+  // exempt) — the bracket bottom cells ($25 Bahia) and discount stacking
+  // can't recreate a below-floor plan. 0/null disables the floor.
+  programMinimumMonthly: 50,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',

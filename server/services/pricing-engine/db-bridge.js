@@ -744,6 +744,19 @@ async function syncConstantsFromDB(dbInstance) {
 
     if (config.lawn_pricing_v2) {
       deepMergePlainObject(constants.LAWN_PRICING_V2, config.lawn_pricing_v2);
+      // Tier availability: the row's per-tier metadata drives which lawn
+      // cadences are sellable without a deploy. hidden wins when present;
+      // customerFacing is the older flag from the 2026-06-15 metadata
+      // migration and is honored as its inverse. Unknown tier keys are
+      // ignored (never invent a tier from config).
+      const tierMeta = config.lawn_pricing_v2.tiers;
+      if (tierMeta && typeof tierMeta === 'object' && !Array.isArray(tierMeta)) {
+        for (const [tierKey, meta] of Object.entries(tierMeta)) {
+          if (!constants.LAWN_TIERS[tierKey] || !meta || typeof meta !== 'object') continue;
+          if (typeof meta.hidden === 'boolean') constants.LAWN_TIERS[tierKey].hidden = meta.hidden;
+          else if (typeof meta.customerFacing === 'boolean') constants.LAWN_TIERS[tierKey].hidden = !meta.customerFacing;
+        }
+      }
     }
 
     // ── Estimate acceptance deposit (flat per service class) ──

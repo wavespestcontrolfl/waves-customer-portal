@@ -5032,10 +5032,11 @@ export default function EstimateToolViewV2({
                       />{" "}
                     </FieldV2>
                     <FieldV2 label="Applications / year" className="mb-0">
+                      {/* 4 — Quarterly retired for new sales (owner directive
+                          2026-07-09); the engine hides the basic tier. */}
                       <SelectV2
                         k="lawnFreq"
                         options={[
-                          { value: "4", label: "4 — Quarterly" },
                           { value: "6", label: "6 — Bi-monthly" },
                           { value: "9", label: "9 — Every 6 weeks" },
                           { value: "12", label: "12 — Monthly" },

@@ -340,6 +340,10 @@ const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
+  // Mirrors server constants.LAWN_PRICING_V2.programMinimumMonthly (owner
+  // directive 2026-07-09): no recurring lawn plan below $50/mo. Server is
+  // authoritative on save; this keeps the preview from under-quoting.
+  programMinimumMonthly: 50,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
   pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
   laborRateLoaded: 35,
@@ -998,6 +1002,10 @@ function lookupPreSlabMinimum(slabSqFt, jobContext) {
 
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
+  // basic/4x is retired for new sales (owner directive 2026-07-09) — a stale
+  // form value of 4 resolves to the 9-app default, matching the server's
+  // hidden-tier fallback in resolveLawnTier/priceLawnCare.
+  if (parsed === 4) return 9;
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
@@ -1602,8 +1610,9 @@ export function calculateEstimate(inputs) {
     const lsf = turfArea.turfSf;
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
+    // 4x/Quarterly is retired for new sales (owner directive 2026-07-09) —
+    // mirrors the server's LAWN_TIERS.basic hidden flag.
     const freqs = [
-      { name: '4x applications/yr', v: 4 },
       { name: '6x applications/yr', v: 6 },
       { name: '9x applications/yr', v: 9 },
       { name: '12x applications/yr', v: 12 },
@@ -1611,6 +1620,11 @@ export function calculateEstimate(inputs) {
     // Same complexity-minutes the server applies to the lawn cost floor, so the
     // preview matches the server-authoritative price (Decision #2).
     const lawnComplexityMin = lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriveway });
+    // Program minimum — same arithmetic as the server's priceLawnCare clamp.
+    const lawnProgramMinMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    const lawnProgramMinAnnual = Number.isFinite(lawnProgramMinMonthly) && lawnProgramMinMonthly > 0
+      ? Math.round(lawnProgramMinMonthly * 12 * 100) / 100
+      : 0;
     R.lawn = [];
     freqs.forEach((f) => {
       const freqIdx = LAWN_FREQS.indexOf(f.v);
@@ -1618,7 +1632,9 @@ export function calculateEstimate(inputs) {
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
       const floorApplied = floorPrice.costFloorAnnual > marketAnnual;
-      const ann = floorApplied ? floorPrice.ann : marketAnnual;
+      let ann = floorApplied ? floorPrice.ann : marketAnnual;
+      const programMinimumApplied = lawnProgramMinAnnual > 0 && ann < lawnProgramMinAnnual;
+      if (programMinimumApplied) ann = Math.ceil(lawnProgramMinAnnual / f.v) * f.v;
       const mo = Math.round(ann / 12 * 100) / 100;
       const pa = Math.round(ann / f.v * 100) / 100;
       const rec = f.v === selectedFreq, dim = !rec;
@@ -1630,8 +1646,13 @@ export function calculateEstimate(inputs) {
         name: f.name,
         recommended: rec,
         dimmed: dim,
-        pricingBasis: floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis,
-        pricingSource: floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource,
+        programMinimumApplied,
+        pricingBasis: programMinimumApplied
+          ? 'PROGRAM_MINIMUM_MONTHLY'
+          : (floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis),
+        pricingSource: programMinimumApplied
+          ? 'PROGRAM_MINIMUM'
+          : (floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource),
         marketMonthly: marketPrice.monthly,
         marketAnnual,
         costFloorAnnual: floorPrice.costFloorAnnual,
@@ -2635,12 +2656,38 @@ export function calculateEstimate(inputs) {
     .filter(li => li.discountable !== false)
     .reduce((sum, li) => sum + li.ann, 0);
   let da = Math.round(waveGuardDiscountableAnnual * wd * 100) / 100;
+  // Lawn program minimum — mirror the server's post-discount guards
+  // (estimate-engine.js). This preview can persist via the CLIENT_FALLBACK
+  // save path when server recompute is unavailable, so the aggregate
+  // WaveGuard % gives back whatever would cut the lawn slice below the
+  // floor, and the manual discount below is capped at the non-lawn room
+  // plus lawn's above-floor headroom.
+  const lawnFloorAnnualGuard = Number.isFinite(Number(LAWN_PRICING_V2.programMinimumMonthly))
+    && Number(LAWN_PRICING_V2.programMinimumMonthly) > 0
+    ? Math.round(Number(LAWN_PRICING_V2.programMinimumMonthly) * 12 * 100) / 100
+    : 0;
+  let lawnFloorProtectedAfterWg = 0;
+  if (lawnFloorAnnualGuard > 0) {
+    let wgGiveBack = 0;
+    for (const li of lineItems) {
+      if (li.service !== 'lawn_care' || li.discountable === false || !(li.ann > 0)) continue;
+      const lineFloor = Math.min(li.ann, lawnFloorAnnualGuard);
+      const afterWg = li.ann * (1 - wd);
+      const clamped = Math.max(afterWg, lineFloor);
+      wgGiveBack += clamped - afterWg;
+      lawnFloorProtectedAfterWg += Math.min(clamped, lawnFloorAnnualGuard);
+    }
+    da = Math.round((da - wgGiveBack) * 100) / 100;
+  }
   // Pest post-discount program floor mirror (server discount-engine
   // applyMarginGuard): the WaveGuard percent may not take pest's collected
   // annual below floorAnn for the selected cadence. Give back the overshoot
   // on the pest line — other services keep their full percent, matching the
-  // server's per-line clamp. Manual discounts stay uncapped (warn-only,
-  // owner loss-leader override).
+  // server's per-line clamp. Manual discounts stay uncapped for pest
+  // (warn-only, owner loss-leader override); the lawn floor's manual-
+  // discount cap below is lawn-specific and unaffected. The two floors
+  // clamp DIFFERENT lines (pest vs lawn_care), so their give-backs on the
+  // shared discount accumulator are independent and order-free.
   let pestProgramFloorApplied = false;
   if (R.pest && Number.isFinite(Number(R.pest.floorAnn)) && wd > 0) {
     const pestFloorAnn = Math.min(Number(R.pest.floorAnn), R.pest.ann);
@@ -2664,7 +2711,11 @@ export function calculateEstimate(inputs) {
       manualDiscountAmount = Math.round(v * 100) / 100;
     }
     const requestedAmount = manualDiscountAmount;
-    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
+    const manualHeadroom = Math.max(0, Math.round((manualDiscountableRecurringAnnual - lawnFloorProtectedAfterWg) * 100) / 100);
+    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual, manualHeadroom);
+    const lawnFloorCapApplied = manualDiscountAmount === manualHeadroom
+      && requestedAmount > manualHeadroom
+      && manualHeadroom < manualDiscountableRecurringAnnual;
     manualDiscountInfo = {
       ...md,
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
@@ -2674,7 +2725,9 @@ export function calculateEstimate(inputs) {
       label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
       discountableBase: manualDiscountableRecurringAnnual,
       capped: requestedAmount > manualDiscountAmount,
-      capReason: requestedAmount > manualDiscountAmount ? 'discountable_base' : null,
+      capReason: lawnFloorCapApplied
+        ? 'lawn_program_minimum'
+        : (requestedAmount > manualDiscountAmount ? 'discountable_base' : null),
       scope: 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
     };
