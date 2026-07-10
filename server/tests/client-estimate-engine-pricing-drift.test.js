@@ -214,18 +214,39 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(estimate.results.pest).toEqual(expect.objectContaining({
       floorPa: 89, floorAnn: 356, floorMo: 29.67,
     }));
-    // Pest sits exactly at the floor, so its entire 20% share is given back;
-    // the other services keep their full percent.
+    // Pest sits exactly at the floor, so its entire 20% share is given back.
+    // This 4,000 sf St. Augustine lawn ALSO prices at the $50/mo lawn program
+    // minimum, so on the merged tree BOTH floors compose: the lawn slice the
+    // floor protects is given back too (independent lines, order-free — see
+    // the lawn guard just above the pest mirror in estimateEngine.js).
     const ra = estimate.recurring.annualBeforeDiscount;
     const fullDa = Math.round(ra * 0.20 * 100) / 100;
     const pestShare = Math.round(356 * 0.20 * 100) / 100;
+    const lawnAnn = estimate.results.lawn.find((row) => row.recommended).ann;
+    const lawnGiveBack = Math.max(0, Math.min(lawnAnn, 600) - lawnAnn * 0.80);
+    expect(lawnGiveBack).toBeGreaterThan(0); // fixture exercises the combined case
     expect(estimate.recurring.pestProgramFloorApplied).toBe(true);
-    expect(estimate.recurring.savings).toBe(Math.round((fullDa - pestShare) * 100) / 100);
+    expect(estimate.recurring.savings)
+      .toBe(Math.round((fullDa - pestShare - lawnGiveBack) * 100) / 100);
     expect(estimate.recurring.annualAfterDiscount)
       .toBe(Math.round((ra - estimate.recurring.savings) * 100) / 100);
 
+    // Pest floor in ISOLATION: with a lawn big enough to keep its full 20%
+    // headroom above the $600/yr lawn floor, only pest's share is given back
+    // and the other services keep their full percent.
+    const bigLawn = calculateEstimate({ ...bundle, measuredTurfSf: 12000 });
+    expect(bigLawn.error).toBeUndefined();
+    expect(bigLawn.recurring.waveGuardTier).toBe('Platinum');
+    expect(bigLawn.results.pest.pa).toBe(89);
+    const bigLawnAnn = bigLawn.results.lawn.find((row) => row.recommended).ann;
+    expect(Math.min(bigLawnAnn, 600) - bigLawnAnn * 0.80).toBeLessThanOrEqual(0); // no lawn give-back
+    const bigRa = bigLawn.recurring.annualBeforeDiscount;
+    const bigFullDa = Math.round(bigRa * 0.20 * 100) / 100;
+    expect(bigLawn.recurring.pestProgramFloorApplied).toBe(true);
+    expect(bigLawn.recurring.savings).toBe(Math.round((bigFullDa - pestShare) * 100) / 100);
+
     // Above the floor (standard 2,000 sf home) the full percent applies untouched.
-    const standard = calculateEstimate({ ...bundle, homeSqFt: 2000, shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE' });
+    const standard = calculateEstimate({ ...bundle, homeSqFt: 2000, measuredTurfSf: 12000, shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE' });
     expect(standard.error).toBeUndefined();
     expect(standard.recurring.pestProgramFloorApplied).toBe(false);
     const standardRa = standard.recurring.annualBeforeDiscount;
