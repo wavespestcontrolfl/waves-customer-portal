@@ -40,4 +40,19 @@ describe('isImplausibleTranscript', () => {
     expect(isImplausibleTranscript('x'.repeat(250), 10)).toBe(false); // 25 c/s
     expect(isImplausibleTranscript('x'.repeat(260), 10)).toBe(true);  // 26 c/s
   });
+
+  test('diarization labels are stripped before the ratio (a real short diarized call is kept)', () => {
+    // ~20s call, dense but human. Speaker labels + newlines add overhead that
+    // must NOT count toward the ratio.
+    const turns = Array.from({ length: 10 }, (_, i) =>
+      `Agent: ${'word '.repeat(4)}\nCaller: ${'reply '.repeat(4)}`).join('\n');
+    // raw length is inflated by labels/newlines; spoken content is ~human rate over 20s
+    expect(isImplausibleTranscript(turns, 20)).toBe(false);
+  });
+
+  test('a labeled hallucination is still rejected (labels do not rescue it)', () => {
+    const hallucination = Array.from({ length: 40 }, () =>
+      'Agent: Thank you for calling Waves Pest Control. This is Amanda.\nCaller: Hi Amanda, my name is...').join('\n');
+    expect(isImplausibleTranscript(hallucination, 5)).toBe(true);
+  });
 });

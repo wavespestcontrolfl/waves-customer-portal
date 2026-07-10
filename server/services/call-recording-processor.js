@@ -131,8 +131,19 @@ const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_C
 const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
 
+// Spoken-content length only: strip diarization speaker labels and collapse
+// whitespace so a valid short diarized call's formatting overhead ("Agent:",
+// "Caller:", newlines) can't push it over the ceiling. Labels first (line-
+// anchored), then whitespace-collapse.
+function spokenCharCount(transcription) {
+  return String(transcription || '')
+    .replace(/^\s*(?:agent|caller|customer|speaker\s*\d+)\s*:/gim, '')
+    .replace(/\s+/g, ' ')
+    .trim().length;
+}
+
 function isImplausibleTranscript(transcription, recordingSeconds) {
-  const chars = String(transcription || '').length;
+  const chars = spokenCharCount(transcription);
   if (chars < MIN_TRANSCRIPT_CHARS_FOR_GUARD) return false;
   // Unknown/zero duration → never reject (fail open; never drop a real transcript).
   if (!recordingSeconds || recordingSeconds <= 0) return false;
@@ -2978,7 +2989,12 @@ const CallRecordingProcessor = {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
-      if (transcription) {
+      // Plausibility gate BEFORE persisting/syncing: a hallucinated transcript
+      // must never reach the DB or the message thread (the terminal rejection
+      // block below finalizes it). recordingSeconds is hoisted here so both the
+      // gate and the rejection share one value.
+      const recordingSecondsForGate = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+      if (transcription && !isImplausibleTranscript(transcription, recordingSecondsForGate)) {
         transcriptionProvenance = {
           provider: result.provider || null,
           model: result.model || null,
@@ -3068,21 +3084,37 @@ const CallRecordingProcessor = {
     // (a re-transcribe would just hallucinate again).
     const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
     if (transcription && isImplausibleTranscript(transcription, recordingSeconds)) {
-      const cps = Math.round(transcription.length / recordingSeconds);
-      logger.warn(`[call-proc] Rejecting implausible transcript for ${maskSid(callSid)}: ${transcription.length} chars over ${recordingSeconds}s (~${cps} chars/sec) — treating as empty voicemail, no extraction`);
+      const cps = Math.round(spokenCharCount(transcription) / recordingSeconds);
+      logger.warn(`[call-proc] Rejecting implausible transcript for ${maskSid(callSid)}: ${transcription.length} chars over ${recordingSeconds}s (~${cps} spoken chars/sec) — treating as empty voicemail, no extraction`);
       let priorMeta = {};
       try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
-      await db('call_log').where({ id: call.id }).update({
-        processing_status: 'voicemail',
-        answered_by: 'voicemail',
-        call_outcome: 'voicemail',
-        transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-        transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: 'implausible_length', raw_chars: transcription.length, recording_seconds: recordingSeconds, chars_per_second: cps }),
-        ai_extraction: null,
-        processing_token: null,
-        processing_started_at: null,
-        updated_at: new Date(),
-      });
+      // Fence on processing_token like the finalization write: if a peer
+      // reclaimed the stale lock, this matches 0 rows and we bail without
+      // overwriting the peer's state. Clear disposition + enriched extraction
+      // too — a force-reprocess of a previously-stamped row (e.g. a phantom
+      // estimate_send from the hallucination) must not leave stale artifacts.
+      const rejected = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'voicemail',
+          answered_by: 'voicemail',
+          call_outcome: 'voicemail',
+          transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+          transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: 'implausible_length', raw_chars: transcription.length, recording_seconds: recordingSeconds, chars_per_second: cps }),
+          ai_extraction: null,
+          ai_extraction_enriched: null,
+          v2_extraction_status: null,
+          disposition: null,
+          review_status: null,
+          processing_token: null,
+          processing_started_at: null,
+          updated_at: new Date(),
+        });
+      if (rejected === 0) {
+        logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+      }
       await updateUnifiedVoiceMessage(
         { ...call, transcription: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' },
         { body: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' }
