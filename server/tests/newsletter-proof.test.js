@@ -1,0 +1,299 @@
+/**
+ * Newsletter proof-approval flow (GATE_NEWSLETTER_PROOF_APPROVAL).
+ *
+ * Pins the trust boundary:
+ *   1. Everything is inert with the gate off — no proofs, no approvals.
+ *   2. Only an allowlisted owner address can approve, only with an
+ *      un-negated "approved" in the freshly-typed (un-quoted) reply text.
+ *   3. Approval re-runs the manual Send button's validation gate and
+ *      claims proof_approved_at atomically before dispatching.
+ *   4. sendNewsletterProof is idempotent (proof_sent_at) and never proofs
+ *      a draft the Send button would reject.
+ */
+
+const mockSendOne = jest.fn(async () => ({ messageId: 'sg-proof-1' }));
+const mockSendCampaign = jest.fn(async () => ({ ok: true }));
+const mockValidate = jest.fn(() => ({ errors: [], warnings: [] }));
+const mockTrigger = jest.fn(async () => ({ ok: true }));
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: () => true,
+  sendOne: mockSendOne,
+  unsubscribeUrl: jest.fn((t) => `https://portal/unsub/${t}`),
+  newsletterGroupId: jest.fn(() => 28768),
+}));
+jest.mock('../services/newsletter-sender', () => ({
+  sendCampaign: mockSendCampaign,
+  resolveSegmentCustomerIds: jest.fn(async () => null),
+  buildSubscriberQuery: jest.fn(() => ({
+    count: () => ({ first: async () => ({ c: 606 }) }),
+  })),
+  loadPersonalizationContext: jest.fn(async () => new Map()),
+}));
+jest.mock('../services/newsletter-validator', () => ({
+  validateNewsletterDraft: mockValidate,
+}));
+jest.mock('../services/notification-triggers', () => ({
+  triggerNotification: mockTrigger,
+}));
+jest.mock('../services/email-template', () => ({
+  wrapNewsletter: ({ body }) => `<wrapped>${body}</wrapped>`,
+}));
+
+const db = require('../models/db');
+const {
+  parseProofToken,
+  extractTopReplyText,
+  isApprovalReply,
+  sendNewsletterProof,
+  maybeHandleProofApproval,
+  approvalSenders,
+} = require('../services/newsletter-proof');
+
+function chain(overrides = {}) {
+  const q = {};
+  ['where', 'whereRaw', 'whereNull', 'whereIn', 'select', 'orderBy', 'limit']
+    .forEach((m) => { q[m] = jest.fn(() => q); });
+  q.first = jest.fn(async () => overrides.first);
+  q.update = jest.fn(async () => (overrides.update !== undefined ? overrides.update : 1));
+  q.count = jest.fn(() => q);
+  Object.assign(q, overrides.extra || {});
+  return q;
+}
+
+const FLAGSHIP_DRAFT = {
+  id: 'send-1',
+  subject: 'Bubbles & Sea Lions',
+  status: 'draft',
+  newsletter_type: 'local-weekly-fresh-events',
+  html_body: '<p>events</p>',
+  text_body: 'events',
+  segment_filter: null,
+  from_email: 'newsletter@wavespestcontrol.com',
+  from_name: 'Waves',
+  proof_token: 'ab12cd34',
+  proof_sent_at: null,
+  proof_approved_at: null,
+};
+
+function wireDb({ sends, subscribers } = {}) {
+  const sendsChain = chain(sends || {});
+  const subsChain = chain(subscribers || { first: undefined });
+  db.mockImplementation((table) => (table === 'newsletter_sends' ? sendsChain : subsChain));
+  return { sendsChain, subsChain };
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
+  delete process.env.NEWSLETTER_PROOF_APPROVERS;
+  delete process.env.NEWSLETTER_PROOF_EMAIL;
+  mockValidate.mockReturnValue({ errors: [], warnings: [] });
+});
+
+afterAll(() => {
+  delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
+});
+
+describe('parseProofToken', () => {
+  test('extracts and lowercases the token, including on replies', () => {
+    expect(parseProofToken('[PROOF-ab12cd34] Hello')).toBe('ab12cd34');
+    expect(parseProofToken('Re: [PROOF-AB12CD34] Hello')).toBe('ab12cd34');
+    expect(parseProofToken('Fwd: re: [proof-ab12cd34] x')).toBe('ab12cd34');
+  });
+  test('returns null when absent or malformed', () => {
+    expect(parseProofToken('Weekly newsletter')).toBeNull();
+    expect(parseProofToken('[PROOF-xyz] nope')).toBeNull();
+    expect(parseProofToken(undefined)).toBeNull();
+  });
+});
+
+describe('extractTopReplyText', () => {
+  test('keeps typed text, drops quoted lines and everything below the separator', () => {
+    const body = [
+      'approved',
+      '',
+      'On Thu, Jul 9, 2026 at 8:00 PM Waves <newsletter@wavespestcontrol.com> wrote:',
+      '> Reply APPROVED to this email',
+      '> and it goes out',
+    ].join('\n');
+    expect(extractTopReplyText(body)).toBe('approved');
+  });
+  test('quoted "APPROVED" from the proof banner alone is not typed text', () => {
+    const body = ['> Reply APPROVED to this email and it goes out'].join('\n');
+    expect(extractTopReplyText(body)).toBe('');
+  });
+  test('stops at From:-style forwards', () => {
+    const body = ['looks wrong', 'From: someone', 'approved'].join('\n');
+    expect(extractTopReplyText(body)).toBe('looks wrong');
+  });
+});
+
+describe('isApprovalReply', () => {
+  test.each(['approved', 'Approved!', 'APPROVED 🚀', 'approve', 'yes — approved'])(
+    'accepts %j', (t) => expect(isApprovalReply(t)).toBe(true),
+  );
+  test.each([
+    'not approved', "don't approve", 'do not approve yet', 'never approve this',
+    'hold off on approving', 'wait to approve', 'no, do not approve',
+    'looks good', 'send it', '', undefined,
+  ])('rejects %j', (t) => expect(isApprovalReply(t)).toBe(false));
+});
+
+describe('approvalSenders', () => {
+  test('defaults to the owner inbox and honors the env override', () => {
+    expect(approvalSenders()).toEqual(['contact@wavespestcontrol.com']);
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'A@x.com, b@y.com';
+    expect(approvalSenders()).toEqual(['a@x.com', 'b@y.com']);
+  });
+});
+
+describe('sendNewsletterProof', () => {
+  test('inert when the gate is off', async () => {
+    process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'false';
+    wireDb();
+    const r = await sendNewsletterProof('send-1');
+    expect(r).toEqual({ skipped: true, reason: 'gate_off' });
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('idempotent — already-proofed draft is skipped', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_sent_at: new Date() } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('proof_already_sent');
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('non-draft statuses are skipped', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, status: 'sent' } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('status_sent');
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('validation failure blocks the proof and notifies instead', async () => {
+    mockValidate.mockReturnValue({ errors: ['hallucinated claim'], warnings: [] });
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('validation_failed');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: ['hallucinated claim'],
+    }));
+  });
+
+  test('happy path: proofs to the owner inbox with token subject + banner, stamps proof state', async () => {
+    const { sendsChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.sent).toBe(true);
+    expect(r.token).toMatch(/^[0-9a-f]{8}$/);
+    expect(mockSendOne).toHaveBeenCalledTimes(1);
+    const args = mockSendOne.mock.calls[0][0];
+    expect(args.to).toBe('contact@wavespestcontrol.com');
+    expect(args.subject).toBe(`[PROOF-${r.token}] Bubbles & Sea Lions`);
+    // Reply must come back to the synced inbox the approval handler watches
+    expect(args.replyTo).toBe('contact@wavespestcontrol.com');
+    expect(args.html).toContain('Reply <strong>APPROVED</strong>');
+    expect(args.html).toContain('606');
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      proof_token: r.token,
+      proof_sent_at: expect.any(Date),
+    }));
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_sent', expect.objectContaining({
+      recipientCount: 606,
+    }));
+  });
+});
+
+describe('maybeHandleProofApproval', () => {
+  const APPROVAL_EMAIL = {
+    id: 'email-1',
+    subject: 'Re: [PROOF-ab12cd34] Bubbles & Sea Lions',
+    from_address: 'contact@wavespestcontrol.com',
+    body_text: 'approved\n\nOn Thu wrote:\n> Reply APPROVED to this email',
+  };
+
+  test('inert when the gate is off', async () => {
+    process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'false';
+    wireDb();
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(false);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('not ours: subject without a proof token', async () => {
+    wireDb();
+    expect(await maybeHandleProofApproval({ ...APPROVAL_EMAIL, subject: 'Re: invoice' })).toBe(false);
+  });
+
+  test('non-allowlisted sender cannot approve', async () => {
+    wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    const r = await maybeHandleProofApproval({ ...APPROVAL_EMAIL, from_address: 'attacker@evil.com' });
+    expect(r).toBe(false);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('reply that does not say approved leaves the draft untouched', async () => {
+    const { sendsChain } = wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    const r = await maybeHandleProofApproval({ ...APPROVAL_EMAIL, body_text: 'hold off, fix the second event' });
+    expect(r).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('quoted APPROVED from the banner alone does not approve', async () => {
+    wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    const r = await maybeHandleProofApproval({
+      ...APPROVAL_EMAIL,
+      body_text: '> Reply APPROVED to this email and it goes out to 606 subscribers.',
+    });
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('duplicate approval reply is a no-op', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_approved_at: new Date() } } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('already-sent campaign cannot be re-approved', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, status: 'sent' } } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('validation failure at approval time blocks the send and notifies', async () => {
+    mockValidate.mockReturnValue({ errors: ['claim gate'], warnings: [] });
+    wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything());
+  });
+
+  test('lost the atomic approval claim → no dispatch', async () => {
+    wireDb({ sends: { first: FLAGSHIP_DRAFT, update: 0 } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('happy path: owner replies approved → claim + dispatch + notification', async () => {
+    const { sendsChain } = wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approved_at');
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      proof_approved_at: expect.any(Date),
+      proof_approval_email_id: 'email-1',
+    }));
+    expect(mockSendCampaign).toHaveBeenCalledWith('send-1');
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_approved', expect.objectContaining({
+      approvedBy: 'contact@wavespestcontrol.com',
+      recipientCount: 606,
+    }));
+  });
+});
