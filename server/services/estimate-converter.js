@@ -2050,6 +2050,7 @@ const EstimateConverter = {
     // Commercial recurring follow-ups aren't auto-scheduled yet — surface it so
     // the team sets up the schedule manually (fire-and-forget; never blocks the
     // accept). Only the initial visit was scheduled above.
+    let commercialScheduleNotification = null;
     if (hasCommercialRecurring && !suppressRecurringConversion) {
       // skipAutoSchedule (manual Mark Won) schedules NOTHING; the normal path
       // schedules only the initial visit. Reflect what actually happened so
@@ -2059,16 +2060,30 @@ const EstimateConverter = {
         ? 'No visits were auto-scheduled — set up the full commercial visit schedule (including the first visit) manually.'
         : 'Initial visit scheduled — set up the remaining recurring commercial visits manually.';
       logger.warn(`[estimate-converter] Commercial recurring estimate ${estimateId} (customer ${customerId}) accepted — ${scheduleNote} (commercial cadence auto-scheduling not yet supported).`);
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          'estimate_converted',
-          `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
-          `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
-          { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } }
-        ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+      const notificationPayload = {
+        type: 'estimate_converted',
+        title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
+        body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
+        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } },
+      };
+      if (opts.deferCommercialScheduleNotification === true) {
+        // In-transaction callers (public accept, manual Mark Won) dispatch this
+        // post-commit from the returned payload — notifyAdmin writes through the
+        // GLOBAL pool, so firing it here would alert staff about a commercial
+        // schedule even when the outer transaction rolls the acceptance back.
+        commercialScheduleNotification = notificationPayload;
+      } else {
+        try {
+          const NotificationService = require('./notification-service');
+          void NotificationService.notifyAdmin(
+            notificationPayload.type,
+            notificationPayload.title,
+            notificationPayload.body,
+            notificationPayload.options
+          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+        }
       }
     }
 
@@ -2125,6 +2140,10 @@ const EstimateConverter = {
       // non-member 'none'/'Commercial' tier).
       membershipEmail: commercialOnlyRecurring ? null : membershipEmail,
       welcomeSms,
+      // Non-null ONLY when opts.deferCommercialScheduleNotification asked for
+      // it (dispatched inline otherwise) — so callers can dispatch whatever
+      // comes back without double-send risk.
+      commercialScheduleNotification,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,

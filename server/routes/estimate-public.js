@@ -13,6 +13,7 @@ const { etDateString, formatETDate } = require('../utils/datetime-et');
 const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -884,6 +885,11 @@ function recurringInvoiceServiceLabel(rows = []) {
     .filter(Boolean);
   return labels.length ? labels.join(' + ') : 'Pest Control';
 }
+
+// Mirrors estimate-converter's (unexported) WAVEGUARD_SETUP_FEE. The standard
+// accept's setup line — minted inside the accept transaction below — must bill
+// the exact figure the converter bills on every other conversion path.
+const WAVEGUARD_SETUP_FEE = 99;
 
 function buildEstimateInvoiceModeDraft({
   estimate = {},
@@ -6954,7 +6960,32 @@ router.put('/:token/accept', async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
-    if (estimate.status === 'accepted') return res.json({ success: true, alreadyAccepted: true });
+    if (estimate.status === 'accepted') {
+      // An archived accepted estimate is no longer customer-viewable (the
+      // /:token/data gate rejects archived_at outright), so never rebuild
+      // invoice amounts or the bearer /pay link for it — return the same
+      // 409 the active gate below hands every other archived estimate.
+      // Pre-payload-rebuild this token got only the bare
+      // { success, alreadyAccepted } shape; blocking outright is strictly
+      // tighter and consistent with the rest of the route.
+      if (!isEstimateCustomerViewable(estimate)) {
+        return res.status(409).json({ error: 'Estimate is no longer active' });
+      }
+      // Retry of an already-accepted estimate (e.g. the first response was
+      // lost in transit): rebuild the FULL success payload from persisted
+      // state so the customer still sees their real next step (pay link /
+      // booking link / site-confirmation copy) instead of generic confirmed
+      // copy that hides it. Read-only — no side effects re-run here (no
+      // conversion, no invoice mint, no sends). Best-effort: a rebuild
+      // failure degrades to the legacy bare payload rather than blocking
+      // the retry.
+      try {
+        return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
+      } catch (e) {
+        logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
+        return res.json({ success: true, alreadyAccepted: true });
+      }
+    }
     if (!isEstimateAcceptActive(estimate)) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
@@ -7124,6 +7155,27 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+
+    // Fail closed (booking-audit P1): an accept that must bind a booked
+    // appointment (slot / existing appointment) or convert a recurring
+    // program needs a customer record, and accept-time customer creation is
+    // phone-keyed — email-based creation is intentionally NOT built here
+    // (the customer-dedupe lane owns customer identity). Without a linked
+    // customer or a phone, the transaction below would commit acceptance
+    // while silently skipping reservation binding and conversion, telling
+    // the customer "confirmed" with nothing booked or converted. Reject
+    // BEFORE any money/state commits — mirrors the invoice-mode 400 above
+    // and the card-hold in-transaction fail-closed (which names this exact
+    // email-only case). A phoneless ONE-TIME accept with no appointment to
+    // bind still succeeds: it needs no customer record (the response carries
+    // the self-serve booking link).
+    if (!estimate.customer_id && !estimate.customer_phone
+      && (!treatAsOneTime || slotId || existingAppointmentId)) {
+      return res.status(400).json({
+        error: 'We could not complete this booking online — please call the Waves office and we’ll finish setting up your service right away.',
+        code: 'CUSTOMER_CONTACT_REQUIRED',
+      });
+    }
 
     // A NARROW low-confidence commercial RECURRING estimate accepts online
     // (self-serve), but its exact price is confirmed on site — so NO money moves
@@ -7564,8 +7616,12 @@ router.put('/:token/accept', async (req, res, next) => {
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
     // Customer-facing sends and notifications fire AFTER the commit below.
-    // Annual-prepay conversion is intentionally inside the transaction so the
-    // accepted state cannot commit without its prepay invoice + term.
+    // BOTH conversions are intentionally inside the transaction: annual
+    // prepay so the accepted state cannot commit without its prepay invoice
+    // + term, and standard recurring so a conversion failure rolls the
+    // acceptance back (a committed accepted-but-unconverted estimate is
+    // unrecoverable — retries short-circuit on status='accepted' and no
+    // sweep re-runs conversion).
     const txResult = await db.transaction(async (trx) => {
       const acceptedUpdates = {
         status: 'accepted',
@@ -8012,6 +8068,7 @@ router.put('/:token/accept', async (req, res, next) => {
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
           deferFollowUpReminderRegistration: true,
+          deferCommercialScheduleNotification: true,
         });
         if (!annualPrepayConversionResult?.draftInvoiceId) {
           throw new Error('Annual prepay invoice was not created');
@@ -8022,6 +8079,151 @@ router.put('/:token/accept', async (req, res, next) => {
         invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
         invoiceServiceLabelResult = 'Annual prepay';
         invoiceKindResult = 'annual_prepay';
+      }
+
+      // Standard recurring conversion (Feature #5) — INSIDE the transaction
+      // (accept-atomicity P1), mirroring the annual-prepay call above and
+      // estimate-manual-acceptance: a conversion failure rolls the whole
+      // acceptance back (the customer gets a retryable error) instead of
+      // committing an accepted-but-unconverted estimate. Skipped entirely
+      // for one-time bookings — the converter creates recurring
+      // scheduled_services rows + upgrades the customer's WaveGuard tier +
+      // marks them active_customer, none of which applies to a single-visit
+      // booking. All comms are deferred post-commit: membership email,
+      // welcome SMS, follow-up reminder registration, invoice delivery, and
+      // the commercial-schedule admin notification.
+      let standardConversionResult = null;
+      let standardInvoiceMinted = false;
+      if (customerId && !treatAsOneTime && !annualPrepaySelected) {
+        const EstimateConverter = require('../services/estimate-converter');
+        standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
+          database: trx,
+          billingTerm,
+          // The converter's own STANDARD draft-invoice branch runs on the
+          // GLOBAL pool (its internal db.transaction + ledger reads), which
+          // cannot see this transaction's uncommitted customer/appointment
+          // rows — so the setup/first-application invoice is minted below on
+          // this trx instead. Invoice-mode already minted its invoice above;
+          // commercial bills manually (owner directive) — both skip below
+          // exactly as they skipped the converter's invoice before.
+          skipSetupInvoice: true,
+          // Commercial schedules + invoices manually (owner directive): never
+          // auto-schedule a wrong-length visit. A narrow low-confidence
+          // commercial estimate is held for on-site price confirmation and is
+          // handled the same way (hold implies commercial, but fold it in
+          // explicitly so the invariant can't depend on the detector shape).
+          skipAutoSchedule: isCommercialAccept || holdFirstInvoiceForSiteConfirmation,
+          autoSendInvoice: false,
+          skipMembershipEmail: true,
+          deferFollowUpReminderRegistration: true,
+          deferCommercialScheduleNotification: true,
+        });
+        // Mint the standard setup/first-application invoice on THIS
+        // transaction — the same invoice the converter's standard branch
+        // builds (same gates, line items, title, notes, deposit credit),
+        // relocated here only because the converter's version runs on the
+        // global pool. Same skip set as the old post-commit converter call:
+        // invoice-mode minted above; commercial + site-confirmation holds
+        // invoice manually after on-site confirmation.
+        if (!billByInvoice && !isCommercialAccept && !holdFirstInvoiceForSiteConfirmation
+          && standardConversionResult?.recurringConversionSkipped !== true) {
+          const conversionEstData = acceptedEstimateForScheduling.estimate_data || {};
+          const conversionRecurringServices = EstimateConverter.recurringServicesFromEstimateData(conversionEstData);
+          const setupFeeApplies = EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+            recurringServices: conversionRecurringServices,
+            estimateData: conversionEstData,
+          });
+          // allowFallback:false matches the allowFirstApplicationFallback the
+          // old converter call passed — an explicit amount or nothing.
+          const standardFirstApplicationAmount = EstimateConverter.resolveFirstApplicationAmount({
+            firstApplicationAmount: firstApplicationInvoiceAmount,
+            allowFallback: false,
+          });
+          const includesFirstApplicationLine = standardFirstApplicationAmount > 0;
+          const shouldCreateStandardDraftInvoice = EstimateConverter.shouldCreateDraftInvoiceForRecurring({
+            billingTerm,
+            recurringServices: conversionRecurringServices,
+          });
+          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine)) {
+            const InvoiceService = require('../services/invoice');
+            const lineItems = [];
+            if (setupFeeApplies) {
+              lineItems.push({
+                description: 'WaveGuard Membership — one-time setup fee',
+                quantity: 1,
+                unit_price: WAVEGUARD_SETUP_FEE,
+              });
+            }
+            if (includesFirstApplicationLine) {
+              lineItems.push({
+                description: 'First service application',
+                quantity: 1,
+                unit_price: standardFirstApplicationAmount,
+              });
+            }
+            const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
+              ? 'WaveGuard Membership Setup + First Application'
+              : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
+            const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99 setup fee plus first application.`
+              : (setupFeeApplies
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99 setup fee only.`
+                : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
+            const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
+              firstApplicationAmount: standardFirstApplicationAmount,
+              firstScheduledServiceId: standardConversionResult.firstScheduledServiceId,
+            }) ? standardConversionResult.firstScheduledServiceId : undefined;
+            // Acceptance deposit credits this first invoice — same trx-shared
+            // ledger read + consume as the invoice-mode mint above: the credit
+            // line exists IFF the ledger consumed exactly that amount, or the
+            // whole accept rolls back. A clean read failure degrades to "no
+            // credit" (the deposit stays received on the ledger and rolls
+            // forward), never to an unbacked discount.
+            const { pendingDepositCredit: pendingStandardDepositCredit, consumeDepositCredit: consumeStandardDepositCredit } = require('../services/estimate-deposits');
+            const standardDepositCredit = await pendingStandardDepositCredit(estimate.id, trx).catch(() => null);
+            const requestedStandardDepositCredit = standardDepositCredit ? Number(standardDepositCredit.amount) : 0;
+            const inv = await InvoiceService.create({
+              database: trx,
+              customerId,
+              ...(attachScheduledServiceId ? { scheduledServiceId: attachScheduledServiceId } : {}),
+              title: invoiceTitle,
+              lineItems,
+              notes: invoiceNotes,
+              dueDate: etDateString(),
+              ...(requestedStandardDepositCredit > 0
+                ? { depositCredit: { amount: requestedStandardDepositCredit, estimateId: estimate.id } }
+                : {}),
+            });
+            if (!inv?.id) {
+              throw new Error('Standard acceptance could not create the setup/first-application invoice');
+            }
+            const appliedStandardDepositCredit = Number(inv.applied_deposit_credit) || 0;
+            if (appliedStandardDepositCredit > 0) {
+              const allocatedStandardDepositCredit = await consumeStandardDepositCredit({
+                estimateId: estimate.id,
+                amount: appliedStandardDepositCredit,
+                invoiceId: inv.id,
+                trx,
+              });
+              if (Math.round(allocatedStandardDepositCredit * 100) !== Math.round(appliedStandardDepositCredit * 100)) {
+                // The ledger could not back the discount (a refund landed
+                // mid-accept) — roll the whole acceptance back rather than
+                // leave a discounted invoice beside an unconsumed deposit.
+                throw new Error(`deposit allocation mismatch on standard accept for estimate ${estimate.id} — acceptance rolled back`);
+              }
+              if (appliedStandardDepositCredit < requestedStandardDepositCredit) {
+                logger.warn(`[estimate-public] deposit partially applied to standard accept for estimate ${estimate.id} — remainder stays on the ledger`);
+              }
+            }
+            standardInvoiceMinted = true;
+            invoiceModeResult = true;
+            invoiceIdResult = inv.id;
+            // The customer-facing amount is the invoice's actual after-tax,
+            // after-credit total — the same figure the /pay page collects.
+            invoiceAmountResult = Number(inv.total) || 0;
+            invoicePayUrlResult = inv.token ? `/pay/${inv.token}` : null;
+          }
+        }
       }
 
       return {
@@ -8035,6 +8237,8 @@ router.put('/:token/accept', async (req, res, next) => {
         invoiceServiceLabel: invoiceServiceLabelResult,
         invoiceKind: invoiceKindResult,
         annualPrepayConversion: annualPrepayConversionResult,
+        standardConversion: standardConversionResult,
+        standardInvoiceMinted,
       };
     });
 
@@ -8056,6 +8260,12 @@ router.put('/:token/accept', async (req, res, next) => {
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
+    const standardConversion = txResult.standardConversion || null;
+    const standardInvoiceMinted = txResult.standardInvoiceMinted === true;
+    // Whichever conversion ran (annual prepay XOR standard recurring) carries
+    // the deferred post-commit side effects: welcome SMS + follow-up reminder
+    // rows the converter couldn't fire against uncommitted rows.
+    const acceptConversion = annualPrepayConversion || standardConversion;
     // Customer-facing prepay figure for SMS/notifications/success payload: the
     // ACTUAL invoice total — net of the acceptance-deposit credit the converter
     // applied — so every quoted amount matches what the pay link collects.
@@ -8065,11 +8275,15 @@ router.put('/:token/accept', async (req, res, next) => {
       ? invoiceAmount
       : annualPrepayDisplayAmount;
     let acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
-    if (annualPrepaySelected && acceptedAppointmentsToRegister.length) {
+    // Either in-transaction conversion may have rewritten the committed
+    // reservation rows (combined-service relabel, service_id, duration,
+    // price) — re-read them so reminders/automations register against the
+    // converted rows, not the pre-conversion snapshots.
+    if (acceptConversion && acceptedAppointmentsToRegister.length) {
       const appointmentIds = acceptedAppointmentsToRegister.map((appt) => appt?.id).filter(Boolean);
       const refreshedRows = appointmentIds.length
         ? await db('scheduled_services').whereIn('id', appointmentIds).select('*').catch((e) => {
-            logger.warn(`[estimate-accept] Appointment refresh after annual prepay conversion failed: ${e.message}`);
+            logger.warn(`[estimate-accept] Appointment refresh after conversion failed: ${e.message}`);
             return [];
           })
         : [];
@@ -8097,8 +8311,8 @@ router.put('/:token/accept', async (req, res, next) => {
       void AppointmentTagger.onServiceScheduled(appointment.id)
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
-    const deferredFollowUpReminderRows = Array.isArray(annualPrepayConversion?.deferredFollowUpReminderRows)
-      ? annualPrepayConversion.deferredFollowUpReminderRows
+    const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
+      ? acceptConversion.deferredFollowUpReminderRows
       : [];
     for (const appointment of deferredFollowUpReminderRows) {
       try {
@@ -8111,13 +8325,46 @@ router.put('/:token/accept', async (req, res, next) => {
         logger.error(`[estimate-accept] Follow-up reminder registration failed for ${appointment.id}: ${e.message}`);
       }
     }
-    // Annual-prepay conversion runs inside the accept transaction, so the
-    // converter defers the new-recurring welcome SMS rather than send it
-    // against uncommitted customer rows. Fire it here, post-commit.
-    if (annualPrepayConversion?.welcomeSms) {
+    // Conversion (annual prepay AND standard recurring) runs inside the
+    // accept transaction, so the converter defers the new-recurring welcome
+    // SMS rather than send it against uncommitted customer rows. Fire it
+    // here, post-commit.
+    if (acceptConversion?.welcomeSms) {
       const { sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
-      void sendNewRecurringWelcome(annualPrepayConversion.welcomeSms)
+      void sendNewRecurringWelcome(acceptConversion.welcomeSms)
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
+    }
+    // The converter deferred the commercial-schedule admin notification
+    // (deferCommercialScheduleNotification) so a rolled-back accept can't page
+    // staff about an unaccepted estimate. Dispatch it here, post-commit,
+    // fire-and-forget.
+    if (acceptConversion?.commercialScheduleNotification) {
+      const commercialNotify = acceptConversion.commercialScheduleNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          commercialNotify.type,
+          commercialNotify.title,
+          commercialNotify.body,
+          commercialNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] commercial-schedule admin notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] commercial-schedule admin notify setup failed: ${e.message}`);
+      }
+    }
+    // The standard conversion runs in-transaction with skipMembershipEmail,
+    // so the membership.started email fires here post-commit (mirrors
+    // estimate-manual-acceptance). Annual prepay intentionally sends none —
+    // same as this route's pre-atomicity behavior and manual accepts. A
+    // SKIPPED conversion (converter found nothing to convert) may still
+    // return a membershipEmail payload — no membership started, so send
+    // nothing for it.
+    if (!annualPrepaySelected
+      && standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true) {
+      const AccountMembershipEmail = require('../services/account-membership-email');
+      void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
+        .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
     }
     // "You're booked — here's what happens next" onboarding email
     // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
@@ -8177,7 +8424,14 @@ router.put('/:token/accept', async (req, res, next) => {
     const confirmedAppointmentRow = reservationRow || (existingAppointmentId ? existingAppointmentRow : null);
     if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
       oneTimeBookingService = bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
-      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept`;
+      // estimate_id carries the estimate correlation into the /book flow so
+      // the resulting scheduled_services row gets source_estimate_id stamped —
+      // without it a booking completed through this link is invisible to the
+      // already-accepted retry rebuild, which would keep answering
+      // book_one_time and enable duplicate appointments. Identity/pricing are
+      // unaffected: /book treats a bare estimate_id (no estimate_token HMAC)
+      // as correlation only.
+      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept&estimate_id=${estimate.id}`;
       bookingUrl = await shortenOrPassthrough(longBookingUrl, {
         kind: 'booking',
         entityType: 'estimates',
@@ -8328,7 +8582,11 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
-    if (invoiceId && (billByInvoice || annualPrepaySelected)) {
+    // Post-commit invoice delivery for every accept-minted invoice —
+    // invoice-mode, annual prepay, and the standard conversion's setup/
+    // first-application invoice (which the converter used to auto-send;
+    // it is now minted in-transaction with delivery deferred here).
+    if (invoiceId && (billByInvoice || annualPrepaySelected || standardInvoiceMinted)) {
       try {
         const InvoiceService = require('../services/invoice');
         const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
@@ -8350,59 +8608,17 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (deliveryErr) {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
-      logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+      logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
     }
 
-    // Auto-convert estimate to active customer (Feature #5). Skip entirely
-    // when this is a one-time booking — EstimateConverter creates recurring
-    // scheduled_services rows + upgrades the customer's WaveGuard tier +
-    // marks them active_customer. None of that applies for a single-visit
-    // one-time booking. Reservation row (if any) already holds the slot.
-    if (customerId && !treatAsOneTime && !annualPrepaySelected) {
-      try {
-        const EstimateConverter = require('../services/estimate-converter');
-        // In invoice-mode we generated the invoice inside the accept
-        // transaction. Suppress converter setup/prepay invoices to avoid
-        // duplicates.
-        const conversion = await EstimateConverter.convertEstimate(estimate.id, {
-          billingTerm,
-          // Commercial schedules + invoices manually (owner directive): never
-          // auto-schedule a wrong-length visit and never auto-create/send an
-          // invoice before the on-site scope confirmation.
-          skipSetupInvoice: billByInvoice || isCommercialAccept,
-          // A narrow low-confidence commercial estimate is held for on-site price
-          // confirmation, so it bills manually just like any commercial accept —
-          // never auto-schedule or auto-create/send an invoice here either. (Hold
-          // implies commercial, but fold it in explicitly so the no-invoice
-          // invariant can't depend on the isCommercialAccept detector shape.)
-          skipAutoSchedule: isCommercialAccept || holdFirstInvoiceForSiteConfirmation,
-          prepayInvoiceAmount: annualPrepayInvoiceAmount,
-          // Commercial (standard) bills manually — create NO auto first-
-          // application invoice (which would also mis-tax a mixed plan); the team
-          // invoices after on-site confirmation. The commercial customer is
-          // marked property_type='commercial' by the converter so that manual
-          // invoice taxes the taxable services (pest) correctly.
-          firstApplicationAmount: (isCommercialAccept || holdFirstInvoiceForSiteConfirmation) ? null : firstApplicationInvoiceAmount,
-          allowFirstApplicationFallback: false,
-          autoSendInvoice: !(isCommercialAccept || holdFirstInvoiceForSiteConfirmation),
-        });
-        if (conversion?.draftInvoiceId) {
-          invoiceMode = true;
-          invoiceId = conversion.draftInvoiceId;
-          invoiceAmount = conversion.draftInvoiceAmount || null;
-          invoicePayUrl = conversion.draftInvoicePayUrl || null;
-          invoiceLinkDelivered = !!conversion.invoiceDelivery?.ok;
-        }
-        logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
-      } catch (e) {
-        logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`);
-        if (annualPrepaySelected) {
-          return res.status(500).json({
-            error: 'Annual prepay setup could not be completed. Please contact the office so we can finish your prepay invoice.',
-            billingTerm,
-          });
-        }
-      }
+    // Auto-convert estimate to active customer (Feature #5) now runs INSIDE
+    // the accept transaction above (accept-atomicity P1) — a conversion
+    // failure rolls the acceptance back and surfaces as a retryable error
+    // instead of committing an accepted-but-unconverted estimate that no
+    // retry or sweep can ever repair. Only its deferred comms remain out
+    // here (membership email / welcome SMS / invoice delivery above).
+    if (standardConversion) {
+      logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
     } else if (customerId && treatAsOneTime) {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
@@ -10331,6 +10547,7 @@ function buildAcceptSuccessPayload({
   treatAsOneTime = false,
   reservationCommitted = false,
   siteConfirmationHold = false,
+  invoiceSettled = false,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -10338,6 +10555,13 @@ function buildAcceptSuccessPayload({
   // minted) — so it gets its own "we'll confirm on site, then invoice" outcome
   // rather than the generic "you're booked" confirmed copy.
   if (siteConfirmationHold) nextStep = 'site_confirmation';
+  // Retry rebuild of an accept whose invoice has since SETTLED (paid / prepaid /
+  // processing / refunded / canceled): nothing is owed, so no pay/prepay/booking
+  // step may surface — the plain confirmed outcome, exactly what a fresh accept
+  // returns when it mints nothing to pay. Without this override a settled
+  // prepay term (billingTerm='prepay_annual') would fall through to
+  // 'prepay_invoice' and a settled invoice-mode one-time to 'book_one_time'.
+  else if (invoiceSettled) nextStep = 'confirmed';
   // Third-party Bill-To: a payer-billed invoice is the payer's to pay — the
   // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
   else if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
@@ -10366,6 +10590,192 @@ function buildAcceptSuccessPayload({
     billingTerm,
     prepayInvoiceAmount,
     bookingUrl,
+  };
+}
+
+// Rebuilds the full accept success payload for a RETRY of an already-accepted
+// estimate (PUT /accept on status='accepted') from persisted state, so a
+// customer whose first response was lost still sees their real next step —
+// the bare { success, alreadyAccepted } shape defaulted the client to
+// generic "confirmed" copy that hid a required pay/booking step. Read-only:
+// no conversion, no invoice mint, no sends. Some accept-time inputs are not
+// persisted and are reconstructed as follows:
+// - invoice: the annual-prepay term's linked invoice (the term row is unique
+//   per source estimate), else the newest non-void invoice carrying the
+//   "Auto-generated from accepted estimate #<id>" notes stamp every
+//   accept-time mint writes — invoices have no estimate_id column, so the
+//   notes prefix is the only deterministic linkage. Voided invoices are
+//   skipped (their pay link is dead; the office re-bills manually); settled
+//   invoices (paid/prepaid/processing/refunded/canceled per
+//   isInvoiceCollectibleStatus) surface the confirmed outcome, never a /pay
+//   link.
+// - invoiceLinkDelivered: whether the invoice was ever sent (sent_at /
+//   sms_sent_at), not specifically at accept time.
+// - invoiceServiceLabel: the invoice title (closest durable analogue of the
+//   accept-time label; informational-only in this payload).
+// - invoiceKind for a standard conversion invoice: null, exactly as the
+//   first-time response reported it.
+async function buildAlreadyAcceptedSuccessPayload(estimate) {
+  const rawEstData = parseEstimateDataSafe(estimate) || {};
+  const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+  // The resolved service mode was persisted at accept; legacy accepts predate
+  // the column, so fall back to the structural detection the accept used.
+  const treatAsOneTime = estimate.accepted_service_mode
+    ? estimate.accepted_service_mode === 'one_time'
+    : isStructuralOneTimeOnlyEstimate(estData, estimate);
+  const billByInvoice = resolveEstimateInvoiceMode(estimate);
+  // Same derivation the accept ran — deterministic from estimate_data.
+  const lowConfidenceAccept = commercialLowConfidenceRange(estData);
+  const siteConfirmationHold = !treatAsOneTime
+    && lowConfidenceAccept.hasLowConfidence
+    && !lowConfidenceAccept.forceSiteQuote;
+
+  const prepayTerm = await db('annual_prepay_terms')
+    .where({ source_estimate_id: estimate.id })
+    .orderBy('created_at', 'desc')
+    .first();
+  const billingTerm = prepayTerm ? 'prepay_annual' : 'standard';
+
+  // Invoice reconstruction is SETTLED-aware (audit P1): 'void' still means a
+  // dead pay link the office re-bills manually (skip / fall through), but any
+  // other non-collectible status per the canonical isInvoiceCollectibleStatus
+  // helper (paid / prepaid / processing / refunded / canceled) means the
+  // customer already settled — the retry must return the confirmed outcome,
+  // never a live /pay link for money that isn't owed.
+  let invoice = null;
+  if (prepayTerm?.prepay_invoice_id) {
+    const prepayInvoice = await db('invoices')
+      .where({ id: prepayTerm.prepay_invoice_id })
+      .first();
+    // A voided prepay invoice's pay link is dead — fall through to the current
+    // live accept-mint invoice (if any) rather than hand the customer a dead
+    // /pay token. Every other status — collectible or settled — is
+    // authoritative for the prepay term.
+    if (prepayInvoice && String(prepayInvoice.status || '').trim().toLowerCase() !== 'void') {
+      invoice = prepayInvoice;
+    }
+  }
+  if (!invoice) {
+    const stampedInvoices = await db('invoices')
+      .where('notes', 'like', `Auto-generated from accepted estimate #${estimate.id}%`)
+      .whereNot('status', 'void')
+      .orderBy('created_at', 'desc');
+    // Prefer the newest still-collectible invoice (it carries the live pay
+    // step — e.g. a settled first mint later re-billed); otherwise the newest
+    // settled one drives the confirmed outcome below.
+    invoice = stampedInvoices.find((row) => isInvoiceCollectibleStatus(row.status))
+      || stampedInvoices[0]
+      || null;
+  }
+  const invoiceSettled = !!invoice && !isInvoiceCollectibleStatus(invoice.status);
+
+  // A booking bound to this estimate (committed reservation, linked existing
+  // appointment, or the converter's auto-scheduled first visit) — enough to
+  // know the customer does NOT need the one-time booking link again.
+  const committedAppointment = await db('scheduled_services')
+    .where({ source_estimate_id: estimate.id })
+    .whereNotNull('customer_id')
+    .whereNull('reservation_expires_at')
+    .orderBy('scheduled_date', 'asc')
+    .first('id');
+  const reservationCommitted = !!committedAppointment;
+
+  // One-time accepts that never booked get the self-serve booking link again.
+  // The service label is derived exactly as the fresh accept derives it —
+  // buildOneTimeInvoiceServiceLabel skips discount/setup/non-billable rows and
+  // honors label/service fields — so a lawn estimate whose FIRST row is a
+  // discount line still routes to the lawn funnel instead of
+  // bookingServiceFor('')'s pest-control default.
+  let bookingUrl = null;
+  if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
+    const { oneTimeList } = acceptanceServiceLists(estData);
+    const retryServiceLabel = buildOneTimeInvoiceServiceLabel({
+      estimate,
+      estData,
+      pricingBundle: null,
+      oneTimeList,
+    });
+    const bookingSvc = bookingServiceFor(retryServiceLabel || oneTimeList?.[0]?.name || '');
+    // estimate_id carries the estimate correlation into the /book flow so the
+    // resulting scheduled_services row gets source_estimate_id stamped — the
+    // exact field the committedAppointment probe above keys on. Without it a
+    // booking completed through THIS link is invisible to later retries,
+    // which keep answering book_one_time and enable duplicate appointments.
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept&estimate_id=${estimate.id}`;
+    // Read-only retry contract: never stack another permanent short_codes row
+    // per retry. Reuse the code already minted for exactly this target URL
+    // (the fresh accept's, or the first retry's); mint at most once otherwise.
+    const existingShortCode = await db('short_codes')
+      .where({
+        entity_type: 'estimates',
+        entity_id: estimate.id,
+        purpose: 'estimate_accept_booking',
+        target_url: longBookingUrl,
+      })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (existingShortCode?.code
+      && (!existingShortCode.expires_at || new Date(existingShortCode.expires_at).getTime() > Date.now())) {
+      // Same base-URL fallback chain as short-url.js's baseUrl() — historical
+      // codes keep resolving through /l/:code regardless of which env named
+      // the host.
+      const shortLinkBase = process.env.SHORTLINK_BASE_URL
+        || process.env.PUBLIC_PORTAL_URL
+        || 'https://portal.wavespestcontrol.com';
+      bookingUrl = `${shortLinkBase}/l/${existingShortCode.code}`;
+    } else {
+      bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+        kind: 'booking',
+        entityType: 'estimates',
+        entityId: estimate.id,
+        customerId: estimate.customer_id || null,
+        // 'web', NOT 'sms': this retry link is rendered on-screen only (no
+        // re-send), and the click-followup queue chases channel='sms' links —
+        // an sms tag here would pollute that lane with a link no text carried.
+        channel: 'web',
+        purpose: 'estimate_accept_booking',
+      });
+    }
+  }
+
+  const payerBilled = !!invoice?.payer_id;
+  const invoiceAmount = invoice ? (Number(invoice.total) || 0) : null;
+  // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
+  // for a settled invoice (nothing is owed).
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && invoice.token
+    ? `/pay/${invoice.token}`
+    : null;
+  const invoiceNotes = String(invoice?.notes || '');
+  const invoiceKind = prepayTerm
+    ? 'annual_prepay'
+    : invoiceNotes.includes('(invoice-mode one-time)')
+      ? 'one_time'
+      : invoiceNotes.includes('(invoice-mode recurring)')
+        ? 'recurring_first_visit'
+        : null;
+
+  return {
+    ...buildAcceptSuccessPayload({
+      // A settled invoice is not an open payable — invoiceMode stays false so
+      // no consumer (including the client's legacy invoiceMode fallback) can
+      // route the customer to a pay step for it.
+      invoiceMode: !!invoice && !invoiceSettled,
+      invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
+      invoiceId: invoice?.id || null,
+      invoiceAmount,
+      invoicePayUrl,
+      payerBilled,
+      invoiceKind,
+      invoiceServiceLabel: prepayTerm ? 'Annual prepay' : (invoice?.title || null),
+      billingTerm,
+      prepayInvoiceAmount: prepayTerm ? invoiceAmount : null,
+      bookingUrl,
+      treatAsOneTime,
+      reservationCommitted,
+      siteConfirmationHold,
+      invoiceSettled,
+    }),
+    alreadyAccepted: true,
   };
 }
 
@@ -14398,6 +14808,7 @@ module.exports.estimateInvoicePayUrlParams = estimateInvoicePayUrlParams;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
+module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
