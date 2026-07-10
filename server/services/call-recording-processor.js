@@ -118,6 +118,27 @@ const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2
 // Google) and six calls died unprocessed — keep this on a live model.
 const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-3.5-flash';
 
+// Transcription-hallucination guard (2026-07-10). The Gemini fallback
+// transcriber can invent a full conversation from a near-empty voicemail —
+// observed live: a 5-second recording produced 4,777 characters of a
+// fabricated "Amanda" pest-control call, which then minted a phantom
+// estimate_send lead and slipped past the spam classifier as legit content.
+// Human speech averages ~12-15 chars/sec; 25 is a hard ceiling no real
+// recording reaches, so a transcript whose length is physically impossible
+// for its recording duration is a hallucination. Applied only to transcripts
+// long enough to matter, and only when the recording duration is known.
+const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_CHARS_PER_SEC || 25);
+const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
+const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+
+function isImplausibleTranscript(transcription, recordingSeconds) {
+  const chars = String(transcription || '').length;
+  if (chars < MIN_TRANSCRIPT_CHARS_FOR_GUARD) return false;
+  // Unknown/zero duration → never reject (fail open; never drop a real transcript).
+  if (!recordingSeconds || recordingSeconds <= 0) return false;
+  return (chars / recordingSeconds) > MAX_TRANSCRIPT_CHARS_PER_SECOND;
+}
+
 // AI-extraction retry budget. A failure marks the row extraction_failed and
 // increments call_log.extraction_attempts; processAllPending re-runs it while
 // under this cap (≥10 min between attempts via the sweep's age gate), which
@@ -3039,6 +3060,36 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
+    // ── Transcription-hallucination guard ── run BEFORE the transcript is
+    // written to the message thread or handed to extraction, so a fabricated
+    // conversation never becomes a phantom lead / disposition / SMS. Recording
+    // duration (actual audio) preferred; call duration (incl. ring) is a safe
+    // looser fallback. Terminal 'voicemail' so the retry sweep won't re-run it
+    // (a re-transcribe would just hallucinate again).
+    const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+    if (transcription && isImplausibleTranscript(transcription, recordingSeconds)) {
+      const cps = Math.round(transcription.length / recordingSeconds);
+      logger.warn(`[call-proc] Rejecting implausible transcript for ${maskSid(callSid)}: ${transcription.length} chars over ${recordingSeconds}s (~${cps} chars/sec) — treating as empty voicemail, no extraction`);
+      let priorMeta = {};
+      try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
+      await db('call_log').where({ id: call.id }).update({
+        processing_status: 'voicemail',
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+        transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: 'implausible_length', raw_chars: transcription.length, recording_seconds: recordingSeconds, chars_per_second: cps }),
+        ai_extraction: null,
+        processing_token: null,
+        processing_started_at: null,
+        updated_at: new Date(),
+      });
+      await updateUnifiedVoiceMessage(
+        { ...call, transcription: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' },
+        { body: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' }
+      ).catch((e) => logger.warn(`[call-proc] unified message update skipped for ${maskSid(callSid)}: ${e.message}`));
+      return { success: true, skipped: true, reason: 'transcription_rejected_implausible' };
+    }
+
     if (transcription) {
       await updateUnifiedVoiceMessage(
         { ...call, transcription },
@@ -6192,6 +6243,7 @@ const CallRecordingProcessor = {
 };
 
 CallRecordingProcessor._test = {
+  isImplausibleTranscript,
   canonicalWavesService,
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
