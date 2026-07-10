@@ -3734,6 +3734,14 @@ export default function EstimateToolViewV2({
   // capturing the contact, address, and property specs — and jump straight
   // into the proposal builder where the operator authors the line-item quote.
   async function openProposalBuilder() {
+    // Every form/pricing/delivery-option edit clears savedId, so a non-null id
+    // is a draft that already matches the current form — reuse it. Re-saving
+    // a lead-less estimate inserts a duplicate row and leaves the earlier
+    // draft (and its customer link) dangling in the pipeline.
+    if (savedId) {
+      navigate(`/admin/estimates/${savedId}/proposal`);
+      return;
+    }
     const generated = estimate || (await doGenerate());
     if (!generated) return;
     // Defer the bill-by-invoice zero-total guard: the manual-quote commercial
