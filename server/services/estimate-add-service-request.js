@@ -408,6 +408,12 @@ async function findEstimateByTokenForUpdate(database, estimateToken) {
 
 function isEstimateAddServiceRequestable(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
+  // Accepted estimates stay requestable (owner ask 2026-07-09): the accepted
+  // page upsells add-on services, and a customer who already said yes is the
+  // warmest add-service lead there is. Acceptance froze the QUOTE — the
+  // expiry gates the quote, not the relationship, so it doesn't apply here.
+  // Declined/expired/send_failed remain blocked.
+  if (estimate.status === 'accepted') return true;
   if (INACTIVE_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;

@@ -9,6 +9,11 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import EstimateViewPage from '../pages/EstimateViewPage';
+import WavesShell from '../components/brand/WavesShell';
+// Brand tokens (--surface/--border/...) normally ride in via main.jsx —
+// without them the WavesShell top bar computes a transparent background and
+// the preview's colors drift from the real page.
+import '../styles/brand-tokens.css';
 
 const SCENARIOS = ['pest', 'preslab', 'bundle', 'lawn', 'accepted'];
 const scenario = (() => {
@@ -29,7 +34,12 @@ const CONTACT = {
 const BASE_ESTIMATE = {
   id: 1,
   token: 'preview-token',
-  slug: null,
+  // Estimate # + issued/expiration render under the hero contact block on
+  // every estimate — the harness carries real-shaped values so the block is
+  // exercised in preview.
+  slug: 'WPC-2026-0512',
+  createdAt: '2026-07-09T14:00:00.000Z',
+  expiresAt: '2026-07-16T14:00:00.000Z',
   ...CONTACT,
   askToken: 'preview-ask-token',
   category: 'RESIDENTIAL',
@@ -395,7 +405,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <MemoryRouter initialEntries={['/estimate/preview-token']}>
       <Routes>
-        <Route path="/estimate/:token" element={<EstimateViewPage />} />
+        {/* Same shell chrome as the real /estimate/:token route in App.jsx —
+            previews must show the universal header/footer (owner 2026-07-09). */}
+        <Route path="/estimate/:token" element={<WavesShell><EstimateViewPage /></WavesShell>} />
       </Routes>
     </MemoryRouter>
     <ScenarioBar />
