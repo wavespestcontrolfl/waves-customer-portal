@@ -383,9 +383,16 @@ function canAutoRoute(extraction, opts = {}) {
     // address (Barbara's case: she didn't restate it). If they DID provide an
     // address and Google Address Validation couldn't accept it (that's why the
     // flag survived suppressAddressFlagsForAV), a new/secondary/ambiguous
-    // address is NOT auto-approved — AV still governs new addresses.
+    // address is NOT auto-approved — AV still governs new addresses. ANY
+    // service-address component counts as "new address given" — a partial
+    // location (city/ZIP/unit only) that AV returns missing_component/
+    // unverified for must still stay blocked, or the booking fallback would
+    // stamp the customer's on-file primary address instead of the stated one.
     const sa = extraction.property?.service_address || {};
-    const newAddressGiven = !!String(sa.street_line_1 || sa.line1 || sa.street || '').trim();
+    const newAddressGiven = [
+      'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
+      'city', 'locality', 'state', 'region', 'postal_code', 'zip', 'zip_code',
+    ].some((k) => String(sa[k] || '').trim());
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
       if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }

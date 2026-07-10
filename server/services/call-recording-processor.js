@@ -3304,6 +3304,7 @@ const CallRecordingProcessor = {
     // the appointment is created from the data the gate actually checked.
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
+    let v2SmsConsentExplicit = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
     let v2ApprovedExtraction = null;
@@ -3488,7 +3489,15 @@ const CallRecordingProcessor = {
           const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
-          // confirmation SMS (established business relationship; they called us).
+          // confirmation SMS (established business relationship; they called
+          // us) — but implied consent is PERSONAL to the caller. It authorizes
+          // texting only the number that reached us (the inbound ANI); it does
+          // NOT authorize texting a spoken alternate callback number (which the
+          // customer.phone||extracted.phone||ANI resolution can prefer over the
+          // ANI) nor fanning a confirmation out to a secondary service contact.
+          // Those alternate recipients still require explicit sms_consent_given,
+          // captured here (v2SmsConsentExplicit) and enforced at the send site.
+          v2SmsConsentExplicit = v2Extraction?.consent?.sms_consent_given === true;
           const tcpa = checkTcpaConsent(v2Extraction, {
             impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),
           });
@@ -4926,13 +4935,17 @@ const CallRecordingProcessor = {
     });
     // Never book a made-up service (owner directive 2026-07-10): service_type
     // MUST be a real admin-catalog service. When the service was UNCLEAR
-    // (serviceResolution.noMatch — no coarse label AND no catalog match) and
-    // fail-open is active, fall back to "Waves Assessment" (assess on-site) —
-    // a real catalog row, not an invented label. Gated on noMatch so it NEVER
-    // fires on a hard veto (unsupported/out-of-scope call, admin-only), which
-    // returns ok:false WITHOUT noMatch and must stay un-bookable, and never
-    // overrides a service that DID resolve.
-    if (!callBookingCatalogRow && serviceResolution.noMatch === true
+    // (serviceResolution.noMatch — no coarse label AND no catalog match) OR it
+    // only resolved to the legacy generic "Waves Appointment" placeholder
+    // (ok:true but not a real catalog row, e.g. "come out Tuesday" with no
+    // service named), and fail-open is active, fall back to "Waves Assessment"
+    // (assess on-site) — a real catalog row, not an invented label. Gated so it
+    // NEVER fires on a hard veto (unsupported/out-of-scope call, admin-only),
+    // which returns ok:false WITHOUT noMatch and must stay un-bookable, and
+    // never overrides a service that DID resolve to a real specific service.
+    const resolvedGenericOnly = serviceResolution.ok
+      && serviceResolution.service === GENERIC_CALL_APPOINTMENT_SERVICE;
+    if (!callBookingCatalogRow && (serviceResolution.noMatch === true || resolvedGenericOnly)
         && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
       const wavesAssessment = bookableCallServices.find((s) => /^waves assessment$/i.test(String(s.name || '')));
       if (wavesAssessment) {
@@ -5002,6 +5015,13 @@ const CallRecordingProcessor = {
               catalogRow: callBookingCatalogRow,
             });
             const smsPhone = customerValidation.details.phone;
+            // Implied-consent recipient scope: when SMS consent is only IMPLIED
+            // (inbound caller, no explicit sms_consent_given), the confirmation
+            // may go ONLY to the inbound ANI — never to a spoken alternate
+            // number that outranked the ANI in the phone resolution above.
+            const smsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+            const smsTargetIsInboundAni = smsLast10(smsPhone).length === 10
+              && smsLast10(smsPhone) === smsLast10(contactPhone);
 
           // Use SMS template if available, fall back to inline
           let smsBody;
@@ -5587,6 +5607,13 @@ const CallRecordingProcessor = {
           if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
+          } else if (scheduledServiceId && !v2SmsConsentExplicit && !smsTargetIsInboundAni) {
+            // SMS cleared only by IMPLIED inbound consent, but the resolved
+            // target isn't the caller's own number (ANI) — implied consent
+            // doesn't cover a spoken alternate recipient. Hold the text; the
+            // appointment still books and the office can confirm the number.
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: implied consent doesn't cover non-ANI recipient`);
+            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
@@ -5666,7 +5693,10 @@ const CallRecordingProcessor = {
                   // buyer/tenant whose slot was just written for this purpose —
                   // and non-blocking: a fan-out failure never voids a primary
                   // confirmation that already went out.
-                  if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true') {
+                  // Requires EXPLICIT sms_consent_given: implied inbound consent
+                  // is personal to the caller and never authorizes texting a
+                  // separate service-contact recipient (buyer/tenant/realtor).
+                  if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && v2SmsConsentExplicit) {
                     try {
                       const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
                       const freshCustomer = await db('customers').where({ id: customerId }).first();

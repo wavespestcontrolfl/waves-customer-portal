@@ -64,6 +64,20 @@ describe('canAutoRoute fail-open booking', () => {
     expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'low_confidence_address']));
   });
 
+  test('existing customer who gave a PARTIAL new address (city/ZIP only, no street) is NOT failed open (P2)', () => {
+    // Caller states a different location by city/ZIP/unit only; AV can't accept
+    // it (missing_component). A street line is absent, but a partial component
+    // must still count as a new address so the booking fallback never stamps
+    // the on-file primary address instead of the partially-stated property.
+    for (const partial of [{ city: 'Sarasota' }, { zip: '34231' }, { unit: 'Apt 4B' }, { postal_code: '34292' }]) {
+      const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
+      ex.property = { service_address: partial };
+      const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
+    }
+  });
+
   test('existing customer who did NOT restate an address (uses on-file) IS failed open', () => {
     const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
     ex.property = { service_address: {} }; // nothing given → on-file address used
