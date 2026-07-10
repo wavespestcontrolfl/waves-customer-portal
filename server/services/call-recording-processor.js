@@ -526,9 +526,15 @@ function summarizeKnownCaller(customer) {
     .map((s) => String(s || '').trim())
     .filter(Boolean)
     .join(' ');
+  const accountType = classifyCallerAccount(customer.pipeline_stage);
   return {
     name: name || null,
-    accountType: classifyCallerAccount(customer.pipeline_stage),
+    accountType,
+    // Fail-open booking inputs: an established customer with an address already
+    // on file (Google-verified at signup) shouldn't be re-blocked for not
+    // restating it on a familiar call.
+    isExistingCustomer: accountType === 'established_customer',
+    hasAddress: !!String(customer.address_line1 || '').trim(),
   };
 }
 
@@ -3435,13 +3441,31 @@ const CallRecordingProcessor = {
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
           const addressValidation = effectiveAddressValidation;
-          const routingResult = canAutoRoute(v2Extraction, { contactPhone, addressValidation });
+          // Fail-open booking (GATE_CALL_FAIL_OPEN_BOOKING): a confirmed booking
+          // isn't held over recoverable contact-field flags — the ANI satisfies
+          // caller_phone_missing, an existing customer's on-file address clears
+          // address flags, a garbled email (name_email_mismatch) is advisory.
+          const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          const knownCustomerForFailOpen = (knownCaller && knownCaller.isExistingCustomer)
+            ? { hasAddress: knownCaller.hasAddress } : null;
+          const routingResult = canAutoRoute(v2Extraction, {
+            contactPhone, addressValidation,
+            failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
+          });
+          if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
+            logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
+          }
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
           const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-          const tcpa = checkTcpaConsent(v2Extraction);
+          // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
+          // caller who booked has implied consent for the transactional
+          // confirmation SMS (established business relationship; they called us).
+          const tcpa = checkTcpaConsent(v2Extraction, {
+            impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),
+          });
           v2SmsBlocked = !tcpa.canSms;
           v2EmailBlocked = !tcpa.canEmail;
 
@@ -5861,6 +5885,10 @@ const CallRecordingProcessor = {
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
+          // Keep the audit/shadow decision consistent with the enforce path.
+          failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
+          callerAni: contactPhone,
+          knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
         });
 
         if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {

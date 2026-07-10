@@ -29,9 +29,17 @@ function computeAddressHash(serviceAddress) {
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
 }
 
-function checkTcpaConsent(extraction) {
+// opts.impliedConsent (gated, INBOUND calls only): a customer who called US,
+// requested service, and agreed to a time has an established business
+// relationship and implied consent for a TRANSACTIONAL confirmation (not
+// marketing). A do-not-contact request always overrides. Owner directive
+// 2026-07-10: don't hold an inbound booker's confirmation over a missing
+// explicit "yes you can text me."
+function checkTcpaConsent(extraction, opts = {}) {
   if (!extraction || !extraction.consent) {
-    return { canSms: false, canEmail: true, reason: 'no_consent_data' };
+    return opts.impliedConsent
+      ? { canSms: true, canEmail: true, reason: 'implied_consent_inbound' }
+      : { canSms: false, canEmail: true, reason: 'no_consent_data' };
   }
 
   const consent = extraction.consent;
@@ -42,6 +50,10 @@ function checkTcpaConsent(extraction) {
 
   if (consent.sms_consent_given === true) {
     return { canSms: true, canEmail: true, reason: 'sms_consent_given' };
+  }
+
+  if (opts.impliedConsent) {
+    return { canSms: true, canEmail: true, reason: 'implied_consent_inbound' };
   }
 
   return { canSms: false, canEmail: true, reason: 'sms_consent_not_given' };

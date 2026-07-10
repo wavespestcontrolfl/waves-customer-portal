@@ -348,13 +348,44 @@ function mergeTriageFlags(modelFlags, deterministicFlags) {
   return [...new Set([...(modelFlags || []), ...(deterministicFlags || [])])];
 }
 
+// Address flags that fail-open booking treats as recoverable ONLY for an
+// EXISTING customer with an address already on file (Google-verified at
+// signup) — they didn't restate it because they're known. Never includes
+// out_of_service_area, which stays a hard block. New-customer addresses are
+// still governed by Google Address Validation.
+const FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS = new Set([
+  'address_unverifiable', 'missing_service_address', 'low_confidence_address', 'address_unverified',
+]);
+
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
   const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
+  let appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
+
+  // Fail-open booking (opts.failOpen): a CONFIRMED appointment must not die over
+  // recoverable contact-field flags. Grounded in live misses (2026-07-10):
+  // bookings blocked because the caller didn't recite a callback number (the ANI
+  // is present), an existing customer didn't restate an address already on file,
+  // or a garbled email tripped name_email_mismatch. The flag is still returned
+  // (failedOpenFlags) so the office can confirm the field — it just no longer
+  // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
+  // caller_not_authorized, spam) are NOT recoverable and stay in the filter.
+  const failedOpenFlags = [];
+  if (opts.failOpen) {
+    const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
+    const knownCustomer = !!opts.knownCustomer;
+    const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
+      if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
+      if (f === 'low_extraction_confidence' && knownCustomer) { failedOpenFlags.push(f); return false; }
+      if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress) { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
 
   if (appointmentBlockingFlags.length > 0) {
     return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags };
@@ -363,7 +394,12 @@ function canAutoRoute(extraction, opts = {}) {
   const confidence = extraction.confidence || {};
   const threshold = opts.confidenceThreshold || DEFAULT_CONFIDENCE_THRESHOLD;
 
-  if (typeof confidence.overall !== 'number' || confidence.overall < threshold) {
+  // Fail-open: a KNOWN caller with a CONFIRMED time + start isn't held over a low
+  // overall-confidence score. Short familiar calls score low (Barbara scored 0),
+  // but a returning customer confirming a slot is a real booking.
+  const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer
+    && extraction.scheduling?.status === 'confirmed' && !!extraction.scheduling?.confirmed_start_at;
+  if (!failOpenLowConfidence && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
     return { allowed: false, reason: 'low_confidence', overall: confidence.overall };
   }
 
@@ -380,7 +416,7 @@ function canAutoRoute(extraction, opts = {}) {
     return { allowed: false, reason: 'do_not_contact' };
   }
 
-  return { allowed: true, flags: finalFlags };
+  return { allowed: true, flags: finalFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
 }
 
 // Suffix-insensitive street comparison shared by the shadow bridge and the
