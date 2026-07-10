@@ -500,7 +500,23 @@ const UNIQUE_COLLISION_HANDLERS = {
   customer_health_scores: repointRowwiseDropCollisions,
   customer_badges: repointRowwiseDropCollisions,
   badge_reward_queue: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id, tag): both duplicates carrying the same CRM tag is
+  // identical content, not divergent data — move the tags the winner lacks,
+  // drop the loser's copies of tags the winner already has.
+  customer_tags: repointRowwiseDropCollisions,
 };
+
+// Customer ids also hide behind polymorphic recipient columns the
+// schema-driven sweep cannot recognize (no *customer_id name, no declared
+// FK). Each (table, type column, id column) triple repoints only rows
+// explicitly typed 'customer', so the winner keeps the loser's notification
+// and email history. audit_log's actor_type/actor_id pair is deliberately
+// NOT listed — an audit row records who actually acted, and the journal
+// snapshot preserves that identity.
+const POLYMORPHIC_CUSTOMER_POINTERS = [
+  { table: 'notifications', typeColumn: 'recipient_type', idColumn: 'recipient_id' },
+  { table: 'email_messages', typeColumn: 'recipient_type', idColumn: 'recipient_id' },
+];
 
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
@@ -583,11 +599,21 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     if (!winnerPhone || winnerPhone !== phone10(loser.phone)) {
       throw new Error('executeMerge: rows no longer share a phone — refresh the queue');
     }
+    // The route's red-tier check also ran outside this transaction. Re-apply
+    // the detection red rule on the LOCKED rows in every mode: an edit that
+    // lands between the queue recheck and this lock must not merge a pair
+    // that now reads as two different people (different last names at a
+    // positively different address).
+    const addr = addressCompat(winner, loser);
+    const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
+      && normName(winner.last_name) !== normName(loser.last_name);
+    if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) {
+      throw new Error('executeMerge: pair now reads as two different people — refresh the queue');
+    }
     if (mode === 'auto') {
       const blockers = await loserAutoBlockers(trx, loser);
       if (blockers.length) throw new Error(`executeMerge(auto): loser is not a shell (${blockers.join(', ')})`);
       if (!namesCompatible(winner, loser)) throw new Error('executeMerge(auto): names conflict');
-      const addr = addressCompat(winner, loser);
       if (!ADDRESS_COMPATIBLE.has(addr.status)) throw new Error(`executeMerge(auto): address ${addr.status}`);
     }
 
@@ -610,6 +636,21 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         } else {
           throw new Error(`executeMerge: repoint failed on ${table}.${column}: ${e.message}`);
         }
+      }
+    }
+    // Polymorphic customer pointers (recipient_type/recipient_id) — see
+    // POLYMORPHIC_CUSTOMER_POINTERS. Same fail-closed contract as the FK
+    // sweep: any failure aborts the merge.
+    for (const { table, typeColumn, idColumn } of POLYMORPHIC_CUSTOMER_POINTERS) {
+      try {
+        await trx.transaction(async (sp) => {
+          const count = await sp(table)
+            .where({ [typeColumn]: 'customer', [idColumn]: loserId })
+            .update({ [idColumn]: winnerId });
+          if (count) repointed[`${table}.${idColumn}`] = count;
+        });
+      } catch (e) {
+        throw new Error(`executeMerge: repoint failed on ${table}.${idColumn}: ${e.message}`);
       }
     }
     // Repointing referred_by can produce a self-referral if the loser had

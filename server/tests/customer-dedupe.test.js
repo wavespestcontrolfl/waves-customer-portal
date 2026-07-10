@@ -558,6 +558,27 @@ describe('executeMerge', () => {
           return 1;
         }
       }
+      if (table === 'customer_tags') {
+        if (q.called('select')) return [{ id: 'tag1' }, { id: 'tag2' }];
+        if (q.called('del')) { state.tagsDropped = (state.tagsDropped || 0) + 1; return 1; }
+        if (q.called('update')) {
+          const w = q.args('where')[0];
+          // The bulk repoint collides (winner already has a shared tag), and
+          // so does tag2's row-wise move; tag1 moves cleanly.
+          if (w === 'customer_id' || (w && w.id === 'tag2')) {
+            const err = new Error('duplicate key value violates unique constraint');
+            err.code = '23505';
+            throw err;
+          }
+          state.repointUpdates.push(table);
+          return 1;
+        }
+      }
+      if (table === 'notifications' && q.called('update')) {
+        state.notificationsWhere = q.args('where')[0];
+        state.repointUpdates.push(table);
+        return 1;
+      }
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
         state.repointUpdates.push(table);
@@ -668,5 +689,47 @@ describe('executeMerge', () => {
 
   it('refuses identical or missing ids', async () => {
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: WINNER })).rejects.toThrow(/distinct/);
+  });
+
+  it('refuses when the locked rows now read as two different people (post-recheck edit race)', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'Nicole', last_name: 'Kenedy', address_line1: '100 Main St', city: 'Bradenton', zip: '34205', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Tina', last_name: 'Tommelleo', address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236', phone: '9995550003' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/two different people/);
+  });
+
+  it('moves non-colliding CRM tags and drops duplicate tags instead of aborting', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'customer_tags', column_name: 'customer_id' }],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.repointed['customer_tags.customer_id']).toMatch(/moved 1, dropped 1/);
+    expect(state.tagsDropped).toBe(1);
+  });
+
+  it('repoints customer-typed polymorphic recipients (notifications, email_messages)', async () => {
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'leads', column_name: 'customer_id' }],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // Only rows explicitly typed 'customer' repoint — admin notifications
+    // must not be touched by a customer merge.
+    expect(state.notificationsWhere).toEqual({ recipient_type: 'customer', recipient_id: LOSER });
+    expect(result.repointed['notifications.recipient_id']).toBe(1);
+    expect(result.repointed['email_messages.recipient_id']).toBe(1);
   });
 });
