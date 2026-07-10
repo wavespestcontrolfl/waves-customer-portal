@@ -2756,6 +2756,52 @@ async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) 
   }
 }
 
+
+// ── Zero-triage layers (2026-07-10, all dark-gated; failures never fail the call) ──
+// Shared by the main completion path AND the spam/voicemail early exits —
+// the suspected-spam/voicemail population is exactly what the classifier's
+// live accrual must cover. The spam classifier records its verdict; the
+// disposition layer stamps the terminal enum on call_log.disposition; the
+// enrichment writer persists gate codes / pets / internal color. Order
+// matters: the classifier verdict feeds the disposition decision.
+async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null }) {
+  try {
+    const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    let spamVerdictResult = null;
+    if (isEnabled('callSpamClassifier')) {
+      const lineTypeRow = await db('phone_line_types')
+        .where({ phone: contactPhone }).first().catch(() => null);
+      spamVerdictResult = await classifyCall({
+        call, extraction: v2ForDisposition, legacy: extracted,
+        // Cache stores line TYPE only — omit caller_name entirely so the
+        // classifier treats CNAM as unknown (never as known-nameless) and
+        // falls back to the AddOns envelope.
+        lineType: lineTypeRow ? { type: lineTypeRow.line_type } : null,
+      });
+      await recordVerdict(call.id, spamVerdictResult);
+    }
+    if (isEnabled('callDispositionV1')) {
+      const { disposition, reason } = decideDisposition({
+        extraction: v2ForDisposition,
+        legacy: extracted,
+        spamVerdict: spamVerdictResult,
+        outcome: {
+          appointmentCreated: !!appointmentResult?.scheduledServiceId,
+          customerId: customerId || null,
+          isKnownCustomer: !!call.customer_id || !!customerId,
+        },
+      });
+      await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
+      logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+    }
+    if (customerId) {
+      await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
+    }
+  } catch (zeroTriageErr) {
+    logger.warn(`[call-proc] zero-triage layer error for ${maskSid(callSid)}: ${zeroTriageErr.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 const CallRecordingProcessor = {
   /**
@@ -3192,6 +3238,11 @@ const CallRecordingProcessor = {
           answered_by: extracted.is_voicemail ? 'voicemail' : call.answered_by || null,
         }
       );
+      // The suspected-spam/voicemail population must still get classifier
+      // verdicts + terminal dispositions — it's the population the live
+      // accrual exists to measure. Customer resolution hasn't run on this
+      // path; enrichment keys on the webhook's pre-linked customer if any.
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -5886,45 +5937,11 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
     }
 
-    // ── Zero-triage layers (2026-07-10, all dark-gated; failures never fail the call) ──
-    // The spam classifier records its verdict; the disposition layer stamps
-    // the terminal enum on call_log.disposition; the enrichment writer
-    // persists gate codes / pets / internal color the model captured. Order
-    // matters: the classifier verdict feeds the disposition decision.
-    // Fenced on finalization: finalized === 0 means a peer reclaimed the
-    // processing_token — this attempt's extraction is stale and must not
-    // record verdicts, stamp a disposition, or enrich over the peer's run.
-    if (finalized > 0) try {
-      const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
-      let spamVerdictResult = null;
-      if (isEnabled('callSpamClassifier')) {
-        const lineTypeRow = await db('phone_line_types')
-          .where({ phone: contactPhone }).first().catch(() => null);
-        spamVerdictResult = await classifyCall({
-          call, extraction: v2ForDisposition, legacy: extracted,
-          lineType: lineTypeRow ? { type: lineTypeRow.line_type, caller_name: null } : null,
-        });
-        await recordVerdict(call.id, spamVerdictResult);
-      }
-      if (isEnabled('callDispositionV1')) {
-        const { disposition, reason } = decideDisposition({
-          extraction: v2ForDisposition,
-          legacy: extracted,
-          spamVerdict: spamVerdictResult,
-          outcome: {
-            appointmentCreated: !!appointmentResult?.scheduledServiceId,
-            customerId: customerId || null,
-            isKnownCustomer: !!call.customer_id || !!customerId,
-          },
-        });
-        await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
-        logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
-      }
-      if (customerId) {
-        await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
-      }
-    } catch (zeroTriageErr) {
-      logger.warn(`[call-proc] zero-triage layer error for ${maskSid(callSid)}: ${zeroTriageErr.message}`);
+    // Zero-triage layers, fenced on finalization: finalized === 0 means a
+    // peer reclaimed the processing_token — this attempt's extraction is
+    // stale and must not record verdicts, stamp a disposition, or enrich.
+    if (finalized > 0) {
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId });
     }
 
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);

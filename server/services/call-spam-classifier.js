@@ -103,9 +103,16 @@ async function callerHistory(fromPhone) {
   const key = String(fromPhone || '').replace(/\D/g, '').slice(-10);
   if (key.length < 10) return { override: false, reason: 'no_usable_number' };
   try {
+    // Same columns the inbound identity matcher consults: the customer's own
+    // number PLUS the three service-contact slot phones — a spouse/tenant
+    // calling from a stored slot number is legitimate history.
+    const PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+    const phoneMatch = PHONE_COLS
+      .map((c) => `RIGHT(regexp_replace(COALESCE(${c},''),'[^0-9]','','g'),10) = ?`)
+      .join(' OR ');
     const [customer, lead] = await Promise.all([
       db('customers')
-        .whereRaw("RIGHT(regexp_replace(COALESCE(phone,''),'[^0-9]','','g'),10) = ?", [key])
+        .whereRaw(`(${phoneMatch})`, PHONE_COLS.map(() => key))
         .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk'])
         .first('id'),
       db('leads')

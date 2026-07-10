@@ -91,18 +91,21 @@ async function runSelfAudit(depsIn = {}) {
     const LEAD_LOSING = ['spam_discarded', 'wrong_number_closed', 'no_action_needed', 'vendor_logged', 'voicemail_processed', 'cancellation_processed'];
     if (call.disposition && verdict.is_lead && LEAD_LOSING.includes(call.disposition)) dispositionMismatches++;
 
-    if (diffs.length) {
+    // One finding per disagreeing field — the ledger keeps the per-field
+    // evidence, not just the first hit (a spam FP that also flips is_lead
+    // must record both).
+    for (const f of diffs) {
       await db('call_audit_findings')
         .insert({
           call_log_id: call.id,
           twilio_call_sid: call.twilio_call_sid,
           call_created_at: call.created_at,
           audit_source: 'self_audit',
-          category: prod.is_spam && !verdict.is_spam ? 'spam_false_positive' : 'field_drift',
-          severity: prod.is_spam && !verdict.is_spam ? 'customer_harm' : 'data_quality',
-          field: diffs[0],
-          old_value: String(prod[diffs[0]]),
-          new_value: String(Boolean(verdict[diffs[0]])),
+          category: f === 'is_spam' && prod.is_spam && !verdict.is_spam ? 'spam_false_positive' : 'field_drift',
+          severity: f === 'is_spam' && prod.is_spam && !verdict.is_spam ? 'customer_harm' : 'data_quality',
+          field: f,
+          old_value: String(prod[f]),
+          new_value: String(Boolean(verdict[f])),
           transcript_excerpt: String(verdict.excerpt || '').slice(0, 300),
           detail: JSON.stringify({ diffs, verdict, disposition: call.disposition }),
         })

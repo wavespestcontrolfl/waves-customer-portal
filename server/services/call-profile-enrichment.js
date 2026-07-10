@@ -23,12 +23,19 @@ const { isEnabled } = require('../config/feature-gates');
 function extractCodes(accessNotes) {
   const text = String(accessNotes || '');
   const grab = (re) => (text.match(re) || [])[1] || null;
-  return {
+  const codes = {
     property_gate_code: grab(/(?:front |main |property )?gate(?: code)?(?: is|:)? #?(\d{3,8})\b/i),
     neighborhood_gate_code: grab(/(?:neighborhood|community|entrance) (?:gate )?code(?: is|:)? #?(\d{3,8})\b/i),
     garage_code: grab(/garage(?: code)?(?: is|:)? #?(\d{3,8})\b/i),
     lockbox_code: grab(/lock ?box(?: code)?(?: is|:)? #?(\d{3,8})\b/i),
   };
+  // "community gate code is 1234" also substring-matches the property regex —
+  // a community code must never be stored as a property-level code the
+  // customer didn't give.
+  if (codes.property_gate_code && codes.property_gate_code === codes.neighborhood_gate_code) {
+    codes.property_gate_code = null;
+  }
+  return codes;
 }
 
 
@@ -79,9 +86,15 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
         for (const [col, val] of Object.entries(codes)) {
           if (val && !existing[col]) updates[col] = val;
         }
-        if (pets && !existing.pet_details) {
+        if (pets) {
+          // Append (with provenance) rather than fill-only-empty: new pets and
+          // safety context from later calls must persist; admin text survives
+          // because appendWithProvenance never overwrites and dedupes repeats.
           const details = petDetailsFrom(pets);
-          if (details) updates.pet_details = details;
+          if (details) {
+            const appended = appendWithProvenance(existing.pet_details, details, callCreatedAt);
+            if (appended !== existing.pet_details) updates.pet_details = appended;
+          }
         }
         if (accessNotes) {
           const appended = appendWithProvenance(existing.access_notes, String(accessNotes).slice(0, 800), callCreatedAt);
