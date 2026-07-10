@@ -2922,6 +2922,10 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const hasLawn = serviceNames.some((name) => /lawn|turf/i.test(name))
     || !!inputServices.lawn
     || !!inputServices.lawnCare
+    // Quote-wizard estimates persist a legacy empty `inputs: {}` next to
+    // engineInputs.services.lawn — read both (mirrors the mosquito detector).
+    || !!engineServices.lawn
+    || !!engineServices.lawnCare
     || inputs.svcLawn === true;
   const isLawnOnly = serviceNames.length > 0
     && serviceNames.every((name) => /lawn|turf/i.test(String(name)));
@@ -3015,10 +3019,11 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const treeShrubProfile = isTreeShrubOnly
     ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
     : null;
-  // Lawn-only estimates price off the treatable turf, so Pool/Lanai and
-  // landscape Complexity read as irrelevant noise there (owner ask 2026-07-09)
-  // — both tiles stay pest/other-mix only.
-  const complexity = isLawnOnly ? null : prettySignalValue(
+  // Lawn estimates price off the treatable turf, so Pool/Lanai (lawn-only,
+  // owner ask 2026-07-09) and landscape Complexity (ANY mix including lawn —
+  // extended to pest+lawn bundles, owner ask 2026-07-10) read as irrelevant
+  // noise there.
+  const complexity = hasLawn ? null : prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
@@ -3864,15 +3869,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>−${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
     : '';
 
-  // WaveGuard Membership setup ($99). Applies only to recurring Pest or Mosquito
-  // mixes; lawn, termite-bait, rodent-bait, tree & shrub, and palm carry no setup
-  // fee (they get a 5% annual-prepay discount instead). A mix containing pest or
-  // mosquito always charges the setup — the 5% never stacks on top.
+  // WaveGuard Membership setup ($99). Applies ONLY to mixes with recurring Pest
+  // (owner directive 2026-07-10); mosquito, lawn, termite-bait, rodent-bait,
+  // tree & shrub, and palm carry no setup fee (they get a 5% annual-prepay
+  // discount instead). A mix containing recurring pest always charges the
+  // setup — the 5% never stacks on top.
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
   // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const hasRecurringMosquito = recurring.some((svc) => recurringServiceKey(svc) === 'mosquito');
-  const hasWaveGuardMembership = !!pestRecurring || hasRecurringMosquito;
+  const hasWaveGuardMembership = !!pestRecurring;
   const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
@@ -7316,9 +7321,16 @@ router.put('/:token/accept', async (req, res, next) => {
       return res.status(400).json({ error: 'annual prepay is not available for existing customers — pick pay_at_visit instead' });
     }
     const pricingFrequencies = Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : [];
-    const selectedFrequency = !treatAsOneTime && pricingFrequencies.length
+    // Floor-clamped lawn cadences are display-hidden but stay fully priced
+    // under hiddenLawnFrequencies — a customer who loaded the page before the
+    // hide deployed can still accept the tier they were offered.
+    const hiddenLawnFrequencies = Array.isArray(pricingBundle?.hiddenLawnFrequencies)
+      ? pricingBundle.hiddenLawnFrequencies
+      : [];
+    const selectedFrequency = !treatAsOneTime && (pricingFrequencies.length || hiddenLawnFrequencies.length)
       ? (selectedFrequencyKey
-        ? pricingFrequencies.find((f) => f.key === selectedFrequencyKey)
+        ? (pricingFrequencies.find((f) => f.key === selectedFrequencyKey)
+          || hiddenLawnFrequencies.find((f) => f.key === selectedFrequencyKey))
         : defaultFrequencyFromList(pricingFrequencies))
       : null;
     let pricingVisitFrequency = selectedFrequency
@@ -9573,16 +9585,16 @@ function normalizeOneTimeBreakdown(estData) {
   addRows(oneTime?.items);
   if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.items);
   const membershipFee = Number(oneTime?.membershipFee ?? nestedOneTime?.membershipFee);
-  // WaveGuard setup fee only applies when recurring pest or mosquito is part of
-  // the estimate. Lawn / termite-bait / rodent-bait / T&S / palm never carry it,
-  // even if a stale membershipFee was cached in oneTime.
+  // WaveGuard setup fee only applies when recurring pest control is part of the
+  // estimate (owner directive 2026-07-10). Mosquito / lawn / termite-bait /
+  // rodent-bait / T&S / palm never carry it, even if a stale membershipFee was
+  // cached in oneTime.
   const recurringServicesForFee = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
   const hasRecurringPest = recurringServicesForFee.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
-  const hasRecurringMosquito = recurringServicesForFee.some((s) => recurringServiceKey(s) === 'mosquito');
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
-  if (Number.isFinite(membershipFee) && membershipFee > 0 && (hasRecurringPest || hasRecurringMosquito) && !hasExplicitWaveGuardSetup) {
+  if (Number.isFinite(membershipFee) && membershipFee > 0 && hasRecurringPest && !hasExplicitWaveGuardSetup) {
     addRows([{
       service: 'waveguard_setup',
       name: 'WaveGuard setup',
@@ -9660,12 +9672,12 @@ function normalizeOneTimeBreakdown(estData) {
 
   // An explicit WaveGuard setup row saved in the estimate's one-time items
   // bypasses the synthesized-fee guard above — drop it for the same
-  // non-pest/mosquito mixes so a lawn-only estimate never shows the $99
-  // membership setup. estimate-converter's
+  // no-recurring-pest mixes so a lawn-only or mosquito-only estimate never
+  // shows the $99 membership setup. estimate-converter's
   // shouldIncludeWaveGuardSetupFeeForRecurring already refuses to CHARGE it
   // for these mixes, so this keeps the page consistent with the invoice.
   let suppressedExplicitSetupTotal = 0;
-  if (!hasRecurringPest && !hasRecurringMosquito) {
+  if (!hasRecurringPest) {
     for (let i = rows.length - 1; i >= 0; i -= 1) {
       const row = rows[i];
       if (row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row)) {
@@ -9688,7 +9700,6 @@ function normalizeOneTimeBreakdown(estData) {
     : (Number.isFinite(membershipFee)
       && membershipFee > 0
       && !hasRecurringPest
-      && !hasRecurringMosquito
       ? membershipFee
       : 0);
   const explicitTotal = Number.isFinite(rawExplicitTotal)
@@ -11281,7 +11292,126 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
     perTreatment: clampedPerTreatment,
     manualDiscount: clampedManualDiscount,
     manualDiscountSuppressed,
+    flooredAtMinimum: monthlyWasClamped || annualWasClamped,
   };
+}
+
+// Floor-clamped lawn cadences are decoys (owner ask 2026-07-10): at the same
+// floored monthly a higher-application tier strictly dominates ($50/mo for 6
+// apps vs $51.98/mo for 9 here), and the tile can never show the promised
+// WaveGuard/manual discount, so hide them. Two guards: the stored/recommended
+// selection always stays (it IS the quoted plan — hiding it would silently
+// re-price the customer), and the ladder never empties — if every tier
+// floors, keep the highest-application one (most value at the same price).
+function isFlooredLawnLadderEntry(entry = {}) {
+  if (entry.flooredAtMinimum === true) return true;
+  // Snapshots/caches frozen before the flag existed carry no flooredAtMinimum —
+  // recompute from the price itself: a lawn tier sitting AT (or below) the
+  // program minimum is floor-pinned by definition (the floor is a hard lower
+  // bound, so an at-floor price is either clamped or coincidentally exact —
+  // both read as "the floor is the price" to the customer).
+  const minMonthly = lawnProgramMinimumMonthly();
+  const monthly = Number(entry.monthly);
+  return minMonthly > 0 && Number.isFinite(monthly) && monthly > 0 && monthly <= minMonthly;
+}
+
+function dropFlooredLawnLadderEntries(entries = [], protectedKeys = null) {
+  const list = Array.isArray(entries) ? entries : [];
+  const isProtected = (entry) => entry.recommended === true
+    || entry.selected === true
+    || (protectedKeys instanceof Set && protectedKeys.has(String(entry.key || '').toLowerCase()));
+  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry) || isProtected(entry));
+  if (kept.length) return kept;
+  if (!list.length) return list;
+  const best = list.reduce((a, b) => (
+    (Number(b.visitsPerYear) || 0) > (Number(a.visitsPerYear) || 0) ? b : a
+  ));
+  return [best];
+}
+
+// The tier the estimate actually quotes/stores — protected from the floored
+// hide even on frozen ladders that carry no recommended/selected flags
+// (hiding the quoted cadence would silently re-price the customer). Read from
+// the post-accept customerSelection and the stored recurring lawn row.
+const LAWN_LADDER_TIER_KEYS = ['basic', 'standard', 'enhanced', 'premium'];
+function storedLawnTierKeysForEstimate(estData = {}) {
+  const keys = new Set();
+  const selection = estData?.customerSelection || estData?.result?.customerSelection || {};
+  const selectionKey = String(selection.serviceTierKey || selection.serviceTier || '').trim().toLowerCase();
+  if (LAWN_LADDER_TIER_KEYS.includes(selectionKey)) keys.add(selectionKey);
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const rows = [
+    ...(Array.isArray(result?.recurring?.services) ? result.recurring.services : []),
+    ...(Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []),
+  ];
+  rows.forEach((svc) => {
+    const name = svc?.name || svc?.label || svc?.displayName || svc?.service || '';
+    if (!/lawn|turf/i.test(String(name))) return;
+    const tierKey = lawnTierKey(svc);
+    if (LAWN_LADDER_TIER_KEYS.includes(tierKey)) keys.add(tierKey);
+  });
+  return keys;
+}
+
+// Display chokepoint for the floored-cadence rule (owner ask 2026-07-10) —
+// runs in finalizePricingBundle so EVERY return path (fresh v1/engine builds,
+// send-snapshot fast path, pricing cache) applies it, mirroring
+// stripStaleWaveGuardSetupFromBundle. Dropped top-level lawn entries move to
+// payload.hiddenLawnFrequencies (NOT deleted) so /accept can still resolve a
+// floored tier a stale pre-deploy client legitimately selected — hidden tiers
+// stay priceable and restampable, they just aren't offered.
+function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
+  let next = payload;
+  const protectedKeys = storedLawnTierKeysForEstimate(estData);
+
+  const topLevel = Array.isArray(payload.frequencies) ? payload.frequencies : [];
+  const lawnTopLevel = topLevel.filter((f) => f?.serviceCategory === 'lawn_care');
+  if (lawnTopLevel.length) {
+    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel, protectedKeys));
+    const hidden = lawnTopLevel.filter((f) => !kept.has(f));
+    if (hidden.length) {
+      next = {
+        ...next,
+        frequencies: topLevel.filter((f) => f?.serviceCategory !== 'lawn_care' || kept.has(f)),
+        hiddenLawnFrequencies: [
+          ...(Array.isArray(payload.hiddenLawnFrequencies) ? payload.hiddenLawnFrequencies : []),
+          ...hidden,
+        ],
+      };
+    }
+  }
+
+  // Only genuine lawn TIER ladders participate (every entry carries the
+  // serviceCategory lawnFrequenciesFromRows stamps). Legacy pest-cadence
+  // MIRRORED lawn sections (keys quarterly/monthly, no serviceCategory) are
+  // one plan repeated per pest cadence — hiding an at-floor mirror row would
+  // desync the section from the pest slider, not remove a tier.
+  const isLawnTierLadder = (section) => section?.key === 'lawn_care'
+    && Array.isArray(section.frequencies)
+    && section.frequencies.length > 1
+    && section.frequencies.every((f) => f?.serviceCategory === 'lawn_care');
+  const services = Array.isArray(next.services) ? next.services : [];
+  if (services.some(isLawnTierLadder)) {
+    next = {
+      ...next,
+      services: services.map((section) => {
+        if (!isLawnTierLadder(section)) {
+          return section;
+        }
+        const kept = dropFlooredLawnLadderEntries(section.frequencies, protectedKeys);
+        if (kept.length === section.frequencies.length) return section;
+        return {
+          ...section,
+          frequencies: kept,
+          defaultFrequencyKey: kept.some((f) => f.key === section.defaultFrequencyKey)
+            ? section.defaultFrequencyKey
+            : (kept.find((f) => f.recommended === true || f.selected === true)?.key || kept[0]?.key || null),
+        };
+      }),
+    };
+  }
+
+  return next;
 }
 
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
@@ -11306,7 +11436,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   const rawManualDiscount = manualDiscountOverride !== undefined
     ? manualDiscountOverride
     : normalizeManualDiscountSummary(estData);
-  return (Array.isArray(rows) ? rows : [])
+  const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
       if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
@@ -11334,7 +11464,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
       const {
-        monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed,
+        monthlyBase, monthly, annual, perTreatment, manualDiscount, manualDiscountSuppressed, flooredAtMinimum,
       } = clampLawnLadderEntry({
         monthlyBase: rawMonthlyBase,
         monthly: rawMonthly,
@@ -11343,6 +11473,11 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         visits,
         manualDiscount: rawManualDiscountForTier,
       });
+      // The engine itself may have already lifted the tier to the program
+      // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
+      // tier is floor-pinned even when the clamp above didn't move a number.
+      const enginePinnedAtMinimum = row.pricingSource === 'PROGRAM_MINIMUM'
+        || row.pricingBasis === 'PROGRAM_MINIMUM_MONTHLY';
       const labelBase = LAWN_CADENCE_LABEL[tierKey] || 'Lawn care';
       return {
         key: tierKey,
@@ -11357,6 +11492,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         billingFrequencyKey: 'monthly',
         manualDiscount: manualDiscount || null,
         ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
+        flooredAtMinimum: flooredAtMinimum === true || enginePinnedAtMinimum,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
         included: [
@@ -11391,6 +11527,11 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
       const order = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
+  // NOTE: floored tiers are NOT dropped here — accept-time tier resolution
+  // reuses this ladder and must still resolve a floored tier a stale client
+  // legitimately selected. Display call sites apply
+  // dropFlooredLawnLadderEntries themselves.
+  return shaped;
 }
 
 // Recurring (ongoing-plan) service keys, used to decide whether an engine
@@ -11483,6 +11624,11 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
       ann: annual,
       pa: perApp,
       v: visits,
+      // Carry the engine's pricing provenance so an engine-pinned
+      // PROGRAM_MINIMUM tier is recognized as floor-clamped downstream
+      // (lawnFrequenciesFromRows flags it; display hides it).
+      pricingSource: t.pricingSource || null,
+      pricingBasis: t.pricingBasis || null,
       recommended: t.recommended === true,
       selected: t.tier === selectedTierKey,
     };
@@ -12222,7 +12368,12 @@ function frequencyServiceRowsMatchMonthly(frequency = {}, keys = []) {
   const monthly = Number(frequency?.monthly);
   if (!Number.isFinite(monthly)) return false;
   const rowsMonthly = frequencyServiceRowsMonthlyTotal(frequency, keys);
-  return rowsMonthly != null && Math.abs(roundMonthly(monthly) - rowsMonthly) <= 0.01;
+  if (rowsMonthly == null) return false;
+  // Compare in integer cents: the intended tolerance is one cent, but a raw
+  // float compare (|84.08 - 84.07| <= 0.01) evaluates 0.010000000000005 > 0.01
+  // and rejected legitimate 1-cent rounding-path drift, collapsing splittable
+  // pest+lawn bundles into the single combined-price card.
+  return Math.abs(Math.round(roundMonthly(monthly) * 100) - Math.round(rowsMonthly * 100)) <= 1;
 }
 
 function canSplitRecurringSelectableLadder(frequencies = [], recurringKeys = []) {
@@ -12543,10 +12694,11 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
   // Lawn program minimum re-clamps AFTER the WaveGuard % — a Platinum 20% on
   // a floor-priced lawn section must not sell below the floor.
   const sectionMinMonthly = serviceKey === 'lawn_care' ? lawnProgramMinimumMonthly() : 0;
-  return entries.map((e) => {
+  const repriced = entries.map((e) => {
     const base = Number(e.monthlyBase);
     if (!Number.isFinite(base) || base <= 0) return { ...e, manualDiscount: null };
-    const monthly = Math.max(roundMonthly(base * (1 - d)), sectionMinMonthly);
+    const discounted = roundMonthly(base * (1 - d));
+    const monthly = Math.max(discounted, sectionMinMonthly);
     const visits = Number(e.visitsPerYear) || null;
     const perTreatment = visits ? roundMonthly((monthly * 12) / visits) : (e.perTreatment ?? null);
     return {
@@ -12555,11 +12707,18 @@ function bundleSectionLadderForService(serviceKey, estData, recurringService, re
       annual: roundMonthly(monthly * 12),
       perTreatment,
       manualDiscount: null,
+      // Floor-pinned either upstream (engine/program-minimum on the stored
+      // row) or here, where the WaveGuard % dropped the tier below the floor.
+      flooredAtMinimum: e.flooredAtMinimum === true || (sectionMinMonthly > 0 && discounted < sectionMinMonthly),
       perServiceTreatments: Array.isArray(e.perServiceTreatments)
         ? e.perServiceTreatments.map((r) => ({ ...r, perTreatment, displayPrice: perTreatment }))
         : [],
     };
   });
+  // Floored tiers stay in this ladder — the accept path resolves the selected
+  // tier through it and a stale client may hold a floored selection that is
+  // still combo-priced. Display call sites drop them.
+  return repriced;
 }
 
 function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
@@ -12580,7 +12739,6 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   ));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
-  const hasRecurringMosquito = recurringKeys.includes('mosquito');
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
   const recurringRows = recurringServiceRowsByKey(recurringServices);
@@ -12610,7 +12768,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: key === 'pest_control',
       frequencies,
-      setupFee: (key === 'pest_control' || key === 'mosquito') ? waveGuardSetupFee : null,
+      setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
     })];
@@ -12647,7 +12805,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
           isRecurring: true,
           isPest: key === 'pest_control',
           frequencies: sectionFrequencies,
-          setupFee: (key === 'pest_control' || (key === 'mosquito' && !hasRecurringPestSection)) ? waveGuardSetupFee : null,
+          setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
           oneTimeBreakdown,
           quoteRequired: payload.quoteRequired === true,
         });
@@ -12665,7 +12823,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: hasRecurringPest,
       frequencies,
-      setupFee: (hasRecurringPest || hasRecurringMosquito) ? waveGuardSetupFee : null,
+      setupFee: hasRecurringPest ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
       memberKeys: recurringKeys, // badge eligibility reflects the bundle's actual services
@@ -12960,9 +13118,8 @@ function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const recurringServices = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
-  const hasPestOrMosquito = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || ''))
-    || recurringServiceKey(s) === 'mosquito');
-  if (hasPestOrMosquito) return payload;
+  const hasRecurringPestForSetup = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
+  if (hasRecurringPestForSetup) return payload;
 
   let next = payload;
   const breakdown = payload.oneTimeBreakdown;
@@ -13010,7 +13167,10 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
   }
-  const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
+  // After the contract attaches sections, hide floor-clamped lawn cadences on
+  // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
+  // top-level entries move to hiddenLawnFrequencies for accept resolution.
+  const withContract = hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData);
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
@@ -13517,9 +13677,10 @@ async function buildPricingBundle(estimate) {
     // pest carries a roach type) is NOT waivable — it covers the heavier
     // visit-1 cost regardless of customer churn.
     const firstVisitFees = [];
-    // The WaveGuard setup fee only applies to recurring pest/mosquito mixes — the
-    // other recurring services are prepay-eligible too but carry no setup fee.
-    if (annualPrepayEligible && (hasPest || recurringKeys.includes('mosquito'))) {
+    // The WaveGuard setup fee only applies to recurring-pest mixes (owner
+    // directive 2026-07-10) — every other recurring service is prepay-eligible
+    // too but carries no setup fee.
+    if (annualPrepayEligible && hasPest) {
       firstVisitFees.push({
         service: 'waveguard_setup',
         amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,
@@ -13652,7 +13813,8 @@ async function buildPricingBundle(estimate) {
       // Lawn-only estimates expose the 4/6/9/12 application ladder
       // (Basic/Standard/Enhanced/Premium) off the live lawn line item, mirroring
       // the v1 result.results.lawn path. Mixed bundles and other single-service
-      // estimates keep the existing single-entry view.
+      // estimates keep the existing single-entry view. Floor-clamped cadences
+      // are display-hidden at the finalizePricingBundle chokepoint.
       const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
       // The foam-specific frequency prices ONLY the foam line, so use it just for
       // a foam-only recurring mix. With another recurring service present (foam +
