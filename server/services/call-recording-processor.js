@@ -2984,17 +2984,26 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
+    // near-silence) is discarded here so the Twilio-builtin fallback below can
+    // supply a real transcript; the terminal rejection only fires if the
+    // fallback is also missing/implausible.
+    let primaryTranscriptRejected = false;
 
     if (call.recording_url) {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
-      // Plausibility gate BEFORE persisting/syncing: a hallucinated transcript
-      // must never reach the DB or the message thread (the terminal rejection
-      // block below finalizes it). recordingSeconds is hoisted here so both the
-      // gate and the rejection share one value.
+      // recordingSeconds is hoisted so the primary gate here and the terminal
+      // rejection below share one value.
       const recordingSecondsForGate = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
-      if (transcription && !isImplausibleTranscript(transcription, recordingSecondsForGate)) {
+      if (transcription && isImplausibleTranscript(transcription, recordingSecondsForGate)) {
+        logger.warn(`[call-proc] Primary transcript implausible for ${maskSid(callSid)}: ${transcription.length} chars / ${recordingSecondsForGate}s — discarding, trying Twilio fallback`);
+        primaryTranscriptRejected = true;
+        transcription = null;
+        contactPassTranscript = null;
+      }
+      if (transcription) {
         transcriptionProvenance = {
           provider: result.provider || null,
           model: result.model || null,
@@ -3083,9 +3092,16 @@ const CallRecordingProcessor = {
     // looser fallback. Terminal 'voicemail' so the retry sweep won't re-run it
     // (a re-transcribe would just hallucinate again).
     const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
-    if (transcription && isImplausibleTranscript(transcription, recordingSeconds)) {
-      const cps = Math.round(spokenCharCount(transcription) / recordingSeconds);
-      logger.warn(`[call-proc] Rejecting implausible transcript for ${maskSid(callSid)}: ${transcription.length} chars over ${recordingSeconds}s (~${cps} spoken chars/sec) — treating as empty voicemail, no extraction`);
+    const fallbackImplausible = transcription && isImplausibleTranscript(transcription, recordingSeconds);
+    // Two terminal-rejection cases: (a) the Twilio fallback ALSO produced an
+    // implausible transcript; (b) the primary was implausible and no usable
+    // fallback exists. Both finalize as an empty voicemail — NOT no_transcription
+    // (which would retry and re-hallucinate). A plausible Twilio fallback after a
+    // rejected primary flows through normally.
+    if (fallbackImplausible || (!transcription && primaryTranscriptRejected)) {
+      const rawChars = transcription ? transcription.length : 0;
+      const cps = fallbackImplausible ? Math.round(spokenCharCount(transcription) / recordingSeconds) : null;
+      logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
       let priorMeta = {};
       try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
       // Fence on processing_token like the finalization write: if a peer
@@ -3101,7 +3117,7 @@ const CallRecordingProcessor = {
           answered_by: 'voicemail',
           call_outcome: 'voicemail',
           transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-          transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: 'implausible_length', raw_chars: transcription.length, recording_seconds: recordingSeconds, chars_per_second: cps }),
+          transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }),
           ai_extraction: null,
           ai_extraction_enriched: null,
           v2_extraction_status: null,
@@ -3114,6 +3130,20 @@ const CallRecordingProcessor = {
       if (rejected === 0) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+      }
+      // Retire phantom lead artifacts a PRIOR hallucinated extraction created
+      // (admin force-reprocess path): soft-delete unconverted leads keyed by
+      // this call SID so the phantom lead the guard neutralizes doesn't linger.
+      // Scoped tight — only leads sourced from THIS call, never won/converted.
+      try {
+        const retired = await db('leads')
+          .where({ twilio_call_sid: callSid })
+          .whereNull('deleted_at')
+          .whereNotIn('status', ['won', 'converted'])
+          .update({ deleted_at: new Date(), lost_reason: 'transcription_rejected_hallucination', updated_at: new Date() });
+        if (retired > 0) logger.info(`[call-proc] Retired ${retired} phantom call-sourced lead(s) for ${maskSid(callSid)} after transcript rejection`);
+      } catch (leadErr) {
+        logger.warn(`[call-proc] phantom-lead retire skipped for ${maskSid(callSid)}: ${leadErr.message}`);
       }
       await updateUnifiedVoiceMessage(
         { ...call, transcription: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' },
