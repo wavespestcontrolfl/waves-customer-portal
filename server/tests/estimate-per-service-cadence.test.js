@@ -451,15 +451,36 @@ describe('floored lawn cadences are display-hidden with guards (buildPricingBund
     expect(bundle.frequencies[1].monthly).toBe(60);
   });
 
-  test('when every tier floors, the highest-application tier survives', async () => {
+  test('when every tier floors, the stored (quoted) tier survives', async () => {
+    // The estimate's recurring lawn row is 9 visits (enhanced) — that quoted
+    // tier is protected even when everything floors, so the customer keeps
+    // seeing the plan they were sold.
     const bundle = await buildPricingBundle(lawnOnlyEstimate([
       { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
       { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60 },
       { name: 'Premium', v: 12, mo: 48, ann: 576, pa: 48 },
     ], { monthly: 50 }));
-    expect(bundle.frequencies.map((f) => f.key)).toEqual(['premium']);
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced']);
     expect(bundle.frequencies[0].monthly).toBe(50);
-    expect(bundle.frequencies[0].visitsPerYear).toBe(12);
+    expect(bundle.frequencies[0].visitsPerYear).toBe(9);
+  });
+
+  test('flag-less frozen ladder: the stored at-floor tier is protected from the hide', async () => {
+    // No recommended/selected flags anywhere (frozen pre-deploy shape) and the
+    // stored recurring lawn row is the at-floor 6-visit standard tier — it must
+    // stay visible (hiding it would silently re-price the quoted plan), while
+    // nothing else is dropped because the other tiers price above the floor.
+    const estimate = lawnOnlyEstimate([
+      { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90 },
+      { name: 'Enhanced', v: 9, mo: 58, ann: 696, pa: 77.33 },
+      { name: 'Premium', v: 12, mo: 79, ann: 948, pa: 79 },
+    ], { monthly: 50 });
+    estimate.estimate_data.result.recurring.services = [
+      { name: 'Lawn Care', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
+    ];
+    const bundle = await buildPricingBundle(estimate);
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(bundle.frequencies[0].monthly).toBe(50); // clamped, quoted, visible
   });
 
   test('hidden tiers move to hiddenLawnFrequencies so accept can still resolve them', async () => {

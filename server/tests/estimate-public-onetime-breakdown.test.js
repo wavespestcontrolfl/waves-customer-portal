@@ -4852,6 +4852,30 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 
+  test('Waves AI payload suppresses complexity for engineInputs-shaped lawn estimates', () => {
+    // Quote-wizard estimates persist a legacy empty `inputs: {}` alongside
+    // engineInputs.services.lawn — the lawn detector must read both shapes.
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {},
+      engineInputs: {
+        homeSqFt: 2400,
+        lotSqFt: 9000,
+        landscapeComplexity: 'MODERATE',
+        services: { lawn: { track: 'st_augustine' }, pest: { frequency: 4 } },
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', service: 'pest_control' },
+            { name: 'Lawn Care', service: 'lawn_care' },
+          ],
+        },
+      },
+    });
+
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
+  });
+
   test('Waves AI payload uses termite-specific copy and perimeter for termite-bait-only estimates', () => {
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {

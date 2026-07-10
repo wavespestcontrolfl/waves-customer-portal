@@ -2922,6 +2922,10 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const hasLawn = serviceNames.some((name) => /lawn|turf/i.test(name))
     || !!inputServices.lawn
     || !!inputServices.lawnCare
+    // Quote-wizard estimates persist a legacy empty `inputs: {}` next to
+    // engineInputs.services.lawn — read both (mirrors the mosquito detector).
+    || !!engineServices.lawn
+    || !!engineServices.lawnCare
     || inputs.svcLawn === true;
   const isLawnOnly = serviceNames.length > 0
     && serviceNames.every((name) => /lawn|turf/i.test(String(name)));
@@ -11311,17 +11315,42 @@ function isFlooredLawnLadderEntry(entry = {}) {
   return minMonthly > 0 && Number.isFinite(monthly) && monthly > 0 && monthly <= minMonthly;
 }
 
-function dropFlooredLawnLadderEntries(entries = []) {
+function dropFlooredLawnLadderEntries(entries = [], protectedKeys = null) {
   const list = Array.isArray(entries) ? entries : [];
-  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry)
-    || entry.recommended === true
-    || entry.selected === true);
+  const isProtected = (entry) => entry.recommended === true
+    || entry.selected === true
+    || (protectedKeys instanceof Set && protectedKeys.has(String(entry.key || '').toLowerCase()));
+  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry) || isProtected(entry));
   if (kept.length) return kept;
   if (!list.length) return list;
   const best = list.reduce((a, b) => (
     (Number(b.visitsPerYear) || 0) > (Number(a.visitsPerYear) || 0) ? b : a
   ));
   return [best];
+}
+
+// The tier the estimate actually quotes/stores — protected from the floored
+// hide even on frozen ladders that carry no recommended/selected flags
+// (hiding the quoted cadence would silently re-price the customer). Read from
+// the post-accept customerSelection and the stored recurring lawn row.
+const LAWN_LADDER_TIER_KEYS = ['basic', 'standard', 'enhanced', 'premium'];
+function storedLawnTierKeysForEstimate(estData = {}) {
+  const keys = new Set();
+  const selection = estData?.customerSelection || estData?.result?.customerSelection || {};
+  const selectionKey = String(selection.serviceTierKey || selection.serviceTier || '').trim().toLowerCase();
+  if (LAWN_LADDER_TIER_KEYS.includes(selectionKey)) keys.add(selectionKey);
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const rows = [
+    ...(Array.isArray(result?.recurring?.services) ? result.recurring.services : []),
+    ...(Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []),
+  ];
+  rows.forEach((svc) => {
+    const name = svc?.name || svc?.label || svc?.displayName || svc?.service || '';
+    if (!/lawn|turf/i.test(String(name))) return;
+    const tierKey = lawnTierKey(svc);
+    if (LAWN_LADDER_TIER_KEYS.includes(tierKey)) keys.add(tierKey);
+  });
+  return keys;
 }
 
 // Display chokepoint for the floored-cadence rule (owner ask 2026-07-10) —
@@ -11331,13 +11360,14 @@ function dropFlooredLawnLadderEntries(entries = []) {
 // payload.hiddenLawnFrequencies (NOT deleted) so /accept can still resolve a
 // floored tier a stale pre-deploy client legitimately selected — hidden tiers
 // stay priceable and restampable, they just aren't offered.
-function hideFlooredLawnCadencesFromBundle(payload = {}) {
+function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
   let next = payload;
+  const protectedKeys = storedLawnTierKeysForEstimate(estData);
 
   const topLevel = Array.isArray(payload.frequencies) ? payload.frequencies : [];
   const lawnTopLevel = topLevel.filter((f) => f?.serviceCategory === 'lawn_care');
   if (lawnTopLevel.length) {
-    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel));
+    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel, protectedKeys));
     const hidden = lawnTopLevel.filter((f) => !kept.has(f));
     if (hidden.length) {
       next = {
@@ -11368,7 +11398,7 @@ function hideFlooredLawnCadencesFromBundle(payload = {}) {
         if (!isLawnTierLadder(section)) {
           return section;
         }
-        const kept = dropFlooredLawnLadderEntries(section.frequencies);
+        const kept = dropFlooredLawnLadderEntries(section.frequencies, protectedKeys);
         if (kept.length === section.frequencies.length) return section;
         return {
           ...section,
@@ -13140,7 +13170,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
-  const withContract = hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData));
+  const withContract = hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData);
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
