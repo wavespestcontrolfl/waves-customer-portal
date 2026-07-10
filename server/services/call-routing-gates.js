@@ -128,6 +128,10 @@ function buildTriageItem({
     secondary_contact_is_existing_customer: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
     unassigned_auto_booking: 'time_ambiguous',
+    // AI extraction retry budget exhausted (call-recording-processor) — the
+    // call has NO extraction, so nothing downstream (lead/customer/route
+    // decision) exists; this card is the only surface it gets.
+    extraction_failed_permanent: 'service_unknown',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
