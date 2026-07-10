@@ -117,7 +117,7 @@ EVENT RULES:
 - Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved") — this is an events newsletter, not a service pitch.
 - title: a CURIOSITY-GAP headline that never uses the raw event name (it renders elsewhere). Proven formulas: question + affirmation ("...? Yes, Please" / "...? Say Less" / "...? Count Us In"), PSA framing ("PSA: You Might Meet Your New Best Friend This Weekend"), direct address ("This One's for You"), equation ("High Hair + Hot Dice = Ultimate Weekend").
 - Each event gets a unique thematic emoji (no repeats between events).
-- gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo.
+- gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo. Every gifSearchTerm in the issue (including introGifTerm) must be clearly DISTINCT from the others — different verbs, moods, and meme genres, never near-synonyms of another section's term — so no two sections pull similar GIFs.
 - description: 2-4 sentences, conversational, says WHY someone would actually go. Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
 - scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
 - highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
@@ -283,7 +283,7 @@ ISSUE SKELETON (every issue, same order — train the reader):
 5. Featured service — the ONE earnest pitch section tied to the month.
 6. Close — voice returns; one-line call CTA; quarterly tie-in ("this is what your quarterly visit is handling right now"); referral nudge.
 
-GIF CAPTIONS (introGifCaption, crawlGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive.
+GIF CAPTIONS (introGifCaption, crawlGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive. The three Giphy search terms (introGifTerm, crawlGifTerm, pitchGifTerm) must be clearly DISTINCT from each other — different moods and meme genres, never near-synonyms.
 
 SIGN-OFF: "${voice.pestInsiderSignoff || '— Adam, Waves Pest Control'}" (a real person, not "The Team" — the renderer appends the 🌊).
 
@@ -363,12 +363,19 @@ async function assemblePestInsiderNewsletter(draft) {
   const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
   const parts = [];
 
-  // Parallel GIF prefetch — same rationale as the flagship assembler.
-  const [introGif, crawlGif, pitchGif] = await Promise.all([
-    searchGiphy(draft.introGifTerm),
-    searchGiphy(draft.crawlGifTerm),
-    searchGiphy(draft.pitchGifTerm),
+  // Parallel candidate prefetch — same rationale as the flagship assembler.
+  // Selection runs sequentially afterward so the same GIF can never appear
+  // twice in one issue.
+  const usedGifIds = new Set();
+  const gifRetryBudget = { remaining: 3 };
+  const [introCandidates, crawlCandidates, pitchCandidates] = await Promise.all([
+    searchGiphyCandidates(draft.introGifTerm),
+    searchGiphyCandidates(draft.crawlGifTerm),
+    searchGiphyCandidates(draft.pitchGifTerm),
   ]);
+  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds, gifRetryBudget);
+  const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds, gifRetryBudget);
+  const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds, gifRetryBudget);
 
   // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
@@ -508,7 +515,23 @@ const COLORS = {
   get rule() { return newsletterPalette().rule; },
 };
 
-const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
+// Animated circular mascot badge built from the CURRENT brand mascot
+// (client/public/waves-logo-2026.png art, wordmark cropped out — illegible
+// at divider size anyway), self-hosted on our CDN. Replaces the Beehiiv-era
+// mascot GIF that (a) was the old logo art and (b) lived on media.beehiiv.com,
+// a platform we left — that asset can vanish without notice.
+const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif';
+
+// The exact words the hero poster letters into the artwork: the issue's
+// subject line, emoji stripped (image models render emoji glyphs as mush;
+// the words are the content signal). Owner rule 2026-07-09: the hero must
+// carry text and it must match what the issue is actually delivering.
+function heroTitleText(subject) {
+  return String(subject || '')
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}️‍]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 async function generateHeroImage(subject) {
   const s3Ready = config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket && process.env.SOCIAL_MEDIA_CDN_DOMAIN;
@@ -516,12 +539,18 @@ async function generateHeroImage(subject) {
 
   try {
     const imageGenerator = require('./content/image-generator');
+    const titleText = heroTitleText(subject);
     const result = await imageGenerator.generate({
       // The shipped issues' visual identity: a custom flat retro-cartoon
       // collage restating the subject (tornado + dog + pirate, Mozart +
-      // llama + pie). AI lettering garbles, so no text overlay — the
-      // subject line itself stays in the email chrome.
-      title: `Retro flat-cartoon poster collage for a Southwest Florida weekend events newsletter titled "${subject}". 2-4 playful cartoon vignettes representing the lineup's themes, vintage palette (teal, orange, cream, brick red), sunburst background, bold and fun, Florida coastal energy. Strictly NO text, NO lettering, NO words in the image.`,
+      // llama + pie), now WITH the subject lettered into the poster —
+      // owner rule 2026-07-09. The primary generators (gpt-image line)
+      // render typography reliably; the old "no text" rule predated them.
+      // Passed as the raw `prompt` (NOT `title`) so image-generator's
+      // generic buildPrompt scaffolding — "photorealistic … No text, words,
+      // watermarks" — can't wrap and contradict it. The composition line
+      // must ride along because Gemini fallbacks take size from the prompt.
+      prompt: `Retro flat-cartoon poster collage for a Southwest Florida weekend events newsletter. 2-4 playful cartoon vignettes representing the lineup's themes ("${titleText}"), vintage palette (teal, orange, cream, brick red), sunburst background, bold and fun, Florida coastal energy. The poster prominently features the headline text "${titleText}" in bold retro hand-lettered poster typography — spelled EXACTLY as written, fully legible, integrated into the design as an arched or banner headline. No other words, letters, or writing anywhere else in the image. Composition: landscape 3:2 aspect ratio, 1536x1024.`,
       mode: 'blog-hero',
     });
     const match = /^data:([^;]+);base64,(.+)$/.exec(result.dataUrl || '');
@@ -537,18 +566,68 @@ async function generateHeroImage(subject) {
     return null;
   }
 }
-async function searchGiphy(term) {
-  if (!term) return null;
+// Fetch up to 25 candidate GIFs for a search term as [{ id, url }].
+// Candidates (not a single winner) so the assembler can dedupe across the
+// whole issue: similar search terms ("excited dance", "happy dancing")
+// share Giphy's top result, and limit=1 shipped the same GIF 6× in one
+// issue (2026-07-09 draft). Wide pool per owner ("slightly broader search
+// or scope"). Never rejects — [] on any failure.
+async function searchGiphyCandidates(term) {
+  if (!term) return [];
   const apiKey = process.env.GIPHY_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) return [];
   try {
-    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=1&rating=pg`;
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=25&rating=pg`;
     const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
     const data = await res.json();
-    const gif = data.data?.[0];
-    return gif?.images?.downsized_medium?.url || gif?.images?.original?.url || null;
-  } catch { return null; }
+    return (Array.isArray(data.data) ? data.data : [])
+      .map((gif) => ({
+        id: gif?.id,
+        url: gif?.images?.downsized_medium?.url || gif?.images?.original?.url || null,
+      }))
+      .filter((c) => c.id && c.url);
+  } catch { return []; }
+}
+
+// Issue-level GIF dedupe: first candidate whose Giphy id hasn't been used
+// in this issue wins and is marked used. A term whose candidates are ALL
+// taken yields null — the renderer falls back to the event photo, because
+// repeating a GIF is never acceptable (owner rule 2026-07-09).
+function pickUniqueGif(candidates, usedIds) {
+  for (const c of candidates || []) {
+    if (!usedIds.has(c.id)) {
+      usedIds.add(c.id);
+      return c.url;
+    }
+  }
+  return null;
+}
+
+// Expanded-keyword retry (owner 2026-07-09: "expand the keywords"): when a
+// term's whole candidate pool is already used, re-search with broadened
+// variants of the term before giving up. Only then does the renderer fall
+// back to the event photo — a repeat is still never an option.
+//
+// Two bounds keep a degraded Giphy from stalling assembly (each search
+// carries a 5s timeout): an EMPTY primary pool means Giphy is unreachable
+// or the term is dead — broadened variants would just burn more timeouts,
+// so we skip them; and the caller passes a shared per-issue retryBudget so
+// the extra sequential searches across all sections stay capped.
+async function pickUniqueGifWithRetry(term, candidates, usedIds, retryBudget = null) {
+  const first = pickUniqueGif(candidates, usedIds);
+  if (first) return first;
+  if (!term) return null;
+  if (!candidates || candidates.length === 0) return null;
+  for (const broadened of [`${term} reaction`, `${term} meme`, `funny ${term}`]) {
+    if (retryBudget) {
+      if (retryBudget.remaining <= 0) return null;
+      retryBudget.remaining -= 1;
+    }
+    const pick = pickUniqueGif(await searchGiphyCandidates(broadened), usedIds);
+    if (pick) return pick;
+  }
+  return null;
 }
 
 // HTML-escape a string before it is interpolated into the email body.
@@ -583,7 +662,7 @@ function slugify(text) {
 function dividerHtml() {
   return `<div style="text-align:center;margin:28px 0;">
 <a href="https://www.wavespestcontrol.com/" style="text-decoration:none;">
-<img src="${WAVES_DIVIDER_GIF}" alt="" width="64" style="width:64px;height:auto;display:inline-block;" />
+<img src="${WAVES_DIVIDER_GIF}" alt="" width="48" style="width:48px;height:auto;display:inline-block;" />
 </a></div>`;
 }
 
@@ -932,15 +1011,24 @@ async function assembleBeehiivNewsletter(draft) {
   const parts = [];
   const events = draft.events || [];
 
-  // Prefetch ALL Giphy lookups concurrently. GIF-first rendering would
-  // otherwise await searchGiphy serially inside the event loop — with
+  // Prefetch ALL Giphy candidate lists concurrently. GIF-first rendering
+  // would otherwise await Giphy serially inside the event loop — with
   // Giphy slow/unreachable that's 5s × 12 events of dead time; in
-  // parallel the worst case is one 5s timeout. searchGiphy never
-  // rejects (catch → null), so Promise.all is safe.
-  const [introGif, ...eventGifs] = await Promise.all([
-    searchGiphy(draft.introGifTerm),
-    ...events.map((ev) => searchGiphy(ev.gifSearchTerm)),
+  // parallel the worst case is one 5s timeout. searchGiphyCandidates never
+  // rejects (catch → []), so Promise.all is safe. Selection then runs
+  // sequentially (intro first, events in order) against a shared used-set
+  // so one issue can never repeat a GIF.
+  const usedGifIds = new Set();
+  const gifRetryBudget = { remaining: 6 };
+  const [introCandidates, ...eventCandidates] = await Promise.all([
+    searchGiphyCandidates(draft.introGifTerm),
+    ...events.map((ev) => searchGiphyCandidates(ev.gifSearchTerm)),
   ]);
+  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds, gifRetryBudget);
+  const eventGifs = [];
+  for (let i = 0; i < eventCandidates.length; i++) {
+    eventGifs.push(await pickUniqueGifWithRetry(events[i]?.gifSearchTerm, eventCandidates[i], usedGifIds, gifRetryBudget));
+  }
 
   // ── Hero Image ──
   const heroUrl = safeUrl(draft.heroImageUrl);
@@ -1413,6 +1501,12 @@ module.exports = {
   assembleBeehiivNewsletter,
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,
+  // GIF dedupe (one issue never repeats a GIF)
+  searchGiphyCandidates,
+  pickUniqueGif,
+  pickUniqueGifWithRetry,
+  // Hero poster headline text (subject, emoji-stripped)
+  heroTitleText,
   displayCity,
   formatLockedLocation,
   linkifyFirst,
