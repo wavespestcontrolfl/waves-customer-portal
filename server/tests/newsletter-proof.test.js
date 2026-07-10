@@ -45,7 +45,9 @@ const db = require('../models/db');
 const {
   parseProofToken,
   extractTopReplyText,
+  htmlReplyToText,
   isApprovalReply,
+  maskEmail,
   sendNewsletterProof,
   maybeHandleProofApproval,
   approvalSenders,
@@ -77,6 +79,11 @@ const FLAGSHIP_DRAFT = {
   proof_approved_at: null,
 };
 
+// Approval-ready fixture: proof stamped, no edits since (the proof write
+// sets proof_sent_at === updated_at in one update).
+const PROOF_STAMP = new Date('2026-07-09T18:00:00Z');
+const PROOFED_DRAFT = { ...FLAGSHIP_DRAFT, proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
+
 function wireDb({ sends, subscribers } = {}) {
   const sendsChain = chain(sends || {});
   const subsChain = chain(subscribers || { first: undefined });
@@ -87,13 +94,17 @@ function wireDb({ sends, subscribers } = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
-  delete process.env.NEWSLETTER_PROOF_APPROVERS;
+  // Approvers are fail-closed (no default) — tests opt in explicitly.
+  process.env.NEWSLETTER_PROOF_APPROVERS = 'contact@wavespestcontrol.com';
   delete process.env.NEWSLETTER_PROOF_EMAIL;
+  delete process.env.GMAIL_USER_EMAIL;
   mockValidate.mockReturnValue({ errors: [], warnings: [] });
+  mockSendOne.mockImplementation(async () => ({ messageId: 'sg-proof-1' }));
 });
 
 afterAll(() => {
   delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
+  delete process.env.NEWSLETTER_PROOF_APPROVERS;
 });
 
 describe('parseProofToken', () => {
@@ -136,14 +147,41 @@ describe('isApprovalReply', () => {
   );
   test.each([
     'not approved', "don't approve", 'do not approve yet', 'never approve this',
+    "can't approve this yet", 'cannot approve', "won't approve",
     'hold off on approving', 'wait to approve', 'no, do not approve',
     'looks good', 'send it', '', undefined,
   ])('rejects %j', (t) => expect(isApprovalReply(t)).toBe(false));
 });
 
+describe('htmlReplyToText — quote-aware HTML conversion', () => {
+  test('drops blockquoted proof banner; typed text survives with line structure', () => {
+    const html = '<div>needs changes</div><blockquote>Reply <strong>APPROVED</strong> to this email and it goes out</blockquote>';
+    const text = htmlReplyToText(html);
+    expect(text).toContain('needs changes');
+    expect(text).not.toMatch(/APPROVED/);
+  });
+  test('drops gmail_quote container through end of message', () => {
+    const html = '<div dir="ltr">approved<br></div><div class="gmail_quote gmail_quote_container">On Thu wrote: Reply APPROVED to this email</div>';
+    const text = htmlReplyToText(html);
+    expect(text.trim()).toBe('approved');
+  });
+  test('nested blockquotes all removed', () => {
+    const html = '<p>hold off</p><blockquote>outer APPROVED <blockquote>inner APPROVED</blockquote></blockquote>';
+    expect(htmlReplyToText(html)).not.toMatch(/APPROVED/);
+  });
+});
+
+describe('maskEmail', () => {
+  test('masks the local part, keeps the domain', () => {
+    expect(maskEmail('contact@wavespestcontrol.com')).toBe('co***@wavespestcontrol.com');
+    expect(maskEmail('not-an-email')).toBe('(invalid)');
+  });
+});
+
 describe('approvalSenders', () => {
-  test('defaults to the owner inbox and honors the env override', () => {
-    expect(approvalSenders()).toEqual(['contact@wavespestcontrol.com']);
+  test('FAIL CLOSED by default; env sets the explicit allowlist', () => {
+    delete process.env.NEWSLETTER_PROOF_APPROVERS;
+    expect(approvalSenders()).toEqual([]);
     process.env.NEWSLETTER_PROOF_APPROVERS = 'A@x.com, b@y.com';
     expect(approvalSenders()).toEqual(['a@x.com', 'b@y.com']);
   });
@@ -183,7 +221,15 @@ describe('sendNewsletterProof', () => {
     }));
   });
 
-  test('happy path: proofs to the owner inbox with token subject + banner, stamps proof state', async () => {
+  test('no approvers configured → fail closed, no proof at all', async () => {
+    delete process.env.NEWSLETTER_PROOF_APPROVERS;
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('no_approvers_configured');
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('happy path: atomic claim BEFORE SendGrid, token subject + banner, no ASM group, synced reply-to', async () => {
     const { sendsChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
     const r = await sendNewsletterProof('send-1');
     expect(r.sent).toBe(true);
@@ -192,17 +238,40 @@ describe('sendNewsletterProof', () => {
     const args = mockSendOne.mock.calls[0][0];
     expect(args.to).toBe('contact@wavespestcontrol.com');
     expect(args.subject).toBe(`[PROOF-${r.token}] Bubbles & Sea Lions`);
-    // Reply must come back to the synced inbox the approval handler watches
+    // Reply must come back to the mailbox the Gmail sync watches
     expect(args.replyTo).toBe('contact@wavespestcontrol.com');
+    // Internal control message — newsletter suppression must not apply
+    expect(args.asmGroupId).toBeUndefined();
     expect(args.html).toContain('Reply <strong>APPROVED</strong>');
     expect(args.html).toContain('606');
-    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
-      proof_token: r.token,
-      proof_sent_at: expect.any(Date),
-    }));
+    // Claim is whereNull-guarded and stamps token+sent_at+updated_at together
+    expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_sent_at');
+    const claim = sendsChain.update.mock.calls[0][0];
+    expect(claim.proof_token).toBe(r.token);
+    expect(claim.proof_sent_at).toBeInstanceOf(Date);
+    expect(claim.updated_at).toBe(claim.proof_sent_at);
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_sent', expect.objectContaining({
       recipientCount: 606,
+      recipient: 'co***@wavespestcontrol.com',
     }));
+  });
+
+  test('lost the atomic proof claim (concurrent worker) → no email', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null }, update: 0 } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('proof_claimed_elsewhere');
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('SendGrid failure releases the claim so the catch-up tick can retry', async () => {
+    mockSendOne.mockImplementation(async () => { throw new Error('sendgrid 503'); });
+    const { sendsChain } = wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('proof_send_failed');
+    // second update clears the claim
+    const lastUpdate = sendsChain.update.mock.calls.at(-1)[0];
+    expect(lastUpdate.proof_token).toBeNull();
+    expect(lastUpdate.proof_sent_at).toBeNull();
   });
 });
 
@@ -227,14 +296,22 @@ describe('maybeHandleProofApproval', () => {
   });
 
   test('non-allowlisted sender cannot approve', async () => {
-    wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval({ ...APPROVAL_EMAIL, from_address: 'attacker@evil.com' });
     expect(r).toBe(false);
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
+  test('no approvers configured → nobody can approve (fail closed)', async () => {
+    delete process.env.NEWSLETTER_PROOF_APPROVERS;
+    wireDb({ sends: { first: PROOFED_DRAFT } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(false);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
   test('reply that does not say approved leaves the draft untouched', async () => {
-    const { sendsChain } = wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval({ ...APPROVAL_EMAIL, body_text: 'hold off, fix the second event' });
     expect(r).toBe(true);
     expect(sendsChain.update).not.toHaveBeenCalled();
@@ -242,7 +319,7 @@ describe('maybeHandleProofApproval', () => {
   });
 
   test('quoted APPROVED from the banner alone does not approve', async () => {
-    wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval({
       ...APPROVAL_EMAIL,
       body_text: '> Reply APPROVED to this email and it goes out to 606 subscribers.',
@@ -251,23 +328,58 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
+  test('HTML-only reply: quoted banner ignored, typed non-approval does NOT dispatch', async () => {
+    wireDb({ sends: { first: PROOFED_DRAFT } });
+    const r = await maybeHandleProofApproval({
+      ...APPROVAL_EMAIL,
+      body_text: null,
+      body_html: '<div dir="ltr">needs changes</div><blockquote>Reply <strong>APPROVED</strong> to this email and it goes out.</blockquote>',
+    });
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('HTML-only reply: typed approved dispatches', async () => {
+    wireDb({ sends: { first: PROOFED_DRAFT } });
+    const r = await maybeHandleProofApproval({
+      ...APPROVAL_EMAIL,
+      body_text: null,
+      body_html: '<div dir="ltr">approved<br></div><div class="gmail_quote">On Thu wrote: Reply APPROVED…</div>',
+    });
+    expect(r).toBe(true);
+    expect(mockSendCampaign).toHaveBeenCalledWith('send-1');
+  });
+
   test('duplicate approval reply is a no-op', async () => {
-    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_approved_at: new Date() } } });
+    wireDb({ sends: { first: { ...PROOFED_DRAFT, proof_approved_at: new Date() } } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
   test('already-sent campaign cannot be re-approved', async () => {
-    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, status: 'sent' } } });
+    wireDb({ sends: { first: { ...PROOFED_DRAFT, status: 'sent' } } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
+  test('draft edited AFTER the proof → approval refused, proof invalidated + reissued', async () => {
+    const edited = { ...PROOFED_DRAFT, updated_at: new Date(PROOF_STAMP.getTime() + 60_000) };
+    const { sendsChain } = wireDb({ sends: { first: edited } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: expect.arrayContaining([expect.stringContaining('edited after the proof')]),
+    }));
+    // stale proof invalidated (token-scoped clear)
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_sent_at: null }));
+  });
+
   test('validation failure at approval time blocks the send and notifies', async () => {
     mockValidate.mockReturnValue({ errors: ['claim gate'], warnings: [] });
-    wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+    wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(mockSendCampaign).not.toHaveBeenCalled();
@@ -275,14 +387,14 @@ describe('maybeHandleProofApproval', () => {
   });
 
   test('lost the atomic approval claim → no dispatch', async () => {
-    wireDb({ sends: { first: FLAGSHIP_DRAFT, update: 0 } });
+    wireDb({ sends: { first: PROOFED_DRAFT, update: 0 } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  test('happy path: owner replies approved → claim + dispatch + notification', async () => {
-    const { sendsChain } = wireDb({ sends: { first: FLAGSHIP_DRAFT } });
+  test('happy path: owner replies approved → claim + dispatch + notification (masked address)', async () => {
+    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approved_at');
@@ -292,7 +404,7 @@ describe('maybeHandleProofApproval', () => {
     }));
     expect(mockSendCampaign).toHaveBeenCalledWith('send-1');
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_approved', expect.objectContaining({
-      approvedBy: 'contact@wavespestcontrol.com',
+      approvedBy: 'co***@wavespestcontrol.com',
       recipientCount: 606,
     }));
   });

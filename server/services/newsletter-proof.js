@@ -37,16 +37,35 @@ function proofRecipient() {
 }
 
 /**
+ * The mailbox the Gmail sync actually watches — approval replies MUST land
+ * there or maybeHandleProofApproval never sees them. Reply-To on the proof
+ * is forced to this address so a proof recipient reading from a personal
+ * address still routes the approval back into the synced inbox.
+ */
+function syncedApprovalMailbox() {
+  return normalizeEmail(process.env.GMAIL_USER_EMAIL || DEFAULT_PROOF_RECIPIENT);
+}
+
+/**
  * Addresses whose "approved" reply is allowed to release the list send.
- * Deliberately NOT the whole internal domain — Virginia works the shared
- * inbox; only the owner address(es) may approve a broadcast.
+ * FAIL CLOSED: no default. The obvious default (contact@) is the shared
+ * inbox non-owner staff work from, and approval is From-address-based —
+ * so the operator must explicitly name the approver address(es) via
+ * NEWSLETTER_PROOF_APPROVERS before any reply can release a broadcast.
  */
 function approvalSenders() {
-  const configured = String(process.env.NEWSLETTER_PROOF_APPROVERS || '')
+  return String(process.env.NEWSLETTER_PROOF_APPROVERS || '')
     .split(',')
     .map(normalizeEmail)
     .filter(Boolean);
-  return configured.length ? configured : [DEFAULT_PROOF_RECIPIENT];
+}
+
+/** PII-safe form of an email address for log lines: "co***@domain.com". */
+function maskEmail(email) {
+  const n = normalizeEmail(email);
+  const at = n.indexOf('@');
+  if (at <= 0) return '(invalid)';
+  return `${n.slice(0, Math.min(2, at))}***@${n.slice(at + 1)}`;
 }
 
 /** Extract the proof token from an email subject ("Re: [PROOF-ab12cd34] …"). */
@@ -75,12 +94,32 @@ function extractTopReplyText(bodyText) {
   return kept.join('\n').trim();
 }
 
-function stripHtmlToText(html) {
-  return String(html || '')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+/**
+ * Convert an HTML-only reply into text WITHOUT destroying the quote
+ * structure. A naive strip-tags pass flattens the quoted proof banner
+ * ("Reply APPROVED…") into the same line as the typed reply, letting a
+ * non-approval reply match. So: drop quoted containers entirely
+ * (blockquote / gmail_quote / yahoo_quoted), keep block boundaries as
+ * newlines, THEN strip tags — extractTopReplyText still runs after this
+ * as the text-path defense.
+ */
+function htmlReplyToText(html) {
+  let s = String(html || '').replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  // innermost-first so nested quote blocks all disappear; bounded loop
+  for (let i = 0; i < 10 && /<blockquote/i.test(s); i++) {
+    s = s.replace(/<blockquote\b[^>]*>(?:(?!<blockquote\b)[\s\S])*?<\/blockquote>/gi, '\n');
+  }
+  // Gmail/Yahoo wrap the whole quoted thread in a marker div — drop from
+  // the marker to the end (the typed reply always precedes it).
+  s = s.replace(/<div[^>]*class="[^"]*(?:gmail_quote|yahoo_quoted)[^"]*"[\s\S]*$/i, '\n');
+  return s
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6]|blockquote)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
     .trim();
 }
 
@@ -92,10 +131,10 @@ function isApprovalReply(text) {
   const t = String(text || '').toLowerCase();
   if (!/\bapproved?\b/.test(t)) return false;
   // Negation guard: a negating word within the same sentence before
-  // "approv…" ("not approved", "don't approve", "hold off on approving",
-  // "wait to approve") blocks the send. Ambiguity fails closed — the owner
-  // can always reply a clean "approved".
-  if (/\b(not|don'?t|do\s+not|isn'?t|never|hold|wait|no)\b[^.!?\n]{0,40}approv/.test(t)) return false;
+  // "approv…" ("not approved", "don't approve", "can't approve yet",
+  // "hold off on approving", "wait to approve") blocks the send.
+  // Ambiguity fails closed — the owner can always reply a clean "approved".
+  if (/\b(not|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|hold|wait|no)\b[^.!?\n]{0,40}approv/.test(t)) return false;
   return true;
 }
 
@@ -186,6 +225,12 @@ async function notifyProof(type, payload) {
  */
 async function sendNewsletterProof(sendId) {
   if (!isProofApprovalEnabled()) return { skipped: true, reason: 'gate_off' };
+  // Fail closed when no explicit approver is configured: a proof whose
+  // approval reply can never be honored would just mislead the owner.
+  if (approvalSenders().length === 0) {
+    logger.warn('[newsletter-proof] gate is on but NEWSLETTER_PROOF_APPROVERS is unset — no proof sent (fail closed)');
+    return { skipped: true, reason: 'no_approvers_configured' };
+  }
   if (!sendgrid.isConfigured()) return { skipped: true, reason: 'sendgrid_not_configured' };
 
   const send = await db('newsletter_sends').where({ id: sendId }).first();
@@ -214,39 +259,65 @@ async function sendNewsletterProof(sendId) {
     }
   }
 
+  // Atomic proof claim BEFORE the external SendGrid call: overlapping
+  // autopilot/catch-up workers must not both email proofs (the second
+  // token would overwrite the first, making its reply a dead letter).
+  // One `now` for both stamps so the approval-time staleness check
+  // (updated_at > proof_sent_at) has an exact baseline.
   const token = crypto.randomBytes(4).toString('hex');
-  const { html, text } = await renderSendPreview({
-    ...send,
-    html_body: proofBannerHtml(recipientCount) + (send.html_body || ''),
-    text_body: send.text_body ? proofBannerText(recipientCount) + send.text_body : send.text_body,
-  }, to);
-
-  const result = await sendgrid.sendOne({
-    to,
-    fromEmail: send.from_email,
-    fromName: send.from_name,
-    subject: `[PROOF-${token}] ${send.subject}`,
-    html,
-    text,
-    // The reply must land back in the synced shared inbox for the approval
-    // handler to see it — force reply-to at the proof recipient.
-    replyTo: to,
-    categories: ['newsletter_proof', `send_${send.id}`],
-    asmGroupId: sendgrid.newsletterGroupId(),
-  });
-
-  await db('newsletter_sends')
+  const now = new Date();
+  const claimed = await db('newsletter_sends')
     .where({ id: send.id })
-    .update({ proof_token: token, proof_sent_at: new Date(), updated_at: new Date() });
+    .whereNull('proof_sent_at')
+    .update({ proof_token: token, proof_sent_at: now, updated_at: now });
+  if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
-  await notifyProof('newsletter_proof_sent', {
-    subject: send.subject,
-    recipient: to,
-    recipientCount,
-  });
+  try {
+    const { html, text } = await renderSendPreview({
+      ...send,
+      html_body: proofBannerHtml(recipientCount) + (send.html_body || ''),
+      text_body: send.text_body ? proofBannerText(recipientCount) + send.text_body : send.text_body,
+    }, to);
 
-  logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, messageId ${result?.messageId || 'n/a'})`);
-  return { sent: true, token };
+    const result = await sendgrid.sendOne({
+      to,
+      fromEmail: send.from_email,
+      fromName: send.from_name,
+      subject: `[PROOF-${token}] ${send.subject}`,
+      html,
+      text,
+      // The reply must land in the mailbox the Gmail sync watches or the
+      // approval handler never sees it — Reply-To is always the synced
+      // inbox, even when the proof recipient is a different address.
+      replyTo: syncedApprovalMailbox(),
+      categories: ['newsletter_proof', `send_${send.id}`],
+      // Deliberately NO ASM group: the proof is an internal control
+      // message; newsletter unsub/suppression state must never be able to
+      // silently swallow it.
+    });
+
+    await notifyProof('newsletter_proof_sent', {
+      subject: send.subject,
+      recipient: maskEmail(to),
+      recipientCount,
+    });
+
+    logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, messageId ${result?.messageId || 'n/a'})`);
+    return { sent: true, token };
+  } catch (sendErr) {
+    // Release OUR claim (token-scoped) so the catch-up tick can retry a
+    // transient SendGrid failure instead of the week silently losing its
+    // proof.
+    try {
+      await db('newsletter_sends')
+        .where({ id: send.id, proof_token: token })
+        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+    } catch (clearErr) {
+      logger.error(`[newsletter-proof] failed to release proof claim for ${send.id}: ${clearErr.message}`);
+    }
+    logger.error(`[newsletter-proof] proof send failed for ${send.id}: ${sendErr.message}`);
+    return { skipped: true, reason: 'proof_send_failed' };
+  }
 }
 
 /**
@@ -268,9 +339,10 @@ async function maybeHandleProofApproval(email) {
   // Ignore our own outbound proof (SendGrid copies can sync back in):
   // a proof has no "Re:" and comes FROM the newsletter address — the
   // send-side guard below (approved-text required) already makes it inert,
-  // but the sender allowlist is the real boundary.
+  // but the sender allowlist is the real boundary. Sender is logged
+  // masked — full addresses in logs are PII.
   if (!approvalSenders().includes(from)) {
-    logger.info(`[newsletter-proof] ignoring [PROOF-${token}] email from non-approver ${from || 'unknown'}`);
+    logger.info(`[newsletter-proof] ignoring [PROOF-${token}] email from non-approver ${maskEmail(from)}`);
     return false;
   }
 
@@ -284,7 +356,10 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
 
-  const replyText = extractTopReplyText(email.body_text || stripHtmlToText(email.body_html));
+  // HTML-only replies go through the quote-aware converter — a naive tag
+  // strip would flatten the quoted proof banner ("Reply APPROVED…") into
+  // the checked text and let a non-approval reply match.
+  const replyText = extractTopReplyText(email.body_text || htmlReplyToText(email.body_html));
   if (!isApprovalReply(replyText)) {
     logger.info(`[newsletter-proof] reply for send ${send.id} did not say "approved" — leaving draft untouched`);
     return true;
@@ -292,6 +367,28 @@ async function maybeHandleProofApproval(email) {
 
   if (!['draft', 'scheduled'].includes(send.status)) {
     logger.info(`[newsletter-proof] send ${send.id} is ${send.status} — approval reply is a no-op`);
+    return true;
+  }
+
+  // Staleness gate: the proof stamps proof_sent_at === updated_at in one
+  // write, so ANY later edit (composer PATCH bumps updated_at) means the
+  // owner approved content that was never proofed. Refuse, invalidate the
+  // stale proof, and immediately issue a fresh one for the edited draft.
+  if (send.proof_sent_at && send.updated_at
+      && new Date(send.updated_at).getTime() > new Date(send.proof_sent_at).getTime()) {
+    logger.info(`[newsletter-proof] send ${send.id} was edited after its proof — refusing stale approval, re-proofing`);
+    await notifyProof('newsletter_proof_blocked', {
+      subject: send.subject,
+      errors: ['Draft was edited after the proof went out — approval refused. A fresh proof of the edited draft is on its way; reply APPROVED to that one.'],
+    });
+    try {
+      await db('newsletter_sends')
+        .where({ id: send.id, proof_token: token })
+        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+      await sendNewsletterProof(send.id);
+    } catch (reproofErr) {
+      logger.error(`[newsletter-proof] re-proof after stale approval failed for ${send.id}: ${reproofErr.message}`);
+    }
     return true;
   }
 
@@ -328,7 +425,7 @@ async function maybeHandleProofApproval(email) {
     });
   if (!claimed) return true;
 
-  logger.info(`[newsletter-proof] send ${send.id} approved by ${from} — dispatching campaign to ${recipientCount} subscribers`);
+  logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — dispatching campaign to ${recipientCount} subscribers`);
 
   // Same fire-and-forget contract as the manual /send route: sendCampaign's
   // atomic draft/scheduled→sending claim is the double-dispatch guard.
@@ -345,7 +442,7 @@ async function maybeHandleProofApproval(email) {
 
   await notifyProof('newsletter_proof_approved', {
     subject: send.subject,
-    approvedBy: from,
+    approvedBy: maskEmail(from),
     recipientCount,
   });
 
@@ -355,9 +452,12 @@ async function maybeHandleProofApproval(email) {
 module.exports = {
   isProofApprovalEnabled,
   proofRecipient,
+  syncedApprovalMailbox,
   approvalSenders,
+  maskEmail,
   parseProofToken,
   extractTopReplyText,
+  htmlReplyToText,
   isApprovalReply,
   renderSendPreview,
   sendNewsletterProof,
