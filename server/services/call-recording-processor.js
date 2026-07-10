@@ -64,7 +64,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -535,10 +535,14 @@ function summarizeKnownCaller(customer) {
     // restating it on a familiar call.
     isExistingCustomer: accountType === 'established_customer',
     hasAddress: !!String(customer.address_line1 || '').trim(),
-    // The on-file street itself, for the fail-open V1-street comparison: a
-    // legacy V1 street that doesn't match it is a NEW address that must hold
-    // for review, never silently rebook to the primary.
+    // The on-file address components, for the fail-open V1 conflict check: a
+    // legacy V1 address that conflicts with them (different street, unit,
+    // city, or ZIP) is a NEW address that must hold for review, never
+    // silently rebook to the primary.
     addressLine1: String(customer.address_line1 || '').trim() || null,
+    addressLine2: String(customer.address_line2 || '').trim() || null,
+    addressCity: String(customer.city || '').trim() || null,
+    addressZip: String(customer.zip || '').trim() || null,
   };
 }
 
@@ -3497,26 +3501,46 @@ const CallRecordingProcessor = {
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
           });
           // Address fail-open is only safe when the on-file address really is
-          // the booking address. If legacy V1 captured a street that does NOT
-          // match the on-file street while V2 heard nothing (that's the only
-          // way address flags fail open), V1 may have heard a rental/secondary
-          // address V2 missed — a should-review new-address booking, not a
-          // confirmed visit at the primary. Demote it to the normal blocked
+          // the booking address. If legacy V1 captured an address that
+          // CONFLICTS with the on-file one while V2 heard nothing (that's the
+          // only way address flags fail open), V1 may have heard a rental/
+          // secondary address V2 missed — a should-review new-address booking,
+          // not a confirmed visit at the primary. Conflict is judged on the
+          // FULL address, not just the street: same street but a different
+          // unit/city/ZIP ("Unit B" at the saved building) must hold exactly
+          // like a different street. Only components V1 actually captured can
+          // conflict — a street-only V1 echo of the on-file street is a
+          // duplicate, not new-address evidence. Demote to the normal blocked
           // path (address_review card) BEFORE the route decision is recorded.
-          // No street in the log line — addresses are PII and these logs are
-          // plaintext; the review card carries the details.
+          // No address values in the log — PII; the review card carries them.
           if (routingResult.allowed
             && (routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
             const legacyV1Street = String(extracted.address_line1 || '').trim();
-            const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
-            if (legacyV1Street && (!onFileStreet || streetCompareKey(legacyV1Street) !== streetCompareKey(onFileStreet))) {
-              logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only street differs from the on-file address`);
-              routingResult = {
-                allowed: false,
-                reason: 'v1_only_new_address',
-                flags: routingResult.flags,
-                appointmentBlockingFlags: ['address_unverified'],
-              };
+            if (legacyV1Street) {
+              // Same normalization family as the property-linkage exact match
+              // (customer-properties), so this guard can't disagree with the
+              // stamp downstream.
+              const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
+              const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+              const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
+              const v1Unit = unitKey(extracted.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
+              const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
+              const v1City = cityKey(extracted.city);
+              const v1Zip = normalizeZip(extracted.zip);
+              const v1AddressConflicts = !onFileStreet
+                || streetKey(legacyV1Street) !== streetKey(onFileStreet)
+                || (v1Unit && v1Unit !== onFileUnit)
+                || (v1City && v1City !== cityKey(knownCaller?.addressCity))
+                || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
+              if (v1AddressConflicts) {
+                logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only address conflicts with the on-file address`);
+                routingResult = {
+                  allowed: false,
+                  reason: 'v1_only_new_address',
+                  flags: routingResult.flags,
+                  appointmentBlockingFlags: ['address_unverified'],
+                };
+              }
             }
           }
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
@@ -5005,12 +5029,24 @@ const CallRecordingProcessor = {
     // never overrides a service that DID resolve to a real specific service.
     const resolvedGenericOnly = serviceResolution.ok
       && serviceResolution.service === GENERIC_CALL_APPOINTMENT_SERVICE;
+    let genericBookingUnbookable = false;
     if (!callBookingCatalogRow && (serviceResolution.noMatch === true || resolvedGenericOnly)
         && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
       const wavesAssessment = bookableCallServices.find((s) => /^waves assessment$/i.test(String(s.name || '')));
       if (wavesAssessment) {
         callBookingCatalogRow = wavesAssessment;
         logger.info(`[call-proc] Service unclear for ${maskSid(callSid)} — booking as "Waves Assessment" (catalog fallback; assess on-site)`);
+      } else if (resolvedGenericOnly) {
+        // The fallback row is unavailable (catalog load failed, or the row is
+        // inactive / not booking-enabled). Booking would otherwise proceed on
+        // serviceResolution.ok with the made-up generic label and
+        // service_id=null — exactly what the real-catalog-service invariant
+        // forbids. Hold for review instead; the skip path files the
+        // auto_booking_skipped_after_approval card with this reason. (The
+        // noMatch case needs no flag: ok:false + no catalog row already
+        // can't book.)
+        genericBookingUnbookable = true;
+        logger.warn(`[call-proc] "Waves Assessment" fallback row unavailable for ${maskSid(callSid)} — holding generic booking for review`);
       }
     }
     // Use the module-level isOutboundCall(call) helper — a local `const
@@ -5023,6 +5059,7 @@ const CallRecordingProcessor = {
     // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
     // noMatch) never set a catalog row, so they stay un-bookable.
     const canCreateAppointmentFromCall = !isOutboundCall(call)
+      && !genericBookingUnbookable
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
@@ -5030,7 +5067,8 @@ const CallRecordingProcessor = {
         dateTime: extracted.preferred_date_time,
         scheduleCreated: false,
         smsSent: false,
-        skippedReason: isOutboundCall(call) ? 'outbound_call' : serviceResolution.reason,
+        skippedReason: isOutboundCall(call) ? 'outbound_call'
+          : (genericBookingUnbookable ? 'generic_service_fallback_unavailable' : serviceResolution.reason),
       };
       logger.info(
         `[call-proc] Skipping appointment auto-create for ${callSid}: ` +
@@ -5075,13 +5113,22 @@ const CallRecordingProcessor = {
               catalogRow: callBookingCatalogRow,
             });
             const smsPhone = customerValidation.details.phone;
-            // Implied-consent recipient scope: when SMS consent is only IMPLIED
-            // (inbound caller, no explicit sms_consent_given), the confirmation
-            // may go ONLY to the inbound ANI — never to a spoken alternate
-            // number that outranked the ANI in the phone resolution above.
+            // Implied-consent recipient scope: implied consent is PERSONAL to
+            // the caller. When it is the only clearance and the resolved
+            // customer phone differs from the inbound ANI (saved primary is a
+            // spouse/alternate/service-contact slot), the confirmation goes to
+            // the ANI — the number that called us and booked — never to a
+            // non-consenting third party, and not held either: the caller DID
+            // consent by calling. Held only when the ANI itself is undialable.
             const smsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
             const smsTargetIsInboundAni = smsLast10(smsPhone).length === 10
               && smsLast10(smsPhone) === smsLast10(contactPhone);
+            const redirectImpliedToAni = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni
+              && smsLast10(contactPhone).length === 10;
+            const smsRecipient = redirectImpliedToAni ? contactPhone : smsPhone;
+            if (redirectImpliedToAni) {
+              logger.info(`[call-proc] Implied-consent confirmation for ${maskSid(callSid)} goes to the inbound caller's number (resolved customer phone differs)`);
+            }
 
           // Use SMS template if available, fall back to inline
           let smsBody;
@@ -5667,15 +5714,15 @@ const CallRecordingProcessor = {
           if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
-          } else if (scheduledServiceId && v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni) {
-            // SMS cleared ONLY by IMPLIED inbound consent, but the resolved
-            // target isn't the caller's own number (ANI) — implied consent
-            // doesn't cover a spoken alternate recipient. Hold the text; the
-            // appointment still books and the office can confirm the number.
-            // Keyed to the implied-consent clearance specifically: a send
-            // cleared by explicit sms_consent_given or by the legacy (V2
-            // enforce off) path goes to the resolved customer phone as before.
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: implied consent doesn't cover non-ANI recipient`);
+          } else if (scheduledServiceId && v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni) {
+            // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
+            // isn't the caller's own number, AND the ANI itself is undialable
+            // — nowhere consented to send. Hold the text; the appointment
+            // still books and the office can confirm the number. (A dialable
+            // ANI redirects to the caller instead — see smsRecipient. Sends
+            // cleared by explicit sms_consent_given or by the legacy V2-off
+            // path go to the resolved customer phone as before.)
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
@@ -5714,7 +5761,7 @@ const CallRecordingProcessor = {
                 smsAttempt: async () => {
                   smsRan = true;
                   const sendResult = await sendCustomerMessage({
-                    to: smsPhone,
+                    to: smsRecipient,
                     body: smsBody,
                     channel: 'sms',
                     audience: 'customer',
