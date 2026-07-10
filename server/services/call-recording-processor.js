@@ -118,6 +118,38 @@ const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2
 // Google) and six calls died unprocessed — keep this on a live model.
 const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-3.5-flash';
 
+// Transcription-hallucination guard (2026-07-10). The Gemini fallback
+// transcriber can invent a full conversation from a near-empty voicemail —
+// observed live: a 5-second recording produced 4,777 characters of a
+// fabricated "Amanda" pest-control call, which then minted a phantom
+// estimate_send lead and slipped past the spam classifier as legit content.
+// Human speech averages ~12-15 chars/sec; 25 is a hard ceiling no real
+// recording reaches, so a transcript whose length is physically impossible
+// for its recording duration is a hallucination. Applied only to transcripts
+// long enough to matter, and only when the recording duration is known.
+const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_CHARS_PER_SEC || 25);
+const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
+const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+
+// Spoken-content length only: strip diarization speaker labels and collapse
+// whitespace so a valid short diarized call's formatting overhead ("Agent:",
+// "Caller:", newlines) can't push it over the ceiling. Labels first (line-
+// anchored), then whitespace-collapse.
+function spokenCharCount(transcription) {
+  return String(transcription || '')
+    .replace(/^\s*(?:agent|caller|customer|speaker\s*\d+)\s*:/gim, '')
+    .replace(/\s+/g, ' ')
+    .trim().length;
+}
+
+function isImplausibleTranscript(transcription, recordingSeconds) {
+  const chars = spokenCharCount(transcription);
+  if (chars < MIN_TRANSCRIPT_CHARS_FOR_GUARD) return false;
+  // Unknown/zero duration → never reject (fail open; never drop a real transcript).
+  if (!recordingSeconds || recordingSeconds <= 0) return false;
+  return (chars / recordingSeconds) > MAX_TRANSCRIPT_CHARS_PER_SECOND;
+}
+
 // AI-extraction retry budget. A failure marks the row extraction_failed and
 // increments call_log.extraction_attempts; processAllPending re-runs it while
 // under this cap (≥10 min between attempts via the sweep's age gate), which
@@ -2952,11 +2984,27 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
+    // near-silence) is discarded here so the Twilio-builtin fallback below can
+    // supply a real transcript; the terminal rejection only fires if the
+    // fallback is also missing/implausible.
+    let primaryTranscriptRejected = false;
+    let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
 
     if (call.recording_url) {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
+      // recordingSeconds is hoisted so the primary gate here and the terminal
+      // rejection below share one value.
+      const recordingSecondsForGate = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+      if (transcription && isImplausibleTranscript(transcription, recordingSecondsForGate)) {
+        logger.warn(`[call-proc] Primary transcript implausible for ${maskSid(callSid)}: ${transcription.length} chars / ${recordingSecondsForGate}s — discarding, trying Twilio fallback`);
+        primaryTranscriptRejected = true;
+        rejectedPrimaryChars = transcription.length; // keep the metric before discarding
+        transcription = null;
+        contactPassTranscript = null;
+      }
       if (transcription) {
         transcriptionProvenance = {
           provider: result.provider || null,
@@ -2996,10 +3044,14 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL
+    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL.
+    // The rejection sentinel is NOT a usable transcript — on an admin
+    // force-reprocess of an already-rejected call it's what's stored in
+    // call_log.transcription, so treat it (and cached copies of it) as no fallback.
+    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
-      if (freshCall?.transcription) {
+      if (isUsableFallback(freshCall?.transcription)) {
         transcription = freshCall.transcription;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
@@ -3018,7 +3070,7 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         });
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
-      } else if (call.transcription) {
+      } else if (isUsableFallback(call.transcription)) {
         transcription = call.transcription;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
@@ -3039,6 +3091,93 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
+    // ── Transcription-hallucination guard ── run BEFORE the transcript is
+    // written to the message thread or handed to extraction, so a fabricated
+    // conversation never becomes a phantom lead / disposition / SMS. Recording
+    // duration (actual audio) preferred; call duration (incl. ring) is a safe
+    // looser fallback. Terminal 'voicemail' so the retry sweep won't re-run it
+    // (a re-transcribe would just hallucinate again).
+    const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+    const fallbackImplausible = transcription && isImplausibleTranscript(transcription, recordingSeconds);
+    // Two terminal-rejection cases: (a) the Twilio fallback ALSO produced an
+    // implausible transcript; (b) the primary was implausible and no usable
+    // fallback exists. Both finalize as an empty voicemail — NOT no_transcription
+    // (which would retry and re-hallucinate). A plausible Twilio fallback after a
+    // rejected primary flows through normally.
+    if (fallbackImplausible || (!transcription && primaryTranscriptRejected)) {
+      // Provenance: for the primary-hallucinated path `transcription` was already
+      // nulled, so use the char count captured before discarding it.
+      const rawChars = transcription ? transcription.length : rejectedPrimaryChars;
+      const cps = recordingSeconds && rawChars
+        ? Math.round((fallbackImplausible ? spokenCharCount(transcription) : rawChars) / recordingSeconds)
+        : null;
+      logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
+      let priorMeta = {};
+      try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
+      // Fence on processing_token like the finalization write: if a peer
+      // reclaimed the stale lock, this matches 0 rows and we bail without
+      // overwriting the peer's state. Clear disposition + enriched extraction
+      // too — a force-reprocess of a previously-stamped row (e.g. a phantom
+      // estimate_send from the hallucination) must not leave stale artifacts.
+      const rejected = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'voicemail',
+          answered_by: 'voicemail',
+          call_outcome: 'voicemail',
+          transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+          transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }),
+          ai_extraction: null,
+          ai_extraction_enriched: null,
+          v2_extraction_status: null,
+          disposition: null,
+          review_status: null,
+          // A prior hallucinated extraction (force-reprocess path) may have
+          // linked this empty voicemail to a phantom customer; the unified
+          // voice sync attaches messages whenever customer_id is set, so unlink.
+          customer_id: null,
+          processing_token: null,
+          processing_started_at: null,
+          updated_at: new Date(),
+        });
+      if (rejected === 0) {
+        logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+      }
+      // Dismiss any open Needs Review cards a prior hallucinated extraction
+      // filed for this call — clearing review_status alone doesn't remove them
+      // (the inbox lists from triage_items.status), so they'd stay actionable.
+      try {
+        const dismissed = await db('triage_items')
+          .where({ call_log_id: call.id })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
+      } catch (trErr) {
+        logger.warn(`[call-proc] stale-triage dismissal skipped for ${maskSid(callSid)}: ${trErr.message}`);
+      }
+      // Retire phantom lead artifacts a PRIOR hallucinated extraction created
+      // (admin force-reprocess path): soft-delete unconverted leads keyed by
+      // this call SID so the phantom lead the guard neutralizes doesn't linger.
+      // Scoped tight — only leads sourced from THIS call, never won/converted.
+      try {
+        const retired = await db('leads')
+          .where({ twilio_call_sid: callSid })
+          .whereNull('deleted_at')
+          .whereNotIn('status', ['won', 'converted'])
+          .update({ deleted_at: new Date(), lost_reason: 'transcription_rejected_hallucination', updated_at: new Date() });
+        if (retired > 0) logger.info(`[call-proc] Retired ${retired} phantom call-sourced lead(s) for ${maskSid(callSid)} after transcript rejection`);
+      } catch (leadErr) {
+        logger.warn(`[call-proc] phantom-lead retire skipped for ${maskSid(callSid)}: ${leadErr.message}`);
+      }
+      await updateUnifiedVoiceMessage(
+        { ...call, transcription: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' },
+        { body: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' }
+      ).catch((e) => logger.warn(`[call-proc] unified message update skipped for ${maskSid(callSid)}: ${e.message}`));
+      return { success: true, skipped: true, reason: 'transcription_rejected_implausible' };
+    }
+
     if (transcription) {
       await updateUnifiedVoiceMessage(
         { ...call, transcription },
@@ -6192,6 +6331,7 @@ const CallRecordingProcessor = {
 };
 
 CallRecordingProcessor._test = {
+  isImplausibleTranscript,
   canonicalWavesService,
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
