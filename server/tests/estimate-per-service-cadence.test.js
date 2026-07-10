@@ -461,4 +461,55 @@ describe('floored lawn cadences are display-hidden with guards (buildPricingBund
     expect(bundle.frequencies[0].monthly).toBe(50);
     expect(bundle.frequencies[0].visitsPerYear).toBe(12);
   });
+
+  test('hidden tiers move to hiddenLawnFrequencies so accept can still resolve them', async () => {
+    const bundle = await buildPricingBundle(lawnOnlyEstimate([
+      { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+      { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60, recommended: true },
+      { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
+    ], { monthly: 50 }));
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    // The floored standard tier is hidden, not deleted — accept resolves a
+    // stale pre-deploy selection from hiddenLawnFrequencies at its clamped price.
+    expect(bundle.hiddenLawnFrequencies.map((f) => f.key)).toEqual(['standard']);
+    expect(bundle.hiddenLawnFrequencies[0].monthly).toBe(50);
+  });
+
+  test('send-snapshot fast path (frozen pre-deploy, no floored flags) still hides floored tiers', async () => {
+    // Snapshot entries predate flooredAtMinimum — the chokepoint recomputes
+    // flooredness from the at-floor price itself.
+    const snapshotFrequencies = [
+      {
+        key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care', serviceTierKey: 'standard',
+        monthly: 50, monthlyBase: 50, annual: 600, perTreatment: 100, visitsPerYear: 6,
+        billingFrequencyKey: 'monthly', included: [], addOns: [],
+      },
+      {
+        key: 'enhanced', label: '9 visits / yr', serviceCategory: 'lawn_care', serviceTierKey: 'enhanced',
+        monthly: 57.75, monthlyBase: 57.75, annual: 693, perTreatment: 77, visitsPerYear: 9,
+        billingFrequencyKey: 'monthly', included: [], addOns: [], recommended: true,
+      },
+      {
+        key: 'premium', label: 'Monthly', serviceCategory: 'lawn_care', serviceTierKey: 'premium',
+        monthly: 79, monthlyBase: 79, annual: 948, perTreatment: 79, visitsPerYear: 12,
+        billingFrequencyKey: 'monthly', included: [], addOns: [],
+      },
+    ];
+    const estimate = lawnOnlyEstimate([
+      { name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100 },
+      { name: 'Enhanced', v: 9, mo: 57.75, ann: 693, pa: 77, recommended: true },
+      { name: 'Premium', v: 12, mo: 79, ann: 948, pa: 79 },
+    ], { monthly: 57.75 });
+    estimate.estimate_data.sendSnapshot = {
+      pricingBundle: {
+        frequencies: snapshotFrequencies,
+        source: 'send_snapshot',
+        oneTimeBreakdown: { items: [], total: 0 },
+      },
+    };
+    const bundle = await buildPricingBundle(estimate);
+    expect(bundle.snapshotHit).toBe(true); // prove the fast path served this, not a rebuild
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    expect((bundle.hiddenLawnFrequencies || []).map((f) => f.key)).toEqual(['standard']);
+  });
 });

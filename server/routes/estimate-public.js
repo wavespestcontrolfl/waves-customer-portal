@@ -7317,9 +7317,16 @@ router.put('/:token/accept', async (req, res, next) => {
       return res.status(400).json({ error: 'annual prepay is not available for existing customers — pick pay_at_visit instead' });
     }
     const pricingFrequencies = Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : [];
-    const selectedFrequency = !treatAsOneTime && pricingFrequencies.length
+    // Floor-clamped lawn cadences are display-hidden but stay fully priced
+    // under hiddenLawnFrequencies — a customer who loaded the page before the
+    // hide deployed can still accept the tier they were offered.
+    const hiddenLawnFrequencies = Array.isArray(pricingBundle?.hiddenLawnFrequencies)
+      ? pricingBundle.hiddenLawnFrequencies
+      : [];
+    const selectedFrequency = !treatAsOneTime && (pricingFrequencies.length || hiddenLawnFrequencies.length)
       ? (selectedFrequencyKey
-        ? pricingFrequencies.find((f) => f.key === selectedFrequencyKey)
+        ? (pricingFrequencies.find((f) => f.key === selectedFrequencyKey)
+          || hiddenLawnFrequencies.find((f) => f.key === selectedFrequencyKey))
         : defaultFrequencyFromList(pricingFrequencies))
       : null;
     let pricingVisitFrequency = selectedFrequency
@@ -11292,9 +11299,21 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
 // selection always stays (it IS the quoted plan — hiding it would silently
 // re-price the customer), and the ladder never empties — if every tier
 // floors, keep the highest-application one (most value at the same price).
+function isFlooredLawnLadderEntry(entry = {}) {
+  if (entry.flooredAtMinimum === true) return true;
+  // Snapshots/caches frozen before the flag existed carry no flooredAtMinimum —
+  // recompute from the price itself: a lawn tier sitting AT (or below) the
+  // program minimum is floor-pinned by definition (the floor is a hard lower
+  // bound, so an at-floor price is either clamped or coincidentally exact —
+  // both read as "the floor is the price" to the customer).
+  const minMonthly = lawnProgramMinimumMonthly();
+  const monthly = Number(entry.monthly);
+  return minMonthly > 0 && Number.isFinite(monthly) && monthly > 0 && monthly <= minMonthly;
+}
+
 function dropFlooredLawnLadderEntries(entries = []) {
   const list = Array.isArray(entries) ? entries : [];
-  const kept = list.filter((entry) => entry.flooredAtMinimum !== true
+  const kept = list.filter((entry) => !isFlooredLawnLadderEntry(entry)
     || entry.recommended === true
     || entry.selected === true);
   if (kept.length) return kept;
@@ -11303,6 +11322,66 @@ function dropFlooredLawnLadderEntries(entries = []) {
     (Number(b.visitsPerYear) || 0) > (Number(a.visitsPerYear) || 0) ? b : a
   ));
   return [best];
+}
+
+// Display chokepoint for the floored-cadence rule (owner ask 2026-07-10) —
+// runs in finalizePricingBundle so EVERY return path (fresh v1/engine builds,
+// send-snapshot fast path, pricing cache) applies it, mirroring
+// stripStaleWaveGuardSetupFromBundle. Dropped top-level lawn entries move to
+// payload.hiddenLawnFrequencies (NOT deleted) so /accept can still resolve a
+// floored tier a stale pre-deploy client legitimately selected — hidden tiers
+// stay priceable and restampable, they just aren't offered.
+function hideFlooredLawnCadencesFromBundle(payload = {}) {
+  let next = payload;
+
+  const topLevel = Array.isArray(payload.frequencies) ? payload.frequencies : [];
+  const lawnTopLevel = topLevel.filter((f) => f?.serviceCategory === 'lawn_care');
+  if (lawnTopLevel.length) {
+    const kept = new Set(dropFlooredLawnLadderEntries(lawnTopLevel));
+    const hidden = lawnTopLevel.filter((f) => !kept.has(f));
+    if (hidden.length) {
+      next = {
+        ...next,
+        frequencies: topLevel.filter((f) => f?.serviceCategory !== 'lawn_care' || kept.has(f)),
+        hiddenLawnFrequencies: [
+          ...(Array.isArray(payload.hiddenLawnFrequencies) ? payload.hiddenLawnFrequencies : []),
+          ...hidden,
+        ],
+      };
+    }
+  }
+
+  // Only genuine lawn TIER ladders participate (every entry carries the
+  // serviceCategory lawnFrequenciesFromRows stamps). Legacy pest-cadence
+  // MIRRORED lawn sections (keys quarterly/monthly, no serviceCategory) are
+  // one plan repeated per pest cadence — hiding an at-floor mirror row would
+  // desync the section from the pest slider, not remove a tier.
+  const isLawnTierLadder = (section) => section?.key === 'lawn_care'
+    && Array.isArray(section.frequencies)
+    && section.frequencies.length > 1
+    && section.frequencies.every((f) => f?.serviceCategory === 'lawn_care');
+  const services = Array.isArray(next.services) ? next.services : [];
+  if (services.some(isLawnTierLadder)) {
+    next = {
+      ...next,
+      services: services.map((section) => {
+        if (!isLawnTierLadder(section)) {
+          return section;
+        }
+        const kept = dropFlooredLawnLadderEntries(section.frequencies);
+        if (kept.length === section.frequencies.length) return section;
+        return {
+          ...section,
+          frequencies: kept,
+          defaultFrequencyKey: kept.some((f) => f.key === section.defaultFrequencyKey)
+            ? section.defaultFrequencyKey
+            : (kept.find((f) => f.recommended === true || f.selected === true)?.key || kept[0]?.key || null),
+        };
+      }),
+    };
+  }
+
+  return next;
 }
 
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
@@ -11515,6 +11594,11 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
       ann: annual,
       pa: perApp,
       v: visits,
+      // Carry the engine's pricing provenance so an engine-pinned
+      // PROGRAM_MINIMUM tier is recognized as floor-clamped downstream
+      // (lawnFrequenciesFromRows flags it; display hides it).
+      pricingSource: t.pricingSource || null,
+      pricingBasis: t.pricingBasis || null,
       recommended: t.recommended === true,
       selected: t.tier === selectedTierKey,
     };
@@ -12675,12 +12759,9 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
         // sliders and combo pricing inseparable across snapshot / engine /
         // recompute paths — a bundle without combos keeps the legacy ladder so
         // the customer can't pick a cadence that isn't priced or persisted.
-        const ownLadderRaw = (key !== 'pest_control' && hasRecurringPestSection && hasServiceCadenceCombos)
+        const ownLadder = (key !== 'pest_control' && hasRecurringPestSection && hasServiceCadenceCombos)
           ? bundleSectionLadderForService(key, estData, recurringService, recurringDiscount)
           : null;
-        // Display drops floor-clamped lawn cadences (decoy options); accept
-        // keeps resolving them via the unfiltered builder for stale clients.
-        const ownLadder = ownLadderRaw ? dropFlooredLawnLadderEntries(ownLadderRaw) : null;
         const sectionFrequencies = (ownLadder && ownLadder.length)
           ? ownLadder
           : sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
@@ -13056,7 +13137,10 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
   }
-  const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
+  // After the contract attaches sections, hide floor-clamped lawn cadences on
+  // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
+  // top-level entries move to hiddenLawnFrequencies for accept resolution.
+  const withContract = hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData));
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
@@ -13544,7 +13628,7 @@ async function buildPricingBundle(estimate) {
       ? mosquitoFrequenciesFromResultStats(estData)
       : [];
     const lawnFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'lawn_care'
-      ? dropFlooredLawnLadderEntries(lawnFrequenciesFromResultStats(estData))
+      ? lawnFrequenciesFromResultStats(estData)
       : [];
     const foamFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'foam_recurring'
       ? foamFrequenciesFromV1Services(v1.services)
@@ -13700,8 +13784,8 @@ async function buildPricingBundle(estimate) {
       // (Basic/Standard/Enhanced/Premium) off the live lawn line item, mirroring
       // the v1 result.results.lawn path. Mixed bundles and other single-service
       // estimates keep the existing single-entry view. Floor-clamped cadences
-      // are display-hidden (decoys) — same rule as the v1/bundle paths.
-      const lawnFreqs = dropFlooredLawnLadderEntries(lawnFrequenciesFromEngineResult(engineResult, estData));
+      // are display-hidden at the finalizePricingBundle chokepoint.
+      const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
       // The foam-specific frequency prices ONLY the foam line, so use it just for
       // a foam-only recurring mix. With another recurring service present (foam +
       // lawn/tree/mosquito), fall through to the full-summary shapeFrequencyEntry
