@@ -1309,9 +1309,27 @@ const SPECIALTY = {
   },
   preSlabTermiticide: {
     defaultProductKey: 'termidor_sc',
+    // Usage-based price steps (owner decision 2026-07-10): the quoted price
+    // floors at the cost-plus of the slab rounded UP to the next
+    // usageStepSqFt sq ft, so price climbs with real product usage every
+    // ~100 sqft instead of flat-lining across the wide contextual-minimum
+    // buckets, and extends past the last bucket (no table cap). The
+    // contextual minimums below still apply as the value floor. Kill switch:
+    // usage_step_sqft = 0 in pricing_config.onetime_preslab (no deploy).
+    usageStepSqFt: 100,
+    // Inventory-price link (owner decision 2026-07-10): db-bridge overrides
+    // each product's containerCost/containerOz from the inventory catalog's
+    // approved best price (products_catalog row named catalogProductName) on
+    // every sync, so an approved price change in /admin/inventory reprices
+    // pre-slab without a deploy. Fail-open: rows that are inactive, flagged
+    // needs_pricing, missing price/size, or whose $/oz drifts outside
+    // [0.5x, 2x] of the config value (fat-finger guard) are ignored. Kill
+    // switch: link_container_costs_to_catalog = false in the same row.
+    linkContainerCostsToCatalog: true,
     products: {
       termidor_sc: {
         label: 'Termidor SC - Fipronil',
+        catalogProductName: 'Termidor SC',
         supplierSku: '59021468',
         packageLabel: '78 oz Agency',
         activeIngredient: 'fipronil',
@@ -1331,6 +1349,7 @@ const SPECIALTY = {
       },
       taurus_sc: {
         label: 'Taurus SC - Fipronil',
+        catalogProductName: 'Taurus SC',
         supplierSku: '82003599',
         packageLabel: '78 oz',
         activeIngredient: 'fipronil',
@@ -1350,6 +1369,7 @@ const SPECIALTY = {
       },
       bifen_it: {
         label: 'Bifen I/T - Bifenthrin',
+        catalogProductName: 'Bifen I/T',
         packageLabel: '1 gallon / 128 oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
@@ -1368,6 +1388,7 @@ const SPECIALTY = {
       },
       talstar_p: {
         label: 'Talstar P - Bifenthrin',
+        catalogProductName: 'Talstar P',
         packageLabel: '1 gallon / 128 oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',

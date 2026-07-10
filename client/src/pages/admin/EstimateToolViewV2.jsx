@@ -108,19 +108,19 @@ const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
 const PRE_SLAB_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.",
-    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | contextual minimum",
+    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   taurus_sc: {
     warning: "Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.",
-    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | contextual minimum",
+    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   bifen_it: {
     warning: "Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.",
-    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | contextual minimum",
+    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
     warning: "Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.",
-    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | contextual minimum",
+    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
 };
 
