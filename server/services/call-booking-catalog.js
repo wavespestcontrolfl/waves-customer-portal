@@ -89,11 +89,16 @@ const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
 // rodent catalog row. Same negation window as NEGATED_ROACH_RE (negation word
 // + up to four plain-word fillers, adversative conjunctions excluded so
 // "don't have ants but rats are everywhere" keeps its affirmative mention)
-// and the same both-order historical strip.
+// and the same both-order historical strip — EXCEPT the trailing direction:
+// "rats showed up two days ago" is a CURRENT problem with an onset time, not
+// history, so the noun→"ago" strip refuses to cross an onset verb (showed/
+// started/came/…). "We had rats a year ago" has no onset verb between the
+// mention and "ago" and still strips.
 const RODENT_NOUN = "(?:rodents?|rats?|mouse|mice)";
+const RODENT_ONSET_VERBS = "(?:showed|shows?|showing|started|starting|began|begun|appeared|appearing|noticed|spotted|saw|seen|found|heard|moved|came|come|coming|returned|arrived|got|gotten|turned|popped|since)";
 const NEGATED_RODENT_RE = new RegExp(`\\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RODENT_NOUN}\\b`, 'gi');
 const HISTORICAL_RODENT_RE = new RegExp(`\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)\\b[^.!?\\n]{0,40}?${RODENT_NOUN}\\b`, 'gi');
-const RODENT_HISTORICAL_RE = new RegExp(`\\b${RODENT_NOUN}\\b[^.!?\\n]{0,40}?\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|ago)\\b`, 'gi');
+const RODENT_HISTORICAL_RE = new RegExp(`\\b${RODENT_NOUN}\\b(?:(?!\\b${RODENT_ONSET_VERBS}\\b)[^.!?\\n]){0,40}?\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|ago)\\b`, 'gi');
 
 function hasAffirmativeRodentMention(text) {
   const cleaned = String(text || '')

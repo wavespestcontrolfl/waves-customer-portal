@@ -3515,25 +3515,29 @@ const CallRecordingProcessor = {
           // No address values in the log — PII; the review card carries them.
           if (routingResult.allowed
             && (routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+            // Same normalization family as the property-linkage exact match
+            // (customer-properties), so this guard can't disagree with the
+            // stamp downstream. The check runs on ANY V1-captured component —
+            // a partial capture (city/ZIP/unit with no street) is still
+            // address evidence and must not slip past a street-only guard.
+            // Matching-only evidence books to the on-file address (it IS that
+            // address); any conflicting or un-matchable component holds.
+            const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
+            const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
             const legacyV1Street = String(extracted.address_line1 || '').trim();
-            if (legacyV1Street) {
-              // Same normalization family as the property-linkage exact match
-              // (customer-properties), so this guard can't disagree with the
-              // stamp downstream.
-              const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
-              const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+            const v1Unit = unitKey(extracted.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
+            const v1City = cityKey(extracted.city);
+            const v1Zip = normalizeZip(extracted.zip);
+            if (legacyV1Street || v1Unit || v1City || v1Zip) {
               const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
-              const v1Unit = unitKey(extracted.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
               const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
-              const v1City = cityKey(extracted.city);
-              const v1Zip = normalizeZip(extracted.zip);
-              const v1AddressConflicts = !onFileStreet
-                || streetKey(legacyV1Street) !== streetKey(onFileStreet)
+              const v1AddressConflicts = (legacyV1Street
+                && (!onFileStreet || streetKey(legacyV1Street) !== streetKey(onFileStreet)))
                 || (v1Unit && v1Unit !== onFileUnit)
                 || (v1City && v1City !== cityKey(knownCaller?.addressCity))
                 || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
               if (v1AddressConflicts) {
-                logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only address conflicts with the on-file address`);
+                logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only address evidence conflicts with the on-file address`);
                 routingResult = {
                   allowed: false,
                   reason: 'v1_only_new_address',

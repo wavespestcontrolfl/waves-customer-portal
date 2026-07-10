@@ -110,6 +110,11 @@ describe('rodent intent → catalog service (owner directive)', () => {
   test('historical rodent mention does NOT anchor the booking (P2)', () => {
     expect(R('We had mice last time but now we need the spiders treated')).toBeUndefined();
     expect(R('Last visit it was rats; this time the lawn needs treatment')).toBeUndefined();
+    expect(R('We had rats a year ago, now the problem is ants')).toBeUndefined();
+  });
+  test('a CURRENT problem with an onset time ("showed up two days ago") still books (P2)', () => {
+    expect(R('rats showed up two days ago and we need someone out')).toBe('rodent_general_one_time');
+    expect(R('the mice came back a week ago')).toBe('rodent_general_one_time');
   });
   test('adversative after a negation keeps the affirmative rodent mention (P2)', () => {
     expect(R("We don't have ants but rats are everywhere in the attic")).toBe('rodent_general_one_time');
