@@ -404,14 +404,38 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
     opacity 0.6s ease, border-color 0.3s ease !important;
 }
 
+/* ---------- mobile: glass material off (owner ask 2026-07-10) ----------
+   backdrop-filter surfaces re-composite whatever sits behind them on every
+   scroll frame, so on phones the card interiors smear/shimmer against the
+   fixed scene while the page moves. Cards go near-solid — the same surface
+   the no-backdrop-filter fallback below uses — and the sheen overlays go
+   with them. The scene (mesh, orbs, grain) stays; only the card material
+   changes. Modals + scrim keep the glass: the page can't scroll under an
+   open dialog, so they never show the artifact. */
 @media (max-width: 640px) {
-  html[data-glass-theme] {
-    --glass-blur: 20px;
+  html[data-glass-theme] [data-glass]:not([data-glass="modal"]) {
+    background: rgba(255, 255, 255, 0.93) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
-  html[data-glass-theme] [data-glass="soft"],
-  html[data-glass-theme] [data-glass="chip"] {
-    backdrop-filter: blur(14px) saturate(165%) !important;
-    -webkit-backdrop-filter: blur(14px) saturate(165%) !important;
+  /* the specular shine + sheen exist to catch light in the glass; on a
+     solid card they only add a compositing layer apiece */
+  html[data-glass-theme] [data-glass]:not([data-glass="modal"])::before,
+  html[data-glass-theme] [data-glass]:not([data-glass="modal"])::after {
+    display: none;
+  }
+  html[data-glass-theme] [data-glass-accent] {
+    background: linear-gradient(135deg, rgba(255, 222, 120, 0.6), rgba(244, 176, 20, 0.45)),
+      rgb(240, 165, 0) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  /* touch fires :hover/:active mid-scroll — the lift/scale reads as cards
+     jumping under the finger */
+  html[data-glass-theme] [data-glass="card"]:hover,
+  html[data-glass-theme] [data-glass="card"]:active,
+  html[data-glass-theme] [data-glass="chip"]:hover {
+    transform: none;
   }
 }
 
