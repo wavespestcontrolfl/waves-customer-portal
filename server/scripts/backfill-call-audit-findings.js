@@ -29,7 +29,7 @@ async function backfillFindings(file) {
       audit_source: r.audit_source,
       category: r.category,
       severity: r.severity,
-      field: r.field || null,
+      field: r.field || '', // '' sentinel (see migration) — nullable field would break onConflict idempotency
       old_value: r.old_value ?? null,
       new_value: r.new_value ?? null,
       transcript_excerpt: r.transcript_excerpt || null,

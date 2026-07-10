@@ -5891,7 +5891,10 @@ const CallRecordingProcessor = {
     // the terminal enum on call_log.disposition; the enrichment writer
     // persists gate codes / pets / internal color the model captured. Order
     // matters: the classifier verdict feeds the disposition decision.
-    try {
+    // Fenced on finalization: finalized === 0 means a peer reclaimed the
+    // processing_token — this attempt's extraction is stale and must not
+    // record verdicts, stamp a disposition, or enrich over the peer's run.
+    if (finalized > 0) try {
       const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
       let spamVerdictResult = null;
       if (isEnabled('callSpamClassifier')) {

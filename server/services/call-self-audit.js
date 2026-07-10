@@ -19,6 +19,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { createDeepMessage } = require('./llm/deep');
+let Anthropic;
+try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const MODEL_TIMEOUT_MS = Number(process.env.CALL_SELF_AUDIT_TIMEOUT_MS || 60000);
 
 const SAMPLE_SIZE = Number(process.env.CALL_SELF_AUDIT_SAMPLE || 25);
 const BASELINE_DISAGREE_RATE = 0.11; // measured in the 2026-07 mining run (fast-pass diff rate on decision fields)
@@ -29,8 +32,16 @@ const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Co
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead.`;
 
-async function runSelfAudit() {
+async function runSelfAudit(depsIn = {}) {
   if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off' };
+  // createDeepMessage's contract is (client, params) — the caller owns the
+  // Anthropic client (per llm/deep.js). Injectable for tests.
+  const deps = { ...depsIn };
+  if (!deps.createMessage) {
+    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client' };
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS, maxRetries: 1 });
+    deps.createMessage = (params) => createDeepMessage(client, params);
+  }
 
   const calls = await db('call_log')
     .where('direction', 'inbound')
@@ -47,12 +58,14 @@ async function runSelfAudit() {
   for (const call of calls) {
     let verdict;
     try {
-      const res = await createDeepMessage({
+      // Blind audit: the model sees ONLY the transcript. Leaking production's
+      // status would bias the auditor toward the very label being audited.
+      const res = await deps.createMessage({
         max_tokens: 4096,
         system: AUDIT_PROMPT,
-        messages: [{ role: 'user', content: `Production said: status=${call.processing_status}. Transcript:\n${call.transcription.slice(0, 5000)}` }],
+        messages: [{ role: 'user', content: `Transcript:\n${call.transcription.slice(0, 5000)}` }],
       });
-      const text = res?.content?.[0]?.text || '';
+      const text = (res?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     } catch (err) {
       logger.warn(`[self-audit] audit call failed for ${call.id}: ${err.message}`);

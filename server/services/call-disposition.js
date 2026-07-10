@@ -71,7 +71,12 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
 
   // 3. Complaint / emergency beats everything else that remains: a booked-nothing
   //    call from an angry customer must reach the owner, not a follow-up drip.
-  const complaint = v2.complaint_or_service_issue === true
+  // Schema-real complaint signals (1.4.0+): customer_history.prior_complaint_mentioned
+  // + the prior_complaint_unresolved triage flag; emergency urgency and the
+  // legacy pain-point regex back them up. (complaint_or_service_issue is NOT
+  // a schema field — a naming ghost from the offline audit tooling.)
+  const complaint = v2.customer_history?.prior_complaint_mentioned === true
+    || (v2.triage_flags || []).includes('prior_complaint_unresolved')
     || (v2.service_request?.urgency === 'emergency')
     || (v1.pain_points || []).some?.((p) => /no.?show|complain|angry|refund|lawyer|legal/i.test(String(p)));
   const knownParty = outcome.isKnownCustomer || !!outcome.customerId;

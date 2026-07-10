@@ -17,7 +17,10 @@ exports.up = async function up(knex) {
       table.string('audit_source').notNullable();
       table.string('category').notNullable(); // missed_lead, wrong_service_type, spam_false_positive, ...
       table.string('severity').notNullable(); // lost_revenue | customer_harm | data_quality | cosmetic
-      table.string('field'); // extraction field in dispute, null for call-level findings
+      // '' (empty-string sentinel), NOT null, for call-level findings: Postgres
+      // treats each NULL as distinct in unique constraints, which would make
+      // the onConflict upserts non-idempotent for call-level categories.
+      table.string('field').notNullable().defaultTo('');
       table.text('old_value'); // production pipeline's value
       table.text('new_value'); // re-analysis value
       table.text('transcript_excerpt'); // <=300 chars citation

@@ -31,6 +31,16 @@ function extractCodes(accessNotes) {
   };
 }
 
+
+// Schema 1.4.0+ shapes pets as { present, species_notes }; older/looser
+// payloads used details/description. Read all, schema field first.
+function petDetailsFrom(pets) {
+  if (!pets) return null;
+  const raw = pets.species_notes || pets.details || pets.description
+    || (Array.isArray(pets) ? pets.join('; ') : null);
+  return raw ? String(raw).slice(0, 1000) : null;
+}
+
 function appendWithProvenance(existing, addition, callDate) {
   const tag = `[call ${String(callDate).slice(0, 10)}]`;
   const line = `${tag} ${addition}`.trim();
@@ -59,7 +69,7 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
         await db('property_preferences').insert({
           customer_id: customerId,
           ...Object.fromEntries(Object.entries(codes).filter(([, v]) => v)),
-          ...(pets?.details || pets?.description ? { pet_details: String(pets.details || pets.description).slice(0, 1000) } : {}),
+          ...(petDetailsFrom(pets) ? { pet_details: petDetailsFrom(pets) } : {}),
           ...(accessNotes ? { access_notes: appendWithProvenance(null, String(accessNotes).slice(0, 800), callCreatedAt) } : {}),
         });
         applied.push('property_preferences_created');
@@ -70,8 +80,8 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
           if (val && !existing[col]) updates[col] = val;
         }
         if (pets && !existing.pet_details) {
-          const details = pets.details || pets.description || (Array.isArray(pets) ? pets.join('; ') : null);
-          if (details) updates.pet_details = String(details).slice(0, 1000);
+          const details = petDetailsFrom(pets);
+          if (details) updates.pet_details = details;
         }
         if (accessNotes) {
           const appended = appendWithProvenance(existing.access_notes, String(accessNotes).slice(0, 800), callCreatedAt);
