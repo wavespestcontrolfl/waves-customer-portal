@@ -29,9 +29,17 @@ function computeAddressHash(serviceAddress) {
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
 }
 
-function checkTcpaConsent(extraction) {
+// opts.impliedConsent (gated, INBOUND calls only): a customer who called US,
+// requested service, and agreed to a time has an established business
+// relationship and implied consent for a TRANSACTIONAL confirmation (not
+// marketing). A do-not-contact request always overrides. Owner directive
+// 2026-07-10: don't hold an inbound booker's confirmation over a missing
+// explicit "yes you can text me."
+function checkTcpaConsent(extraction, opts = {}) {
   if (!extraction || !extraction.consent) {
-    return { canSms: false, canEmail: true, reason: 'no_consent_data' };
+    return opts.impliedConsent
+      ? { canSms: true, canEmail: true, reason: 'implied_consent_inbound' }
+      : { canSms: false, canEmail: true, reason: 'no_consent_data' };
   }
 
   const consent = extraction.consent;
@@ -42,6 +50,10 @@ function checkTcpaConsent(extraction) {
 
   if (consent.sms_consent_given === true) {
     return { canSms: true, canEmail: true, reason: 'sms_consent_given' };
+  }
+
+  if (opts.impliedConsent) {
+    return { canSms: true, canEmail: true, reason: 'implied_consent_inbound' };
   }
 
   return { canSms: false, canEmail: true, reason: 'sms_consent_not_given' };
@@ -91,6 +103,9 @@ function buildTriageItem({
     low_confidence_address: 'address_review',
     address_unverified: 'address_review',
     address_validation_unavailable: 'address_review',
+    // MODEL flag — fail-open books past it for a known customer, so its
+    // advisory card must land in the address-review lane, not service_unknown.
+    address_unverifiable: 'address_review',
     ambiguous_scheduling: 'time_ambiguous',
     reschedule_or_cancel: 'time_ambiguous',
     // Gate-rejection reason strings double as flags on the Needs Review row —
@@ -111,6 +126,10 @@ function buildTriageItem({
     commercial_requires_quote: 'customer_field_conflict',
     prior_complaint_unresolved: 'customer_field_conflict',
     sms_consent_missing: 'customer_field_conflict',
+    // Booked appointment whose confirmation SMS was HELD (implied consent
+    // covers only the inbound ANI and the ANI was undialable) — the office
+    // confirms the number and sends the confirmation manually.
+    implied_consent_non_ani_recipient: 'customer_field_conflict',
     low_extraction_confidence: 'service_unknown',
     spam_or_wrong_number: 'service_unknown',
     caller_phone_missing: 'customer_field_conflict',

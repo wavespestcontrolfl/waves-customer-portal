@@ -344,6 +344,18 @@ const gates = {
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
+  // Fail-open booking: a CONFIRMED appointment books despite recoverable
+  // contact-field flags (ANI satisfies caller_phone_missing; an existing
+  // customer's on-file address clears address flags; garbled email is
+  // advisory). Google Address Validation still governs new addresses; hard
+  // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
+  // stay. Creates real appointments — owner-flip only.
+  callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Implied consent for INBOUND bookings: a caller who called us and agreed to
+  // a time has implied consent for the transactional confirmation SMS
+  // (established business relationship). do-not-contact always overrides.
+  // Sends customer SMS — owner-flip only.
+  callInboundImpliedConsent: process.env.GATE_CALL_INBOUND_IMPLIED_CONSENT === 'true',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
