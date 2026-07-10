@@ -31,6 +31,7 @@ const REASON_LABELS = {
   loser_has_stripe_customer_id: "Duplicate has a Stripe profile",
   loser_has_portal_login: "Duplicate has a portal login",
   loser_has_live_stage: "Duplicate is a live customer (stage)",
+  loser_has_third_party_payer: "Duplicate bills to a third-party payer",
 };
 
 function reasonLabel(reason) {

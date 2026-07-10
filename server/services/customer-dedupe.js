@@ -163,6 +163,12 @@ async function batchAutoBlockers(database, losers) {
   for (const loser of losers) {
     if (loser.stripe_customer_id) byId.get(loser.id).push('stripe_customer_id');
     if (loser.password_hash) byId.get(loser.id).push('portal_login');
+    // A default third-party payer is billing state: invoice creation resolves
+    // scheduled_service.payer_id ?? customers.payer_id, so silently retiring
+    // a payer-linked row flips the merged account to self-pay and bills the
+    // homeowner instead of the AP payer. Review-queue only; the manual path
+    // transfers or refuses inside executeMerge.
+    if (loser.payer_id) byId.get(loser.id).push('third_party_payer');
     // A live-stage row (any stage whereLiveCustomer treats as a real
     // customer — active, won, or at-risk) is never a disposable shell:
     // retiring it would drop account state (stage/tier/rate) the merge
@@ -242,7 +248,7 @@ async function findDuplicateGroups(database = db) {
     .whereRaw("COALESCE(phone, '') <> ''")
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
       'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
-      'pipeline_stage', 'lead_source', 'created_at');
+      'pipeline_stage', 'lead_source', 'created_at', 'payer_id');
   const byPhone = new Map();
   for (const row of rows) {
     const p10 = phone10(row.phone);
@@ -678,6 +684,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       && winner.stripe_customer_id !== loser.stripe_customer_id) {
       throw new Error('executeMerge: both customers have Stripe profiles — resolve in Stripe first');
     }
+    // Two DIFFERENT third-party payer defaults is a human billing decision,
+    // exactly like both-have-Stripe: refuse. (A loser-only payer transfers
+    // with the backfills below — invoice precedence is
+    // scheduled_service.payer_id ?? customers.payer_id, so dropping it would
+    // flip the merged account to self-pay.)
+    if (winner.payer_id && loser.payer_id && winner.payer_id !== loser.payer_id) {
+      throw new Error('executeMerge: customers have different third-party payers — resolve billing first');
+    }
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
@@ -782,9 +796,19 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
           .update({ promoter_id: winnerPromoter.id });
         await trx('referral_invites').where({ promoter_id: loserPromoter.id })
           .update({ promoter_id: winnerPromoter.id });
+        // Click history and payout rows key on promoter_id too — payout
+        // approval looks the promoter back up, so orphaning them would strand
+        // pending payouts and understate promoter stats.
+        await trx('referral_clicks').where({ promoter_id: loserPromoter.id })
+          .update({ promoter_id: winnerPromoter.id });
+        await trx('referral_payouts').where({ promoter_id: loserPromoter.id })
+          .update({ promoter_id: winnerPromoter.id });
         const loserRow = await trx('referral_promoters').where({ id: loserPromoter.id }).first();
+        // Legacy counters AND the live v2 balances (available/pending) the
+        // referral portal displays and payout approval checks.
         const counters = ['click_balance_cents', 'referral_balance_cents', 'total_earned_cents',
-          'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted'];
+          'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
+          'available_balance_cents', 'pending_earnings_cents'];
         const sums = {};
         for (const col of counters) {
           const add = Number(loserRow?.[col] || 0);
@@ -824,6 +848,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       phone: `merged-${String(loserId).slice(0, 8)}`,
       email: null,
       stripe_customer_id: null,
+      payer_id: null,
       account_credits: 0,
       active: false,
       deleted_at: trx.fn.now(),
@@ -840,6 +865,12 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // strand every saved card. (Both-have-Stripe was refused above.)
     if (!winner.stripe_customer_id && loser.stripe_customer_id) {
       backfills.stripe_customer_id = loser.stripe_customer_id;
+    }
+    // A loser-only third-party payer default transfers the same way —
+    // without it the merged account self-pays and bills the homeowner
+    // instead of the AP payer. (Different-payers was refused above.)
+    if (!winner.payer_id && loser.payer_id) {
+      backfills.payer_id = loser.payer_id;
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });

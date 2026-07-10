@@ -828,13 +828,18 @@ describe('executeMerge', () => {
       id: 7, customer_id: WINNER, click_balance_cents: 100, referral_balance_cents: 0,
       total_earned_cents: 100, total_paid_out_cents: 0, total_clicks: 4,
       total_referrals_sent: 1, total_referrals_converted: 0,
+      available_balance_cents: 0, pending_earnings_cents: 100,
     };
     const loserPromoterRow = {
       id: 9, customer_id: LOSER, click_balance_cents: 50, referral_balance_cents: 200,
       total_earned_cents: 250, total_paid_out_cents: 0, total_clicks: 2,
       total_referrals_sent: 3, total_referrals_converted: 1,
+      available_balance_cents: 300, pending_earnings_cents: 50,
     };
-    const state = { referralRepoint: null, inviteRepoint: null, promoterUpdate: null, promoterDeleted: null };
+    const state = {
+      referralRepoint: null, inviteRepoint: null, clickRepoint: null, payoutRepoint: null,
+      promoterUpdate: null, promoterDeleted: null,
+    };
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser];
@@ -861,6 +866,14 @@ describe('executeMerge', () => {
         state.inviteRepoint = [q.args('where')[0], q.args('update')[0]];
         return 1;
       }
+      if (table === 'referral_clicks' && q.called('update')) {
+        state.clickRepoint = [q.args('where')[0], q.args('update')[0]];
+        return 1;
+      }
+      if (table === 'referral_payouts' && q.called('update')) {
+        state.payoutRepoint = [q.args('where')[0], q.args('update')[0]];
+        return 1;
+      }
       if (q.called('update')) return 1;
       return [];
     }));
@@ -872,7 +885,12 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     expect(state.referralRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
     expect(state.inviteRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
-    // Balances/counters sum; zero-add columns untouched.
+    // Click history and payout rows follow the promoter — payout approval
+    // looks the promoter back up, so orphans would strand pending payouts.
+    expect(state.clickRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
+    expect(state.payoutRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
+    // Balances/counters sum — including the live v2 balances the portal
+    // displays (available/pending); zero-add columns untouched.
     expect(state.promoterUpdate).toEqual({
       click_balance_cents: 150,
       referral_balance_cents: 200,
@@ -880,10 +898,44 @@ describe('executeMerge', () => {
       total_clicks: 6,
       total_referrals_sent: 4,
       total_referrals_converted: 1,
+      available_balance_cents: 300,
+      pending_earnings_cents: 150,
       updated_at: 'NOW',
     });
     expect(state.promoterDeleted).toEqual({ id: 9 });
     expect(result.repointed['referral_promoters.consolidated']).toMatch(/9 into 7/);
+  });
+
+  it('refuses when the two customers have different third-party payers', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: 1 },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 2 },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/different third-party payers/);
+  });
+
+  it('transfers a loser-only payer default and clears it on the retired row', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.payer_id).toBe(5);
+    expect(state.retired.payer_id).toBe(null);
+  });
+
+  it('auto mode refuses a payer-linked loser — third-party billing is never a disposable shell', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'auto' }))
+      .rejects.toThrow(/not a shell \(third_party_payer\)/);
   });
 });
 
