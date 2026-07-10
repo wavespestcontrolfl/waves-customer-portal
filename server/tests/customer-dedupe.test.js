@@ -253,6 +253,16 @@ describe('findDuplicateGroups', () => {
     expect(groups[0].candidates[0].reasons).toContain('address_unparsable');
   });
 
+  it('blocks a discount-carrying shell from green — assigned discounts are billing state', async () => {
+    installDb(router({
+      customers: [complete, shell],
+      blockerRows: { customer_discounts: [{ customer_id: shell.id, n: 1 }] },
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].candidates[0].tier).toBe('yellow');
+    expect(groups[0].candidates[0].reasons).toContain('loser_has_customer_discounts');
+  });
+
   it('blocks a won-stage shell from green — live stages carry account state the merge does not copy', async () => {
     const wonShell = { ...shell, pipeline_stage: 'won' };
     installDb(router({ customers: [complete, wonShell] }));
@@ -930,6 +940,11 @@ describe('executeMerge', () => {
       status: 'merged',
       merged_into_promoter_id: 7,
       referral_balance_cents: 0,
+      total_earned_cents: 0,
+      total_paid_out_cents: 0,
+      total_clicks: 0,
+      total_referrals_sent: 0,
+      total_referrals_converted: 0,
       available_balance_cents: 0,
       pending_earnings_cents: 0,
       updated_at: 'NOW',
@@ -1065,6 +1080,38 @@ describe('executeMerge', () => {
     });
     expect(result.repointed['customers.autopay_restrictions'])
       .toBe('autopay_enabled, autopay_paused_until, autopay_pause_reason');
+  });
+
+  it('carries a loser-only unit onto a street-only winner (address_line2 backfill)', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      address_line1: '5350 De Soto Rd', address_line2: null, zip: '34243',
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      address_line1: '5350 Desoto Rd Apt 1418', address_line2: null, zip: '34243',
+    };
+    const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // Case preserved from the loser's raw line1.
+    expect(result.backfills.address_line2).toBe('Apt 1418');
+  });
+
+  it('promotes the winner when retiring the same-account primary profile', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      account_id: 'acct-1', is_primary_profile: false,
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      account_id: 'acct-1', is_primary_profile: true,
+    };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.is_primary_profile).toBe(true);
+    expect(state.retired.is_primary_profile).toBe(false);
   });
 
   it('refuses matching per-application modes with different fees', async () => {

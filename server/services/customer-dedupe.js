@@ -103,6 +103,15 @@ function unitFromLine2(line2) {
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s) && s.length <= 8 ? s.replace(/-/g, '') : null;
 }
 
+// Case-preserving unit substring from a raw address_line1 ("...Apt 1418" →
+// "Apt 1418") — used when a merge must carry a loser-only unit onto a
+// street-only winner's address_line2.
+function rawUnitText(line1) {
+  if (!line1) return null;
+  const m = String(line1).match(/\b(?:apt|apartment|unit|ste|suite|lot|bldg|building|trlr|rm)\s*#?\s*[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\b/i);
+  return m ? m[0].trim() : null;
+}
+
 function addressCompat(winner, loser) {
   const wRaw = String(winner.address_line1 || '').trim();
   const lRaw = String(loser.address_line1 || '').trim();
@@ -158,6 +167,10 @@ const AUTO_BLOCKER_TABLES = [
   'service_records', 'customer_contracts', 'annual_prepay_terms',
   'estimate_deposits', 'estimate_card_holds', 'termite_bonds',
   'customer_credit_ledger',
+  // An assigned promo/referral/custom discount is billing state the discount
+  // engine reads at invoice/estimate time — silently repointing one onto a
+  // live account grants a discount nobody approved. Review queue instead.
+  'customer_discounts',
 ];
 
 // Batched: one grouped count per table for the whole candidate set, not one
@@ -741,6 +754,16 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         throw new Error('executeMerge: the duplicate belongs to a multi-property account with other live members — reconcile accounts first');
       }
     }
+    // Same-account primary handoff: shared notification/channel prefs
+    // resolve via (account_id, is_primary_profile=true) — retiring the
+    // account's primary without promoting the survivor would leave sibling
+    // properties falling back to their own/default prefs.
+    const promoteWinnerAsPrimary = Boolean(
+      loser.is_primary_profile
+      && loser.account_id
+      && loser.account_id === winner.account_id
+      && !winner.is_primary_profile,
+    );
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
@@ -898,6 +921,10 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         // via .first()), balances zero (they folded above), and
         // merged_into_promoter_id points the resolver at the winner so
         // in-flight invites keep earning credit there.
+        // Balances AND lifetime counters zero on the alias — they folded
+        // into the winner, and analytics/top-promoter queries read
+        // referral_promoters without always excluding status='merged', so a
+        // populated alias would double-count every click/referral/reward.
         await trx('referral_promoters').where({ id: loserPromoter.id }).update({
           customer_id: null,
           status: 'merged',
@@ -905,6 +932,11 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
           referral_balance_cents: 0,
           available_balance_cents: 0,
           pending_earnings_cents: 0,
+          total_earned_cents: 0,
+          total_paid_out_cents: 0,
+          total_clicks: 0,
+          total_referrals_sent: 0,
+          total_referrals_converted: 0,
           updated_at: trx.fn.now(),
         });
         repointed['referral_promoters.consolidated'] = `folded promoter ${loserPromoter.id} into ${winnerPromoter.id} (loser kept as code alias)`;
@@ -960,6 +992,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       stripe_customer_id: null,
       payer_id: null,
       billing_mode: null,
+      is_primary_profile: false,
       account_credits: 0,
       active: false,
       deleted_at: trx.fn.now(),
@@ -991,6 +1024,25 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       if (isEmptyValue(winner.per_application_fee) && !isEmptyValue(loser.per_application_fee)) {
         backfills.per_application_fee = loser.per_application_fee;
       }
+    }
+    // A street-only winner absorbing a unit-bearing loser (same street key,
+    // one-sided unit = a compatible match) must keep the unit — it is the
+    // only piece of the service address that distinguishes the apartment.
+    // The loser's line2 copies as-is; a unit embedded in the loser's line1
+    // is re-extracted with case preserved.
+    const winnerKey = normalizeStreetKey(winner.address_line1);
+    const loserKey = normalizeStreetKey(loser.address_line1);
+    const winnerHasUnit = Boolean((winnerKey && winnerKey.unit) || unitFromLine2(winner.address_line2));
+    const loserUnitText = loser.address_line2
+      || rawUnitText(loser.address_line1)
+      || null;
+    if (!winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
+      && ((loserKey && loserKey.unit) || unitFromLine2(loser.address_line2))
+      && isEmptyValue(winner.address_line2) && loserUnitText) {
+      backfills.address_line2 = loserUnitText;
+    }
+    if (promoteWinnerAsPrimary) {
+      backfills.is_primary_profile = true;
     }
     // On-location service contacts route appointment/service-report comms
     // (customer-contact.js): copy slot-WISE, never field-wise — mixing one
