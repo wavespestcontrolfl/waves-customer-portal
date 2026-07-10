@@ -43,6 +43,7 @@ import {
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
+import { useNavigate } from "react-router-dom";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink, Monitor, X } from "lucide-react";
@@ -503,7 +504,11 @@ function buildMosquitoRecommendations(form) {
   return recommendations;
 }
 
-function validateDeliveryOptions(form, estimate) {
+// deferInvoiceTotals: the commercial-proposal handoff saves a manual-quote
+// draft whose totals are zero until the proposal line items are authored —
+// the proposal PUT recomputes the billable totals immediately after, so the
+// zero-total bill-by-invoice guard below would block that flow at the save.
+function validateDeliveryOptions(form, estimate, { deferInvoiceTotals = false } = {}) {
   const oneTimeAmount = oneTimePestChoiceAmountForPreview(estimate?.results, form)
     || Number(estimate?.oneTime?.total || 0);
   const recurringAmount = Math.max(
@@ -523,7 +528,7 @@ function validateDeliveryOptions(form, estimate) {
       return "Offer one-time option requires a one-time total on the generated estimate.";
     }
   }
-  if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
+  if (form.billByInvoice && !deferInvoiceTotals && oneTimeAmount <= 0 && recurringAmount <= 0) {
     return "Bill by invoice requires a billable recurring or one-time total.";
   }
   return null;
@@ -1841,6 +1846,7 @@ export default function EstimateToolViewV2({
   initialCustomerEmail = "",
   initialServiceInterest = "",
 } = {}) {
+  const navigate = useNavigate();
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
   const autocompleteRef = useRef(null);
@@ -3640,16 +3646,20 @@ export default function EstimateToolViewV2({
     }
   }
 
-  async function doSave() {
-    if (!estimate) return null;
-    const deliveryError = validateDeliveryOptions(form, estimate);
+  // estimateOverride: callers that generate-then-save in one handler pass the
+  // freshly returned estimate — the `estimate` state in this closure is still
+  // the pre-generate value (React state doesn't update mid-handler).
+  async function doSave(estimateOverride = null, { deferInvoiceTotals = false } = {}) {
+    const estimateToSave = estimateOverride || estimate;
+    if (!estimateToSave) return null;
+    const deliveryError = validateDeliveryOptions(form, estimateToSave, { deferInvoiceTotals });
     if (deliveryError) {
       alert(deliveryError);
       return null;
     }
     setSaving(true);
     try {
-      const E = estimate;
+      const E = estimateToSave;
       const quoteRequired = estimateRequiresQuote(E);
       const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
       const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
@@ -3717,6 +3727,28 @@ export default function EstimateToolViewV2({
     } finally {
       setSaving(false);
     }
+  }
+
+  // Commercial hand-off: the estimator can't price a commercial property
+  // (manual quote required), so generate if needed, persist the draft —
+  // capturing the contact, address, and property specs — and jump straight
+  // into the proposal builder where the operator authors the line-item quote.
+  async function openProposalBuilder() {
+    // Every form/pricing/delivery-option edit clears savedId, so a non-null id
+    // is a draft that already matches the current form — reuse it. Re-saving
+    // a lead-less estimate inserts a duplicate row and leaves the earlier
+    // draft (and its customer link) dangling in the pipeline.
+    if (savedId) {
+      navigate(`/admin/estimates/${savedId}/proposal`);
+      return;
+    }
+    const generated = estimate || (await doGenerate());
+    if (!generated) return;
+    // Defer the bill-by-invoice zero-total guard: the manual-quote commercial
+    // draft has no billable totals until the proposal lines are authored on
+    // the page this navigates to.
+    const saved = await doSave(generated, { deferInvoiceTotals: true });
+    if (saved?.id) navigate(`/admin/estimates/${saved.id}/proposal`);
   }
 
   async function doSend(id, method) {
@@ -4828,6 +4860,21 @@ export default function EstimateToolViewV2({
               {commercialDetected && (
                 <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
                   {COMMERCIAL_WARNING_TEXT}
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={saving || generating}
+                      title="Generates and saves a draft estimate, then opens the line-item proposal builder"
+                      onClick={openProposalBuilder}
+                    >
+                      {generating
+                        ? "Generating…"
+                        : saving
+                          ? "Saving…"
+                          : "Save draft & build commercial proposal"}
+                    </Button>
+                  </div>
                 </div>
               )}
               <div className="grid grid-cols-2 gap-3">
