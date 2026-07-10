@@ -5,6 +5,7 @@ const {
   buildServiceCadenceCombos,
   bundleSectionLadderForService,
   applySelectedMosquitoTierToEstimateData,
+  buildPricingBundle,
 } = require('../routes/estimate-public');
 
 // A pest + lawn + mosquito bundle (Gold tier = 3 qualifying services → 15% off).
@@ -313,5 +314,99 @@ describe('applySelectedMosquitoTierToEstimateData — accept re-stamps the picke
     const lawnFreq = { key: 'basic', serviceCategory: 'lawn_care', monthly: 35 };
     const input = estDataWithRecurringMosquito();
     expect(applySelectedMosquitoTierToEstimateData(input, lawnFreq)).toBe(input);
+  });
+});
+
+describe('bundle split survives 1-cent per-service rounding drift (buildPricingBundle e2e)', () => {
+  // Real prod Silver pest+lawn draft (numbers verbatim, identity swapped):
+  // combined monthly rounds from the discounted sum (0.9 × 93.42 = 84.078 →
+  // 84.08) while the per-service treatment rows round individually
+  // (32.10 + 51.975→51.98 sums to 84.07) — a legitimate 1-cent drift.
+  // The old gate compared raw floats: |84.08 − 84.07| = 0.010000000000005116
+  // > 0.01, so frequencyServiceRowsMatchMonthly rejected the quarterly entry
+  // and the whole estimate collapsed into the single combined-price bundle
+  // section — no per-service sections, no lawn cadence slider, even though
+  // buildServiceCadenceCombos had priced all 9 combinations.
+  function driftEstimate() {
+    return {
+      id: `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'draft',
+      monthly_total: 84.08,
+      annual_total: 1008.90,
+      onetime_total: 99,
+      waveguard_tier: 'Silver',
+      estimate_data: {
+        inputs: {
+          svcPest: true, svcLawn: true, pestFreq: '4', lawnFreq: '9',
+          grassType: 'st_augustine', homeSqFt: '2309', lotSqFt: '9423',
+          stories: '1', isCommercial: 'NO', customerName: 'Split Drift',
+          address: '123 Rounding Way, Parrish, FL 34219',
+        },
+        result: {
+          hasRecurring: true,
+          hasOneTime: true,
+          manualDiscount: null,
+          totals: { year1: 1107.9, year2: 1008.9, year2mo: 84.08, manualDiscount: null },
+          oneTime: { items: [], total: 99, membershipFee: 99 },
+          recurring: {
+            tier: 'Silver',
+            waveGuardTier: 'Silver',
+            discount: 0.1,
+            serviceCount: 2,
+            monthlyTotal: 84.08,
+            grandTotal: 84.08,
+            annualBeforeDiscount: 1121,
+            annualAfterDiscount: 1008.9,
+            services: [
+              {
+                name: 'Lawn Care', service: 'lawn_care', mo: 57.75, monthly: 57.75,
+                perTreatment: 77, visitsPerYear: 9, grassType: 'St. Augustine',
+                discountable: true, discountEligible: true,
+                waveGuardDiscountEligible: true, countsTowardWaveGuardTier: true,
+              },
+              {
+                name: 'Pest Control', service: 'pest_control', mo: 35.67, monthly: 35.67,
+                basePrice: 107, perTreatment: 107, visitsPerYear: 4,
+              },
+            ],
+          },
+          results: {
+            pestTiers: [
+              { label: 'Quarterly', mo: 35.67, pa: 107, ann: 428, apps: 4, init: 99, recommended: true },
+              { label: 'Bi-Monthly', mo: 45.48, pa: 90.95, ann: 545.7, apps: 6, init: 99 },
+              { label: 'Monthly', mo: 74.9, pa: 74.9, ann: 898.8, apps: 12, init: 99 },
+            ],
+            lawn: [
+              { name: '6x applications/yr', v: 6, mo: 50, pa: 100, ann: 600, dimmed: true },
+              { name: '9x applications/yr', v: 9, mo: 57.75, pa: 77, ann: 693, recommended: true },
+              { name: '12x applications/yr', v: 12, mo: 79, pa: 79, ann: 948, dimmed: true },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  test('splits into pest + lawn sections, lawn with its own application ladder', async () => {
+    const bundle = await buildPricingBundle(driftEstimate());
+    expect(bundle.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+
+    const pest = bundle.services[0];
+    expect(pest.frequencies.map((f) => f.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
+    // Per-application pest pricing at 10% WaveGuard off: 107→96.30, 90.95→81.86(±1¢), 74.90→67.41
+    expect(pest.frequencies[0].perTreatment).toBeCloseTo(96.30, 2);
+
+    const lawn = bundle.services[1];
+    expect(lawn.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.frequencies.map((f) => f.visitsPerYear)).toEqual([6, 9, 12]);
+    // Program minimum keeps the 6x tier at $50/mo even after the 10% discount.
+    expect(lawn.frequencies[0].monthly).toBe(50);
+
+    // The combo ladder backs the selections; default combo equals the stored total.
+    expect(bundle.serviceCadenceCombos).toHaveLength(9);
+    const defaultCombo = bundle.serviceCadenceCombos.find(
+      (c) => c.key === 'lawn_care:enhanced|pest_control:quarterly',
+    );
+    expect(defaultCombo.monthly).toBe(84.08);
   });
 });

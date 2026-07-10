@@ -3015,10 +3015,11 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const treeShrubProfile = isTreeShrubOnly
     ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
     : null;
-  // Lawn-only estimates price off the treatable turf, so Pool/Lanai and
-  // landscape Complexity read as irrelevant noise there (owner ask 2026-07-09)
-  // — both tiles stay pest/other-mix only.
-  const complexity = isLawnOnly ? null : prettySignalValue(
+  // Lawn estimates price off the treatable turf, so Pool/Lanai (lawn-only,
+  // owner ask 2026-07-09) and landscape Complexity (ANY mix including lawn —
+  // extended to pest+lawn bundles, owner ask 2026-07-10) read as irrelevant
+  // noise there.
+  const complexity = hasLawn ? null : prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
@@ -3864,15 +3865,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>−${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
     : '';
 
-  // WaveGuard Membership setup ($99). Applies only to recurring Pest or Mosquito
-  // mixes; lawn, termite-bait, rodent-bait, tree & shrub, and palm carry no setup
-  // fee (they get a 5% annual-prepay discount instead). A mix containing pest or
-  // mosquito always charges the setup — the 5% never stacks on top.
+  // WaveGuard Membership setup ($99). Applies ONLY to mixes with recurring Pest
+  // (owner directive 2026-07-10); mosquito, lawn, termite-bait, rodent-bait,
+  // tree & shrub, and palm carry no setup fee (they get a 5% annual-prepay
+  // discount instead). A mix containing recurring pest always charges the
+  // setup — the 5% never stacks on top.
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
   // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const hasRecurringMosquito = recurring.some((svc) => recurringServiceKey(svc) === 'mosquito');
-  const hasWaveGuardMembership = !!pestRecurring || hasRecurringMosquito;
+  const hasWaveGuardMembership = !!pestRecurring;
   const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
@@ -9573,16 +9574,16 @@ function normalizeOneTimeBreakdown(estData) {
   addRows(oneTime?.items);
   if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.items);
   const membershipFee = Number(oneTime?.membershipFee ?? nestedOneTime?.membershipFee);
-  // WaveGuard setup fee only applies when recurring pest or mosquito is part of
-  // the estimate. Lawn / termite-bait / rodent-bait / T&S / palm never carry it,
-  // even if a stale membershipFee was cached in oneTime.
+  // WaveGuard setup fee only applies when recurring pest control is part of the
+  // estimate (owner directive 2026-07-10). Mosquito / lawn / termite-bait /
+  // rodent-bait / T&S / palm never carry it, even if a stale membershipFee was
+  // cached in oneTime.
   const recurringServicesForFee = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
   const hasRecurringPest = recurringServicesForFee.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
-  const hasRecurringMosquito = recurringServicesForFee.some((s) => recurringServiceKey(s) === 'mosquito');
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
-  if (Number.isFinite(membershipFee) && membershipFee > 0 && (hasRecurringPest || hasRecurringMosquito) && !hasExplicitWaveGuardSetup) {
+  if (Number.isFinite(membershipFee) && membershipFee > 0 && hasRecurringPest && !hasExplicitWaveGuardSetup) {
     addRows([{
       service: 'waveguard_setup',
       name: 'WaveGuard setup',
@@ -9660,12 +9661,12 @@ function normalizeOneTimeBreakdown(estData) {
 
   // An explicit WaveGuard setup row saved in the estimate's one-time items
   // bypasses the synthesized-fee guard above — drop it for the same
-  // non-pest/mosquito mixes so a lawn-only estimate never shows the $99
-  // membership setup. estimate-converter's
+  // no-recurring-pest mixes so a lawn-only or mosquito-only estimate never
+  // shows the $99 membership setup. estimate-converter's
   // shouldIncludeWaveGuardSetupFeeForRecurring already refuses to CHARGE it
   // for these mixes, so this keeps the page consistent with the invoice.
   let suppressedExplicitSetupTotal = 0;
-  if (!hasRecurringPest && !hasRecurringMosquito) {
+  if (!hasRecurringPest) {
     for (let i = rows.length - 1; i >= 0; i -= 1) {
       const row = rows[i];
       if (row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row)) {
@@ -9688,7 +9689,6 @@ function normalizeOneTimeBreakdown(estData) {
     : (Number.isFinite(membershipFee)
       && membershipFee > 0
       && !hasRecurringPest
-      && !hasRecurringMosquito
       ? membershipFee
       : 0);
   const explicitTotal = Number.isFinite(rawExplicitTotal)
@@ -12222,7 +12222,12 @@ function frequencyServiceRowsMatchMonthly(frequency = {}, keys = []) {
   const monthly = Number(frequency?.monthly);
   if (!Number.isFinite(monthly)) return false;
   const rowsMonthly = frequencyServiceRowsMonthlyTotal(frequency, keys);
-  return rowsMonthly != null && Math.abs(roundMonthly(monthly) - rowsMonthly) <= 0.01;
+  if (rowsMonthly == null) return false;
+  // Compare in integer cents: the intended tolerance is one cent, but a raw
+  // float compare (|84.08 - 84.07| <= 0.01) evaluates 0.010000000000005 > 0.01
+  // and rejected legitimate 1-cent rounding-path drift, collapsing splittable
+  // pest+lawn bundles into the single combined-price card.
+  return Math.abs(Math.round(roundMonthly(monthly) * 100) - Math.round(rowsMonthly * 100)) <= 1;
 }
 
 function canSplitRecurringSelectableLadder(frequencies = [], recurringKeys = []) {
@@ -12580,7 +12585,6 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   ));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
-  const hasRecurringMosquito = recurringKeys.includes('mosquito');
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
   const recurringRows = recurringServiceRowsByKey(recurringServices);
@@ -12610,7 +12614,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: key === 'pest_control',
       frequencies,
-      setupFee: (key === 'pest_control' || key === 'mosquito') ? waveGuardSetupFee : null,
+      setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
     })];
@@ -12647,7 +12651,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
           isRecurring: true,
           isPest: key === 'pest_control',
           frequencies: sectionFrequencies,
-          setupFee: (key === 'pest_control' || (key === 'mosquito' && !hasRecurringPestSection)) ? waveGuardSetupFee : null,
+          setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
           oneTimeBreakdown,
           quoteRequired: payload.quoteRequired === true,
         });
@@ -12665,7 +12669,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: hasRecurringPest,
       frequencies,
-      setupFee: (hasRecurringPest || hasRecurringMosquito) ? waveGuardSetupFee : null,
+      setupFee: hasRecurringPest ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
       memberKeys: recurringKeys, // badge eligibility reflects the bundle's actual services
@@ -12960,9 +12964,8 @@ function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const recurringServices = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
-  const hasPestOrMosquito = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || ''))
-    || recurringServiceKey(s) === 'mosquito');
-  if (hasPestOrMosquito) return payload;
+  const hasRecurringPestForSetup = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
+  if (hasRecurringPestForSetup) return payload;
 
   let next = payload;
   const breakdown = payload.oneTimeBreakdown;
@@ -13517,9 +13520,10 @@ async function buildPricingBundle(estimate) {
     // pest carries a roach type) is NOT waivable — it covers the heavier
     // visit-1 cost regardless of customer churn.
     const firstVisitFees = [];
-    // The WaveGuard setup fee only applies to recurring pest/mosquito mixes — the
-    // other recurring services are prepay-eligible too but carry no setup fee.
-    if (annualPrepayEligible && (hasPest || recurringKeys.includes('mosquito'))) {
+    // The WaveGuard setup fee only applies to recurring-pest mixes (owner
+    // directive 2026-07-10) — every other recurring service is prepay-eligible
+    // too but carries no setup fee.
+    if (annualPrepayEligible && hasPest) {
       firstVisitFees.push({
         service: 'waveguard_setup',
         amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,

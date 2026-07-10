@@ -1963,9 +1963,10 @@ describe('public estimate one-time breakdown', () => {
       }),
     ]));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
-      // Mosquito is a WaveGuard-membership service (setup fee + tier), but it is
-      // not pest, so the pest-specific add-on gates stay off.
-      showWaveGuardSetupFee: true,
+      // The WaveGuard setup fee is recurring-pest only (owner directive
+      // 2026-07-10) — mosquito counts toward the tier but never carries the
+      // fee, and the pest-specific add-on gates stay off.
+      showWaveGuardSetupFee: false,
       showPestRecurringAddOns: false,
       showOneTimePestAddOns: false,
     }));
@@ -4665,8 +4666,10 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Lot', value: '9,000 sq ft' },
       { label: 'Pool/Lanai', value: 'Yes (Medium cage)' },
       { label: 'Treatable lawn', value: '5,200 sq ft' },
-      { label: 'Complexity', value: 'Moderate' },
     ]));
+    // Complexity is suppressed for ANY mix that includes lawn (owner ask
+    // 2026-07-10 — extends the lawn-only rule to pest+lawn bundles).
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.signals).toEqual([]);
   });
@@ -4815,7 +4818,10 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics.some((metric) => metric.label === 'Trees/Shrubs')).toBe(false);
   });
 
-  test('Waves AI payload preserves complexity for termite and lawn bundles', () => {
+  test('Waves AI payload suppresses complexity for any bundle that includes lawn', () => {
+    // Owner ask 2026-07-10: landscape Complexity reads as noise whenever lawn
+    // is in the mix — extended from the lawn-only rule to bundles (pest+lawn,
+    // termite+lawn). Termite perimeter still renders.
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {
         homeSqFt: 2400,
@@ -4838,11 +4844,11 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.metrics).toHaveLength(6);
+    expect(payload.metrics).toHaveLength(5);
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Termite perimeter', value: '180 linear ft' },
-      { label: 'Complexity', value: 'Moderate' },
     ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 

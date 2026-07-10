@@ -62,15 +62,16 @@ describe('estimate converter annual prepay amount', () => {
     expect(determineTier(0, false)).toEqual(expect.objectContaining({ tier: 'none' }));
   });
 
-  test('WaveGuard setup fee applies to recurring pest/mosquito mixes only', () => {
-    // $99 setup applies only to recurring Pest or Mosquito mixes.
+  test('WaveGuard setup fee applies to recurring-pest mixes only', () => {
+    // $99 setup applies only to mixes with recurring Pest Control (owner
+    // directive 2026-07-10 — mosquito no longer qualifies).
     expect(hasWaveGuardSetupService([
       { service: 'pest_control', name: 'Pest Control' },
     ])).toBe(true);
+    // Everything else carries no setup fee (5% annual-prepay discount instead).
     expect(hasWaveGuardSetupService([
       { service: 'mosquito', name: 'Mosquito Control' },
-    ])).toBe(true);
-    // Everything else carries no setup fee (5% annual-prepay discount instead).
+    ])).toBe(false);
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
     ])).toBe(false);
@@ -84,16 +85,16 @@ describe('estimate converter annual prepay amount', () => {
     expect(hasWaveGuardSetupService([
       { service: 'tree_shrub', name: 'Tree & Shrub' },
     ])).toBe(false);
-    // Mixes containing pest or mosquito always charge the setup (no 5% stacking).
+    // Mixes containing recurring pest always charge the setup (no 5% stacking).
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'pest_control', name: 'Pest Control' },
     ])).toBe(true);
+    // No recurring pest in the mix → no setup, even with mosquito present.
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'mosquito', name: 'Mosquito Control' },
-    ])).toBe(true);
-    // Lawn + tree (no pest/mosquito) → no setup.
+    ])).toBe(false);
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'tree_shrub', name: 'Tree & Shrub' },

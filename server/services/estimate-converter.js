@@ -619,16 +619,17 @@ function isTermiteBaitOneTimeItem(item = {}) {
 }
 
 // Service-type predicate (independent of existing-customer status): the WaveGuard
-// $99 setup is a Pest/Mosquito membership fee. Lawn, termite-bait, rodent-bait,
-// tree & shrub, and palm carry no setup fee — they earn the annual-prepay discount
-// instead. This drives the prepay-discount decision (which must not depend on the
-// existing-customer waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
+// $99 setup is a recurring-Pest membership fee ONLY (owner directive 2026-07-10).
+// Mosquito, lawn, termite-bait, rodent-bait, tree & shrub, and palm carry no setup
+// fee — they earn the annual-prepay discount instead. This drives the
+// prepay-discount decision (which must not depend on the existing-customer
+// waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
 // existing-customer waiver on top for the actual setup invoice.
 function recurringMixHasMembershipFeeService(recurringServices = []) {
   const keys = (Array.isArray(recurringServices) ? recurringServices : [])
     .map(recurringServiceKey)
     .filter(Boolean);
-  return keys.includes('pest_control') || keys.includes('mosquito');
+  return keys.includes('pest_control');
 }
 
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
