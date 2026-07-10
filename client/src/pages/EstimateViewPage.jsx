@@ -561,7 +561,27 @@ function HeaderTailSkeleton() {
   );
 }
 
-function NotFoundCard() {
+// extensionEligible comes from the /data 404 body: the server only sets it
+// when the token maps to a real, published estimate that died of expiry (and
+// the GATE_ESTIMATE_EXTENSION_REQUEST gate is on) — so garbage URLs never
+// grow a button that can only fail.
+function NotFoundCard({ token = null, extensionEligible = false }) {
+  // idle | sending | sent | failed — one-shot extension ask; the server
+  // dedupes repeats per estimate, so 'sent' is terminal for this render.
+  const [requestState, setRequestState] = useState('idle');
+
+  const requestExtension = async () => {
+    if (requestState === 'sending' || requestState === 'sent') return;
+    setRequestState('sending');
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/extension-request`, { method: 'POST' });
+      if (!r.ok) throw new Error(`extension_request_failed_${r.status}`);
+      setRequestState('sent');
+    } catch {
+      setRequestState('failed');
+    }
+  };
+
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
       <div style={{ fontSize: 34 }}></div>
@@ -571,6 +591,41 @@ function NotFoundCard() {
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         and we'll get you sorted.
       </div>
+      {extensionEligible && token ? (
+        requestState === 'sent' ? (
+          <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 20, lineHeight: 1.5, fontWeight: 600 }}>
+            Request sent — we've let our office know you'd like more time on this estimate. We'll reach out shortly.
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={requestExtension}
+              disabled={requestState === 'sending'}
+              style={{
+                minHeight: 48,
+                border: 0,
+                borderRadius: 10,
+                padding: '0 24px',
+                marginTop: 20,
+                background: ESTIMATE_BUTTON_BG,
+                color: COLORS.white,
+                fontSize: 15,
+                fontWeight: 800,
+                cursor: requestState === 'sending' ? 'not-allowed' : 'pointer',
+                opacity: requestState === 'sending' ? 0.8 : 1,
+              }}
+            >
+              {requestState === 'sending' ? 'Sending…' : 'Request an extension'}
+            </button>
+            {requestState === 'failed' ? (
+              <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.5 }}>
+                We couldn't send that just now — give us a call and we'll extend it over the phone.
+              </div>
+            ) : null}
+          </>
+        )
+      ) : null}
     </div>
   );
 }
@@ -2565,6 +2620,9 @@ export default function EstimateViewPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // Set from the /data 404 body — true only when the server confirms this
+  // token is a real published estimate that expired (see NotFoundCard).
+  const [extensionEligible, setExtensionEligible] = useState(false);
   // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
   // "Customer View" / the estimates list's Preview). Makes the /data fetch
   // attach the staff session's Bearer token so the server will serve an
@@ -2778,6 +2836,8 @@ export default function EstimateViewPage() {
     }
     const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
     if (r.status === 404) {
+      const notFoundBody = await r.json().catch(() => ({}));
+      setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
       setNotFound(true);
       setLoading(false);
       return;
@@ -3308,7 +3368,7 @@ export default function EstimateViewPage() {
     );
   }
   if (notFound || !data) {
-    return <Page><NotFoundCard /></Page>;
+    return <Page><NotFoundCard token={token} extensionEligible={extensionEligible} /></Page>;
   }
 
   const { estimate, pricing, cta } = data;

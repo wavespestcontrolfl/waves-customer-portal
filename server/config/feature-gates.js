@@ -454,6 +454,14 @@ const gates = {
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
 
+  // Estimate extension request — "Request an extension" button on the React
+  // estimate page's expired/not-found screen. One click records the ask and
+  // notifies admin in-app (no customer comms, no expiry change — the office
+  // decides). Gates BOTH the /data 404 eligibility flag (which is what makes
+  // the button render) and the POST endpoint itself.
+  // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
+  estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
+
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
   // 100% of customers. Glass is now the unconditional theme on every customer

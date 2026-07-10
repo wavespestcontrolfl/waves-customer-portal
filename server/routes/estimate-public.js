@@ -90,6 +90,14 @@ const addServiceRequestLimiter = rateLimit({
   message: { error: 'Too many service requests submitted. Please wait before sending another or call our office.' },
 });
 
+const extensionRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
 function scheduledDateOnly(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -9104,6 +9112,66 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
   }
 });
 
+// POST /api/estimates/:token/extension-request — one-click "my link expired
+// but I still want this" signal from the React expired/not-found screen.
+// Writes NOTHING customer-visible and sends NO customer comms: it records the
+// ask on the estimate row and raises an in-app admin notification so the
+// office can extend/resend on their own judgment. Token is the only gate
+// (same-origin auth model as /:token/data); the endpoint 404s identically for
+// unknown tokens, ineligible rows, and the gate being off, so it reveals no
+// more about a token than /data already does.
+router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateExtensionRequest')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    // Dedupe: one admin notification per estimate per 24h. The stamp lives in
+    // estimate_data (no migration for a single timestamp); a non-object blob
+    // skips the stamp and the rate limiter alone bounds repeats.
+    let estData = {};
+    try {
+      estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : (estimate.estimate_data || {});
+    } catch { estData = {}; }
+    const lastRequestedAt = Date.parse(estData?.extensionRequestedAt || '');
+    if (Number.isFinite(lastRequestedAt) && Date.now() - lastRequestedAt < 24 * 60 * 60 * 1000) {
+      return res.json({ success: true, alreadyRequested: true });
+    }
+
+    // The notification IS the deliverable — unlike the best-effort notifies
+    // elsewhere in this file, a failure here must surface as a 500 so the
+    // customer gets the "call us" fallback instead of a false "request sent".
+    const NotificationService = require('../services/notification-service');
+    const expiredLine = estimate.expires_at
+      ? `link expired ${new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`
+      : 'link expired';
+    await NotificationService.notifyAdmin(
+      'estimate',
+      `Extension requested: ${estimate.customer_name}`,
+      `${estimate.address || 'no address'} — ${expiredLine}; customer asked for more time on this estimate`,
+      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+    );
+
+    // Stamp after the notify commits so a failed notify can be retried; a
+    // failed stamp after a successful notify just risks one duplicate
+    // notification, which the office can live with.
+    await db('estimates').where({ id: estimate.id }).update({
+      estimate_data: db.raw(
+        "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true) ELSE estimate_data END",
+        [new Date().toISOString()],
+      ),
+    }).catch((e) => logger.warn(`[estimate-extension-request] stamp skipped for estimate ${estimate.id}: ${e.message}`));
+
+    res.status(201).json({ success: true });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', async (req, res, next) => {
   try {
@@ -10514,6 +10582,24 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
+}
+
+// Whether this estimate may receive a customer "extension request" from the
+// React expired/not-found screen. Deliberately the complement of the narrow
+// expired slice of isEstimateCustomerViewable: a real, PUBLISHED estimate the
+// customer once legitimately held, now dead only because time ran out (past
+// expires_at, or the daily sweep already flipped status to 'expired').
+// send_failed rows qualify too once date-expired — if the customer is on the
+// page they clearly have the link. Everything else stays ineligible:
+// accepted/declined still render in full (no expired screen to ask from),
+// unpublished drafts/scheduled sends were never the customer's to extend, and
+// archived rows are office-retired. Gate + rate limit live at the call sites.
+function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
+  if (!estimate || estimate.archived_at) return false;
+  if (['accepted', 'declined'].includes(estimate.status)) return false;
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (estimate.status === 'expired') return true;
+  return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
 }
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
@@ -14349,7 +14435,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
       && Boolean(await verifyStaffBearer(req));
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
-      return res.status(404).json({ error: 'Estimate not found' });
+      // Carries exactly one extra bit beyond the bare 404: this token maps to
+      // a real, published estimate that died of expiry (never a draft), so the
+      // SPA's not-found screen may offer the "Request an extension" button.
+      // The legacy SSR path already reveals more for the same rows (a
+      // personalized expired page), and POST /:token/extension-request
+      // re-checks eligibility + gate server-side regardless.
+      return res.status(404).json({
+        error: 'Estimate not found',
+        extensionRequestEligible: featureGates.isEnabled('estimateExtensionRequest')
+          && isEstimateExtensionRequestEligible(estimate),
+      });
     }
 
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
@@ -14852,6 +14948,7 @@ module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
+module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
