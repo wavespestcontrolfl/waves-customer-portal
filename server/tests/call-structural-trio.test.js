@@ -406,6 +406,12 @@ describe('demoteFailOpenOnV1AddressConflict', () => {
     const r = demoteFailOpenOnV1AddressConflict(allowed, { city: 'Sarasota' }, kc);
     expect(r.allowed).toBe(false);
   });
+  test('partial-only V1 evidence demotes even when it MATCHES on-file (codex r10 P2)', () => {
+    // Same city/ZIP cannot disambiguate a second property in that city/ZIP —
+    // partial evidence without a street always holds for review.
+    expect(demoteFailOpenOnV1AddressConflict(allowed, { city: 'Venice' }, kc).allowed).toBe(false);
+    expect(demoteFailOpenOnV1AddressConflict(allowed, { zip: '34285' }, kc).allowed).toBe(false);
+  });
   test('address flags did not fail open → untouched even with a conflicting V1 street', () => {
     const noAddr = { allowed: true, failedOpenFlags: ['caller_phone_missing'] };
     expect(demoteFailOpenOnV1AddressConflict(noAddr, { address_line1: '9 Elsewhere Rd' }, kc)).toBe(noAddr);

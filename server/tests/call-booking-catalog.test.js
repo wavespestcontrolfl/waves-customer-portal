@@ -131,6 +131,10 @@ describe('rodent intent → catalog service (owner directive)', () => {
     expect(R('rats showed up two days ago and we need someone out')).toBe('rodent_general_one_time');
     expect(R('the mice came back a week ago')).toBe('rodent_general_one_time');
   });
+  test('a contrast cue after a history phrase preserves the CURRENT rodent mention (P2)', () => {
+    expect(R('Last visit we treated ants, now I have mice')).toBe('rodent_general_one_time');
+    expect(R('previously it was spiders but today rats are in the garage')).toBe('rodent_general_one_time');
+  });
   test('adversative after a negation keeps the affirmative rodent mention (P2)', () => {
     expect(R("We don't have ants but rats are everywhere in the attic")).toBe('rodent_general_one_time');
   });

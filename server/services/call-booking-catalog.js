@@ -96,11 +96,15 @@ const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
 // mention and "ago" and still strips.
 const RODENT_NOUN = "(?:rodents?|rats?|mouse|mice)";
 const RODENT_ONSET_VERBS = "(?:showed|shows?|showing|started|starting|began|begun|appeared|appearing|noticed|spotted|saw|seen|found|heard|moved|came|come|coming|returned|arrived|got|gotten|turned|popped|since)";
+// A contrast cue between a history phrase and the rodent noun means the noun
+// is the CURRENT problem, not the history: "Last visit we treated ants, now I
+// have mice" books mice. The leading-direction strip refuses to cross one.
+const RODENT_CONTRAST_CUES = "(?:now|but|today|currently|this\\s+time)";
 // The negation consumes COORDINATED nouns too ("no mice or rats", "not rats
 // and mice") — without the trailing group, "no mice or rats, just ants"
 // strips only "no mice" and the surviving "rats" reads as affirmative.
 const NEGATED_RODENT_RE = new RegExp(`\\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RODENT_NOUN}\\b(?:(?:\\s*,\\s*(?:or|and|nor)\\s+|\\s*,\\s*|\\s+(?:or|and|nor)\\s+)${RODENT_NOUN}\\b)*`, 'gi');
-const HISTORICAL_RODENT_RE = new RegExp(`\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)\\b[^.!?\\n]{0,40}?${RODENT_NOUN}\\b`, 'gi');
+const HISTORICAL_RODENT_RE = new RegExp(`\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)\\b(?:(?!\\b${RODENT_CONTRAST_CUES}\\b)[^.!?\\n]){0,40}?${RODENT_NOUN}\\b`, 'gi');
 const RODENT_HISTORICAL_RE = new RegExp(`\\b${RODENT_NOUN}\\b(?:(?!\\b${RODENT_ONSET_VERBS}\\b)[^.!?\\n]){0,40}?\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|ago)\\b`, 'gi');
 
 function hasAffirmativeRodentMention(text) {

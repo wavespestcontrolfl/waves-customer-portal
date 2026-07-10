@@ -518,6 +518,10 @@ function classifyCallerAccount(pipelineStage) {
   return LEAD_PIPELINE_STAGES.has(stage) ? 'open_lead' : 'established_customer';
 }
 
+// Stages whose on-file data fail-open booking may trust (see
+// summarizeKnownCaller.isExistingCustomer).
+const FAIL_OPEN_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+
 // Short, PII-light caller hint for the extraction prompt. Returns null when the
 // inbound number doesn't map to a single known customer.
 function summarizeKnownCaller(customer) {
@@ -532,8 +536,12 @@ function summarizeKnownCaller(customer) {
     accountType,
     // Fail-open booking inputs: an established customer with an address already
     // on file (Google-verified at signup) shouldn't be re-blocked for not
-    // restating it on a familiar call.
-    isExistingCustomer: accountType === 'established_customer',
+    // restating it on a familiar call. Fail-open trust is limited to stages we
+    // ACTIVELY serve — a terminal prospect (lost/disqualified/duplicate) also
+    // classifies as 'established_customer' for prompt purposes, but its stale
+    // on-file data must never clear address/confidence blockers; dormant/
+    // churned accounts likewise fall back to normal review.
+    isExistingCustomer: FAIL_OPEN_CUSTOMER_STAGES.has(String(customer.pipeline_stage || '').trim().toLowerCase()),
     hasAddress: !!String(customer.address_line1 || '').trim(),
     // The on-file address components, for the fail-open V1 conflict check: a
     // legacy V1 address that conflicts with them (different street, unit,
@@ -550,13 +558,17 @@ function summarizeKnownCaller(customer) {
 // shadow/AUDIT recompute — the saved shadow decision must hold exactly where
 // enforce would hold, or rollout metrics overstate safe fail-open bookings.
 // When address flags failed open (V2 heard no address) but legacy V1 captured
-// ANY address component (street, unit — line2 or embedded, city, ZIP) that
-// conflicts with — or can't be matched against — the caller's on-file
-// address, the booking demotes to the blocked path (address_review card).
-// Matching-only evidence books to the on-file address (it IS that address).
-// Same normalization family as the property-linkage exact match
-// (customer-properties), so this guard can't disagree with the stamp
-// downstream. Returns the (possibly demoted) routing result; never mutates.
+// ANY address component (street, unit — line2 or embedded, city, ZIP), the
+// booking demotes to the blocked path (address_review card) UNLESS the
+// evidence is a street-anchored echo of the on-file address (same street
+// key, no conflicting unit/city/ZIP) — that is a duplicate, not a new
+// address. Partial-only evidence (city/ZIP/unit with NO street) demotes even
+// when it matches: it cannot disambiguate a second property in the same
+// city/ZIP, mirroring the V2 rule that any partial component is a
+// new-address signal. Same normalization family as the property-linkage
+// exact match (customer-properties), so this guard can't disagree with the
+// stamp downstream. Returns the (possibly demoted) routing result; never
+// mutates.
 function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
   if (!routingResult?.allowed
     || !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
@@ -571,8 +583,9 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
   if (!legacyV1Street && !v1Unit && !v1City && !v1Zip) return routingResult;
   const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
   const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
-  const v1AddressConflicts = (legacyV1Street
-    && (!onFileStreet || streetKey(legacyV1Street) !== streetKey(onFileStreet)))
+  const v1AddressConflicts = !legacyV1Street
+    || !onFileStreet
+    || streetKey(legacyV1Street) !== streetKey(onFileStreet)
     || (v1Unit && v1Unit !== onFileUnit)
     || (v1City && v1City !== cityKey(knownCaller?.addressCity))
     || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
@@ -5725,24 +5738,24 @@ const CallRecordingProcessor = {
             appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
           }
 
-          // Only send the confirmation SMS if the schedule row landed and TCPA gate allows it.
-          if (scheduledServiceId && v2SmsBlocked) {
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
-            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
-          } else if (scheduledServiceId && v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni) {
-            // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
-            // isn't the caller's own number, AND the ANI itself is undialable
-            // — nowhere consented to send. Hold the text; the appointment
-            // still books and the office can confirm the number. (A dialable
-            // ANI redirects to the caller instead — see smsRecipient. Sends
-            // cleared by explicit sms_consent_given or by the legacy V2-off
-            // path go to the resolved customer phone as before.)
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable`);
+          // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
+          // isn't the caller's own number, AND the ANI itself is undialable —
+          // there is no consented SMS recipient. Hold the SMS LEG ONLY: the
+          // TCPA gate still allowed email, and deliverConfirmationByChannel
+          // below is the sole reader of the email/both confirmation
+          // preference, so the send path must still run with the SMS attempt
+          // suppressed. The office confirms the number via the review card.
+          // (A dialable ANI redirects to the caller instead — see
+          // smsRecipient. Sends cleared by explicit sms_consent_given or by
+          // the legacy V2-off path go to the resolved customer phone.)
+          const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni;
+          if (scheduledServiceId && !v2SmsBlocked && holdImpliedSmsLeg) {
+            logger.info(`[call-proc] Holding confirmation SMS leg for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable (email leg unaffected)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
-            // The appointment BOOKED but no confirmation went out and the
-            // number needs confirming — that must reach the Needs Review
-            // inbox (the approved-but-unbooked card below is skipped because
-            // the schedule row exists).
+            // The appointment BOOKED with no confirmation TEXT and the number
+            // needs confirming — that must reach the Needs Review inbox (the
+            // approved-but-unbooked card below is skipped because the
+            // schedule row exists).
             await db('triage_items')
               .insert(buildTriageItem({
                 callLogId: call.id,
@@ -5754,6 +5767,11 @@ const CallRecordingProcessor = {
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore()
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
+          }
+          // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
+          if (scheduledServiceId && v2SmsBlocked) {
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
+            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
@@ -5790,19 +5808,24 @@ const CallRecordingProcessor = {
                 serviceLabel: serviceType,
                 smsAttempt: async () => {
                   smsRan = true;
-                  const sendResult = await sendCustomerMessage({
-                    to: smsRecipient,
-                    body: smsBody,
-                    channel: 'sms',
-                    audience: 'customer',
-                    purpose: 'appointment_confirmation',
-                    customerId,
-                    appointmentId: scheduledServiceId,
-                    identityTrustLevel: 'phone_matches_customer',
-                    metadata: {
-                      original_message_type: 'confirmation',
-                    },
-                  });
+                  // SMS leg held (implied consent, no consented recipient):
+                  // skip only the primary text — the channel email leg and
+                  // the gated fan-out/email-only legs below still run.
+                  const sendResult = holdImpliedSmsLeg
+                    ? { sent: false, blocked: true, code: 'implied_consent_non_ani_recipient' }
+                    : await sendCustomerMessage({
+                      to: smsRecipient,
+                      body: smsBody,
+                      channel: 'sms',
+                      audience: 'customer',
+                      purpose: 'appointment_confirmation',
+                      customerId,
+                      appointmentId: scheduledServiceId,
+                      identityTrustLevel: 'phone_matches_customer',
+                      metadata: {
+                        original_message_type: 'confirmation',
+                      },
+                    });
                   const primaryOk = !(sendResult.blocked || sendResult.sent === false);
                   if (!primaryOk) {
                     logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
