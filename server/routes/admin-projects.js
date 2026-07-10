@@ -21,7 +21,7 @@ const config = require('../config');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, isValidProjectType, getProjectType, applyFindingsDefaults } = require('../services/project-types');
+const { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, isValidProjectType, getProjectType } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
@@ -1388,16 +1388,12 @@ router.post('/', async (req, res, next) => {
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
-    // Seed field-level defaults (e.g. the pre-treat certificate's applicator
-    // FDACS ID) at creation only — updates never re-fill a cleared value.
-    const seededFindings = applyFindingsDefaults(project_type, normalizeFindings(findings));
-
     const [row] = await db('projects').insert({
       customer_id,
       project_type,
       project_date: projectDate,
       title: title || null,
-      findings: Object.keys(seededFindings).length ? seededFindings : null,
+      findings: findings || null,
       recommendations: recommendations || null,
       service_record_id: service_record_id || null,
       scheduled_service_id: scheduled_service_id || null,
