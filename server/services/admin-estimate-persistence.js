@@ -508,17 +508,33 @@ async function firstForUpdate(query) {
   return lockableQuery.first();
 }
 
-async function createOrReuseAdminEstimate({
+function parseStoredEstimateData(estimateData) {
+  if (!estimateData) return null;
+  if (typeof estimateData === 'string') {
+    try {
+      return JSON.parse(estimateData);
+    } catch {
+      return null;
+    }
+  }
+  return typeof estimateData === 'object' ? estimateData : null;
+}
+
+// The full save-time pricing pipeline shared by create and revise: trust-strip
+// the client payload, normalize the pest floor metadata, recompute the
+// server-authoritative price, freeze membership artifacts, and validate the
+// delivery options. Returns the estimates-table write fields (everything
+// except the identity/lifecycle columns the caller owns: id, token, status,
+// expires_at, created_by_technician_id).
+async function resolveEstimateWritePayload({
   database = db,
   body,
   technicianId,
   technician,
   now = () => new Date(),
-  randomBytes = crypto.randomBytes,
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
 }) {
   const {
-    leadId,
     showOneTimeOption,
     billByInvoice,
     estimateData,
@@ -612,7 +628,6 @@ async function createOrReuseAdminEstimate({
   const resolvedWaveguardTier = (repricedAtServer && priorQualifyingServices.length && membershipSnapshot?.tierLabel)
     ? membershipSnapshot.tierLabel
     : body.waveguardTier;
-  const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,
     billByInvoice: !!billByInvoice,
@@ -623,14 +638,34 @@ async function createOrReuseAdminEstimate({
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
 
-  const expiresAt = estimateExpiresAt(now);
-  const writeFields = {
+  return {
     ...buildEstimatePersistenceFields(
       { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
       { technician, technicianId, now },
     ),
     ...pricing.audit,
   };
+}
+
+async function createOrReuseAdminEstimate({
+  database = db,
+  body,
+  technicianId,
+  technician,
+  now = () => new Date(),
+  randomBytes = crypto.randomBytes,
+  recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+}) {
+  const linkedLeadId = normalizeLinkedLeadId(body.leadId);
+  const writeFields = await resolveEstimateWritePayload({
+    database,
+    body,
+    technicianId,
+    technician,
+    now,
+    recompute,
+  });
+  const expiresAt = estimateExpiresAt(now);
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
@@ -703,13 +738,108 @@ async function createOrReuseAdminEstimate({
   });
 }
 
+// Statuses a revise can never touch. Acceptance locks the price and spins up
+// downstream records; declined/expired are closed; `sending` means a send is
+// mid-flight (editing under it would race the sender's pre-send read into a
+// stale-content send). draft / scheduled / sent / viewed / send_failed remain
+// editable — the whole point is fixing a quote the customer already has.
+const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
+
+// Single source of truth for "can this estimate be edited in place?" —
+// consumed by the revise write below and by GET /:id/edit-source so the
+// builder can explain a non-editable row instead of failing on save.
+// Returns null when editable, otherwise { message, statusCode }.
+function estimateReviseBlock(estimate, estimateData) {
+  const parsed = estimateData === undefined
+    ? parseStoredEstimateData(estimate?.estimate_data)
+    : estimateData;
+  if (estimate?.archived_at) {
+    return { message: 'Estimate is archived. Unarchive it before editing.', statusCode: 400 };
+  }
+  if (parsed?.proposal?.enabled === true) {
+    return { message: 'This estimate is a commercial proposal — edit it with the Commercial proposal editor.', statusCode: 400 };
+  }
+  if (estimate?.price_locked_at) {
+    return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
+  }
+  const status = String(estimate?.status || '');
+  if (status === 'sending') {
+    return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };
+  }
+  if (REVISE_BLOCKED_STATUSES.includes(status)) {
+    return { message: `A ${status} estimate can no longer be edited.`, statusCode: 409 };
+  }
+  return null;
+}
+
+// Revise an existing estimate in place: same body + pricing pipeline as
+// create, but the row keeps its id, token, status, expiry, creator, and
+// lead/customer linkage — so the link the customer already received simply
+// starts showing the updated quote. A later send/resend re-stamps the send
+// snapshot and expiry exactly like a first send.
+async function reviseAdminEstimate({
+  database = db,
+  estimateId,
+  body,
+  technicianId,
+  technician,
+  now = () => new Date(),
+  recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+}) {
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) throw errorWithStatus('Estimate not found', 404);
+  const block = estimateReviseBlock(estimate);
+  if (block) throw errorWithStatus(block.message, block.statusCode);
+
+  // The builder may reopen an estimate whose contact/customer linkage it did
+  // not capture (auto-send or agent-drafted rows) — never let a blank field in
+  // the edit payload sever the row's existing linkage or satellite snapshot.
+  const writeFields = await resolveEstimateWritePayload({
+    database,
+    body: {
+      ...body,
+      customerId: body.customerId || estimate.customer_id || null,
+      satelliteUrl: body.satelliteUrl || estimate.satellite_url || null,
+    },
+    technicianId,
+    technician,
+    now,
+    recompute,
+  });
+
+  // Atomic revise guard: the editability check above ran on a pre-read, so
+  // scope the UPDATE to the same editable conditions — a customer accept or
+  // an in-flight send landing between SELECT and UPDATE must win, not be
+  // silently overwritten. Replacing estimate_data wholesale also drops the
+  // prior send's pricing snapshot and any customer-picked preferences, which
+  // is intended: they described the PREVIOUS quote (the public view falls
+  // back to live pricing until the next send re-stamps a snapshot).
+  const [updated] = await database('estimates')
+    .where({ id: estimate.id })
+    .whereNull('price_locked_at')
+    .whereNull('archived_at')
+    .whereNotIn('status', REVISE_BLOCKED_STATUSES)
+    .update({
+      ...writeFields,
+      updated_at: now(),
+    })
+    .returning('*');
+  if (!updated) {
+    throw errorWithStatus('Estimate was accepted or locked while you were editing. Refresh and retry.', 409);
+  }
+  clearEstimatePricingCache(estimate.id);
+  return { estimate: updated };
+}
+
 module.exports = {
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,
+  estimateReviseBlock,
   normalizeClientPestFloorMetadata,
+  reviseAdminEstimate,
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,
   compareClientToServer,

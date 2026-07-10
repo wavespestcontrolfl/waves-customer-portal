@@ -1840,6 +1840,10 @@ export default function EstimateToolViewV2({
   initialCustomerPhone = "",
   initialCustomerEmail = "",
   initialServiceInterest = "",
+  // When set, the builder reopens this existing estimate for in-place editing:
+  // the form seeds from its saved inputs and Save PUTs a revision instead of
+  // creating a new estimate (the customer's link stays the same).
+  editEstimateId = "",
 } = {}) {
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
@@ -1926,14 +1930,26 @@ export default function EstimateToolViewV2({
   }
 
   // ── form state (verbatim from V1) ─────────────────────────────
-  const [form, setForm] = useState({
-    leadId: initialLeadId || "",
-    customerId: initialCustomerId || "",
-    address: initialAddress || "",
-    customerName: initialCustomerName || "",
-    customerPhone: initialCustomerPhone || "",
-    customerEmail: initialCustomerEmail || "",
-    leadServiceInterest: initialServiceInterest || "",
+  // Blank builder form. A function (not a literal in useState) so edit mode
+  // can re-seed the form from a saved estimate's stored inputs merged over
+  // these defaults — fields added to the builder after that estimate was
+  // saved still initialize instead of arriving undefined.
+  const buildDefaultEstimateForm = ({
+    leadId = "",
+    customerId = "",
+    address = "",
+    customerName = "",
+    customerPhone = "",
+    customerEmail = "",
+    serviceInterest = "",
+  } = {}) => ({
+    leadId,
+    customerId,
+    address,
+    customerName,
+    customerPhone,
+    customerEmail,
+    leadServiceInterest: serviceInterest,
     homeSqFt: "",
     stories: "1",
     lotSqFt: "",
@@ -2113,6 +2129,18 @@ export default function EstimateToolViewV2({
     showOneTimeOption: false,
     billByInvoice: false,
   });
+
+  const [form, setForm] = useState(() =>
+    buildDefaultEstimateForm({
+      leadId: initialLeadId,
+      customerId: initialCustomerId,
+      address: initialAddress,
+      customerName: initialCustomerName,
+      customerPhone: initialCustomerPhone,
+      customerEmail: initialCustomerEmail,
+      serviceInterest: initialServiceInterest,
+    }),
+  );
 
   useEffect(() => {
     const incoming = {
@@ -2395,6 +2423,92 @@ export default function EstimateToolViewV2({
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+
+  // ── Edit mode: reopen an existing estimate for in-place revision ──
+  // Loaded from GET /:id/edit-source. `hasInputs` is false for estimates
+  // created outside the builder (lead auto-send / agent drafts) — those seed
+  // contact fields only and the operator rebuilds the quote before saving.
+  const [editMode, setEditMode] = useState(null);
+  const [editLoadError, setEditLoadError] = useState(null);
+
+  useEffect(() => {
+    if (!editEstimateId) return undefined;
+    let cancelled = false;
+    (async () => {
+      setEditLoadError(null);
+      try {
+        const r = await fetch(
+          `/api/admin/estimates/${editEstimateId}/edit-source`,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+            },
+          },
+        );
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        if (cancelled) return;
+        if (!d.editable) {
+          setEditMode(null);
+          setEditLoadError(
+            d.blockReason || "This estimate can no longer be edited.",
+          );
+          return;
+        }
+        const seeded = {
+          ...buildDefaultEstimateForm(),
+          ...(d.inputs || {}),
+          // Live contact columns win over the stored form snapshot, and a
+          // revise never re-links a lead — the row keeps its own linkage
+          // server-side, so the form's leadId must stay blank here.
+          leadId: "",
+          customerId: d.customerId || "",
+          address: d.address || "",
+          customerName: d.customerName || "",
+          customerPhone: d.customerPhone || "",
+          customerEmail: d.customerEmail || "",
+        };
+        // Reopening the SAME job must not trip the per-job rodent-guarantee
+        // confirmation reset (it fires on identity change vs this ref).
+        rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
+        setForm(seeded);
+        setEnrichedProfile(d.engineProfile || null);
+        setSatelliteData(null);
+        setEstimate(null);
+        setSavedId(null);
+        setSavedViewUrl(null);
+        setPriceRecomputeNotice(null);
+        setEditMode({
+          id: d.id,
+          status: d.status,
+          customerName: d.customerName || "",
+          hasInputs: !!d.inputs,
+        });
+      } catch (e) {
+        if (!cancelled) {
+          setEditMode(null);
+          setEditLoadError(e.message);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editEstimateId]);
+
+  function exitEditMode() {
+    setEditMode(null);
+    setEditLoadError(null);
+    setForm(buildDefaultEstimateForm());
+    setEnrichedProfile(null);
+    setSatelliteData(null);
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+    setPriceRecomputeNotice(null);
+  }
 
   const set = useCallback((key, val) => {
     setForm((f) => {
@@ -3657,27 +3771,35 @@ export default function EstimateToolViewV2({
         manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
         serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
       };
-      const r = await fetch("/api/admin/estimates", {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({
-          address: form.address,
-          customerName: form.customerName || "",
-          customerPhone: form.customerPhone || "",
-          customerEmail: form.customerEmail || "",
-          leadId: form.leadId || null,
-          customerId: form.customerId || existingCustomerMatch?.id || null,
-          estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
-          monthlyTotal,
-          annualTotal: monthlyTotal * 12,
-          onetimeTotal,
-          waveguardTier: E.recurring?.tier || "Bronze",
-          notes: form.notes || "",
-          satelliteUrl: satelliteData?.imageUrl || null,
-          showOneTimeOption: !!form.showOneTimeOption,
-          billByInvoice: !!form.billByInvoice,
-        }),
-      });
+      // Edit mode revises the existing estimate in place (same id + token —
+      // the customer's link starts showing the updated quote); otherwise a
+      // normal create.
+      const r = await fetch(
+        editMode?.id
+          ? `/api/admin/estimates/${editMode.id}`
+          : "/api/admin/estimates",
+        {
+          method: editMode?.id ? "PUT" : "POST",
+          headers: authHeaders,
+          body: JSON.stringify({
+            address: form.address,
+            customerName: form.customerName || "",
+            customerPhone: form.customerPhone || "",
+            customerEmail: form.customerEmail || "",
+            leadId: editMode?.id ? null : form.leadId || null,
+            customerId: form.customerId || existingCustomerMatch?.id || null,
+            estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
+            monthlyTotal,
+            annualTotal: monthlyTotal * 12,
+            onetimeTotal,
+            waveguardTier: E.recurring?.tier || "Bronze",
+            notes: form.notes || "",
+            satelliteUrl: satelliteData?.imageUrl || null,
+            showOneTimeOption: !!form.showOneTimeOption,
+            billByInvoice: !!form.billByInvoice,
+          }),
+        },
+      );
       if (!r.ok)
         throw new Error(
           await summarizeEstimateResponseFailure(r, "Save failed"),
@@ -4322,6 +4444,48 @@ export default function EstimateToolViewV2({
                 </div>
               )}
             </div>
+          </div>
+        )}
+        {editLoadError && (
+          <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
+            <div className="text-14 text-zinc-700">
+              <span className="font-medium text-zinc-900">
+                Couldn&apos;t open the estimate for editing.
+              </span>{" "}
+              {editLoadError}
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setEditLoadError(null)}
+            >
+              Dismiss
+            </Button>
+          </div>
+        )}
+        {editMode && (
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3">
+            <div className="text-14 text-zinc-700">
+              <div className="font-medium text-zinc-900">
+                Editing existing estimate
+                {editMode.customerName ? ` for ${editMode.customerName}` : ""} ·
+                status {editMode.status}
+              </div>
+              <div className="mt-1">
+                Saving updates the estimate the customer already has — the link
+                stays the same. Resend after saving to notify them.
+              </div>
+              {!editMode.hasInputs && (
+                <div className="mt-1">
+                  This estimate wasn&apos;t authored in the builder, so its
+                  original inputs couldn&apos;t be restored. Re-enter the
+                  property details and services, then Generate before saving.
+                </div>
+              )}
+            </div>
+            <Button variant="secondary" size="sm" onClick={exitEditMode}>
+              Exit edit mode
+            </Button>
           </div>
         )}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
@@ -6521,7 +6685,11 @@ export default function EstimateToolViewV2({
             <div
               className={cn(
                 "grid gap-3",
-                estimate ? "grid-cols-3" : "grid-cols-2",
+                estimate
+                  ? editMode
+                    ? "grid-cols-2 sm:grid-cols-4"
+                    : "grid-cols-3"
+                  : "grid-cols-2",
               )}
             >
               {" "}
@@ -6538,6 +6706,18 @@ export default function EstimateToolViewV2({
                     ? "Regenerate"
                     : "Generate Estimate"}
               </Button>{" "}
+              {estimate && editMode && (
+                <Button
+                  variant="secondary"
+                  size="md"
+                  className="h-12 text-12"
+                  disabled={generateBusy || saving}
+                  onClick={() => doSave()}
+                  title="Update the existing estimate — the customer's link shows the new quote without a resend"
+                >
+                  {saving ? "Saving…" : "Save changes"}
+                </Button>
+              )}
               {estimate && (
                 <Button
                   variant="secondary"
@@ -6831,7 +7011,9 @@ export default function EstimateToolViewV2({
 
             {savedId && (
               <div className="text-12 text-ink-secondary">
-                Saved — ID #{savedId}.
+                {editMode
+                  ? "Changes saved — the customer's link now shows the updated estimate. Resend to notify them."
+                  : `Saved — ID #${savedId}.`}
               </div>
             )}
 
