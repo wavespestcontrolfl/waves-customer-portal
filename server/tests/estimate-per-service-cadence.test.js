@@ -397,16 +397,68 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
     expect(pest.frequencies[0].perTreatment).toBeCloseTo(96.30, 2);
 
     const lawn = bundle.services[1];
-    expect(lawn.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
-    expect(lawn.frequencies.map((f) => f.visitsPerYear)).toEqual([6, 9, 12]);
-    // Program minimum keeps the 6x tier at $50/mo even after the 10% discount.
-    expect(lawn.frequencies[0].monthly).toBe(50);
+    // The 6x tier is engine-pinned at the $50/mo program minimum (pricingSource
+    // PROGRAM_MINIMUM) — floored cadences are decoys and display-hidden (owner
+    // ask 2026-07-10), so only the above-floor tiers are offered.
+    expect(lawn.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    expect(lawn.frequencies.map((f) => f.visitsPerYear)).toEqual([9, 12]);
 
-    // The combo ladder backs the selections; default combo equals the stored total.
+    // The combo ladder backs the selections; default combo equals the stored
+    // total. Floored tiers stay combo-priced (accept must still resolve a
+    // stale client's floored selection) — they are display-hidden only.
     expect(bundle.serviceCadenceCombos).toHaveLength(9);
     const defaultCombo = bundle.serviceCadenceCombos.find(
       (c) => c.key === 'lawn_care:enhanced|pest_control:quarterly',
     );
     expect(defaultCombo.monthly).toBe(84.08);
+  });
+});
+
+describe('floored lawn cadences are display-hidden with guards (buildPricingBundle e2e)', () => {
+  function lawnOnlyEstimate(lawnRows, { monthly = 51.98 } = {}) {
+    return {
+      id: `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'sent',
+      monthly_total: monthly,
+      annual_total: Math.round(monthly * 12 * 100) / 100,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        result: {
+          hasRecurring: true,
+          recurring: {
+            discount: 0,
+            monthlyTotal: monthly,
+            services: [{ name: 'Lawn Care', service: 'lawn_care', mo: monthly, visitsPerYear: 9 }],
+          },
+          results: { lawn: lawnRows },
+          oneTime: { items: [], total: 0 },
+        },
+      },
+    };
+  }
+
+  test('floored non-recommended tier is hidden; recommended floored tier stays', async () => {
+    const bundle = await buildPricingBundle(lawnOnlyEstimate([
+      // standard prices below the $50 floor → clamped → hidden
+      { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+      // enhanced also floors, but it is the recommended (quoted) plan → stays
+      { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60, recommended: true },
+      { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
+    ], { monthly: 50 }));
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    expect(bundle.frequencies[0].monthly).toBe(50); // recommended, floor-clamped
+    expect(bundle.frequencies[1].monthly).toBe(60);
+  });
+
+  test('when every tier floors, the highest-application tier survives', async () => {
+    const bundle = await buildPricingBundle(lawnOnlyEstimate([
+      { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+      { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60 },
+      { name: 'Premium', v: 12, mo: 48, ann: 576, pa: 48 },
+    ], { monthly: 50 }));
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['premium']);
+    expect(bundle.frequencies[0].monthly).toBe(50);
+    expect(bundle.frequencies[0].visitsPerYear).toBe(12);
   });
 });
