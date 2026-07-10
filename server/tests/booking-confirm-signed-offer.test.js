@@ -14,7 +14,11 @@
  *
  * Also home to the source_estimate_id contract (accept-retry correlation):
  * malformed → 400, unknown-but-well-formed → booking proceeds UNLINKED, the
- * booking's own estimate id → proceeds.
+ * booking's own estimate id → proceeds. The ownership gate (an existing
+ * estimate must BELONG to the resolved customer — customer_id match, or
+ * contact match when the estimate has no customer yet — or the booking
+ * proceeds unlinked with a warn) is driven end-to-end in the last describe
+ * with a transaction mock that captures the scheduled_services insert.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
@@ -266,5 +270,157 @@ describe('createSelfBooking — source_estimate_id (accept-retry correlation)', 
     const result = await createSelfBooking(confirmPayload(validSig(), { source_estimate_id: EST_ID }));
     expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit r4)', () => {
+  // Any EXISTING estimate UUID used to link unconditionally. The column is
+  // trusted downstream — already-accepted retry rebuilds treat it as "this
+  // estimate is booked" and completion invoicing rolls the estimate's pending
+  // deposit credit forward through it — so a borrowed UUID could suppress the
+  // real customer's retry link or consume their deposit credit. The gate:
+  // link only when the estimate belongs to the resolved customer
+  // (customer_id match, or — customer-less estimate — a contact match:
+  // last-10 phone, email only when the estimate has no phone). Mismatch
+  // books UNLINKED with a warn (fail-open, like the unknown-id path).
+  //
+  // These run the flow past the customer resolution into the booking
+  // transaction; a mock captures the scheduled_services insert (the row the
+  // link is stamped on) and then aborts with a sentinel, so no post-commit
+  // side effects (SMS/reminders) are reached.
+  const OTHER_EST = 'bbbb2222-cc33-4d44-8e55-ffff6666aaaa';
+  const PHONE_EST = 'cccc3333-dd44-4e55-8f66-aaaa7777bbbb';
+  const MISMATCH_EST = 'dddd4444-ee55-4f66-8a77-bbbb8888cccc';
+  const CUST = { id: 'cust-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota' };
+  const ESTIMATES = {
+    [EST_ID]: { id: EST_ID, source: 'admin', customer_id: 'cust-1', status: 'sent' },
+    // someone ELSE's estimate — linked to a different customer
+    [OTHER_EST]: { id: OTHER_EST, customer_id: 'cust-other', customer_phone: '(941) 555-0999', customer_email: 'mallory@example.com' },
+    // customer-less estimate whose contact phone (freeform) matches CUST
+    [PHONE_EST]: { id: PHONE_EST, customer_id: null, customer_phone: '941-555-0100', customer_email: null },
+    // customer-less estimate whose contact matches NOBODY on this booking
+    [MISMATCH_EST]: { id: MISMATCH_EST, customer_id: null, customer_phone: '(555) 000-1111', customer_email: 'someone@else.example' },
+  };
+  const SENTINEL = 'stop-after-scheduled-services-insert';
+  let capturedScheduledInsert;
+
+  function trxTable(table) {
+    if (table === 'self_booked_appointments') {
+      let counting = false;
+      const b = {
+        where: () => b,
+        whereNot: () => b,
+        modify(fn) { fn(b); return b; },
+        count: () => { counting = true; return b; },
+        // replay lookup → none; global day-cap count → 0 (under cap)
+        first: () => Promise.resolve(counting ? { count: 0 } : null),
+        insert: () => ({ returning: () => Promise.resolve([{ id: 'sb-1' }]) }),
+      };
+      return b;
+    }
+    if (table === 'scheduled_services') {
+      const b = {
+        leftJoin: () => b,
+        where: () => b,
+        whereNotIn: () => b,
+        whereRaw: () => b,
+        first: () => Promise.resolve(null), // conflict re-check → free
+        insert: (row) => { capturedScheduledInsert = row; throw new Error(SENTINEL); },
+      };
+      return b;
+    }
+    throw new Error(`unexpected trx table ${table}`);
+  }
+
+  function mockOwnershipTables() {
+    db.mockImplementation((table) => {
+      if (table === 'estimates') {
+        const builder = {
+          _id: null,
+          where(_field, id) { builder._id = id; return builder; },
+          first: jest.fn(() => Promise.resolve(ESTIMATES[String(builder._id)] || null)),
+        };
+        return builder;
+      }
+      if (table === 'booking_config') {
+        return { first: jest.fn().mockResolvedValue({}) };
+      }
+      if (table === 'technicians') {
+        return {
+          where: jest.fn().mockReturnThis(),
+          first: jest.fn().mockResolvedValue({ id: TECH_ID, active: true }),
+        };
+      }
+      if (table === 'customers') {
+        // Phone lookup and the by-id lookup both resolve CUST — identity
+        // lands on cust-1 for every path in this describe.
+        return {
+          whereRaw: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+          first: jest.fn().mockResolvedValue(CUST),
+        };
+      }
+      if (table === 'notification_prefs') {
+        return { insert: () => ({ onConflict: () => ({ ignore: () => Promise.resolve() }) }) };
+      }
+      if (table === 'service_zones') {
+        return { select: () => Promise.resolve([]) };
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    db.transaction = jest.fn(async (fn) => fn(Object.assign(
+      (table) => trxTable(table),
+      { raw: jest.fn().mockResolvedValue(undefined), fn: { now: () => new Date() } },
+    )));
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    capturedScheduledInsert = undefined;
+    mockOwnershipTables();
+  });
+
+  async function runToScheduledInsert(overrides) {
+    const sig = mintSlotOfferField(offerPayload());
+    await expect(createSelfBooking(confirmPayload(sig, overrides))).rejects.toThrow(SENTINEL);
+    expect(capturedScheduledInsert).toBeDefined();
+    return capturedScheduledInsert;
+  }
+
+  test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {
+    const row = await runToScheduledInsert({ source_estimate_id: OTHER_EST });
+    expect(row.source_estimate_id).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not belong'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(OTHER_EST));
+  });
+
+  test("the customer's OWN linked estimate (customer_id match) stamps the link", async () => {
+    const row = await runToScheduledInsert({ source_estimate_id: EST_ID });
+    expect(row.source_estimate_id).toBe(EST_ID);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a customer-less estimate whose contact PHONE matches the booking customer stamps the link', async () => {
+    const row = await runToScheduledInsert({ source_estimate_id: PHONE_EST });
+    expect(row.source_estimate_id).toBe(PHONE_EST);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('phone-resolved identity (customer_id + phone, no estimate token) gets the same contact-match link', async () => {
+    const row = await runToScheduledInsert({
+      estimate_id: undefined,
+      customer_id: 'cust-1',
+      new_customer: { phone: '9415550100', lat: LAT, lng: LNG },
+      source_estimate_id: PHONE_EST,
+    });
+    expect(row.source_estimate_id).toBe(PHONE_EST);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a customer-less estimate with a NON-matching contact books UNLINKED with a warn', async () => {
+    const row = await runToScheduledInsert({ source_estimate_id: MISMATCH_EST });
+    expect(row.source_estimate_id).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not belong'));
   });
 });

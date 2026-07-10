@@ -61,7 +61,7 @@ jest.mock('../routes/estimate-public', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const { getAvailableSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
+const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 // Real ET helpers (not mocked) — the route compares the explicit ?date against
 // the horizon in ET, exactly like slot-reservation.js does at reserve time.
@@ -100,6 +100,7 @@ afterAll((done) => {
 
 beforeEach(() => {
   getAvailableSlots.mockReset();
+  findEstimateSlots.mockReset();
   slotReservation.reserveSlot.mockReset();
   lastFirstArgs = null;
 });
@@ -109,6 +110,14 @@ const NON_VIEWABLE = [
   ['scheduled', { id: 'est-1', status: 'scheduled', expires_at: null, archived_at: null }],
   ['send_failed', { id: 'est-1', status: 'send_failed', expires_at: null, archived_at: null }],
   ['archived', { id: 'est-1', status: 'sent', expires_at: null, archived_at: '2026-07-01T00:00:00Z' }],
+  // Archived + TERMINAL: the viewability 404 must win over the terminal 409 —
+  // a 409 here would make archived tokens distinguishable from missing ones.
+  // (One representative status; declined/void ride the same archived_at branch.
+  // Case count is budgeted against the router's 30-req/min shared limiter.)
+  ['archived accepted', { id: 'est-1', status: 'accepted', expires_at: null, archived_at: '2026-07-01T00:00:00Z' }],
+  // expired is non-viewable on /data, so the slot endpoints 404 it too (it
+  // used to leak a 409 through the terminal branch running first).
+  ['expired', { id: 'est-1', status: 'expired', expires_at: null, archived_at: null }],
 ];
 
 describe('slot endpoints status-gate parity with /:token/data', () => {
@@ -130,8 +139,19 @@ describe('slot endpoints status-gate parity with /:token/data', () => {
     expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
   });
 
-  test('terminal states (incl. void) still 409 ahead of the viewability gate', async () => {
-    for (const status of ['accepted', 'declined', 'expired', 'void']) {
+  test('find-slots 404s an archived accepted estimate too — the gate is shared across all three slot endpoints', async () => {
+    currentEstimate = { id: 'est-1', status: 'accepted', expires_at: null, archived_at: '2026-07-01T00:00:00Z' };
+    const res = await fetch(`${base}/${TOKEN}/find-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: 'next week mornings' }),
+    });
+    expect(res.status).toBe(404);
+    expect(findEstimateSlots).not.toHaveBeenCalled();
+  });
+
+  test('VIEWABLE terminal states (accepted/declined/void, not archived) still 409 — viewability runs first, then the terminal gate', async () => {
+    for (const status of ['accepted', 'declined', 'void']) {
       currentEstimate = { id: 'est-1', status, expires_at: null, archived_at: null };
       const res = await fetch(`${base}/${TOKEN}/available-slots`);
       expect(res.status).toBe(409);

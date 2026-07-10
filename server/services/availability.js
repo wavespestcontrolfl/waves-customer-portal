@@ -104,15 +104,15 @@ class AvailabilityEngine {
       // If no tech blocks AND no existing services in zone, skip this day
       if (techBlocks.length === 0 && scheduledInZone.length === 0) continue;
 
-      // Count existing self-bookings for this zone/day
-      const existingBookings = await db('self_booked_appointments')
-        .where('service_zone_id', zone.id)
-        .where('date', dateStr)
-        .whereNot('status', 'cancelled')
-        .count('* as count')
-        .first();
+      // Day-cap filter: max_self_books_per_day is GLOBAL by calendar date
+      // (the shared helper confirmBooking enforces under the day-cap lock).
+      // Counting only this zone's bookings here let the engine keep OFFERING
+      // a day that another zone had already filled — every confirm on those
+      // offers then failed with SLOT_TAKEN. Same count, same predicate, so
+      // the builder never offers a day the confirm path would reject on cap.
+      const existingBookingsCount = await countActiveSelfBookingsForDay(db, dateStr);
 
-      if (parseInt(existingBookings.count) >= config.max_self_books_per_day) continue;
+      if (existingBookingsCount >= (config.max_self_books_per_day || 3)) continue;
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({

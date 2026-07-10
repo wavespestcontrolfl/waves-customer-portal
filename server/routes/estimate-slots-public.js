@@ -134,16 +134,19 @@ router.use(rateLimit({
 // list) so the router and service layers reject the same states.
 const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void']);
 function rejectIneligibleEstimate(res, estimate = {}) {
-  if (SLOT_BLOCKED_STATES.has(estimate.status)) {
-    return res.status(409).json({ error: 'Estimate is no longer active' });
-  }
   // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
   // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
   // and past-expiry estimates must not expose availability or take holds —
   // same 404 shape /data uses. Callers must SELECT archived_at/status/
-  // expires_at for this check to see them.
+  // expires_at for this check to see them. This check runs FIRST: an archived
+  // estimate whose status is also terminal (accepted/declined/…) must return
+  // the same generic 404 as a missing token — a 409 here would make archived
+  // tokens distinguishable from nonexistent ones.
   if (!isEstimateCustomerViewable(estimate)) {
     return res.status(404).json({ error: 'Not found' });
+  }
+  if (SLOT_BLOCKED_STATES.has(estimate.status)) {
+    return res.status(409).json({ error: 'Estimate is no longer active' });
   }
   return null;
 }

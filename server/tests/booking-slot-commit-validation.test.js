@@ -336,17 +336,47 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   test('source_estimate_id: uuid-shape 400, existence-checked (FK), stamped on the scheduled_services insert', () => {
     const blockIdx = src.indexOf('let sourceEstimateId = null;');
     expect(blockIdx).toBeGreaterThan(-1);
-    const block = src.slice(blockIdx, blockIdx + 900);
+    const block = src.slice(blockIdx, blockIdx + 1200);
     // shape gate before any uuid cast could throw
     expect(block).toMatch(/\^\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}\$/);
     expect(block).toMatch(/status: 400/);
-    // existence check — the column FKs estimates; a stale link books UNLINKED
-    expect(block).toMatch(/await db\('estimates'\)\.where\('id', srcEstIdStr\)\.first\('id'\)/);
+    // existence check — the column FKs estimates; a stale link books UNLINKED.
+    // Ownership columns ride the fetch so the post-resolution gate below can
+    // decide the link without a second query.
+    expect(block).toMatch(/await db\('estimates'\)\.where\('id', srcEstIdStr\)\.first\('id', 'customer_id', 'customer_phone', 'customer_email'\)/);
     expect(block).toMatch(/proceeds unlinked/);
     // …and the dispatch row actually carries it
     expect(src).toMatch(/source_estimate_id: sourceEstimateId,/);
     // never the raw payload value
     expect(src).not.toMatch(/source_estimate_id: source_estimate_id/);
+  });
+
+  test('source_estimate_id ownership gate: the link is stamped only AFTER the customer resolves, and only for the customer\'s own estimate', () => {
+    // Any existing estimate UUID used to link unconditionally — the column is
+    // trusted downstream (already-booked retry detection, estimate-deposit
+    // credit roll-forward), so a borrowed UUID could suppress the real
+    // customer's retry link or consume their deposit credit. Pin the gate:
+    // decided after the customer row loads, matched by customer_id or (no
+    // customer yet) by contact, mismatch books UNLINKED with a warn (fail-open,
+    // same shape as the unknown-id path — correlation never blocks a booking).
+    const customerFetchIdx = src.indexOf("const customer = await db('customers').where('id', custId).first();");
+    const gateIdx = src.indexOf('if (sourceEstimateRow) {');
+    const stampIdx = src.indexOf('sourceEstimateId = srcEstIdStr;');
+    expect(customerFetchIdx).toBeGreaterThan(-1);
+    expect(gateIdx).toBeGreaterThan(customerFetchIdx); // after resolution (incl. just-created)
+    expect(stampIdx).toBeGreaterThan(gateIdx); // the ONLY stamp lives inside the gate
+    expect(src.indexOf('sourceEstimateId = srcEstIdStr;', stampIdx + 1)).toBe(-1);
+    const gateBlock = src.slice(gateIdx, gateIdx + 1600);
+    // linked estimate → must be THIS customer's
+    expect(gateBlock).toMatch(/String\(sourceEstimateRow\.customer_id\) === String\(custId\)/);
+    // unlinked estimate → contact match: last-10 phone, email only when the
+    // estimate has no phone (estimates.customer_phone may be freeform/E.164)
+    expect(gateBlock).toMatch(/customer_phone/);
+    expect(gateBlock).toMatch(/customer_email/);
+    expect(gateBlock).toMatch(/slice\(-10\)/);
+    // mismatch: warn + unlinked, never a rejection
+    expect(gateBlock).toMatch(/does not belong to booking customer/);
+    expect(gateBlock).not.toMatch(/ok: false/);
   });
 });
 
@@ -386,6 +416,16 @@ describe('AvailabilityEngine.confirmBooking — shared global day cap (source gu
 
   test('the old PER-ZONE cap count is gone (it let cross-zone writers exceed the global cap)', () => {
     expect(availSrc).not.toMatch(/const existingBookings = await trx\('self_booked_appointments'\)/);
+  });
+
+  test('getAvailableSlots filters full days by the GLOBAL count (shared helper), matching what confirm enforces', () => {
+    // The zone-engine BUILDER used to count per zone: when another zone had
+    // consumed the global cap, it still offered this zone's slots and every
+    // confirm then 409'd SLOT_TAKEN. Both builders (this one and booking.js's
+    // buildBookingAvailability, which already counts with no zone filter)
+    // must use the same global-by-date count the confirms enforce.
+    expect(availSrc).toMatch(/const existingBookingsCount = await countActiveSelfBookingsForDay\(db, dateStr\);/);
+    expect(availSrc).not.toMatch(/const existingBookings = await db\('self_booked_appointments'\)\s*\n\s*\.where\('service_zone_id', zone\.id\)[\s\S]{0,200}\.count\(/);
   });
 });
 

@@ -1370,7 +1370,16 @@ async function createSelfBooking(payload = {}) {
     // Malformed shape → 400 (a crafted value must not reach the uuid cast);
     // well-formed but unknown → book UNLINKED (the column FKs estimates, and
     // a stale link must not block a real customer's booking).
+    //
+    // The link itself is decided AFTER the customer row resolves below: the
+    // downstream consumers of scheduled_services.source_estimate_id
+    // (already-booked retry detection, deposit-credit roll-forward) trust it
+    // as "this customer's estimate", so an arbitrary well-formed UUID must
+    // not attach someone ELSE's estimate to this booking. Here we only shape-
+    // check (still pre-customer-insert, so the 400 can't strand a profile)
+    // and fetch the estimate's ownership columns.
     let sourceEstimateId = null;
+    let sourceEstimateRow = null;
     if (source_estimate_id) {
       const srcEstIdStr = String(source_estimate_id).trim();
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(srcEstIdStr)) {
@@ -1378,9 +1387,9 @@ async function createSelfBooking(payload = {}) {
       }
       const srcEst = (estimate && String(estimate.id) === srcEstIdStr)
         ? estimate
-        : await db('estimates').where('id', srcEstIdStr).first('id');
+        : await db('estimates').where('id', srcEstIdStr).first('id', 'customer_id', 'customer_phone', 'customer_email');
       if (srcEst) {
-        sourceEstimateId = srcEstIdStr;
+        sourceEstimateRow = srcEst;
       } else {
         logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} matches no estimate — booking proceeds unlinked`);
       }
@@ -1417,6 +1426,46 @@ async function createSelfBooking(payload = {}) {
 
     const customer = await db('customers').where('id', custId).first();
     if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
+
+    // source_estimate_id ownership gate: only stamp the link when the
+    // referenced estimate actually belongs to the customer this booking
+    // resolved to — either it is already linked to this customer row, or
+    // (not yet linked to any customer) its contact matches the booking's
+    // contact: last-10-digit phone compare (estimates.customer_phone may be
+    // freeform admin input or E.164 — same rule as estimate-public.js
+    // phoneLast10), falling back to a case-insensitive email compare only
+    // when the estimate carries no phone. A mismatch books UNLINKED with a
+    // warn — same fail-open shape as the unknown-id path above, because a
+    // stale or mistyped correlation must never block a real customer's
+    // booking; it just must not let them claim someone else's estimate
+    // (retry suppression, deposit-credit roll-forward).
+    if (sourceEstimateRow) {
+      const srcEstIdStr = String(sourceEstimateRow.id);
+      let owned = false;
+      if (sourceEstimateRow.customer_id) {
+        owned = String(sourceEstimateRow.customer_id) === String(custId);
+      } else {
+        const last10 = (v) => {
+          const digits = String(v || '').replace(/\D/g, '');
+          return digits.length >= 10 ? digits.slice(-10) : '';
+        };
+        const estPhone10 = last10(sourceEstimateRow.customer_phone);
+        if (estPhone10) {
+          owned = [customer.phone, new_customer?.phone].some((p) => last10(p) === estPhone10);
+        } else {
+          const estEmail = String(sourceEstimateRow.customer_email || '').trim().toLowerCase();
+          const bookingEmails = [customer.email, new_customer?.email]
+            .map((e) => String(e || '').trim().toLowerCase())
+            .filter(Boolean);
+          owned = !!estEmail && bookingEmails.includes(estEmail);
+        }
+      }
+      if (owned) {
+        sourceEstimateId = srcEstIdStr;
+      } else {
+        logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} does not belong to booking customer ${custId} — booking proceeds unlinked`);
+      }
+    }
 
     // Estimate-token and phone-resolved paths never ran the address match, so
     // a submitted unit that disagrees with the resolved record's on-file unit
