@@ -227,7 +227,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Landscape Plant Health
           </div>
-          <h2 style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
             {statusHeadline || statusMeta(status).label}
           </h2>
           {scoreExplanation ? (

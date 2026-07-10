@@ -7771,7 +7771,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
            ("Overall Lawn Status") without touching their inner list labels */
         html[data-glass-theme] .service-report-v1 .section-eyebrow,
-        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1) { display: none; }
+        /* V2 hero eyebrows hide under glass; the heroes are h2 now (one h1 per
+           page — codex P3 on #2567), so match them by class alongside the h1. */
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1),
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title) { display: none; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
