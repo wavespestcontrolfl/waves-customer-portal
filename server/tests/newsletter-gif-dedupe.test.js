@@ -82,6 +82,27 @@ describe('pickUniqueGifWithRetry — expanded-keyword fallback', () => {
     const url = await pickUniqueGifWithRetry('bass drop', [{ id: 'topgif', url: 'https://x/top.gif' }], used);
     expect(url).toBeNull();
   });
+
+  test('empty primary pool (Giphy down / dead term) → no broadened searches at all', async () => {
+    process.env.GIPHY_API_KEY = 'test-key';
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ data: [giphyGif('freshgif')] }) }));
+    const url = await pickUniqueGifWithRetry('bass drop', [], new Set());
+    expect(url).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('shared retry budget caps broadened searches across sections', async () => {
+    process.env.GIPHY_API_KEY = 'test-key';
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ data: [giphyGif('topgif')] }) })); // never yields fresh
+    const used = new Set(['topgif']);
+    const budget = { remaining: 2 };
+    const primary = [{ id: 'topgif', url: 'https://x/top.gif' }];
+    await pickUniqueGifWithRetry('term one', primary, used, budget); // burns 2, would try 3
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(budget.remaining).toBe(0);
+    await pickUniqueGifWithRetry('term two', primary, used, budget); // budget spent → no searches
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('heroTitleText — hero poster headline', () => {

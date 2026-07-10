@@ -367,14 +367,15 @@ async function assemblePestInsiderNewsletter(draft) {
   // Selection runs sequentially afterward so the same GIF can never appear
   // twice in one issue.
   const usedGifIds = new Set();
+  const gifRetryBudget = { remaining: 3 };
   const [introCandidates, crawlCandidates, pitchCandidates] = await Promise.all([
     searchGiphyCandidates(draft.introGifTerm),
     searchGiphyCandidates(draft.crawlGifTerm),
     searchGiphyCandidates(draft.pitchGifTerm),
   ]);
-  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds);
-  const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds);
-  const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds);
+  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds, gifRetryBudget);
+  const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds, gifRetryBudget);
+  const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds, gifRetryBudget);
 
   // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
@@ -545,7 +546,11 @@ async function generateHeroImage(subject) {
       // llama + pie), now WITH the subject lettered into the poster —
       // owner rule 2026-07-09. The primary generators (gpt-image line)
       // render typography reliably; the old "no text" rule predated them.
-      title: `Retro flat-cartoon poster collage for a Southwest Florida weekend events newsletter. 2-4 playful cartoon vignettes representing the lineup's themes ("${titleText}"), vintage palette (teal, orange, cream, brick red), sunburst background, bold and fun, Florida coastal energy. The poster prominently features the headline text "${titleText}" in bold retro hand-lettered poster typography — spelled EXACTLY as written, fully legible, integrated into the design as an arched or banner headline. No other words, letters, or writing anywhere else in the image.`,
+      // Passed as the raw `prompt` (NOT `title`) so image-generator's
+      // generic buildPrompt scaffolding — "photorealistic … No text, words,
+      // watermarks" — can't wrap and contradict it. The composition line
+      // must ride along because Gemini fallbacks take size from the prompt.
+      prompt: `Retro flat-cartoon poster collage for a Southwest Florida weekend events newsletter. 2-4 playful cartoon vignettes representing the lineup's themes ("${titleText}"), vintage palette (teal, orange, cream, brick red), sunburst background, bold and fun, Florida coastal energy. The poster prominently features the headline text "${titleText}" in bold retro hand-lettered poster typography — spelled EXACTLY as written, fully legible, integrated into the design as an arched or banner headline. No other words, letters, or writing anywhere else in the image. Composition: landscape 3:2 aspect ratio, 1536x1024.`,
       mode: 'blog-hero',
     });
     const match = /^data:([^;]+);base64,(.+)$/.exec(result.dataUrl || '');
@@ -603,11 +608,22 @@ function pickUniqueGif(candidates, usedIds) {
 // term's whole candidate pool is already used, re-search with broadened
 // variants of the term before giving up. Only then does the renderer fall
 // back to the event photo — a repeat is still never an option.
-async function pickUniqueGifWithRetry(term, candidates, usedIds) {
+//
+// Two bounds keep a degraded Giphy from stalling assembly (each search
+// carries a 5s timeout): an EMPTY primary pool means Giphy is unreachable
+// or the term is dead — broadened variants would just burn more timeouts,
+// so we skip them; and the caller passes a shared per-issue retryBudget so
+// the extra sequential searches across all sections stay capped.
+async function pickUniqueGifWithRetry(term, candidates, usedIds, retryBudget = null) {
   const first = pickUniqueGif(candidates, usedIds);
   if (first) return first;
   if (!term) return null;
+  if (!candidates || candidates.length === 0) return null;
   for (const broadened of [`${term} reaction`, `${term} meme`, `funny ${term}`]) {
+    if (retryBudget) {
+      if (retryBudget.remaining <= 0) return null;
+      retryBudget.remaining -= 1;
+    }
     const pick = pickUniqueGif(await searchGiphyCandidates(broadened), usedIds);
     if (pick) return pick;
   }
@@ -1003,14 +1019,15 @@ async function assembleBeehiivNewsletter(draft) {
   // sequentially (intro first, events in order) against a shared used-set
   // so one issue can never repeat a GIF.
   const usedGifIds = new Set();
+  const gifRetryBudget = { remaining: 6 };
   const [introCandidates, ...eventCandidates] = await Promise.all([
     searchGiphyCandidates(draft.introGifTerm),
     ...events.map((ev) => searchGiphyCandidates(ev.gifSearchTerm)),
   ]);
-  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds);
+  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds, gifRetryBudget);
   const eventGifs = [];
   for (let i = 0; i < eventCandidates.length; i++) {
-    eventGifs.push(await pickUniqueGifWithRetry(events[i]?.gifSearchTerm, eventCandidates[i], usedGifIds));
+    eventGifs.push(await pickUniqueGifWithRetry(events[i]?.gifSearchTerm, eventCandidates[i], usedGifIds, gifRetryBudget));
   }
 
   // ── Hero Image ──
