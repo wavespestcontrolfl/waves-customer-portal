@@ -1687,9 +1687,16 @@ export function calculateEstimate(inputs) {
       const perApp = Math.round((pp * ft.disc + roachAddOn) * 100) / 100;
       const ann = Math.round(perApp * ft.f * 100) / 100;
       const mo = Math.round(ann / 12 * 100) / 100;
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec });
+      // Post-discount program floor mirror (server constants.PEST.floor = 89,
+      // per-visit basis rounded before annualizing — see server discount-engine
+      // pestProgramFloorAnnual). Rides on the stored tier rows so the public
+      // estimator holds the WaveGuard-discounted pest price at the floor.
+      const floorPa = Math.round(89 * ft.disc * 100) / 100;
+      const floorAnn = Math.round(floorPa * ft.f * 100) / 100;
+      const floorMo = Math.round(floorAnn / 12 * 100) / 100;
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, floorPa, floorAnn, floorMo });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, floorPa, floorAnn, floorMo };
       }
     });
     R.pestRoachMod = roachMod;
@@ -2627,7 +2634,22 @@ export function calculateEstimate(inputs) {
   const waveGuardDiscountableAnnual = lineItems
     .filter(li => li.discountable !== false)
     .reduce((sum, li) => sum + li.ann, 0);
-  const da = Math.round(waveGuardDiscountableAnnual * wd * 100) / 100;
+  let da = Math.round(waveGuardDiscountableAnnual * wd * 100) / 100;
+  // Pest post-discount program floor mirror (server discount-engine
+  // applyMarginGuard): the WaveGuard percent may not take pest's collected
+  // annual below floorAnn for the selected cadence. Give back the overshoot
+  // on the pest line — other services keep their full percent, matching the
+  // server's per-line clamp. Manual discounts stay uncapped (warn-only,
+  // owner loss-leader override).
+  let pestProgramFloorApplied = false;
+  if (R.pest && Number.isFinite(Number(R.pest.floorAnn)) && wd > 0) {
+    const pestFloorAnn = Math.min(Number(R.pest.floorAnn), R.pest.ann);
+    const pestOvershoot = Math.round((R.pest.ann * wd - (R.pest.ann - pestFloorAnn)) * 100) / 100;
+    if (pestOvershoot > 0) {
+      da = Math.round((da - pestOvershoot) * 100) / 100;
+      pestProgramFloorApplied = true;
+    }
+  }
   const recurringAnnualAfterWaveGuard = Math.round((ra - da) * 100) / 100;
   const md = inputs.manualDiscount;
   let manualDiscountAmount = 0;
@@ -2709,6 +2731,7 @@ export function calculateEstimate(inputs) {
       waveGuardTier: wt,
       discount: wd,
       savings: da,
+      pestProgramFloorApplied,
       rodentBaitMo: R.rodBaitMo || 0,
       palmInjectionMo: palmMo,
       palmInjectionAnn: palmAnn,

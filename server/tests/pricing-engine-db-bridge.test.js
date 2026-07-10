@@ -39,6 +39,9 @@ describe('pricing engine DB bridge', () => {
     tierQualifier: constants.PALM.tierQualifier,
     excludeFromPctDiscount: constants.PALM.excludeFromPctDiscount,
   };
+  const originalPestBase = constants.PEST.base;
+  const originalPestFloor = constants.PEST.floor;
+  const originalEnforceFloor = constants.PEST.enforceFloorPostDiscount;
 
   afterEach(() => {
     constants.PEST.pestInitialRoach = originalInitialRoach;
@@ -70,6 +73,37 @@ describe('pricing engine DB bridge', () => {
     for (const key of Object.keys(constants.URGENCY)) delete constants.URGENCY[key];
     Object.assign(constants.URGENCY, JSON.parse(JSON.stringify(originalUrgency)));
     Object.assign(constants.PALM, originalPalm);
+    constants.PEST.base = originalPestBase;
+    constants.PEST.floor = originalPestFloor;
+    constants.PEST.enforceFloorPostDiscount = originalEnforceFloor;
+  });
+
+  test('program-floor kill switch: absent key restores the enabled default on every sync', async () => {
+    // Constants mutate in place across syncs — a one-time false must not
+    // stick after the key (or the whole pest_base row) is removed (codex r2).
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'pest_base',
+      data: { base: 117, floor: 89, enforce_floor_post_discount: false },
+    }]))).resolves.toBe(true);
+    expect(constants.PEST.enforceFloorPostDiscount).toBe(false);
+
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'pest_base',
+      data: { base: 117, floor: 89 },
+    }]))).resolves.toBe(true);
+    expect(constants.PEST.enforceFloorPostDiscount).toBe(true);
+
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'pest_base',
+      data: { base: 117, floor: 89, enforce_floor_post_discount: false },
+    }]))).resolves.toBe(true);
+    expect(constants.PEST.enforceFloorPostDiscount).toBe(false);
+    // pest_base row gone entirely (config present but unrelated) — same restore.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'global_labor_rate',
+      data: { value: constants.GLOBAL.LABOR_RATE },
+    }]))).resolves.toBe(true);
+    expect(constants.PEST.enforceFloorPostDiscount).toBe(true);
   });
 
   test('preserves cents on DB-synced initial roach pricing brackets', async () => {
