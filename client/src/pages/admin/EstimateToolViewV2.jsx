@@ -43,6 +43,7 @@ import {
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
+import { useNavigate } from "react-router-dom";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink, Monitor, X } from "lucide-react";
@@ -1841,6 +1842,7 @@ export default function EstimateToolViewV2({
   initialCustomerEmail = "",
   initialServiceInterest = "",
 } = {}) {
+  const navigate = useNavigate();
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
   const autocompleteRef = useRef(null);
@@ -3640,16 +3642,20 @@ export default function EstimateToolViewV2({
     }
   }
 
-  async function doSave() {
-    if (!estimate) return null;
-    const deliveryError = validateDeliveryOptions(form, estimate);
+  // estimateOverride: callers that generate-then-save in one handler pass the
+  // freshly returned estimate — the `estimate` state in this closure is still
+  // the pre-generate value (React state doesn't update mid-handler).
+  async function doSave(estimateOverride = null) {
+    const estimateToSave = estimateOverride || estimate;
+    if (!estimateToSave) return null;
+    const deliveryError = validateDeliveryOptions(form, estimateToSave);
     if (deliveryError) {
       alert(deliveryError);
       return null;
     }
     setSaving(true);
     try {
-      const E = estimate;
+      const E = estimateToSave;
       const quoteRequired = estimateRequiresQuote(E);
       const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
       const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
@@ -3717,6 +3723,17 @@ export default function EstimateToolViewV2({
     } finally {
       setSaving(false);
     }
+  }
+
+  // Commercial hand-off: the estimator can't price a commercial property
+  // (manual quote required), so generate if needed, persist the draft —
+  // capturing the contact, address, and property specs — and jump straight
+  // into the proposal builder where the operator authors the line-item quote.
+  async function openProposalBuilder() {
+    const generated = estimate || (await doGenerate());
+    if (!generated) return;
+    const saved = await doSave(generated);
+    if (saved?.id) navigate(`/admin/estimates/${saved.id}/proposal`);
   }
 
   async function doSend(id, method) {
@@ -4828,6 +4845,21 @@ export default function EstimateToolViewV2({
               {commercialDetected && (
                 <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
                   {COMMERCIAL_WARNING_TEXT}
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={saving || generating}
+                      title="Generates and saves a draft estimate, then opens the line-item proposal builder"
+                      onClick={openProposalBuilder}
+                    >
+                      {generating
+                        ? "Generating…"
+                        : saving
+                          ? "Saving…"
+                          : "Save draft & build commercial proposal"}
+                    </Button>
+                  </div>
                 </div>
               )}
               <div className="grid grid-cols-2 gap-3">

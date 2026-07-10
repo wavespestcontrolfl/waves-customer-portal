@@ -1270,7 +1270,31 @@ router.get('/:id/proposal', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const proposal = normalizeProposal(estimate);
-    res.json({ proposal, totals: computeProposalTotals(proposal) });
+    res.json({
+      proposal,
+      totals: computeProposalTotals(proposal),
+      // Estimate summary for the standalone proposal-builder page, which loads
+      // by id without the pipeline list. Additive — older consumers only read
+      // `proposal`/`totals`.
+      estimate: {
+        id: estimate.id,
+        status: estimate.status,
+        customerName: estimate.customer_name,
+        customerId: estimate.customer_id,
+        customerEmail: estimate.customer_email,
+        customerPhone: estimate.customer_phone,
+        address: estimate.address,
+        token: estimate.token,
+        sentAt: estimate.sent_at,
+        viewedAt: estimate.viewed_at,
+        acceptedAt: estimate.accepted_at,
+        expiresAt: estimate.expires_at,
+        archivedAt: estimate.archived_at,
+        priceLockedAt: estimate.price_locked_at,
+        billByInvoice: estimate.bill_by_invoice,
+        category: estimate.category,
+      },
+    });
   } catch (err) { next(err); }
 });
 

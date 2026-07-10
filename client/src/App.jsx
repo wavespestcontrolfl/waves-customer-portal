@@ -224,6 +224,7 @@ const AdminReferralsPage = lazyWithRetry(() => import('./pages/admin/ReferralsPa
 const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
 const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
+const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
@@ -420,6 +421,7 @@ export default function App() {
             <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
             <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
+            <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading proposal...</div>}><AdminCommercialProposalPage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface
                 — Board tab (phase 2 v1) + Schedule tab (existing
                 DispatchPageV2). /admin/schedule still works (redirects
