@@ -116,6 +116,24 @@ describe('canAutoRoute fail-open booking', () => {
     expect(r.allowed).toBe(true);
   });
 
+  test('community-only service_address ("the Lakewood Ranch property") IS new-address evidence — stays blocked (P2)', () => {
+    const ex = extraction(['address_unverifiable', 'missing_service_address'], 0.9);
+    ex.property = { service_address: { subdivision_or_community: 'Lakewood Ranch' } };
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
+  });
+
+  test('held implied-consent confirmation files in the customer-field-conflict lane (P2)', () => {
+    const item = buildTriageItem({
+      callLogId: 'c1',
+      flag: 'implied_consent_non_ani_recipient',
+      extraction: { meta: { call_summary: 'booked; confirmation held, number needs confirming' } },
+      severity: 'advisory',
+    });
+    expect(item.category).toBe('customer_field_conflict');
+  });
+
   test('hard blocks are NEVER failed open', () => {
     for (const hard of ['out_of_service_area', 'caller_not_authorized', 'spam_or_wrong_number']) {
       const r = canAutoRoute(extraction([hard]), { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });

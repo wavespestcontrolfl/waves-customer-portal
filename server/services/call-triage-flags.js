@@ -394,11 +394,14 @@ function canAutoRoute(extraction, opts = {}) {
     // itself locates nothing (buildAddressLines ignores state-only addresses
     // for the same reason), and treating it as evidence would keep the
     // on-file-address recovery dark for confirmed known-customer bookings.
+    // A spoken community/subdivision ("the Lakewood Ranch property") is
+    // location evidence too — without street/city/ZIP it can't be verified,
+    // so it must hold for review, not fall back to the on-file primary.
     const sa = extraction.property?.service_address || {};
     const newAddressGiven = [
       'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
       'city', 'locality', 'postal_code', 'zip', 'zip_code',
-      'raw_text',
+      'subdivision_or_community', 'raw_text',
     ].some((k) => String(sa[k] || '').trim());
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }

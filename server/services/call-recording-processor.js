@@ -5739,6 +5739,21 @@ const CallRecordingProcessor = {
             // path go to the resolved customer phone as before.)
             logger.info(`[call-proc] Skipping SMS for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
+            // The appointment BOOKED but no confirmation went out and the
+            // number needs confirming — that must reach the Needs Review
+            // inbox (the approved-but-unbooked card below is skipped because
+            // the schedule row exists).
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'implied_consent_non_ani_recipient',
+                extraction: v2ApprovedExtraction || undefined,
+                severity: 'advisory',
+                extraPayload: { scheduled_service_id: scheduledServiceId, confirmation_sms_sent: false },
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore()
+              .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           } else if (scheduledServiceId) {
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
@@ -5818,16 +5833,19 @@ const CallRecordingProcessor = {
                   // buyer/tenant whose slot was just written for this purpose —
                   // and non-blocking: a fan-out failure never voids a primary
                   // confirmation that already went out.
-                  // Requires EXPLICIT sms_consent_given: implied inbound consent
-                  // is personal to the caller and never authorizes texting a
-                  // separate service-contact recipient (buyer/tenant/realtor).
-                  if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && v2SmsConsentExplicit) {
+                  // The SMS legs require EXPLICIT sms_consent_given: implied
+                  // inbound consent is personal to the caller and never
+                  // authorizes texting a separate service-contact recipient
+                  // (buyer/tenant/realtor). The email-only leg below sends no
+                  // SMS, so it is NOT gated on SMS consent — only on the
+                  // confirmation opt-out and the do-not-contact email block.
+                  if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true') {
                     try {
                       const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
                       const freshCustomer = await db('customers').where({ id: customerId }).first();
                       const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-                      const extraContacts = getAppointmentContacts(freshCustomer || {}, prefsRow)
+                      const extraContacts = !v2SmsConsentExplicit ? [] : getAppointmentContacts(freshCustomer || {}, prefsRow)
                         .filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
                       for (const contact of extraContacts) {
                         const contactBody = await renderSmsTemplate('appointment_confirmation', {
@@ -5883,9 +5901,11 @@ const CallRecordingProcessor = {
                       // validator, but the email path bypasses it — an
                       // opted-out account must not leak a confirmation email
                       // (same rule deliverConfirmationByChannel encodes).
+                      // v2EmailBlocked (do-not-contact) suppresses the email
+                      // leg the same way the TCPA gate suppresses SMS.
                       const confirmationOptedOut = prefsRow?.appointment_confirmation === false;
                       const { getServiceContactSlots } = require('./customer-contact');
-                      const emailOnlySlots = confirmationOptedOut ? [] : getServiceContactSlots(freshCustomer || {})
+                      const emailOnlySlots = (confirmationOptedOut || v2EmailBlocked) ? [] : getServiceContactSlots(freshCustomer || {})
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
                         const AppointmentEmail = require('./appointment-email');

@@ -126,6 +126,10 @@ function buildTriageItem({
     commercial_requires_quote: 'customer_field_conflict',
     prior_complaint_unresolved: 'customer_field_conflict',
     sms_consent_missing: 'customer_field_conflict',
+    // Booked appointment whose confirmation SMS was HELD (implied consent
+    // covers only the inbound ANI and the ANI was undialable) — the office
+    // confirms the number and sends the confirmation manually.
+    implied_consent_non_ani_recipient: 'customer_field_conflict',
     low_extraction_confidence: 'service_unknown',
     spam_or_wrong_number: 'service_unknown',
     caller_phone_missing: 'customer_field_conflict',
