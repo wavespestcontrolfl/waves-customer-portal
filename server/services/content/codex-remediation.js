@@ -193,6 +193,12 @@ async function generateFix(markdown, findings, deps = {}) {
  *   frontmatter omits `tag`, so the scheduler lane passes the real topic (like
  *   astro-publisher ~787) so FAQ-blocked-service etc. fire on Rodents/Bed Bugs.
  * opts.factContext — { title, city, keyword, tag } for the fact-check gate.
+ * opts.operatorFaqException — the publish path's NARROW operator-FAQ opt-out
+ *   (owner directive 2026-06-11: FAQPage on every intercept post). An intercept
+ *   post on a FAQ-blocked service (e.g. termite) legitimately ships WITH a FAQ,
+ *   so without this flag the gate P0s on the PRE-EXISTING body and every fix
+ *   parks (PR #368). Manifest-derived by the caller, never from generated
+ *   content; defaults false (strict).
  */
 async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   let parsed;
@@ -211,7 +217,12 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   const service = (Array.isArray(opts.service) && opts.service.some(Boolean)) ? opts.service : [data.category, data.tag];
   const guardrails = contentGuardrails.evaluate(
     { body, frontmatter: data },
-    { domains, service, primaryKeyword: data.primary_keyword || null },
+    {
+      domains,
+      service,
+      primaryKeyword: data.primary_keyword || null,
+      operatorFaqException: opts.operatorFaqException === true,
+    },
   );
   if (!guardrails.pass) {
     const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -607,6 +618,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
+    operatorFaqException = false,
     onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
@@ -748,7 +760,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
-  const gate = await validate(fixed, { service, factContext }, deps);
+  const gate = await validate(fixed, { service, factContext, operatorFaqException }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
@@ -911,6 +923,32 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   const db = deps.db || dbDefault;
+  // Derive the publish path's narrow operator-FAQ exception from the run's
+  // opportunity + brief via the SAME runner derivation the run-context gate
+  // uses — an intercept post on a FAQ-blocked service carries its FAQ by
+  // owner mandate, and evaluating validateFixedBlogFile without the flag
+  // P0s the pre-existing body so every fix parks (PR #368). Scoped to
+  // new_supporting_blog (the only action the gates cover — and skipping it
+  // avoids the refresh lane's live-frontmatter load on every tick); any
+  // missing row or lookup failure stays false, which only parks (stricter),
+  // never merges.
+  let operatorFaqException = false;
+  try {
+    const fullRun = run && run.id ? await db('autonomous_runs').where({ id: run.id }).first() : null;
+    const opp = (fullRun && fullRun.action_type === 'new_supporting_blog' && fullRun.opportunity_id)
+      ? await db('opportunity_queue').where({ id: fullRun.opportunity_id }).first()
+      : null;
+    if (opp) {
+      const runner = deps.autonomousRunner || require('./autonomous-runner');
+      const brief = await runner._loadReviewedBrief(fullRun);
+      if (brief) {
+        const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
+        operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
+      }
+    }
+  } catch (e) {
+    logger.warn(`[codex-remediation] operator-FAQ exception derivation failed for PR #${pr && pr.number}: ${e.message} — evaluating gates without it`);
+  }
   return runRemediationForPr({
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
@@ -922,6 +960,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lanes park at validateAutonomousRunGates before any commit anyway;
     // this keeps the invariant local instead of relying on that gate.)
     restampPublished: (run && run.action_type) === 'new_supporting_blog',
+    operatorFaqException,
     // Surface the park on the run itself: the run stays parked at
     // completed_pending_review (status='parked' stops re-remediation until a
     // new head re-arms), and without this note the ONLY record of why lived
