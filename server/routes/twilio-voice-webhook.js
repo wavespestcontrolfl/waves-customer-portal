@@ -452,6 +452,10 @@ router.post('/voice', async (req, res) => {
     const { checkInboundBlock } = require('../middleware/spam-block');
     const blockResult = await checkInboundBlock({
       from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+      // Blocked calls return TwiML before the call_log insert below ever
+      // runs, so their spam evidence must ride the blocked_call_attempts
+      // audit row instead — same fields the allowed path stores in metadata.
+      signals: { stir_verstat: req.body.StirVerstat || null, addons: parseAddOnsForAudit(req.body.AddOns) },
       recordAttempt: firstDelivery,
     });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
