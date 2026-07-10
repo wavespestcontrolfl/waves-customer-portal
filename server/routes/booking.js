@@ -635,17 +635,65 @@ function bookingSlotWindow(config = {}) {
   };
 }
 
-// Server-side duration. There is NO server-side per-service catalog to derive
-// from — the /book funnel's catalog is the client-side SERVICES array
-// (client/src/pages/PublicBookingPage.jsx), and the availability builder runs
-// its overlap math on the same client-sent minutes — so the requested value is
-// honored ONLY inside the range that catalog actually emits (45–90). Anything
-// outside it (a forged 1-minute slot that would slide under the overlap check,
-// a day-blocking 600, or a 15/240 no funnel service ever sends) falls back to
-// the configured slot duration.
+// The /book funnel's service catalog, mirrored server-side (booking-audit
+// round 3). The DB `services` catalog keys (pest_general_quarterly,
+// mosquito_monthly, …) don't map 1:1 onto the funnel's coarse booking
+// categories, so this mirror of the client SERVICES array
+// (client/src/pages/PublicBookingPage.jsx — keep the two in sync) is the
+// server's authority for what each funnel service's visit takes. A known key
+// pins the duration outright; the caller-sent minutes then only matter for
+// unknown/legacy service labels, where the 45–90 catalog-range clamp remains.
+const BOOKING_FUNNEL_SERVICE_DURATIONS = {
+  pest_control: 60,
+  lawn_care: 60,
+  mosquito: 45,
+  tree_shrub: 60,
+  termite: 90,
+  rodent: 60,
+  bora_care: 90,
+};
+// Display-label aliases (the funnel's /confirm sends the label as
+// service_type) — defensive only; the funnel also posts the raw service_id.
+const BOOKING_FUNNEL_SERVICE_ALIASES = {
+  'pest control': 'pest_control',
+  'lawn care': 'lawn_care',
+  'mosquito control': 'mosquito',
+  'tree & shrub': 'tree_shrub',
+  'termite inspection': 'termite',
+  'rodent control': 'rodent',
+  'bora-care wood treatment': 'bora_care',
+};
+// Normalized funnel service key ('' when the value names no funnel service).
+function normalizeBookingServiceKey(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (BOOKING_FUNNEL_SERVICE_DURATIONS[text] !== undefined) return text;
+  return BOOKING_FUNNEL_SERVICE_ALIASES[text] || '';
+}
+
+// Stable location scope for signed offers: the server-resolved coordinates
+// the slot computation ran on, rounded to the same ~1 km grid the public
+// responses disclose (roundPublicCoord) — so the exact/rounded echo split
+// never changes the key, and re-rounding an already-rounded echo is a no-op.
+function bookingOfferLocationKey(lat, lng) {
+  const rl = roundPublicCoord(lat);
+  const rg = roundPublicCoord(lng);
+  if (rl == null || rg == null) return '';
+  return `${rl.toFixed(2)},${rg.toFixed(2)}`;
+}
+
+// Server-side duration. A recognized funnel service derives its duration from
+// the server-side catalog mirror above — the client-sent minutes are ignored
+// outright, so a crafted duration can neither shrink the overlap-check window
+// nor shape the offers the builder SIGNS. Unknown service labels keep the
+// legacy clamp: honored only inside the range the funnel catalog actually
+// emits (45–90); anything outside it (a forged 1-minute slot, a day-blocking
+// 600) falls back to the configured slot duration.
 const MIN_BOOKING_DURATION_MINUTES = 45;
 const MAX_BOOKING_DURATION_MINUTES = 90;
-function resolveBookingDuration(requested, config = {}) {
+function resolveBookingDuration(requested, config = {}, serviceKey = '') {
+  const catalog = BOOKING_FUNNEL_SERVICE_DURATIONS[serviceKey];
+  if (catalog) return catalog;
   const n = parseInt(requested, 10);
   if (Number.isInteger(n) && n >= MIN_BOOKING_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
   return config.slot_duration_minutes || 60;
@@ -718,7 +766,7 @@ function roundPublicCoord(value) {
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [] }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '' }) {
   const result = await findAvailableSlots({
     lat,
     lng,
@@ -759,6 +807,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   );
 
   const fmt = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  // Location scope for every offer this build signs — the exact coords the
+  // slot computation ran on, on the public rounding grid. Callers that mint
+  // redeemable offers (/availability, /find-slots) also pass the normalized
+  // serviceKey; callers that never redeem (capture-intent revalidation,
+  // reschedule/voice lookups) leave it '' and their sigs can't clear the
+  // /confirm gate, which re-derives a non-empty funnel key.
+  const offerLocationKey = bookingOfferLocationKey(lat, lng);
   const candidateMap = new Map();
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
@@ -778,12 +833,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       ...labels,
       start_time: startTime,
       end_time: fmt(endMin),
-      // Signed offer (booking-audit round 2): /confirm requires this exact
-      // (date, start, technician, duration) tuple back with a live HMAC —
-      // see utils/slot-offer-token.js. The client passes it through as-is.
+      // Signed offer (booking-audit rounds 2+3): /confirm requires this exact
+      // (service, location, date, start, technician, duration) tuple back with
+      // a live HMAC — see utils/slot-offer-token.js. The client passes it
+      // through as-is; serviceKey + locationKey bind the request context the
+      // slots were computed FOR, so an offer fetched for one address/service
+      // can't confirm another.
       slot_sig: mintSlotOfferField({
         surface: 'booking',
         scopeId: '',
+        serviceKey,
+        locationKey: offerLocationKey,
         date: slot.date,
         startMinutes: startMin,
         technicianId: slot.technician.id || null,
@@ -918,15 +978,19 @@ router.get('/availability', async (req, res, next) => {
     let rangeTo = clamp(date_to, defaultTo);
     if (rangeTo < rangeFrom) rangeTo = rangeFrom;
 
-    // Server-clamped duration (same 45–90 catalog range /confirm enforces):
-    // the builder must never shape — or SIGN — offers around a forged value.
-    const duration = resolveBookingDuration(duration_minutes, config);
+    // Server-derived duration: a recognized funnel service (the client sends
+    // its catalog id as service_type) pins the duration from the server-side
+    // catalog mirror; unknown labels keep the 45–90 clamp. The builder must
+    // never shape — or SIGN — offers around a forged value.
+    const serviceKey = normalizeBookingServiceKey(service_type);
+    const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildBookingAvailability({
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
       expandOpenDays: req.query.expand === 'open',
+      serviceKey,
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -990,15 +1054,17 @@ router.post('/find-slots', async (req, res, next) => {
       defaultWindowDays: config.advance_days_max ?? 14,
     });
 
-    // Same server-side clamp as /availability — signed offers must only ever
-    // cover durations the funnel catalog genuinely emits.
-    const duration = resolveBookingDuration(duration_minutes, config);
+    // Same server-side derivation as /availability — signed offers must only
+    // ever cover durations the funnel catalog genuinely emits.
+    const serviceKey = normalizeBookingServiceKey(service_type);
+    const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildBookingAvailability({
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,
       expandOpenDays: true,
+      serviceKey,
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -1037,8 +1103,10 @@ async function createSelfBooking(payload = {}) {
       slot_sig,
       technician_id,
       service_type,
+      service_id,
       quoted_service_label,
       duration_minutes,
+      source_estimate_id,
       recurring_pattern,
       customer_notes,
       source,
@@ -1198,10 +1266,17 @@ async function createSelfBooking(payload = {}) {
       return { ok: false, status: 400, error: slotDateError };
     }
 
-    // Duration is derived server-side (clamped to the funnel's real range,
-    // config fallback) — never trusted raw from the payload, where a tiny
-    // forged value would shrink the overlap-check window.
-    const duration = resolveBookingDuration(duration_minutes, config);
+    // Duration is derived server-side — a recognized funnel service pins it
+    // from the server-side catalog mirror (the raw minutes are ignored), and
+    // unknown labels keep the 45–90 clamp — never trusted raw from the
+    // payload, where a tiny forged value would shrink the overlap-check
+    // window. The key preference (service_id → service_type → quoted label)
+    // matches what the funnel actually posts: the catalog id rides
+    // service_id; service_type carries the display label.
+    const serviceKey = normalizeBookingServiceKey(service_id)
+      || normalizeBookingServiceKey(service_type)
+      || normalizeBookingServiceKey(quoted_service_label);
+    const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     // End time is ALWAYS start + server-resolved duration. A provided
     // slot_end must agree — a forged early end would slide under the
@@ -1223,18 +1298,45 @@ async function createSelfBooking(payload = {}) {
       return { ok: false, status: 400, error: geometryError };
     }
 
-    // Signed-offer proof (booking-audit round 2): the date/geometry/duration
+    // Signed-offer proof (booking-audit rounds 2+3): the date/geometry/duration
     // mirrors above are defense-in-depth, but they can't prove this exact
-    // (date, start, technician, duration) tuple was ever OFFERED — a crafted
-    // /confirm could still book any in-range weekday/weekend with an optional
-    // tech. Require the HMAC the availability builder attached to the slot
-    // (mintSlotOfferField in buildBookingAvailability; ~45-min expiry).
-    // Missing / expired / tampered → the same "pick another" 409 the funnel
-    // already recovers from (stepping back re-fetches availability) — which
-    // is also the one-time cost for a customer holding a pre-deploy slot list.
-    if (!verifySlotOfferField({
+    // (service, location, date, start, technician, duration) tuple was ever
+    // OFFERED — a crafted /confirm could still book any in-range
+    // weekday/weekend with an optional tech, or redeem an offer fetched for a
+    // DIFFERENT address/service. Require the HMAC the availability builder
+    // attached to the slot (mintSlotOfferField in buildBookingAvailability;
+    // ~45-min expiry). Missing / expired / tampered / cross-context → the same
+    // "pick another" 409 the funnel already recovers from (stepping back
+    // re-fetches availability) — which is also the one-time cost for a
+    // customer holding a pre-deploy slot list.
+    //
+    // Location scope: the booking's OWN coordinates, on the same rounding
+    // grid the builder signed. Preference order mirrors what actually drives
+    // the visit — the submitted new_customer coords (the funnel echoes the
+    // availability response's resolved coords here, and they're what a
+    // created customer record stores), else the resolved customer record's
+    // coords. No coords at all → '' → can only verify an offer minted for ''
+    // (which redeemable builders never mint).
+    let offerLat = Number(new_customer?.lat);
+    let offerLng = Number(new_customer?.lng);
+    if ((!Number.isFinite(offerLat) || !Number.isFinite(offerLng)) && custId) {
+      const coordRow = await db('customers').where('id', custId).first('latitude', 'longitude');
+      offerLat = coordRow?.latitude != null ? parseFloat(coordRow.latitude) : NaN;
+      offerLng = coordRow?.longitude != null ? parseFloat(coordRow.longitude) : NaN;
+    }
+    const offerLocationKey = bookingOfferLocationKey(
+      Number.isFinite(offerLat) ? offerLat : null,
+      Number.isFinite(offerLng) ? offerLng : null,
+    );
+    // An empty serviceKey can never have been offered by the funnel (both
+    // public offer routes derive a key the same way) — refuse outright so a
+    // sig harvested from a non-redeeming builder call (reschedule/voice
+    // lookups sign with serviceKey '') can't clear this gate.
+    if (!serviceKey || !verifySlotOfferField({
       surface: 'booking',
       scopeId: '',
+      serviceKey,
+      locationKey: offerLocationKey,
       date: slotDateStr,
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
@@ -1255,6 +1357,32 @@ async function createSelfBooking(payload = {}) {
         : null;
       if (!tech || tech.active === false) {
         return { ok: false, status: 400, error: 'That time slot is no longer available. Please pick another.' };
+      }
+    }
+
+    // Estimate correlation (accept-retry lane): /book URLs minted by the
+    // estimate accept-retry flow carry estimate_id=<uuid>, which the funnel
+    // passes through as source_estimate_id so the booked visit traces back to
+    // its estimate (scheduled_services.source_estimate_id — the same link an
+    // estimate accept writes, feeding the deposit-credit roll-forward and the
+    // accept flow's already-booked detection). Correlation only — it never
+    // resolves identity (that stays with the token-proven estimate_id path).
+    // Malformed shape → 400 (a crafted value must not reach the uuid cast);
+    // well-formed but unknown → book UNLINKED (the column FKs estimates, and
+    // a stale link must not block a real customer's booking).
+    let sourceEstimateId = null;
+    if (source_estimate_id) {
+      const srcEstIdStr = String(source_estimate_id).trim();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(srcEstIdStr)) {
+        return { ok: false, status: 400, error: 'Invalid estimate reference — please book again from your estimate link.' };
+      }
+      const srcEst = (estimate && String(estimate.id) === srcEstIdStr)
+        ? estimate
+        : await db('estimates').where('id', srcEstIdStr).first('id');
+      if (srcEst) {
+        sourceEstimateId = srcEstIdStr;
+      } else {
+        logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} matches no estimate — booking proceeds unlinked`);
       }
     }
 
@@ -1437,6 +1565,11 @@ async function createSelfBooking(payload = {}) {
     // customer+day: a double-submit (button double-tap, client retry)
     // otherwise mints two parents — and two seeded quarterly series — and a
     // partial failure could leave a booking without its dispatch row.
+    // Shared global day-cap primitives (services/availability.js) — the SAME
+    // lock namespace + count EVERY self_booked_appointments writer takes, so
+    // the zone-engine confirmBooking and this path serialize against each
+    // other. Lazy require: the route ↔ service load order must not cycle.
+    const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../services/availability');
     let txResult;
     try {
       txResult = await db.transaction(async (trx) => {
@@ -1467,13 +1600,11 @@ async function createSelfBooking(payload = {}) {
       // max_self_books_per_day cap below is GLOBAL by date — two confirms in
       // different zones share none of those locks, so both could observe a
       // cap-1 count and insert, exceeding the cap. One date-scoped lock
-      // serializes the count+insert across zones. Taken last, keeping the
-      // acquisition order fixed (customer → tech → zone → day) so concurrent
-      // confirms can't deadlock.
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['self-booking-day-cap', slotDateStr],
-      );
+      // (the SHARED helper — availability.js's confirmBooking takes the same
+      // one) serializes the count+insert across zones AND across writers.
+      // Taken last, keeping the acquisition order fixed
+      // (customer → tech → zone → day) so concurrent confirms can't deadlock.
+      await acquireSelfBookingDayCapLock(trx, slotDateStr);
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
@@ -1484,17 +1615,13 @@ async function createSelfBooking(payload = {}) {
       if (existing) return { existing };
 
       // Commit-time max_self_books_per_day re-check (same predicate the
-      // availability builder uses to drop full days) — the builder's cap is
-      // advisory-only without this, since a direct POST never saw it. Runs
-      // AFTER the replay lookup so a double-submit on a now-full day still
-      // returns its original booking.
+      // availability builder uses to drop full days, via the shared helper) —
+      // the builder's cap is advisory-only without this, since a direct POST
+      // never saw it. Runs AFTER the replay lookup so a double-submit on a
+      // now-full day still returns its original booking.
       const { maxPerDay } = bookingSlotWindow(config);
-      const dayCountRow = await trx('self_booked_appointments')
-        .where('date', slotDateStr)
-        .whereNot('status', 'cancelled')
-        .count('* as count')
-        .first();
-      if (parseInt(dayCountRow?.count || 0) >= maxPerDay) {
+      const dayCount = await countActiveSelfBookingsForDay(trx, slotDateStr);
+      if (dayCount >= maxPerDay) {
         throw Object.assign(new Error('That day is fully booked — please pick another day.'), {
           statusCode: 409,
           isOperational: true,
@@ -1575,6 +1702,9 @@ async function createSelfBooking(payload = {}) {
         window_start: slot_start,
         window_end: endTime,
         service_type: resolvedServiceType,
+        // Accept-retry correlation — validated above (uuid shape + estimate
+        // exists; the column FKs estimates). Null on every non-estimate /book.
+        source_estimate_id: sourceEstimateId,
         status: 'confirmed',
         customer_confirmed: true,
         confirmed_at: new Date(),
@@ -2184,6 +2314,9 @@ module.exports._internals = {
   // and the /status/:code enumeration limiter (exported for tests).
   bookingSlotWindow,
   resolveBookingDuration,
+  normalizeBookingServiceKey,
+  bookingOfferLocationKey,
+  BOOKING_FUNNEL_SERVICE_DURATIONS,
   validateBookingSlotGeometry,
   validateBookingSlotDate,
   generateConfirmationCode,

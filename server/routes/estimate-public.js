@@ -13,6 +13,7 @@ const { etDateString, formatETDate } = require('../utils/datetime-et');
 const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -8055,6 +8056,7 @@ router.put('/:token/accept', async (req, res, next) => {
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
           deferFollowUpReminderRegistration: true,
+          deferCommercialScheduleNotification: true,
         });
         if (!annualPrepayConversionResult?.draftInvoiceId) {
           throw new Error('Annual prepay invoice was not created');
@@ -8076,7 +8078,8 @@ router.put('/:token/accept', async (req, res, next) => {
       // scheduled_services rows + upgrades the customer's WaveGuard tier +
       // marks them active_customer, none of which applies to a single-visit
       // booking. All comms are deferred post-commit: membership email,
-      // welcome SMS, follow-up reminder registration, and invoice delivery.
+      // welcome SMS, follow-up reminder registration, invoice delivery, and
+      // the commercial-schedule admin notification.
       let standardConversionResult = null;
       let standardInvoiceMinted = false;
       if (customerId && !treatAsOneTime && !annualPrepaySelected) {
@@ -8101,6 +8104,7 @@ router.put('/:token/accept', async (req, res, next) => {
           autoSendInvoice: false,
           skipMembershipEmail: true,
           deferFollowUpReminderRegistration: true,
+          deferCommercialScheduleNotification: true,
         });
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch
@@ -8318,6 +8322,24 @@ router.put('/:token/accept', async (req, res, next) => {
       void sendNewRecurringWelcome(acceptConversion.welcomeSms)
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
     }
+    // The converter deferred the commercial-schedule admin notification
+    // (deferCommercialScheduleNotification) so a rolled-back accept can't page
+    // staff about an unaccepted estimate. Dispatch it here, post-commit,
+    // fire-and-forget.
+    if (acceptConversion?.commercialScheduleNotification) {
+      const commercialNotify = acceptConversion.commercialScheduleNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          commercialNotify.type,
+          commercialNotify.title,
+          commercialNotify.body,
+          commercialNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] commercial-schedule admin notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] commercial-schedule admin notify setup failed: ${e.message}`);
+      }
+    }
     // The standard conversion runs in-transaction with skipMembershipEmail,
     // so the membership.started email fires here post-commit (mirrors
     // estimate-manual-acceptance). Annual prepay intentionally sends none —
@@ -8390,7 +8412,14 @@ router.put('/:token/accept', async (req, res, next) => {
     const confirmedAppointmentRow = reservationRow || (existingAppointmentId ? existingAppointmentRow : null);
     if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
       oneTimeBookingService = bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
-      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept`;
+      // estimate_id carries the estimate correlation into the /book flow so
+      // the resulting scheduled_services row gets source_estimate_id stamped —
+      // without it a booking completed through this link is invisible to the
+      // already-accepted retry rebuild, which would keep answering
+      // book_one_time and enable duplicate appointments. Identity/pricing are
+      // unaffected: /book treats a bare estimate_id (no estimate_token HMAC)
+      // as correlation only.
+      const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${oneTimeBookingService.id}&source=estimate-accept&estimate_id=${estimate.id}`;
       bookingUrl = await shortenOrPassthrough(longBookingUrl, {
         kind: 'booking',
         entityType: 'estimates',
@@ -10507,6 +10536,7 @@ function buildAcceptSuccessPayload({
   treatAsOneTime = false,
   reservationCommitted = false,
   siteConfirmationHold = false,
+  invoiceSettled = false,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -10514,6 +10544,13 @@ function buildAcceptSuccessPayload({
   // minted) — so it gets its own "we'll confirm on site, then invoice" outcome
   // rather than the generic "you're booked" confirmed copy.
   if (siteConfirmationHold) nextStep = 'site_confirmation';
+  // Retry rebuild of an accept whose invoice has since SETTLED (paid / prepaid /
+  // processing / refunded / canceled): nothing is owed, so no pay/prepay/booking
+  // step may surface — the plain confirmed outcome, exactly what a fresh accept
+  // returns when it mints nothing to pay. Without this override a settled
+  // prepay term (billingTerm='prepay_annual') would fall through to
+  // 'prepay_invoice' and a settled invoice-mode one-time to 'book_one_time'.
+  else if (invoiceSettled) nextStep = 'confirmed';
   // Third-party Bill-To: a payer-billed invoice is the payer's to pay — the
   // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
   else if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
@@ -10557,7 +10594,10 @@ function buildAcceptSuccessPayload({
 //   "Auto-generated from accepted estimate #<id>" notes stamp every
 //   accept-time mint writes — invoices have no estimate_id column, so the
 //   notes prefix is the only deterministic linkage. Voided invoices are
-//   skipped (their pay link is dead; the office re-bills manually).
+//   skipped (their pay link is dead; the office re-bills manually); settled
+//   invoices (paid/prepaid/processing/refunded/canceled per
+//   isInvoiceCollectibleStatus) surface the confirmed outcome, never a /pay
+//   link.
 // - invoiceLinkDelivered: whether the invoice was ever sent (sent_at /
 //   sms_sent_at), not specifically at accept time.
 // - invoiceServiceLabel: the invoice title (closest durable analogue of the
@@ -10585,23 +10625,38 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     .first();
   const billingTerm = prepayTerm ? 'prepay_annual' : 'standard';
 
+  // Invoice reconstruction is SETTLED-aware (audit P1): 'void' still means a
+  // dead pay link the office re-bills manually (skip / fall through), but any
+  // other non-collectible status per the canonical isInvoiceCollectibleStatus
+  // helper (paid / prepaid / processing / refunded / canceled) means the
+  // customer already settled — the retry must return the confirmed outcome,
+  // never a live /pay link for money that isn't owed.
   let invoice = null;
   if (prepayTerm?.prepay_invoice_id) {
-    // Same non-void predicate as the fallback below: a voided prepay invoice's
-    // pay link is dead — fall through to the current live accept-mint invoice
-    // (if any) rather than hand the customer a dead /pay token.
-    invoice = await db('invoices')
+    const prepayInvoice = await db('invoices')
       .where({ id: prepayTerm.prepay_invoice_id })
-      .whereNot('status', 'void')
       .first();
+    // A voided prepay invoice's pay link is dead — fall through to the current
+    // live accept-mint invoice (if any) rather than hand the customer a dead
+    // /pay token. Every other status — collectible or settled — is
+    // authoritative for the prepay term.
+    if (prepayInvoice && String(prepayInvoice.status || '').trim().toLowerCase() !== 'void') {
+      invoice = prepayInvoice;
+    }
   }
   if (!invoice) {
-    invoice = await db('invoices')
+    const stampedInvoices = await db('invoices')
       .where('notes', 'like', `Auto-generated from accepted estimate #${estimate.id}%`)
       .whereNot('status', 'void')
-      .orderBy('created_at', 'desc')
-      .first();
+      .orderBy('created_at', 'desc');
+    // Prefer the newest still-collectible invoice (it carries the live pay
+    // step — e.g. a settled first mint later re-billed); otherwise the newest
+    // settled one drives the confirmed outcome below.
+    invoice = stampedInvoices.find((row) => isInvoiceCollectibleStatus(row.status))
+      || stampedInvoices[0]
+      || null;
   }
+  const invoiceSettled = !!invoice && !isInvoiceCollectibleStatus(invoice.status);
 
   // A booking bound to this estimate (committed reservation, linked existing
   // appointment, or the converter's auto-scheduled first visit) — enough to
@@ -10615,12 +10670,11 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const reservationCommitted = !!committedAppointment;
 
   // One-time accepts that never booked get the self-serve booking link again.
-  // Minting a fresh short link is not a comms send (the accept-time code is
-  // not recoverable from here). The service label is derived exactly as the
-  // fresh accept derives it — buildOneTimeInvoiceServiceLabel skips discount/
-  // setup/non-billable rows and honors label/service fields — so a lawn
-  // estimate whose FIRST row is a discount line still routes to the lawn
-  // funnel instead of bookingServiceFor('')'s pest-control default.
+  // The service label is derived exactly as the fresh accept derives it —
+  // buildOneTimeInvoiceServiceLabel skips discount/setup/non-billable rows and
+  // honors label/service fields — so a lawn estimate whose FIRST row is a
+  // discount line still routes to the lawn funnel instead of
+  // bookingServiceFor('')'s pest-control default.
   let bookingUrl = null;
   if (treatAsOneTime && !billByInvoice && !reservationCommitted) {
     const { oneTimeList } = acceptanceServiceLists(estData);
@@ -10631,23 +10685,55 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       oneTimeList,
     });
     const bookingSvc = bookingServiceFor(retryServiceLabel || oneTimeList?.[0]?.name || '');
-    bookingUrl = await shortenOrPassthrough(
-      `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept`,
-      {
+    // estimate_id carries the estimate correlation into the /book flow so the
+    // resulting scheduled_services row gets source_estimate_id stamped — the
+    // exact field the committedAppointment probe above keys on. Without it a
+    // booking completed through THIS link is invisible to later retries,
+    // which keep answering book_one_time and enable duplicate appointments.
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${bookingSvc.id}&source=estimate-accept&estimate_id=${estimate.id}`;
+    // Read-only retry contract: never stack another permanent short_codes row
+    // per retry. Reuse the code already minted for exactly this target URL
+    // (the fresh accept's, or the first retry's); mint at most once otherwise.
+    const existingShortCode = await db('short_codes')
+      .where({
+        entity_type: 'estimates',
+        entity_id: estimate.id,
+        purpose: 'estimate_accept_booking',
+        target_url: longBookingUrl,
+      })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (existingShortCode?.code
+      && (!existingShortCode.expires_at || new Date(existingShortCode.expires_at).getTime() > Date.now())) {
+      // Same base-URL fallback chain as short-url.js's baseUrl() — historical
+      // codes keep resolving through /l/:code regardless of which env named
+      // the host.
+      const shortLinkBase = process.env.SHORTLINK_BASE_URL
+        || process.env.PUBLIC_PORTAL_URL
+        || 'https://portal.wavespestcontrol.com';
+      bookingUrl = `${shortLinkBase}/l/${existingShortCode.code}`;
+    } else {
+      bookingUrl = await shortenOrPassthrough(longBookingUrl, {
         kind: 'booking',
         entityType: 'estimates',
         entityId: estimate.id,
         customerId: estimate.customer_id || null,
-        channel: 'sms',
+        // 'web', NOT 'sms': this retry link is rendered on-screen only (no
+        // re-send), and the click-followup queue chases channel='sms' links —
+        // an sms tag here would pollute that lane with a link no text carried.
+        channel: 'web',
         purpose: 'estimate_accept_booking',
-      },
-    );
+      });
+    }
   }
 
   const payerBilled = !!invoice?.payer_id;
   const invoiceAmount = invoice ? (Number(invoice.total) || 0) : null;
-  // Never hand the homeowner a payer's bearer /pay token.
-  const invoicePayUrl = invoice && !payerBilled && invoice.token ? `/pay/${invoice.token}` : null;
+  // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
+  // for a settled invoice (nothing is owed).
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && invoice.token
+    ? `/pay/${invoice.token}`
+    : null;
   const invoiceNotes = String(invoice?.notes || '');
   const invoiceKind = prepayTerm
     ? 'annual_prepay'
@@ -10659,7 +10745,10 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
 
   return {
     ...buildAcceptSuccessPayload({
-      invoiceMode: !!invoice,
+      // A settled invoice is not an open payable — invoiceMode stays false so
+      // no consumer (including the client's legacy invoiceMode fallback) can
+      // route the customer to a pay step for it.
+      invoiceMode: !!invoice && !invoiceSettled,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -10673,6 +10762,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold,
+      invoiceSettled,
     }),
     alreadyAccepted: true,
   };

@@ -5,10 +5,18 @@
  * tech) stay in place as defense-in-depth, but the signature is the decisive
  * check: the generator signs each slot it returns over
  *
- *   {surface, scopeId, date, startMinutes, technicianId-or-null,
- *    durationMinutes} + an expiry timestamp
+ *   {surface, scopeId, serviceKey, locationKey, date, startMinutes,
+ *    technicianId-or-null, durationMinutes} + an expiry timestamp
  *
  * and the commit paths refuse anything that doesn't verify.
+ *
+ * serviceKey/locationKey (canonical string v2, booking-audit round 3): the
+ * /book surface's scopeId is '' (anonymous funnel), so v1 offers bound only
+ * the slot tuple — a caller could fetch offers for one address/service and
+ * confirm a different one. The /book generator now binds the normalized
+ * funnel service id and a rounded-coordinate location key into the signature
+ * (see routes/booking.js); the estimate surface leaves both '' because its
+ * scopeId (the estimate id) already pins service + address context.
  *
  * Two carrier shapes, one canonical string:
  *   - Estimate surface: the sig + exp ride INSIDE the slotId string
@@ -49,9 +57,14 @@ const EXP_SKEW_MS = 60 * 1000;
 
 function canonicalOfferString(payload = {}) {
   return [
-    'waves-slot-offer.v1',
+    // v2: serviceKey + locationKey joined the signed scope (round 3). The tag
+    // bump makes every v1 offer fail verification outright rather than
+    // depending on field-count coincidences.
+    'waves-slot-offer.v2',
     String(payload.surface || ''),
     String(payload.scopeId ?? ''),
+    String(payload.serviceKey ?? ''),
+    String(payload.locationKey ?? ''),
     String(payload.date || ''),
     String(Number(payload.startMinutes)),
     String(payload.technicianId || ''),
@@ -61,8 +74,10 @@ function canonicalOfferString(payload = {}) {
 }
 
 /**
- * Sign a slot offer. `payload`: { surface, scopeId, date, startMinutes,
- * technicianId (null for unassigned), durationMinutes }. Returns { exp, sig }.
+ * Sign a slot offer. `payload`: { surface, scopeId, serviceKey, locationKey,
+ * date, startMinutes, technicianId (null for unassigned), durationMinutes }.
+ * serviceKey/locationKey default '' for surfaces whose scopeId already binds
+ * that context. Returns { exp, sig }.
  */
 function signSlotOffer(payload, now = Date.now()) {
   const exp = now + SLOT_OFFER_TTL_MS;

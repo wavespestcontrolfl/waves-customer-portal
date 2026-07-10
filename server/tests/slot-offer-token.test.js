@@ -3,9 +3,9 @@
  * (utils/slot-offer-token.js — booking-audit round 2).
  *
  * Pin: a freshly signed offer verifies; ANY field change (surface, scope,
- * date, start, technician, duration, exp) breaks the HMAC; expired and
- * far-future-forged expiries are rejected; the two carrier shapes (slotId
- * suffix for the estimate surface, standalone field for /book) round-trip;
+ * service, location, date, start, technician, duration, exp) breaks the HMAC;
+ * expired and far-future-forged expiries are rejected; the two carrier shapes
+ * (slotId suffix for the estimate surface, standalone field for /book) round-trip;
  * the calendar round-trip rejects impossible YYYY-MM-DD strings; and the
  * confirmation-code generator keeps its ≈50-bit CSPRNG contract.
  */
@@ -49,6 +49,8 @@ describe('signSlotOffer / verifySlotOffer', () => {
     const variants = [
       { surface: 'booking' }, // wrong surface
       { scopeId: 'estimate-999' }, // wrong scope
+      { serviceKey: 'pest_control' }, // v2: service scope (signed as '')
+      { locationKey: '27.34,-82.53' }, // v2: location scope (signed as '')
       { date: '2027-05-21' },
       { startMinutes: 600 },
       { technicianId: 'tech-2' },
@@ -58,6 +60,22 @@ describe('signSlotOffer / verifySlotOffer', () => {
     for (const change of variants) {
       expect(verifySlotOffer({ ...OFFER, exp, ...change }, sig)).toBe(false);
     }
+  });
+
+  test('v2 scope fields (serviceKey/locationKey) sign, verify, and bind', () => {
+    const scoped = { ...OFFER, serviceKey: 'pest_control', locationKey: '27.34,-82.53' };
+    const { exp, sig } = signSlotOffer(scoped);
+    expect(verifySlotOffer({ ...scoped, exp }, sig)).toBe(true);
+    // Tamper either scope field → HMAC fails.
+    expect(verifySlotOffer({ ...scoped, serviceKey: 'termite', exp }, sig)).toBe(false);
+    expect(verifySlotOffer({ ...scoped, locationKey: '26.99,-82.10', exp }, sig)).toBe(false);
+    // …and dropping them back to the '' defaults fails too (no aliasing).
+    expect(verifySlotOffer({ ...OFFER, exp }, sig)).toBe(false);
+  });
+
+  test("omitted scope fields default to '' — explicit-empty and absent sign identically (estimate-surface compat)", () => {
+    const { exp, sig } = signSlotOffer(OFFER); // no serviceKey/locationKey at all
+    expect(verifySlotOffer({ ...OFFER, serviceKey: '', locationKey: '', exp }, sig)).toBe(true);
   });
 
   test('rejects tampered / missing signatures', () => {

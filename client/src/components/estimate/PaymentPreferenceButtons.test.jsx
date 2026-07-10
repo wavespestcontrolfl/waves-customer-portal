@@ -3,7 +3,17 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from './PaymentPreferenceButtons';
+import {
+  CARD_CONSENT_TEXT as CLIENT_CARD_CONSENT_TEXT,
+  CONSENT_VERSION as CLIENT_CONSENT_VERSION,
+} from '../../lib/paymentMethodConsentText';
+// Server-authoritative sources (CJS, dependency-light — vitest interops them).
+// AGENTS.md: computeChargeAmount policy in server/services/stripe-pricing.js
+// is the single source of truth for the surcharge; the consent text mirror
+// must stay in sync with server/services/payment-method-consent-text.js.
+import serverConsent from '../../../../server/services/payment-method-consent-text';
+import stripePricing from '../../../../server/services/stripe-pricing';
 
 afterEach(() => cleanup());
 
@@ -171,9 +181,36 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    expect(screen.getByText(/A credit card surcharge of up to 2\.9% may apply/)).toBeInTheDocument();
+    // The rendered figure must be the server-authoritative rate
+    // (CONFIGURED_COST_BPS in server/services/stripe-pricing.js), never a
+    // hardcoded or separately maintained client number.
+    const serverPct = String(stripePricing.CONFIGURED_COST_BPS / 100); // '2.9'
+    expect(
+      screen.getByText(new RegExp(`A credit card surcharge of up to ${serverPct.replace('.', '\\.')}% may apply`)),
+    ).toBeInTheDocument();
     // The vague unquantified line is gone.
     expect(screen.queryByText(/small processing fee/i)).not.toBeInTheDocument();
+  });
+
+  describe('CARD_SURCHARGE_DISCLOSURE is server-authoritative (AGENTS.md surcharge P0)', () => {
+    it('discloses exactly the rate computeChargeAmount charges (CONFIGURED_COST_BPS)', () => {
+      const match = CARD_SURCHARGE_DISCLOSURE.match(/up to (\d+(?:\.\d+)?)%/);
+      expect(match).not.toBeNull();
+      expect(Number(match[1])).toBe(stripePricing.CONFIGURED_COST_BPS / 100);
+      // Exactly one percentage figure — no second, conflicting rate in the copy.
+      expect(CARD_SURCHARGE_DISCLOSURE.match(/\d+(?:\.\d+)?%/g)).toHaveLength(1);
+    });
+
+    it('renders the rate phrase verbatim from the versioned consent copy — not a second client mirror', () => {
+      const consentPhrase = CLIENT_CARD_CONSENT_TEXT.match(/up to \d+(?:\.\d+)?%/);
+      expect(consentPhrase).not.toBeNull(); // extraction the component relies on must work
+      expect(CARD_SURCHARGE_DISCLOSURE).toContain(consentPhrase[0]);
+    });
+
+    it('client consent mirror is in sync with the server canonical (version + card text aligned)', () => {
+      expect(CLIENT_CONSENT_VERSION).toBe(serverConsent.CONSENT_VERSION);
+      expect(CLIENT_CARD_CONSENT_TEXT).toBe(serverConsent.CARD_CONSENT_TEXT);
+    });
   });
 
   it('uses "an" with the bare invoice fallback label (never "a invoice")', () => {

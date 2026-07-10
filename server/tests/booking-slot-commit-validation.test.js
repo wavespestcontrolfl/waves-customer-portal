@@ -19,6 +19,9 @@ const { _internals } = require('../routes/booking');
 const {
   bookingSlotWindow,
   resolveBookingDuration,
+  normalizeBookingServiceKey,
+  bookingOfferLocationKey,
+  BOOKING_FUNNEL_SERVICE_DURATIONS,
   validateBookingSlotGeometry,
   validateBookingSlotDate,
   generateConfirmationCode,
@@ -107,7 +110,44 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
 });
 
 describe('resolveBookingDuration — server-derived, never trusted raw', () => {
-  test('accepts the funnel catalog range (45–90) including string form', () => {
+  test('a recognized funnel service PINS its catalog duration — the client minutes are ignored', () => {
+    // The server-side mirror of the client SERVICES array is the authority.
+    expect(BOOKING_FUNNEL_SERVICE_DURATIONS).toEqual({
+      pest_control: 60,
+      lawn_care: 60,
+      mosquito: 45,
+      tree_shrub: 60,
+      termite: 90,
+      rodent: 60,
+      bora_care: 90,
+    });
+    for (const [key, minutes] of Object.entries(BOOKING_FUNNEL_SERVICE_DURATIONS)) {
+      // Whatever the caller asks for — in-range, out-of-range, garbage — the
+      // catalog wins for a known service.
+      for (const requested of [45, 60, 90, 15, 600, 'abc', null]) {
+        expect(resolveBookingDuration(requested, {}, key)).toBe(minutes);
+      }
+    }
+  });
+
+  test('normalizeBookingServiceKey maps catalog ids AND funnel display labels; unknown → empty', () => {
+    expect(normalizeBookingServiceKey('pest_control')).toBe('pest_control');
+    expect(normalizeBookingServiceKey('Pest Control')).toBe('pest_control');
+    expect(normalizeBookingServiceKey('  Mosquito Control ')).toBe('mosquito');
+    expect(normalizeBookingServiceKey('Termite Inspection')).toBe('termite');
+    expect(normalizeBookingServiceKey('German Roach Cleanout')).toBe('');
+    expect(normalizeBookingServiceKey('')).toBe('');
+    expect(normalizeBookingServiceKey(null)).toBe('');
+  });
+
+  test('bookingOfferLocationKey — public rounding grid, idempotent for exact vs rounded echoes', () => {
+    expect(bookingOfferLocationKey(27.336789, -82.530612)).toBe('27.34,-82.53');
+    expect(bookingOfferLocationKey(27.34, -82.53)).toBe('27.34,-82.53'); // re-rounding a rounded echo
+    expect(bookingOfferLocationKey(null, -82.53)).toBe('');
+    expect(bookingOfferLocationKey('junk', 'junk')).toBe('');
+  });
+
+  test('accepts the funnel catalog range (45–90) including string form (unknown service)', () => {
     expect(resolveBookingDuration(45, {})).toBe(45);
     expect(resolveBookingDuration(75, {})).toBe(75);
     expect(resolveBookingDuration(90, {})).toBe(90);
@@ -199,7 +239,7 @@ describe('createSelfBooking — DB-free forged-payload rejections', () => {
 describe('createSelfBooking commit-path wiring (source guards)', () => {
   test('geometry validation runs at commit with the server-resolved duration', () => {
     expect(src).toMatch(/const geometryError = validateBookingSlotGeometry\(\{\s*\n?\s*startMin: timeToMin\(slot_start\), duration, config,/);
-    expect(src).toMatch(/const duration = resolveBookingDuration\(duration_minutes, config\);/);
+    expect(src).toMatch(/const duration = resolveBookingDuration\(duration_minutes, config, serviceKey\);/);
   });
 
   test('end time is ALWAYS start + duration; a disagreeing client slot_end is rejected', () => {
@@ -231,11 +271,12 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(insertIdx).toBeGreaterThan(-1);
     for (const validation of [
       'const slotDateError = validateBookingSlotDate(slotDateStr, config);', // ET date bounds + calendar round-trip
-      'const duration = resolveBookingDuration(duration_minutes, config);', // server duration
+      'const duration = resolveBookingDuration(duration_minutes, config, serviceKey);', // server duration (catalog-pinned)
       'if (slot_end && timeToMin(slot_end) !== endMin)', // slot_end agreement
       'const geometryError = validateBookingSlotGeometry({', // grid/hours/lunch
-      'if (!verifySlotOfferField({', // signed-offer proof (audit round 2)
+      'if (!serviceKey || !verifySlotOfferField({', // signed-offer proof (rounds 2+3)
       "await db('technicians').where('id', techIdStr).first('id', 'active')", // real active tech
+      'let sourceEstimateId = null;', // accept-retry correlation validation
     ]) {
       const idx = src.indexOf(validation);
       expect(idx).toBeGreaterThan(-1);
@@ -252,20 +293,31 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(identityIdx).toBeLessThan(src.indexOf('const slotDateError = validateBookingSlotDate(slotDateStr, config);'));
   });
 
-  test('day-cap count is serialized under a DATE-scoped advisory lock (cross-zone)', () => {
+  test('day-cap count is serialized under the SHARED date-scoped advisory lock (cross-zone, cross-writer)', () => {
     // The customer/tech/zone locks don't cover two confirms in DIFFERENT
-    // zones — both could observe a cap-1 count. The cap is global by date,
-    // so the lock key must be the bare date, nothing else.
-    expect(src).toMatch(/\['self-booking-day-cap', slotDateStr\],/);
-    const lockIdx = src.indexOf("['self-booking-day-cap', slotDateStr],");
+    // zones — both could observe a cap-1 count. The cap is global by date, so
+    // both self_booked_appointments writers take the SAME shared lock+count
+    // primitives (services/availability.js) — a private copy in either file
+    // would let the other bypass it.
+    expect(src).toMatch(/const \{ acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay \} = require\('\.\.\/services\/availability'\);/);
+    const lockIdx = src.indexOf('await acquireSelfBookingDayCapLock(trx, slotDateStr);');
     const txIdx = src.indexOf('txResult = await db.transaction');
-    const capCountIdx = src.indexOf("const dayCountRow = await trx('self_booked_appointments')");
+    const capCountIdx = src.indexOf('const dayCount = await countActiveSelfBookingsForDay(trx, slotDateStr);');
     expect(txIdx).toBeGreaterThan(-1);
     expect(lockIdx).toBeGreaterThan(txIdx); // inside the transaction (xact-scoped)
     expect(lockIdx).toBeLessThan(capCountIdx); // taken before the count it serializes
-    // same pg_advisory_xact_lock(hashtext, hashtext) style as the other locks
-    const lockCall = src.slice(src.lastIndexOf('trx.raw', lockIdx), lockIdx);
-    expect(lockCall).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
+  });
+
+  test('lock acquisition order stays fixed — customer → tech → zone → day — so writers can never deadlock', () => {
+    const txIdx = src.indexOf('txResult = await db.transaction');
+    const customerLockIdx = src.indexOf("['self-booking-confirm', `${custId}:${slotDateStr}`],", txIdx);
+    const techLockIdx = src.indexOf("['slot-reserve', `${technician_id}:${slotDateStr}`],", txIdx);
+    const zoneLockIdx = src.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],", txIdx);
+    const dayLockIdx = src.indexOf('await acquireSelfBookingDayCapLock(trx, slotDateStr);', txIdx);
+    expect(customerLockIdx).toBeGreaterThan(txIdx);
+    expect(techLockIdx).toBeGreaterThan(customerLockIdx);
+    expect(zoneLockIdx).toBeGreaterThan(techLockIdx);
+    expect(dayLockIdx).toBeGreaterThan(zoneLockIdx);
   });
 
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
@@ -275,12 +327,65 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(replayIdx).toBeGreaterThan(-1);
     expect(capIdx).toBeGreaterThan(replayIdx);
     expect(conflictIdx).toBeGreaterThan(capIdx);
-    // same non-cancelled predicate the availability builder counts with
-    expect(src).toMatch(/const dayCountRow = await trx\('self_booked_appointments'\)\s*\n\s*\.where\('date', slotDateStr\)\s*\n\s*\.whereNot\('status', 'cancelled'\)/);
   });
 
   test('DAY_FULL rides the SLOT_TAKEN catch (409 + created-profile rollback)', () => {
     expect(src).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'DAY_FULL'/);
+  });
+
+  test('source_estimate_id: uuid-shape 400, existence-checked (FK), stamped on the scheduled_services insert', () => {
+    const blockIdx = src.indexOf('let sourceEstimateId = null;');
+    expect(blockIdx).toBeGreaterThan(-1);
+    const block = src.slice(blockIdx, blockIdx + 900);
+    // shape gate before any uuid cast could throw
+    expect(block).toMatch(/\^\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}\$/);
+    expect(block).toMatch(/status: 400/);
+    // existence check — the column FKs estimates; a stale link books UNLINKED
+    expect(block).toMatch(/await db\('estimates'\)\.where\('id', srcEstIdStr\)\.first\('id'\)/);
+    expect(block).toMatch(/proceeds unlinked/);
+    // …and the dispatch row actually carries it
+    expect(src).toMatch(/source_estimate_id: sourceEstimateId,/);
+    // never the raw payload value
+    expect(src).not.toMatch(/source_estimate_id: source_estimate_id/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Global day cap — availability.js's confirmBooking is the OTHER writer
+// ---------------------------------------------------------------------------
+
+describe('AvailabilityEngine.confirmBooking — shared global day cap (source guards)', () => {
+  const availSrc = fs.readFileSync(path.join(__dirname, '../services/availability.js'), 'utf8');
+
+  test('the shared helpers own the lock namespace + the global non-cancelled count', () => {
+    expect(availSrc).toMatch(/const SELF_BOOKING_DAY_CAP_LOCK_NS = 'self-booking-day-cap';/);
+    expect(availSrc).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
+    const countIdx = availSrc.indexOf('async function countActiveSelfBookingsForDay');
+    expect(countIdx).toBeGreaterThan(-1);
+    const countFn = availSrc.slice(countIdx, countIdx + 600);
+    expect(countFn).toMatch(/\.whereNot\('status', 'cancelled'\)/);
+    // GLOBAL by date — no zone scoping inside the shared count
+    expect(countFn).not.toMatch(/service_zone_id/);
+    // …and both primitives are exported for the route writer
+    expect(availSrc).toMatch(/module\.exports\.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;/);
+    expect(availSrc).toMatch(/module\.exports\.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;/);
+  });
+
+  test('confirmBooking takes the day lock AFTER its zone lock (fixed order) and counts globally before inserting', () => {
+    const zoneLockIdx = availSrc.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],");
+    const dayLockIdx = availSrc.indexOf('await acquireSelfBookingDayCapLock(trx, dateStr);');
+    const dayCountIdx = availSrc.indexOf('const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {');
+    const insertIdx = availSrc.indexOf("await trx('self_booked_appointments').insert({");
+    expect(zoneLockIdx).toBeGreaterThan(-1);
+    expect(dayLockIdx).toBeGreaterThan(zoneLockIdx); // zone → day, same relative order as createSelfBooking
+    expect(dayCountIdx).toBeGreaterThan(dayLockIdx); // count under the lock
+    expect(insertIdx).toBeGreaterThan(dayCountIdx); // checked before the write
+    // reschedules still exclude the row being moved
+    expect(availSrc).toMatch(/excludeSelfBookingId: options\.excludeSelfBookingId \|\| null,/);
+  });
+
+  test('the old PER-ZONE cap count is gone (it let cross-zone writers exceed the global cap)', () => {
+    expect(availSrc).not.toMatch(/const existingBookings = await trx\('self_booked_appointments'\)/);
   });
 });
 
@@ -289,29 +394,47 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
 // ---------------------------------------------------------------------------
 
 describe('signed slot offers on the /book surface (source guards)', () => {
-  test('the availability builder SIGNS every candidate over (date, start, tech, duration)', () => {
+  test('the availability builder SIGNS every candidate over (service, location, date, start, tech, duration)', () => {
     expect(src).toMatch(/slot_sig: mintSlotOfferField\(\{\s*\n\s*surface: 'booking',/);
+    const signIdx = src.indexOf("slot_sig: mintSlotOfferField({");
+    const sign = src.slice(signIdx, signIdx + 400);
+    expect(sign).toMatch(/serviceKey,/);
+    expect(sign).toMatch(/locationKey: offerLocationKey,/);
+    // …over the coords the slot computation actually ran on
+    expect(src).toMatch(/const offerLocationKey = bookingOfferLocationKey\(lat, lng\);/);
     // the day-bucket copies carry the sig through to the client
     expect(src).toMatch(/technician_id: slot\.technician_id,\s*\n\s*slot_sig: slot\.slot_sig,/);
   });
 
-  test('/availability and /find-slots clamp the duration BEFORE shaping/signing offers', () => {
-    // both routes + createSelfBooking = 3 call sites of the shared clamp;
-    // the old raw parseInt(duration_minutes) form is gone.
-    expect((src.match(/const duration = resolveBookingDuration\(duration_minutes, config\);/g) || []).length).toBe(3);
+  test('/availability and /find-slots derive service + duration BEFORE shaping/signing offers', () => {
+    // both routes + createSelfBooking = 3 call sites of the shared
+    // derivation; the old raw parseInt(duration_minutes) form is gone.
+    expect((src.match(/const duration = resolveBookingDuration\(duration_minutes, config, serviceKey\);/g) || []).length).toBe(3);
     expect(src).not.toMatch(/\? parseInt\(duration_minutes\)/);
+    // both public offer routes normalize the service key the same way
+    expect((src.match(/const serviceKey = normalizeBookingServiceKey\(service_type\);/g) || []).length).toBe(2);
+    // …and pass it into the builder that signs
+    expect((src.match(/^\s*serviceKey,$/gm) || []).length).toBeGreaterThanOrEqual(3); // 2 routes + sign payload
   });
 
-  test('createSelfBooking requires the signed offer and rejects with the plain-string 409', () => {
-    const gateIdx = src.indexOf('if (!verifySlotOfferField({');
+  test('createSelfBooking requires the signed offer — service + location bound — and rejects with the plain-string 409', () => {
+    const gateIdx = src.indexOf('if (!serviceKey || !verifySlotOfferField({');
     expect(gateIdx).toBeGreaterThan(-1);
-    const gate = src.slice(gateIdx, gateIdx + 600);
+    const gate = src.slice(gateIdx, gateIdx + 700);
     expect(gate).toMatch(/surface: 'booking'/);
+    expect(gate).toMatch(/serviceKey,/);
+    expect(gate).toMatch(/locationKey: offerLocationKey,/);
     expect(gate).toMatch(/date: slotDateStr/);
     expect(gate).toMatch(/startMinutes: timeToMin\(slot_start\)/);
     expect(gate).toMatch(/technicianId: technician_id \|\| null/);
     expect(gate).toMatch(/durationMinutes: duration/);
     expect(gate).toMatch(/status: 409/);
+  });
+
+  test("the confirm-side service scope prefers the catalog id and the location scope prefers the submitted coords (customer-record fallback)", () => {
+    expect(src).toMatch(/const serviceKey = normalizeBookingServiceKey\(service_id\)\s*\n\s*\|\| normalizeBookingServiceKey\(service_type\)\s*\n\s*\|\| normalizeBookingServiceKey\(quoted_service_label\);/);
+    expect(src).toMatch(/let offerLat = Number\(new_customer\?\.lat\);/);
+    expect(src).toMatch(/&& custId\) \{\s*\n\s*const coordRow = await db\('customers'\)\.where\('id', custId\)\.first\('latitude', 'longitude'\);/);
   });
 });
 

@@ -1,7 +1,7 @@
 import React from 'react';
 import { estimateCard } from './cardStyles';
 import { fmtMoney } from '../../lib/money';
-import { DEFAULT_CARD_SURCHARGE_RATE } from '../../lib/cardSurcharge';
+import { CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 import { W } from './tokens';
 
 /**
@@ -21,11 +21,23 @@ import { W } from './tokens';
 const ACTION_BG = W.blueDeeper;
 
 // Quantified card-fee disclosure for every point where the customer consents
-// to a card on file. Wording mirrors the canonical CARD_CONSENT_TEXT in
-// lib/paymentMethodConsentText.js, and the rate comes from the same constant
-// the charge path uses (lib/cardSurcharge.js) so the disclosed percentage
-// can't drift from what's actually charged.
-export const CARD_SURCHARGE_DISCLOSURE = `A credit card surcharge of up to ${+(DEFAULT_CARD_SURCHARGE_RATE * 100).toFixed(2)}% may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`;
+// to a card on file. The "up to X%" phrase is extracted VERBATIM from the
+// canonical, versioned consent copy (lib/paymentMethodConsentText.js — the
+// client mirror of server/services/payment-method-consent-text.js, which is
+// version-locked to the server surcharge policy in
+// server/services/stripe-pricing.js / computeChargeAmount). Never hardcode a
+// percentage here and never derive one from a second client-side rate
+// constant (lib/cardSurcharge.js is charge-preview MATH, not disclosure
+// copy): AGENTS.md classifies a disclosure figure drifting from the server
+// policy as a P0. When the rate changes, the consent module bumps its
+// version and this copy follows automatically.
+const SURCHARGE_RATE_PHRASE = (CARD_CONSENT_TEXT.match(/up to \d+(?:\.\d+)?%/) || [])[0];
+export const CARD_SURCHARGE_DISCLOSURE = SURCHARGE_RATE_PHRASE
+  ? `A credit card surcharge of ${SURCHARGE_RATE_PHRASE} may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`
+  // Fail-safe: if the consent copy is ever reworded so the phrase can't be
+  // extracted, disclose unquantified rather than a possibly-stale number.
+  // (The unit test asserts extraction works, so CI catches the rewording.)
+  : 'A credit card surcharge may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.';
 
 
 function billingIntervalMonths(frequency = {}) {

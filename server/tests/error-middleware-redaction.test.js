@@ -4,10 +4,17 @@
  * a customer's phone/email/address/name/SMS body in the logs raw. The old
  * key-based denylist missed keys like `to`/`body`/`message`/`fromNumber`
  * (admin-communications passes { to, body, ... } to next(err)), so the
- * redactor is now shape-only: every key survives, every string/number value
- * is replaced by a type:length marker — no free text can leak through ANY
- * key, known or unknown. Booleans and null/undefined pass through as
- * debugging signal.
+ * redactor is shape-only: every string/number VALUE is replaced by a
+ * type:length marker — no free text can leak through ANY key, known or
+ * unknown. Booleans and null/undefined pass through as debugging signal.
+ *
+ * Keys are content too: { "jane@example.com": true } would still write an
+ * email into the logs with only values masked. So only allowlisted structural
+ * key NAMES (ids, enum discriminators, dates, pagination, booking-flow
+ * containers) survive verbatim; every other key becomes a
+ * '[key:string:<len>:<hash8>]' marker (short one-way sha256 prefix keeps
+ * shapes correlatable and distinct keys from colliding without exposing the
+ * key text).
  */
 jest.mock('../services/logger', () => ({
   error: jest.fn(),
@@ -15,11 +22,17 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
 }));
 
+const crypto = require('crypto');
 const logger = require('../services/logger');
 const { errorHandler, redactSensitiveBody } = require('../middleware/errors');
 
+// Mirrors redactKey in middleware/errors.js — expected marker for a
+// non-allowlisted key.
+const keyMarker = (k) =>
+  `[key:string:${k.length}:${crypto.createHash('sha256').update(k).digest('hex').slice(0, 8)}]`;
+
 describe('redactSensitiveBody', () => {
-  test('masks classic PII keys as type:length markers, keeps keys', () => {
+  test('masks classic PII values as type:length markers; non-structural keys become key markers', () => {
     const body = {
       phone: '941-555-1234',
       email: 'jane@example.com',
@@ -31,15 +44,56 @@ describe('redactSensitiveBody', () => {
       ssn: '123-45-6789',
     };
     const out = redactSensitiveBody(body);
-    expect(Object.keys(out).sort()).toEqual(Object.keys(body).sort());
-    for (const key of Object.keys(body)) {
-      expect(out[key]).toBe(`[string:${body[key].length}]`);
+    expect(Object.keys(out)).toHaveLength(Object.keys(body).length);
+    for (const [key, val] of Object.entries(body)) {
+      expect(out[keyMarker(key)]).toBe(`[string:${val.length}]`);
+    }
+    // no raw key name or value survives anywhere in the redacted payload
+    const flat = JSON.stringify(out);
+    for (const [key, val] of Object.entries(body)) {
+      expect(flat).not.toContain(`"${key}"`);
+      expect(flat).not.toContain(val);
     }
     // input untouched (the handler must not mutate req.body)
     expect(body.phone).toBe('941-555-1234');
   });
 
-  test('masks the admin-SMS keys the denylist missed: to/body/message/fromNumber', () => {
+  test('PII-looking KEYS never reach the logs: {"jane@example.com": true}', () => {
+    const out = redactSensitiveBody({
+      'jane@example.com': true,
+      '941-555-1234': 'call me',
+    });
+    const flat = JSON.stringify(out);
+    expect(flat).not.toContain('jane@example.com');
+    expect(flat).not.toContain('941-555-1234');
+    const keys = Object.keys(out);
+    expect(keys).toHaveLength(2); // distinct hashes — no marker collision
+    for (const k of keys) expect(k).toMatch(/^\[key:string:\d+:[0-9a-f]{8}\]$/);
+    // boolean value survives as shape signal; string value is masked
+    expect(out[keyMarker('jane@example.com')]).toBe(true);
+    expect(out[keyMarker('941-555-1234')]).toBe('[string:7]');
+  });
+
+  test('allowlisted structural keys pass through verbatim (values still masked)', () => {
+    const out = redactSensitiveBody({
+      estimate_id: 'abc123',
+      slotId: 42,
+      status: 'pending',
+      scheduled_for: '2026-07-11T09:00',
+      page: 2,
+      source: 'book_page',
+    });
+    expect(Object.keys(out).sort()).toEqual(
+      ['estimate_id', 'page', 'scheduled_for', 'slotId', 'source', 'status'].sort(),
+    );
+    expect(out.estimate_id).toBe('[string:6]');
+    expect(out.slotId).toBe('[number:2]');
+    expect(out.status).toBe('[string:7]');
+    expect(out.scheduled_for).toBe('[string:16]');
+    expect(out.page).toBe('[number:1]');
+  });
+
+  test('masks the admin-SMS payload the denylist missed: to/body/message/fromNumber', () => {
     const body = {
       to: '+19415551234',
       body: 'Hi Jane, your quarterly pest visit is confirmed for Friday.',
@@ -48,10 +102,10 @@ describe('redactSensitiveBody', () => {
     };
     const out = redactSensitiveBody(body);
     expect(out).toEqual({
-      to: '[string:12]',
-      body: `[string:${body.body.length}]`,
-      message: `[string:${body.message.length}]`,
-      fromNumber: '[string:12]',
+      [keyMarker('to')]: '[string:12]',
+      [keyMarker('body')]: `[string:${body.body.length}]`,
+      [keyMarker('message')]: `[string:${body.message.length}]`,
+      [keyMarker('fromNumber')]: '[string:12]',
     });
     // no raw value survives anywhere in the redacted payload
     const flat = JSON.stringify(out);
@@ -64,14 +118,12 @@ describe('redactSensitiveBody', () => {
       digits: 9415551234,
       big: 10n,
       payAtVisit: true,
-      flag: false,
     });
-    expect(out.some_future_key).toBe('[string:31]');
-    expect(out.digits).toBe('[number:10]');
-    expect(out.big).toBe('[bigint:2]');
+    expect(out[keyMarker('some_future_key')]).toBe('[string:31]');
+    expect(out[keyMarker('digits')]).toBe('[number:10]');
+    expect(out[keyMarker('big')]).toBe('[bigint:2]');
     // booleans carry no PII and stay useful for debugging
-    expect(out.payAtVisit).toBe(true);
-    expect(out.flag).toBe(false);
+    expect(out[keyMarker('payAtVisit')]).toBe(true);
   });
 
   test('recurses into nested objects and arrays (the /confirm new_customer shape)', () => {
@@ -83,19 +135,20 @@ describe('redactSensitiveBody', () => {
       },
       items: [{ email: 'a@b.com', qty: 2 }],
     });
+    // container keys are structural and survive; inner PII keys do not
     expect(out.new_customer).toEqual({
-      first_name: '[string:4]',
-      phone: '[string:10]',
-      city: '[string:8]',
+      [keyMarker('first_name')]: '[string:4]',
+      [keyMarker('phone')]: '[string:10]',
+      [keyMarker('city')]: '[string:8]',
     });
-    expect(out.items[0]).toEqual({ email: '[string:7]', qty: '[number:1]' });
+    expect(out.items[0]).toEqual({ [keyMarker('email')]: '[string:7]', qty: '[number:1]' });
   });
 
   test('null/undefined values stay as-is (shape signal preserved)', () => {
-    const out = redactSensitiveBody({ phone: null, email: undefined, ok: true });
-    expect(out.phone).toBeNull();
-    expect(out.email).toBeUndefined();
-    expect(out.ok).toBe(true);
+    const out = redactSensitiveBody({ status: null, date: undefined, ok: true });
+    expect(out.status).toBeNull();
+    expect(out.date).toBeUndefined();
+    expect(out[keyMarker('ok')]).toBe(true);
   });
 
   test('non-object bodies and edge cases are safe', () => {
@@ -103,9 +156,9 @@ describe('redactSensitiveBody', () => {
     expect(redactSensitiveBody(null)).toBeNull();
     // a raw string body is free text too — masked, not passed through
     expect(redactSensitiveBody('raw string body')).toBe('[string:15]');
-    const cyclic = { a: 1 };
+    const cyclic = { id: 1 };
     cyclic.self = cyclic;
-    expect(redactSensitiveBody(cyclic).self).toBe('[Circular]');
+    expect(redactSensitiveBody(cyclic)[keyMarker('self')]).toBe('[Circular]');
   });
 });
 
@@ -119,7 +172,7 @@ describe('errorHandler', () => {
 
   beforeEach(() => jest.clearAllMocks());
 
-  test('logs a shape-only body — no raw free-text value reaches the logger', () => {
+  test('logs a shape-only body — no raw value OR non-structural key reaches the logger', () => {
     const req = {
       method: 'POST',
       path: '/api/admin/communications/schedule-sms',
@@ -128,6 +181,7 @@ describe('errorHandler', () => {
         body: 'Hi Jane, see you Friday at 9.',
         fromNumber: '+19412030220',
         scheduledFor: '2026-07-11T09:00',
+        'jane@example.com': true,
       },
     };
     const err = new Error('boom');
@@ -138,14 +192,19 @@ describe('errorHandler', () => {
     expect(msg).toBe('POST /api/admin/communications/schedule-sms: boom');
     expect(meta.stack).toBe(err.stack);
     expect(meta.body).toEqual({
-      to: '[string:12]',
-      body: '[string:29]',
-      fromNumber: '[string:12]',
-      scheduledFor: '[string:16]',
+      [keyMarker('to')]: '[string:12]',
+      [keyMarker('body')]: '[string:29]',
+      [keyMarker('fromNumber')]: '[string:12]',
+      scheduledFor: '[string:16]', // allowlisted structural key survives
+      [keyMarker('jane@example.com')]: true,
     });
-    // nothing the customer typed or any phone number survives in the log call
+    // nothing the customer typed, no phone number, and no PII-bearing key
+    // survives in the log call
     const flat = JSON.stringify(meta.body);
-    for (const val of Object.values(req.body)) expect(flat).not.toContain(val);
+    for (const val of Object.values(req.body)) {
+      if (typeof val === 'string') expect(flat).not.toContain(val);
+    }
+    expect(flat).not.toContain('jane@example.com');
     // and req.body itself was not mutated
     expect(req.body.to).toBe('+19415551234');
   });

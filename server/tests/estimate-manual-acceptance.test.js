@@ -170,6 +170,7 @@ describe('estimate manual acceptance', () => {
       skipAutoSchedule: true,
       skipSetupInvoice: true,
       skipMembershipEmail: true,
+      deferCommercialScheduleNotification: true,
     });
     expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(membershipEmail);
     expect(inserts).toEqual([
@@ -245,6 +246,7 @@ describe('estimate manual acceptance', () => {
       skipAutoSchedule: true,
       skipSetupInvoice: false,
       skipMembershipEmail: true,
+      deferCommercialScheduleNotification: true,
       autoSendInvoice: false,
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,

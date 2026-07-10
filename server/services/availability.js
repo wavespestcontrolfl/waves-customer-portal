@@ -14,6 +14,43 @@ function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
 }
 
+// ---- global self-booking day cap (shared by EVERY writer) -----------------
+//
+// max_self_books_per_day is GLOBAL by calendar date, but the writers'
+// narrower locks (customer/tech/zone) don't serialize two confirms in
+// DIFFERENT zones — both could observe a cap-1 count and insert, exceeding
+// the cap. These two primitives centralize the fix: one date-scoped advisory
+// lock + one global count, required by BOTH self_booked_appointments writers
+// (routes/booking.js createSelfBooking and confirmBooking below) so neither
+// can bypass the other. Lock-ordering contract: every writer takes its
+// narrower locks FIRST (createSelfBooking: customer → tech → zone;
+// confirmBooking: zone) and this date lock LAST — same relative order
+// everywhere, so concurrent confirms can never deadlock.
+const SELF_BOOKING_DAY_CAP_LOCK_NS = 'self-booking-day-cap';
+
+async function acquireSelfBookingDayCapLock(trx, dateStr) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [SELF_BOOKING_DAY_CAP_LOCK_NS, String(dateStr)],
+  );
+}
+
+// Same non-cancelled predicate the availability builder counts full days
+// with. excludeSelfBookingId: a same-day reschedule replaces its own row —
+// counting the row being moved would reject the move on a full day even
+// though the final count is unchanged.
+async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingId = null } = {}) {
+  const row = await trx('self_booked_appointments')
+    .where('date', String(dateStr))
+    .whereNot('status', 'cancelled')
+    .modify((q) => {
+      if (excludeSelfBookingId) q.whereNot('id', excludeSelfBookingId);
+    })
+    .count('* as count')
+    .first();
+  return parseInt(row?.count || 0, 10);
+}
+
 class AvailabilityEngine {
 
   async getAvailableSlots(city, estimateId) {
@@ -232,23 +269,23 @@ class AvailabilityEngine {
         ['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],
       );
 
-      if (zone) {
-        const existingBookings = await trx('self_booked_appointments')
-          .where('service_zone_id', zone.id)
-          .where('date', dateStr)
-          .whereNot('status', 'cancelled')
-          // A same-day reschedule replaces its own booking — counting the
-          // row being moved against the daily cap would reject the move
-          // on a full day even though the final count is unchanged.
-          .modify((q) => {
-            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
-          })
-          .count('* as count')
-          .first();
-        if (parseInt(existingBookings.count) >= maxPerDay) {
-          throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
-        }
+      // Global day cap — the shared lock + count every
+      // self_booked_appointments writer takes (see the helpers above). The
+      // zone lock only serializes same-zone writers; the cap is global by
+      // date, so a per-zone count here let cross-zone confirms (this engine
+      // vs the public /book confirm) exceed max_self_books_per_day. Lock
+      // order stays fixed — zone THEN day, the same relative order as
+      // createSelfBooking's customer → tech → zone → day — so concurrent
+      // confirms across both writers can never deadlock.
+      await acquireSelfBookingDayCapLock(trx, dateStr);
+      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
+        excludeSelfBookingId: options.excludeSelfBookingId || null,
+      });
+      if (dayCount >= maxPerDay) {
+        throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+      }
 
+      if (zone) {
         // Mirror getAvailableSlots' occupied set: zone services + live
         // self-bookings. Any overlap means the slot was taken since the
         // customer loaded the picker.
@@ -402,3 +439,7 @@ class AvailabilityEngine {
 }
 
 module.exports = new AvailabilityEngine();
+// Shared global day-cap primitives — required by routes/booking.js's
+// createSelfBooking (lazily, so the route ↔ service load order can't cycle).
+module.exports.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;
+module.exports.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;
