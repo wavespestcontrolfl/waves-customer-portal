@@ -1,6 +1,9 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/audit-log', () => ({
+  auditNotificationTemplateIssue: jest.fn(async () => undefined),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -399,5 +402,37 @@ describe('admin SMS template routes', () => {
       expect(auditQuery.limit).toHaveBeenCalledWith(5);
       expect(auditQuery.select).toHaveBeenCalledWith('id', 'metadata', 'created_at');
     });
+  });
+});
+
+describe('getTemplate inactive-row behavior', () => {
+  const { auditNotificationTemplateIssue: auditSpy } = require('../services/audit-log');
+
+  beforeEach(() => auditSpy.mockClear());
+
+  test('inactive row skips SILENTLY — the pause switch is not a render defect', async () => {
+    // The follow-up cron polls disabled stages every tick; auditing here
+    // would flood the issues feed with deliberate kill-switch events.
+    db.schema = { hasTable: jest.fn(async () => true) };
+    setDbQueues({
+      sms_templates: [chain({ first: { template_key: 'estimate_followup_questions', is_active: false, body: 'x' } })],
+    });
+
+    const body = await smsTemplatesRouter.getTemplate('estimate_followup_questions', {}, {});
+
+    expect(body).toBe(null);
+    expect(auditSpy).not.toHaveBeenCalled();
+  });
+
+  test('missing row still audits (a real defect)', async () => {
+    db.schema = { hasTable: jest.fn(async () => true) };
+    setDbQueues({
+      sms_templates: [chain({ first: undefined })],
+    });
+
+    const body = await smsTemplatesRouter.getTemplate('estimate_followup_questions', {}, {});
+
+    expect(body).toBe(null);
+    expect(auditSpy).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'missing_template' }));
   });
 });

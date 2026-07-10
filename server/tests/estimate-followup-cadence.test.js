@@ -69,7 +69,7 @@ const updates = [];
 function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
-    'join', 'whereIn', 'whereNotNull', 'where', 'select', 'groupBy', 'max',
+    'join', 'whereIn', 'whereNotIn', 'whereNotNull', 'where', 'select', 'groupBy', 'max',
     'as', 'orderBy', 'orWhereNull', 'andWhere', 'whereNull', 'orWhere',
     'whereNotExists',
   ]) {
@@ -371,6 +371,19 @@ describe('live-customer contact fallback (Codex P1: ID-less estimates)', () => {
 
     expect(sent).toBe(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('booked-but-not-restaged: contact match stuck at new_lead with a live booking → skipped', async () => {
+    enqueue('estimates', { rows: [baseEstimate({ customer_id: null })] });
+    enqueue('customers', { first: undefined }); // no live-STAGE contact match
+    enqueue('customers', { rows: [{ id: 'cust-booked-lead' }] }); // any-stage contact rows
+    enqueue('scheduled_services', { first: { id: 'ss-live' } }); // booking since the estimate
+
+    const sent = await _private.checkQuestionsTouch(NOW);
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
   });
 
   test('no customer_id and no phone/email at all → not treated as live', async () => {

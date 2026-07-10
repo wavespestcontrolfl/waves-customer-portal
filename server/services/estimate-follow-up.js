@@ -34,7 +34,10 @@ const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
-const { customerConvertedSince } = require("./estimate-conversion-guard");
+const {
+  customerConvertedSince,
+  NON_LIVE_APPOINTMENT_STATUSES,
+} = require("./estimate-conversion-guard");
 
 // ── Cadence windows ──────────────────────────────────────────────────────
 // With the 10-day default expiry the ladder lands roughly day 2-3 / day 5-6
@@ -168,7 +171,35 @@ async function isLiveCustomer(est) {
         if (email) this.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [email]);
       })
       .first("id");
-    return !!contactMatch;
+    if (contactMatch) return true;
+    // Booked-but-not-restaged rows: a phone booking can leave the matched
+    // customer at new_lead (customer-stages.js documents booked lead rows
+    // stuck there), which the stage filter above misses — and
+    // customerConvertedSince can't reach them without a customer_id.
+    // Appointment evidence on ANY contact-matched live row since the
+    // estimate went out = converted (same booking rule as the conversion
+    // guard: non-terminal rows created since est.created_at).
+    const contactRows = await db("customers")
+      .where("active", true)
+      .whereNull("deleted_at")
+      .andWhere(function () {
+        if (phone) {
+          this.orWhereRaw(
+            "RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?",
+            [phone],
+          );
+        }
+        if (email) this.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [email]);
+      })
+      .select("id");
+    const contactIds = contactRows.map((r) => r.id);
+    if (!contactIds.length) return false;
+    const booked = await db("scheduled_services")
+      .whereIn("customer_id", contactIds)
+      .whereNotIn("status", NON_LIVE_APPOINTMENT_STATUSES)
+      .where("created_at", ">=", new Date(est.created_at || 0))
+      .first("id");
+    return !!booked;
   } catch (e) {
     // Fail CLOSED: a skipped touch retries next tick (the claim is never
     // burned on a skip); texting a paying customer can't be taken back.

@@ -41,10 +41,15 @@ describe('sms template default seed vs retired keys', () => {
     expect([..._private.RETIRED_SEED_KEYS].sort()).toEqual([...RETIRED_KEYS].sort());
   });
 
-  test('no coarse estimate_followup kill-switch mapping — stages use their own keys', () => {
-    expect(_private.MSG_TYPE_TO_TEMPLATE).not.toHaveProperty('estimate_followup');
-    // The per-stage message types ARE template keys, resolved by the
-    // isTemplateActive fallback — none of them may be re-mapped elsewhere.
+  test('legacy estimate_followup maps to a REAL template; stages keep their own keys', () => {
+    // Round-1 removed the coarse mapping so cron stages gate on their own
+    // per-stage keys — that stands (the per-stage message types ARE template
+    // keys, resolved by the isTemplateActive fallback; none may be re-mapped).
+    // But manual/IB sends still emit the legacy 'estimate_followup' type, and
+    // isTemplateActive treats an unmapped MISSING row as active — so the
+    // legacy type must map to a real row or the kill switch stops gating
+    // those sends (PR-bot round on fecd185eb).
+    expect(_private.MSG_TYPE_TO_TEMPLATE.estimate_followup).toBe('estimate_followup_questions');
     for (const t of NEW_TEMPLATES) {
       expect(_private.MSG_TYPE_TO_TEMPLATE).not.toHaveProperty(t.template_key);
     }

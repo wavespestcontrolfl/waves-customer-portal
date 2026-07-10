@@ -113,6 +113,20 @@ const RETIRED_TEMPLATES = [
     trigger_event_key: 'estimate.followup_final',
     sort_order: 28,
   },
+  // estimate_followup_expiring predates this migration, and up() rewrote it
+  // to require {service_hook} — a variable the OLD cron (restored by the
+  // schema down()) never passes. getTemplate fails closed on unresolved
+  // placeholders, so down() must restore the old-compatible body or expiring
+  // SMS silently stop after a rollback.
+  {
+    template_key: 'estimate_followup_expiring',
+    name: 'Estimate Follow-Up — Expiring (hardcoded)',
+    category: 'estimates',
+    body: "Hello {first_name}! Heads up: your Waves estimate expires on {expires_at}. {estimate_url}\n\nReply here if you'd like to move forward.",
+    variables: ['first_name', 'estimate_url', 'expires_at'],
+    trigger_event_key: 'estimate.expiring_soon',
+    sort_order: 29,
+  },
 ];
 
 async function upsertTemplates(knex, templates) {
@@ -167,9 +181,11 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
   await removeTemplates(knex, NEW_TEMPLATES.map((t) => t.template_key)
     .filter((k) => k !== 'estimate_followup_expiring'));
+  // estimate_followup_expiring is KEPT (the old cron uses it) but restored to
+  // its old-compatible body via RETIRED_TEMPLATES — the new body requires
+  // {service_hook}, which the old cron never passes and getTemplate fails
+  // closed on.
   await upsertTemplates(knex, RETIRED_TEMPLATES);
-  // estimate_followup_expiring predates this migration — down() keeps the row
-  // (the old cron uses it) with the new copy; copy rollback isn't meaningful.
 };
 
 exports.NEW_TEMPLATES = NEW_TEMPLATES;

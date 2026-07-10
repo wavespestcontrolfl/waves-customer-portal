@@ -739,6 +739,39 @@ describe('cadenceStageDueSoon', () => {
     });
     expect(cadenceStageDueSoon(est, NOW)).toBe(false);
   });
+
+  test('check-in NOT due while the 48h touch-1 gap holds — click skips, not dismissed', () => {
+    const est = makeEstimate({
+      sent_at: new Date(NOW.getTime() - 6 * 24 * H),
+      followup_credit_sent_at: null,
+      // Touch 1 landed late, 12h ago: checkCheckInTouch waits 48h after it,
+      // so earliest fire = NOW+36h — outside the 24h lookahead.
+      followup_questions_sent_at: new Date(NOW.getTime() - 12 * H),
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(false);
+  });
+
+  test('check-in due once the touch-1 gap clears inside the lookahead', () => {
+    const est = makeEstimate({
+      sent_at: new Date(NOW.getTime() - 6 * 24 * H),
+      followup_credit_sent_at: null,
+      // Gap clears at NOW+18h — inside the 24h lookahead.
+      followup_questions_sent_at: new Date(NOW.getTime() - 30 * H),
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(true);
+  });
+
+  test('spacing floor past the window end = empty window → not due', () => {
+    const est = makeEstimate({
+      status: 'sent', viewed_at: null,
+      // Questions window closes at NOW+1h, but 24h spacing off a touch 1h
+      // ago floors the earliest fire at NOW+23h — nothing can send.
+      sent_at: new Date(NOW.getTime() - 119 * H),
+      followup_questions_sent_at: null,
+      last_follow_up_at: new Date(NOW.getTime() - 1 * H),
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(false);
+  });
 });
 
 describe('expireStaleActions', () => {

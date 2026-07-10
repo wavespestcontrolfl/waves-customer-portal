@@ -162,7 +162,10 @@ function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
   if (!['sent', 'viewed'].includes(est.status)) return false;
   const H = 3600000;
   const nowMs = now.getTime();
-  const overlapsSoon = (startMs, endMs) => startMs <= nowMs + soonHours * H && endMs >= nowMs;
+  // startMs > endMs = an EMPTY effective window (a spacing/gap floor pushed
+  // past the window close) — never "due".
+  const overlapsSoon = (startMs, endMs) => startMs <= endMs
+    && startMs <= nowMs + soonHours * H && endMs >= nowMs;
   const unclaimed = (col) => est[col] == null;
   const ts = (v) => {
     if (!v) return null;
@@ -171,17 +174,30 @@ function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
   };
   const sentAt = ts(est.sent_at);
   const expiresAt = ts(est.expires_at);
+  const questionsAt = ts(est.followup_questions_sent_at);
+  const lastTouchAt = ts(est.last_follow_up_at);
+  // Touches 1 and 2 also honor withTouchSpacing (24h since last_follow_up_at,
+  // TOUCH_SPACING_HOURS), and the check-in additionally waits 48h after touch
+  // 1 (CHECKIN_QUESTIONS_GAP_HOURS). Without these floors the mirror reads
+  // "due" for clicks the cadence can't actually touch inside the lookahead —
+  // and the click gets dismissed instead of skipped/retried.
+  const spacingFloor = lastTouchAt == null ? -Infinity : lastTouchAt + 24 * H;
 
   // 1. Questions opener: sent 48h–5d ago (QUESTIONS_WINDOW). Anchored on
   //    sent_at whether or not the estimate was viewed — only the copy varies.
   if (sentAt && unclaimed('followup_questions_sent_at')
-      && overlapsSoon(sentAt + 48 * H, sentAt + 120 * H)) return true;
+      && overlapsSoon(Math.max(sentAt + 48 * H, spacingFloor), sentAt + 120 * H)) return true;
   // 2. Day-5 check-in: sent 5–8d ago (CHECKIN_WINDOW); yields when expiry is
   //    inside 48h (CHECKIN_EXPIRY_YIELD_HOURS — the last-day notice owns
-  //    short-fuse estimates).
+  //    short-fuse estimates); waits out the touch-1 gap and normal spacing.
+  const checkinFloor = Math.max(
+    sentAt + 5 * 24 * H,
+    questionsAt == null ? -Infinity : questionsAt + 48 * H,
+    spacingFloor,
+  );
   if (sentAt && unclaimed('followup_credit_sent_at')
       && expiresAt && expiresAt > nowMs + 48 * H
-      && overlapsSoon(sentAt + 5 * 24 * H, sentAt + 8 * 24 * H)) return true;
+      && overlapsSoon(checkinFloor, sentAt + 8 * 24 * H)) return true;
   // 3. Last-day notice: expires within 30h (EXPIRING_HORIZON_HOURS).
   if (expiresAt && unclaimed('followup_expiring_sent_at')
       && overlapsSoon(expiresAt - 30 * H, expiresAt)) return true;

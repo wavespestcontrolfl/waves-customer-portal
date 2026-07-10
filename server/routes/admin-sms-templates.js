@@ -333,6 +333,13 @@ const MSG_TYPE_TO_TEMPLATE = {
   estimate_sent: 'estimate_sent',
   estimate_accepted_onetime: 'estimate_accepted_onetime',
   estimate_auto_renewed: 'estimate_auto_renewed',
+  // Legacy manual/IB sends still emit message_type 'estimate_followup'
+  // (comms-tools preserves the original type), and isTemplateActive treats a
+  // MISSING row as active — so the coarse key must map to a real template or
+  // disabling follow-ups no longer gates those sends. Cron touches are
+  // unaffected: each passes its own rendered per-stage template key as
+  // original_message_type, so this mapping only gates the legacy type.
+  estimate_followup: 'estimate_followup_questions',
   reactivation: 'seasonal_reactivation',
 };
 
@@ -359,10 +366,11 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
       auditSmsTemplateIssue(templateKey, 'missing_template', 'template row missing', context);
       return null;
     }
-    if (t.is_active === false) {
-      auditSmsTemplateIssue(templateKey, 'inactive_template', 'template inactive', context);
-      return null;
-    }
+    // An inactive row is the operator's pause switch, not a defect — skip
+    // silently (the follow-up cron polls disabled stages every tick, so
+    // auditing here would flood the template-issues feed with deliberate
+    // kill-switch events and bury real missing/unresolved problems).
+    if (t.is_active === false) return null;
     const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
     let body = variant?.body || t.body;
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {

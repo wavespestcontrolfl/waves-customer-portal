@@ -243,6 +243,28 @@ describe('estimate_followup_cadence_templates migration', () => {
     expect(knex).not.toHaveBeenCalled();
   });
 
+  test('down() restores an OLD-compatible expiring body — no {service_hook}', async () => {
+    // up() rewrote estimate_followup_expiring to require {service_hook},
+    // which the old cron (restored by the schema down()) never passes;
+    // getTemplate fails closed on unresolved placeholders, so a rollback
+    // that kept the new copy would silently stop expiring SMS.
+    const { knex, ops } = makeTemplateKnex({
+      existingKeys: ['estimate_followup_expiring'], // down() keeps the row
+    });
+
+    await templateMigration.down(knex);
+
+    // The row is NOT in the delete set…
+    const deletedKeys = ops.deletes.flatMap((op) => op.criteria.template_key);
+    expect(deletedKeys).not.toContain('estimate_followup_expiring');
+    // …and it is rewritten to the old-variable body.
+    const expiring = ops.upserts.find((op) => op.key === 'estimate_followup_expiring');
+    expect(expiring).toBeTruthy();
+    expect(expiring.row.body).not.toContain('{service_hook}');
+    expect(JSON.parse(expiring.row.variables).sort())
+      .toEqual(['estimate_url', 'expires_at', 'first_name']);
+  });
+
   test('all bodies stay GSM-7 friendly: no em-dashes or curly quotes', async () => {
     for (const t of templateMigration.NEW_TEMPLATES) {
       expect(t.body).not.toMatch(/[—–’‘“”]/);
