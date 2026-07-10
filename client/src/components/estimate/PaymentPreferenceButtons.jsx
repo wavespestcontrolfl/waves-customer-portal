@@ -1,6 +1,7 @@
 import React from 'react';
 import { estimateCard } from './cardStyles';
 import { fmtMoney } from '../../lib/money';
+import { DEFAULT_CARD_SURCHARGE_RATE } from '../../lib/cardSurcharge';
 import { W } from './tokens';
 
 /**
@@ -18,6 +19,13 @@ import { W } from './tokens';
  */
 
 const ACTION_BG = W.blueDeeper;
+
+// Quantified card-fee disclosure for every point where the customer consents
+// to a card on file. Wording mirrors the canonical CARD_CONSENT_TEXT in
+// lib/paymentMethodConsentText.js, and the rate comes from the same constant
+// the charge path uses (lib/cardSurcharge.js) so the disclosed percentage
+// can't drift from what's actually charged.
+export const CARD_SURCHARGE_DISCLOSURE = `A credit card surcharge of up to ${+(DEFAULT_CARD_SURCHARGE_RATE * 100).toFixed(2)}% may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`;
 
 
 function billingIntervalMonths(frequency = {}) {
@@ -140,10 +148,13 @@ export default function PaymentPreferenceButtons({
       : hasFirstVisitInvoice
         ? 'first application invoice'
         : 'invoice';
+  // 'a setup invoice' but 'an invoice' — the bare fallback label starts with
+  // a vowel, so pick the article from the label instead of hardcoding 'a'.
+  const payPerApplicationInvoiceArticle = /^[aeiou]/i.test(payPerApplicationInvoiceLabel) ? 'an' : 'a';
 
   const payPerApplicationLabel = isOneTime ? 'Book visit' : 'Pay per application';
   const fineprint = offerPrepay
-    ? `Choose pay per application with a ${payPerApplicationInvoiceLabel} after confirmation, or annual prepay to approve the 12-month plan up front with setup included.`
+    ? `Choose pay per application with ${payPerApplicationInvoiceArticle} ${payPerApplicationInvoiceLabel} after confirmation, or annual prepay to approve the 12-month plan up front with setup included.`
     : invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
@@ -215,7 +226,7 @@ export default function PaymentPreferenceButtons({
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
           {holdRequired
-            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
             : fineprint}
         </div>
       </div>

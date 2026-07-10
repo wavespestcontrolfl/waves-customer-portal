@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -713,6 +713,40 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     );
     expect(screen.getByText('Invoice due now')).toBeInTheDocument();
     expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
+  });
+});
+
+describe('SuccessCard — already-accepted retry', () => {
+  it('does not promise a confirmation text when the accept was a retry of an already-accepted estimate', () => {
+    // Server returns the full success payload with alreadyAccepted: true; with
+    // no nextStep resolving, the generic card must not promise a text that
+    // may never re-send.
+    render(<SuccessCard acceptResult={{ success: true, alreadyAccepted: true }} />);
+
+    expect(screen.getByText(/already accepted — you're all set/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check your phone for the confirmation text/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the confirmation-text copy for a fresh accept', () => {
+    render(<SuccessCard acceptResult={{ success: true }} />);
+
+    expect(screen.getByText(/Check your phone for the confirmation text/)).toBeInTheDocument();
+  });
+
+  it('routes an already-accepted retry to its nextStep card when one resolves', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true,
+          alreadyAccepted: true,
+          nextStep: 'pay_invoice',
+          invoicePayUrl: 'https://pay.example/inv',
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Payment is optional right now/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Pay now and save card/ })).toHaveAttribute('href', 'https://pay.example/inv');
   });
 });
 

@@ -57,7 +57,16 @@ const SERVICE_LABELS = {
 };
 
 const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
+// Working-day start for customer-facing slots — mirrors DAY_START_HOUR (8:00)
+// in scheduling/find-time.js, which generates every route-derived offer.
+// Keep the two in sync.
+const SLOT_DAY_START_MINUTES = 8 * 60;
 const SLOT_DAY_END_MINUTES = 17 * 60;
+// Furthest-out date any offer surface produces: the public route clamps
+// ?windowDays to this and findEstimateSlots caps the AI date parse's
+// maxDaysOut to it. slot-reservation enforces the same bound on reserve so a
+// crafted slotId can't book beyond what any surface offers.
+const MAX_SLOT_HORIZON_DAYS = 90;
 
 // ---------- in-memory caches ----------
 
@@ -1220,8 +1229,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       expander,
       nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
-        estimateAddress: estimate.address || null,
-        estimateCoords: null,
+        // Deliberately no estimateAddress / estimateCoords / coordsSource:
+        // this payload feeds the PUBLIC token-gated slot picker, which reads
+        // none of them — echoing exact lat/lng back out is a location leak.
+        // Admin diagnostics use getSlotDebug, which carries coords itself.
         firstDayAvailability: firstDayAvailability(bookable),
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
@@ -1230,7 +1241,6 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         serviceProfile,
         generatedAt: new Date().toISOString(),
         cacheHit: false,
-        coordsSource: 'none',
       },
     };
     return fallback;
@@ -1289,9 +1299,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     expander,
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
-      estimateAddress: estimate.address || null,
-      estimateCoords: { lat: coords.lat, lng: coords.lng },
-      coordsSource: coords.source,
+      // Deliberately no estimateAddress / estimateCoords / coordsSource:
+      // this payload feeds the PUBLIC token-gated slot picker, which reads
+      // none of them — echoing exact lat/lng back out is a location leak.
+      // Admin diagnostics use getSlotDebug, which carries coords itself.
       firstDayAvailability: firstDayAvailability(bookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
@@ -1323,7 +1334,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const when = await parseWhen(query, {
     now: new Date(),
     minDaysOut: 0,
-    maxDaysOut: 90,
+    maxDaysOut: MAX_SLOT_HORIZON_DAYS,
     defaultWindowDays: DEFAULT_OPTS.windowDays,
   });
 
@@ -1446,6 +1457,11 @@ module.exports = {
   getSlotDebug,
   invalidateEstimate,
   resolveEstimateSlotProfile,
+  // Business bounds shared with slot-reservation's server-side validation
+  // and the public route's windowDays clamp.
+  SLOT_DAY_START_MINUTES,
+  SLOT_DAY_END_MINUTES,
+  MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
     parseAnchorTime,

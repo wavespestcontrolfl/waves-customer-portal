@@ -160,6 +160,39 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getAllByText(/confirm your exact price on/i).length).toBeGreaterThan(0);
   });
 
+  it('quantifies the credit-card surcharge at the one-time card-hold consent point', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="one_time"
+        setupFee={null}
+        cardHold={{ requiredForOneTime: true, noShowFeeAmount: 49, cancelWindowHours: 24 }}
+      />,
+    );
+
+    expect(screen.getByText(/A credit card surcharge of up to 2\.9% may apply/)).toBeInTheDocument();
+    // The vague unquantified line is gone.
+    expect(screen.queryByText(/small processing fee/i)).not.toBeInTheDocument();
+  });
+
+  it('uses "an" with the bare invoice fallback label (never "a invoice")', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+      />,
+    );
+
+    // No setup fee and no first-visit amount → the fallback label is bare
+    // 'invoice', which takes 'an'.
+    expect(screen.getByText(/with an invoice after confirmation/)).toBeInTheDocument();
+    expect(screen.queryByText(/\ba invoice\b/)).not.toBeInTheDocument();
+  });
+
   it('invoice-mode WITHOUT the hold keeps the standard "Accept + send invoice" CTA', () => {
     render(
       <PaymentPreferenceButtons

@@ -14,6 +14,11 @@ jest.mock('../services/estimate-slot-availability', () => ({
       { service: 'lawn_care', visitsPerYear: 9 },
     ],
   })),
+  // Mirror the real exported business bounds — slot-reservation destructures
+  // these at require time for its server-side slot policy.
+  SLOT_DAY_START_MINUTES: 8 * 60,
+  SLOT_DAY_END_MINUTES: 17 * 60,
+  MAX_SLOT_HORIZON_DAYS: 90,
 }));
 
 const db = require('../models/db');
@@ -57,135 +62,165 @@ describe('slot reservation helpers', () => {
     )).toBe('Pest Control');
   });
 
-  test('reserveSlot writes service-profile duration and checks overlapping windows', async () => {
-    const estimateBuilder = {
+  // Shared builder factories for the reserveSlot transaction mocks. The txn
+  // touches, in order: estimates (lock), technicians (active check),
+  // service_zones (zone lock — the mock trx throws for it and the caught
+  // error degrades to zone:unknown), then scheduled_services queries in
+  // FIFO order via scheduledBuilders.
+  function makeEstimateBuilder(row) {
+    return {
       where: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue({
+      first: jest.fn().mockResolvedValue(row),
+    };
+  }
+  function makeTechnicianBuilder(row = { id: 'tech-1' }) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(row),
+    };
+  }
+  function makeLiveHoldsBuilder(rows = []) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue(rows),
+    };
+  }
+  function makeConflictBuilder(result = null) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      modify: jest.fn(function (callback) {
+        callback(this);
+        return this;
+      }),
+      whereNotIn: jest.fn().mockReturnThis(),
+      andWhereRaw: jest.fn().mockReturnThis(),
+      andWhere: jest.fn(function (callback) {
+        callback(this);
+        return this;
+      }),
+      whereNull: jest.fn().mockReturnThis(),
+      orWhereRaw: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(result),
+    };
+  }
+  function makeInsertBuilder(returned) {
+    return {
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([returned]),
+    };
+  }
+  function makeDeleteBuilder() {
+    return {
+      whereIn: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValue(1),
+    };
+  }
+  function makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders }) {
+    const trx = jest.fn((table) => {
+      if (table === 'estimates') return estimateBuilder;
+      if (table === 'technicians') return technicianBuilder;
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    return trx;
+  }
+
+  test('reserveSlot writes service-profile duration and checks overlapping windows', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
         id: 'estimate-456',
         status: 'sent',
         service_interest: 'Generic estimate service',
-      }),
-    };
-    const conflictBuilder = {
-      where: jest.fn().mockReturnThis(),
-      modify: jest.fn(function (callback) {
-        callback(this);
-        return this;
-      }),
-      whereNotIn: jest.fn().mockReturnThis(),
-      andWhereRaw: jest.fn().mockReturnThis(),
-      andWhere: jest.fn(function (callback) {
-        callback(this);
-        return this;
-      }),
-      whereNull: jest.fn().mockReturnThis(),
-      orWhereRaw: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue(null),
-    };
-    const insertBuilder = {
-      insert: jest.fn().mockReturnThis(),
-      returning: jest.fn().mockResolvedValue([{
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const liveHoldsBuilder = makeLiveHoldsBuilder([]);
+      const conflictBuilder = makeConflictBuilder(null);
+      const insertBuilder = makeInsertBuilder({
         id: 'scheduled-123',
         reservation_expires_at: '2027-05-20T13:15:00.000Z',
-      }]),
-    };
-    const scheduledBuilders = [conflictBuilder, insertBuilder];
-    const trx = jest.fn((table) => {
-      if (table === 'estimates') return estimateBuilder;
-      if (table === 'scheduled_services') return scheduledBuilders.shift();
-      throw new Error(`unexpected table ${table}`);
-    });
-    trx.raw = jest.fn((sql) => ({ raw: sql }));
-    db.transaction = jest.fn(async (callback) => callback(trx));
+      });
+      const scheduledBuilders = [liveHoldsBuilder, conflictBuilder, insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
 
-    await expect(slotReservation.reserveSlot({
-      estimateId: 'estimate-456',
-      slotId: '2027-05-20_09-00_tech-1',
-      selectedFrequency: 'quarterly',
-    })).resolves.toEqual({
-      scheduledServiceId: 'scheduled-123',
-      expiresAt: '2027-05-20T13:15:00.000Z',
-    });
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-05-20_09-00_tech-1',
+        selectedFrequency: 'quarterly',
+      })).resolves.toEqual({
+        scheduledServiceId: 'scheduled-123',
+        expiresAt: '2027-05-20T13:15:00.000Z',
+      });
 
-    expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: '2027-05-20' });
-    expect(conflictBuilder.where).toHaveBeenCalledWith('technician_id', 'tech-1');
-    expect(conflictBuilder.andWhereRaw).toHaveBeenCalledWith(
-      expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
-      ['10:30:00', 60, '09:00:00'],
-    );
-    expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
-      service_type: 'Quarterly Pest Control',
-      notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
-      scheduled_date: '2027-05-20',
-      window_start: '09:00:00',
-      window_end: '10:30:00',
-      estimated_duration_minutes: 90,
-    }));
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-1', active: true });
+      expect(liveHoldsBuilder.where).toHaveBeenCalledWith({ source_estimate_id: 'estimate-456' });
+      expect(conflictBuilder.where).toHaveBeenCalledWith({ scheduled_date: '2027-05-20' });
+      expect(conflictBuilder.where).toHaveBeenCalledWith('technician_id', 'tech-1');
+      expect(conflictBuilder.andWhereRaw).toHaveBeenCalledWith(
+        expect.stringContaining('NULLIF(estimated_duration_minutes, 0)'),
+        ['10:30:00', 60, '09:00:00'],
+      );
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
+        service_type: 'Quarterly Pest Control',
+        notes: 'Accepted service mix: 4x Pest Control + 9x Lawn Care.',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        window_end: '10:30:00',
+        estimated_duration_minutes: 90,
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('reserveSlot labels a one-time pest accept "Pest Control" and pins is_recurring=false', async () => {
-    // One-time profile: empty services, so the cadence is unknown — the old
-    // behavior defaulted the pest label to "Quarterly Pest Control".
-    estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
-      serviceMode: 'one_time',
-      serviceLabel: 'Pest Control',
-      durationMinutes: 60,
-      services: [],
-    });
-    const estimateBuilder = {
-      where: jest.fn().mockReturnThis(),
-      select: jest.fn().mockReturnThis(),
-      forUpdate: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue({
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      // One-time profile: empty services, so the cadence is unknown — the old
+      // behavior defaulted the pest label to "Quarterly Pest Control".
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'Pest Control',
+        durationMinutes: 60,
+        services: [],
+      });
+      const estimateBuilder = makeEstimateBuilder({
         id: 'estimate-789',
         status: 'sent',
         service_interest: 'Pest Control',
-      }),
-    };
-    const conflictBuilder = {
-      where: jest.fn().mockReturnThis(),
-      modify: jest.fn(function (callback) {
-        callback(this);
-        return this;
-      }),
-      whereNotIn: jest.fn().mockReturnThis(),
-      andWhereRaw: jest.fn().mockReturnThis(),
-      andWhere: jest.fn(function (callback) {
-        callback(this);
-        return this;
-      }),
-      whereNull: jest.fn().mockReturnThis(),
-      orWhereRaw: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue(null),
-    };
-    const insertBuilder = {
-      insert: jest.fn().mockReturnThis(),
-      returning: jest.fn().mockResolvedValue([{
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const insertBuilder = makeInsertBuilder({
         id: 'scheduled-789',
         reservation_expires_at: '2027-05-20T13:15:00.000Z',
-      }]),
-    };
-    const scheduledBuilders = [conflictBuilder, insertBuilder];
-    const trx = jest.fn((table) => {
-      if (table === 'estimates') return estimateBuilder;
-      if (table === 'scheduled_services') return scheduledBuilders.shift();
-      throw new Error(`unexpected table ${table}`);
-    });
-    trx.raw = jest.fn((sql) => ({ raw: sql }));
-    db.transaction = jest.fn(async (callback) => callback(trx));
+      });
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
 
-    await slotReservation.reserveSlot({
-      estimateId: 'estimate-789',
-      slotId: '2027-05-20_09-00_tech-1',
-      serviceMode: 'one_time',
-    });
+      await slotReservation.reserveSlot({
+        estimateId: 'estimate-789',
+        slotId: '2027-05-20_09-00_tech-1',
+        serviceMode: 'one_time',
+      });
 
-    expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
-      service_type: 'Pest Control',
-      is_recurring: false,
-    }));
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
+        service_type: 'Pest Control',
+        is_recurring: false,
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
@@ -380,6 +415,207 @@ describe('slot reservation helpers', () => {
         slotId: '2027-07-14_13-00_tech-1',
       })).rejects.toThrow('REACHED_DB');
       expect(db.transaction).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot rejects a forged slotId before the working day starts', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    db.transaction = jest.fn();
+    try {
+      // 03:00 is format-valid but before the 8 AM day start — no generator
+      // ever offers it, so it must be rejected before any db work.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-05-20_03-00_tech-1',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot rejects a forged slotId beyond the 90-day offer horizon', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    db.transaction = jest.fn(async () => { throw new Error('REACHED_DB'); });
+    try {
+      // 2027-09-01 is 123 days out — beyond every offer surface's clamp.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-09-01_09-00_tech-1',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(db.transaction).not.toHaveBeenCalled();
+
+      // Exactly 90 days out is the furthest legitimate offer — must pass the
+      // pre-txn policy guards (sentinel proves the db was reached).
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-07-30_09-00_tech-1',
+      })).rejects.toThrow('REACHED_DB');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot rejects a slotId naming an inactive or unknown technician', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      });
+      const technicianBuilder = makeTechnicianBuilder(null); // no active match
+      const scheduledBuilders = [];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-05-20_09-00_tech-ghost',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-ghost', active: true });
+      // Rejected before any scheduled_services query or insert.
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot rejects a slot whose window runs past the working-day end', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      // 180-minute profile starting 15:00 ends 18:00 — more than the 59-min
+      // round-up grace past the 17:00 close, so no generator offers it.
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'recurring',
+        serviceLabel: 'Lawn Care',
+        durationMinutes: 180,
+        services: [{ service: 'lawn_care', visitsPerYear: 9 }],
+      });
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Lawn Care',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const scheduledBuilders = [];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-05-20_15-00_tech-1',
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      // Rejected before the hold/conflict/insert queries ran.
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot refreshes this estimate\'s own live hold for the same slot instead of 409ing', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-1',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        technician_id: 'tech-1',
+        estimated_duration_minutes: 90,
+        reservation_expires_at: '2027-05-20T13:05:00.000Z',
+      }]);
+      const refreshBuilder = {
+        where: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue([{
+          id: 'held-1',
+          reservation_expires_at: '2027-05-20T13:30:00.000Z',
+        }]),
+      };
+      const scheduledBuilders = [liveHoldsBuilder, refreshBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      // The client re-POSTs /reserve with the same slotId after "go back" —
+      // the estimate's own live hold must be returned (expiry extended), not
+      // treated as a conflicting booking.
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-05-20_09-00_tech-1',
+        selectedFrequency: 'quarterly',
+      })).resolves.toEqual({
+        scheduledServiceId: 'held-1',
+        expiresAt: '2027-05-20T13:30:00.000Z',
+      });
+
+      expect(refreshBuilder.where).toHaveBeenCalledWith({ id: 'held-1' });
+      expect(refreshBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+        reservation_expires_at: expect.anything(),
+      }));
+      // No conflict check / insert consumed — the hold was reused.
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot supersedes this estimate\'s live hold for a different slot and books the new one', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-old',
+        scheduled_date: '2027-05-19',
+        window_start: '11:00:00',
+        technician_id: 'tech-1',
+        estimated_duration_minutes: 90,
+        reservation_expires_at: '2027-05-19T15:05:00.000Z',
+      }]);
+      const deleteBuilder = makeDeleteBuilder();
+      const conflictBuilder = makeConflictBuilder(null);
+      const insertBuilder = makeInsertBuilder({
+        id: 'scheduled-new',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      });
+      const scheduledBuilders = [liveHoldsBuilder, deleteBuilder, conflictBuilder, insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: '2027-05-20_09-00_tech-1',
+        selectedFrequency: 'quarterly',
+      })).resolves.toEqual({
+        scheduledServiceId: 'scheduled-new',
+        expiresAt: '2027-05-20T13:15:00.000Z',
+      });
+
+      // The stale hold was released inside the txn before the conflict check.
+      expect(deleteBuilder.whereIn).toHaveBeenCalledWith('id', ['held-old']);
+      expect(deleteBuilder.del).toHaveBeenCalledTimes(1);
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+      }));
     } finally {
       jest.useRealTimers();
     }

@@ -32,11 +32,25 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const estimateSlotAvailability = require('./estimate-slot-availability');
-const { etParts, etDateString } = require('../utils/datetime-et');
+const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
+
+// Business bounds shared with the slot generators (see the exporting module
+// for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
+// 90-day offer horizon.
+const {
+  SLOT_DAY_START_MINUTES,
+  SLOT_DAY_END_MINUTES,
+  MAX_SLOT_HORIZON_DAYS,
+} = estimateSlotAvailability;
 
 const DEFAULT_HOLD_MINUTES = 15;
 const DEFAULT_DURATION_MINUTES = 60;
 const MAX_SERVICE_TYPE_LENGTH = 100;
+// classifySlot's roundUpToHour can push a proven-feasible route slot's
+// DISPLAY window up to 59 minutes later than the gap find-time validated, so
+// a legitimately offered slot can end up to 59 minutes past the 17:00 day
+// close. Allow exactly that much on the end-of-day check and no more.
+const ROUND_UP_GRACE_MINUTES = 59;
 
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
@@ -219,6 +233,34 @@ async function reserveSlot({
     }
   }
 
+  // Server-authoritative slot policy: parseSlotId validates FORMAT only — the
+  // date/time/tech in the slotId are client-supplied, so a crafted id could
+  // otherwise book 3 AM, any-horizon, or inactive-tech visits. Route-derived
+  // find-time slots are legitimately offered at minutes the day-grid generator
+  // wouldn't emit, so grid MEMBERSHIP can't be re-checked here; instead
+  // enforce the business bounds every legitimate offer satisfies: the 8a–5p
+  // working window (end checked in-txn once the duration is known), the offer
+  // horizon, and an active technician (checked in-txn). Lunch is deliberately
+  // NOT enforced: PREFERRED_WINDOWS skipping noon is a soft display rotation
+  // for synthetic ASAP slots only — route-derived slots keep their
+  // proven-feasible start, which can fall over lunch.
+  const [slotStartHour, slotStartMinute] = String(windowStart).split(':').map(Number);
+  const slotStartMinutes = slotStartHour * 60 + slotStartMinute;
+  if (slotStartMinutes < SLOT_DAY_START_MINUTES) {
+    const err = new Error('slot starts before the working day');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
+  // No offer surface produces slots beyond MAX_SLOT_HORIZON_DAYS (the public
+  // route clamps ?windowDays and the AI date search caps maxDaysOut there).
+  if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
+    const err = new Error('slot date is beyond the booking horizon');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
+
   // Numeric coerce + bound the hold window so we can safely interpolate it
   // into a Postgres INTERVAL string below.
   const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
@@ -251,6 +293,26 @@ async function reserveSlot({
         const err = new Error(`estimate in terminal state '${estimate.status}'`);
         err.code = 'ESTIMATE_TERMINAL';
         throw err;
+      }
+
+      // Active-technician check: find-time only generates slots for
+      // technicians where({ active: true }), so a slotId naming an inactive
+      // or unknown tech was never offered. A crafted non-uuid techId makes
+      // the lookup itself throw (22P02) — treat that the same as unknown
+      // (the txn rolls back on the throw below either way).
+      if (techId) {
+        let activeTech = null;
+        try {
+          activeTech = await trx('technicians').where({ id: techId, active: true }).first('id');
+        } catch (techErr) {
+          logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
+        }
+        if (!activeTech) {
+          const err = new Error('slot technician is not available');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
       }
 
       // The FOR UPDATE above only serializes THIS estimate — two different
@@ -304,9 +366,63 @@ async function reserveSlot({
         ? Number(serviceProfile.durationMinutes)
         : DEFAULT_DURATION_MINUTES;
       const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
+      // Working-day end: every legitimate offer ends by SLOT_DAY_END_MINUTES
+      // (find-time's dayClose / slotWindowFitsDay), plus the round-up grace —
+      // see ROUND_UP_GRACE_MINUTES. Checked here (not with the pre-txn policy
+      // guards) because the effective duration needs the estimate's profile.
+      if (slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+        const err = new Error('slot runs past the end of the working day');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
       const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+
+      // Idempotent self-hold handling: the conflict checks below have no
+      // self-exclusion, so this estimate's OWN live hold would 409 the
+      // customer's retry (the client re-POSTs /reserve with the same slotId
+      // after "go back"). Re-reserving the SAME slot refreshes the existing
+      // hold's expiry and returns it; a live hold for a DIFFERENT slot is
+      // superseded — released inside this txn with the same narrow predicate
+      // releaseReservation uses (still-uncommitted rows only), which also
+      // removes it from both the tech- and zone-conflict queries below.
+      const liveHolds = await trx('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNull('customer_id')
+        .whereNotNull('reservation_expires_at')
+        .whereRaw('reservation_expires_at > NOW()')
+        .forUpdate()
+        .select('*');
+      const sameSlotHold = (liveHolds || []).find((hold) => dateOnly(hold.scheduled_date) === date
+        && String(hold.window_start).slice(0, 5) === String(windowStart).slice(0, 5)
+        && (hold.technician_id || null) === (techId || null)
+        && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes);
+      if (sameSlotHold) {
+        const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
+        if (staleIds.length) {
+          await trx('scheduled_services').whereIn('id', staleIds).del();
+        }
+        // Refresh expiry only — commitReservation recomputes service_type /
+        // notes / window_end from the accept-time profile, so the hold's
+        // stamped labels don't need to be rebuilt on a retry.
+        const [refreshed] = await trx('scheduled_services')
+          .where({ id: sameSlotHold.id })
+          .update({ reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`) })
+          .returning(['id', 'reservation_expires_at']);
+        const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
+        logger.info('[slot-reservation] refreshed existing hold', {
+          estimateId,
+          slotId,
+          scheduledServiceId: sameSlotHold.id,
+          expiresAt: refreshedExpiresAt instanceof Date ? refreshedExpiresAt.toISOString() : refreshedExpiresAt,
+        });
+        return { scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt };
+      }
+      if ((liveHolds || []).length) {
+        await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
+      }
 
       // Conflict check + insert in the same txn so a concurrent reserve that
       // overlaps this tech/date window can't slip past us. Expired

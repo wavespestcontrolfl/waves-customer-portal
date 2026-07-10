@@ -34,7 +34,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
+const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
@@ -47,6 +47,7 @@ const {
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
+  isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
   reconcileFrozenMembershipSnapshot,
@@ -98,6 +99,18 @@ function resolveSlotServiceMode(estimate = {}, requestedMode = '') {
   return requestedMode === 'one_time' ? 'one_time' : 'recurring';
 }
 
+// Cache/privacy parity with GET /:token/data (estimate-public.js): these
+// responses are tokenized and can carry availability tied to a customer's
+// address — no shared-browser or intermediary retention, no referrer leak of
+// the tokenized URL. Stamped before any branch so every response path
+// (including 4xx/429) carries them.
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 30,
@@ -116,12 +129,19 @@ router.use(rateLimit({
 // BLOCKED_STATES_FOR_SLOTS + expires_at) so the commercial manual-scheduling
 // short-circuit can't return a 200 for an accepted/declined/expired estimate.
 // Returns a sent response (caller must `return` it) or null when eligible.
-const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired']);
+// 'void' matches the services' terminal set (reserveSlot's ESTIMATE_TERMINAL
+// list) so the router and service layers reject the same states.
+const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void']);
 function rejectIneligibleEstimate(res, estimate = {}) {
   if (SLOT_BLOCKED_STATES.has(estimate.status)) {
     return res.status(409).json({ error: 'Estimate is no longer active' });
   }
-  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
+  // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
+  // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
+  // and past-expiry estimates must not expose availability or take holds —
+  // same 404 shape /data uses. Callers must SELECT archived_at/status/
+  // expires_at for this check to see them.
+  if (!isEstimateCustomerViewable(estimate)) {
     return res.status(404).json({ error: 'Not found' });
   }
   return null;
@@ -159,7 +179,7 @@ router.get('/:token/available-slots', async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -193,7 +213,7 @@ router.get('/:token/available-slots', async (req, res) => {
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
-    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 90) {
+    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
     // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
@@ -281,7 +301,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -369,7 +389,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }

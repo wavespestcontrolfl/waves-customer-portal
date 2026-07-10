@@ -557,9 +557,18 @@ function inTimeOfDay(startTimeHHMM, timeOfDay) {
 // Resolve service coordinates from any of: explicit lat/lng, a linked estimate's
 // customer, a free-text address, or a city's service-zone center. Shared by
 // /availability and /find-slots.
+//
+// `disclosable`: whether the coords may be echoed EXACTLY on a public response.
+// Caller-supplied lat/lng or a geocode of the caller's own address disclose
+// nothing the caller doesn't already hold; coords pulled off an ESTIMATE's
+// customer record (estimate_id is a raw public-URL value with no ownership
+// check here) would hand out someone else's rooftop-accurate location, so the
+// public routes round those (roundPublicCoord). Slot computation always uses
+// the exact values either way.
 async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   let resolvedLat = lat ? parseFloat(lat) : null;
   let resolvedLng = lng ? parseFloat(lng) : null;
+  let disclosable = !!(resolvedLat && resolvedLng);
 
   if ((!resolvedLat || !resolvedLng) && estimate_id) {
     const est = await db('estimates').where('id', estimate_id).first();
@@ -582,6 +591,7 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   if ((!resolvedLat || !resolvedLng) && address) {
     const geo = await geocodeAddress(address);
     resolvedLat = geo.lat; resolvedLng = geo.lng;
+    disclosable = true;
   }
 
   if ((!resolvedLat || !resolvedLng) && city) {
@@ -589,7 +599,7 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
     if (zone) { resolvedLat = zone.lat; resolvedLng = zone.lng; }
   }
 
-  return { lat: resolvedLat, lng: resolvedLng };
+  return { lat: resolvedLat, lng: resolvedLng, disclosable };
 }
 
 // Load the singleton booking_config row, falling back to the same defaults the
@@ -602,6 +612,82 @@ async function loadBookingConfig() {
     day_start: '08:00', day_end: '17:00',
     max_self_books_per_day: 3,
   };
+}
+
+// The slot rules a config row implies — ONE derivation shared by the
+// availability builder (which offers slots) and createSelfBooking (which
+// commits them), so a forged /confirm payload can never book a slot the
+// builder would not have offered.
+function bookingSlotWindow(config = {}) {
+  return {
+    slotGridMinutes: 60,
+    dayStartMin: timeToMin(config.day_start || '08:00'),
+    dayEndMin: timeToMin(config.day_end || '17:00'),
+    lunchStartMin: timeToMin(config.lunch_start || '12:00'),
+    lunchEndMin: timeToMin(config.lunch_end || '13:00'),
+    maxPerDay: config.max_self_books_per_day ?? 3,
+  };
+}
+
+// Server-side duration: the same source the availability builder uses — the
+// client's requested minutes when they are a sane funnel value, else the
+// configured slot duration. The /book funnel's service catalog runs 45–90
+// minutes, so anything outside these bounds (a forged 1-minute slot that
+// would slide under the overlap check, or a day-blocking 600) falls back.
+const MIN_BOOKING_DURATION_MINUTES = 15;
+const MAX_BOOKING_DURATION_MINUTES = 240;
+function resolveBookingDuration(requested, config = {}) {
+  const n = parseInt(requested, 10);
+  if (Number.isInteger(n) && n >= MIN_BOOKING_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
+  return config.slot_duration_minutes || 60;
+}
+
+// Commit-time mirror of the builder's addCandidate constraints (grid
+// alignment, day window, lunch block). Returns null when the slot is one the
+// builder could have offered, else a customer-facing rejection message.
+function validateBookingSlotGeometry({ startMin, duration, config }) {
+  const { slotGridMinutes, dayStartMin, dayEndMin, lunchStartMin, lunchEndMin } = bookingSlotWindow(config);
+  const endMin = startMin + duration;
+  if (startMin % slotGridMinutes !== 0) {
+    return 'That start time isn\'t one of our bookable slots — please pick another.';
+  }
+  if (startMin < dayStartMin || endMin > dayEndMin) {
+    return 'That time is outside our working hours — please pick another slot.';
+  }
+  // Lunch windows are reserved for route health and are never self-bookable.
+  if (startMin < lunchEndMin && endMin > lunchStartMin) {
+    return 'That time isn\'t available — please pick another slot.';
+  }
+  return null;
+}
+
+// Exact service coordinates never belong on a public response body:
+// resolveBookingCoords can derive them from an estimate's CUSTOMER record
+// (estimate_id) or a geocode, so echoing them precisely would hand a caller
+// someone's rooftop-accurate location. Caller-supplied coords are echoed
+// exactly (they already know them); server-resolved ones are rounded to
+// ~2 decimal places (~1 km) — coarse enough to hide the address, precise
+// enough for the funnel's slot-search round-trips.
+function roundPublicCoord(value) {
+  return (value == null || !Number.isFinite(Number(value)))
+    ? null
+    : Math.round(Number(value) * 100) / 100;
+}
+
+// Confirmation codes are the ONLY factor on GET /status/:code, which returns
+// booking + customer details — so they must be unguessable. 10 chars from a
+// 32-symbol alphabet ≈ 50 bits via a CSPRNG (32 divides 256, so the modulo
+// is unbiased). Legacy 4-char codes already in customers' hands still
+// resolve; the dedicated /status rate limiter bounds enumeration of those.
+const CONFIRMATION_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CONFIRMATION_CODE_LENGTH = 10;
+function generateConfirmationCode() {
+  const bytes = crypto.randomBytes(CONFIRMATION_CODE_LENGTH);
+  let code = 'WPC-';
+  for (let i = 0; i < CONFIRMATION_CODE_LENGTH; i += 1) {
+    code += CONFIRMATION_CODE_ALPHABET[bytes[i] % CONFIRMATION_CODE_ALPHABET.length];
+  }
+  return code;
 }
 
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
@@ -630,13 +716,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     topN: expandOpenDays ? Number.MAX_SAFE_INTEGER : 200,
   });
 
-  // Enforce max_self_books_per_day — filter out dates already at cap
-  const maxPerDay = config.max_self_books_per_day ?? 3;
-  const slotGridMinutes = 60;
-  const dayStartMin = timeToMin(config.day_start || '08:00');
-  const dayEndMin = timeToMin(config.day_end || '17:00');
-  const lunchStart = timeToMin(config.lunch_start || '12:00');
-  const lunchEnd = timeToMin(config.lunch_end || '13:00');
+  // Enforce max_self_books_per_day — filter out dates already at cap.
+  // Slot rules come from the shared bookingSlotWindow derivation so the
+  // /confirm commit path enforces exactly what is offered here.
+  const {
+    maxPerDay, slotGridMinutes, dayStartMin, dayEndMin,
+    lunchStartMin: lunchStart, lunchEndMin: lunchEnd,
+  } = bookingSlotWindow(config);
   const bookingCounts = await db('self_booked_appointments')
     .whereNot('status', 'cancelled')
     .whereBetween('date', [rangeFrom, rangeTo])
@@ -773,7 +859,7 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -807,12 +893,14 @@ router.get('/availability', async (req, res, next) => {
       expandOpenDays: req.query.expand === 'open',
     });
 
+    // Coords the caller didn't already hold (estimate_id → customer record,
+    // zone center) are rounded on the way out — see resolveBookingCoords.
     res.json({
       slots: availability.slots,
       days: availability.days,
       nearby: availability.nearby,
-      lat: resolvedLat,
-      lng: resolvedLng,
+      lat: coordsDisclosable ? resolvedLat : roundPublicCoord(resolvedLat),
+      lng: coordsDisclosable ? resolvedLng : roundPublicCoord(resolvedLng),
       duration_minutes: duration,
       service_type: service_type || null,
       total_feasible: availability.total_feasible,
@@ -852,7 +940,7 @@ router.post('/find-slots', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -886,8 +974,9 @@ router.post('/find-slots', async (req, res, next) => {
       nearby: availability.nearby,
       slots: availability.slots,
       days: availability.days,
-      lat: resolvedLat,
-      lng: resolvedLng,
+      // Same coordinate-echo rule as /availability (see resolveBookingCoords).
+      lat: coordsDisclosable ? resolvedLat : roundPublicCoord(resolvedLat),
+      lng: coordsDisclosable ? resolvedLng : roundPublicCoord(resolvedLng),
       duration_minutes: duration,
       service_type: service_type || null,
       capture_token: mintCaptureToken(captureIpKey(req)),
@@ -933,6 +1022,11 @@ async function createSelfBooking(payload = {}) {
     const slotDateStr = String(slot_date).split('T')[0];
     if (!/^\d{4}-\d{2}-\d{2}$/.test(slotDateStr)) {
       return { ok: false, status: 400, error: 'Invalid slot_date' };
+    }
+    // Reject malformed times up front: timeToMin() on garbage yields NaN,
+    // which would sail through every numeric comparison below.
+    if (!/^([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(String(slot_start))) {
+      return { ok: false, status: 400, error: 'Invalid slot_start' };
     }
     const todayEtStr = etDateString();
     if (slotDateStr < todayEtStr) {
@@ -1116,16 +1210,48 @@ async function createSelfBooking(payload = {}) {
     // when this booking just created the customer, or on a different street.
     const visitUnit = createdCustomerId ? '' : carriedVisitUnit(customer, new_customer);
 
-	    const config = (await db('booking_config').first()) || {};
-    const duration = duration_minutes || config.slot_duration_minutes || 60;
+    const config = await loadBookingConfig();
+    // Duration is derived server-side (clamped to the funnel's real range,
+    // config fallback) — never trusted raw from the payload, where a tiny
+    // forged value would shrink the overlap-check window.
+    const duration = resolveBookingDuration(duration_minutes, config);
 
-    // Compute end time if not provided
-    const endMin = slot_end ? timeToMin(slot_end) : (timeToMin(slot_start) + duration);
+    // End time is ALWAYS start + server-resolved duration. A provided
+    // slot_end must agree — a forged early end would slide under the
+    // advisory-locked conflict check below.
+    const endMin = timeToMin(slot_start) + duration;
+    if (slot_end && timeToMin(slot_end) !== endMin) {
+      return { ok: false, status: 400, error: 'slot_end doesn\'t match the requested slot — please pick your time again.' };
+    }
     const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
 
-    const confCode = 'WPC-' + Array.from({ length: 4 }, () =>
-      'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]
-    ).join('');
+    // Commit-time re-check of the availability builder's slot rules (grid
+    // alignment, working hours, lunch block): the builder only OFFERS
+    // conforming slots, but this endpoint is public, so a crafted payload
+    // must not be able to book a slot the builder would never have offered.
+    const geometryError = validateBookingSlotGeometry({
+      startMin: timeToMin(slot_start), duration, config,
+    });
+    if (geometryError) {
+      return { ok: false, status: 400, error: geometryError };
+    }
+
+    // technician_id comes straight from the client (an opaque id echoed from
+    // the availability response) — verify it names a real, active technician
+    // before it drives advisory locks, the conflict predicate, and the
+    // dispatch row. The shape guard keeps a non-UUID from throwing a
+    // Postgres cast error (500) out of the lookup.
+    if (technician_id) {
+      const techIdStr = String(technician_id);
+      const tech = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(techIdStr)
+        ? await db('technicians').where('id', techIdStr).first('id', 'active')
+        : null;
+      if (!tech || tech.active === false) {
+        return { ok: false, status: 400, error: 'That time slot is no longer available. Please pick another.' };
+      }
+    }
+
+    const confCode = generateConfirmationCode();
 
     // Resolve zone from city (best-effort, for reporting)
     const zones = await db('service_zones').select('*');
@@ -1265,6 +1391,25 @@ async function createSelfBooking(payload = {}) {
         .first();
       if (existing) return { existing };
 
+      // Commit-time max_self_books_per_day re-check (same predicate the
+      // availability builder uses to drop full days) — the builder's cap is
+      // advisory-only without this, since a direct POST never saw it. Runs
+      // AFTER the replay lookup so a double-submit on a now-full day still
+      // returns its original booking.
+      const { maxPerDay } = bookingSlotWindow(config);
+      const dayCountRow = await trx('self_booked_appointments')
+        .where('date', slotDateStr)
+        .whereNot('status', 'cancelled')
+        .count('* as count')
+        .first();
+      if (parseInt(dayCountRow?.count || 0) >= maxPerDay) {
+        throw Object.assign(new Error('That day is fully booked — please pick another day.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'DAY_FULL',
+        });
+      }
+
       // Re-verify the slot is still available (race condition guard).
       // Tech bookings conflict against the tech's route; no-tech bookings
       // conflict against other unassigned jobs in the same zone (the
@@ -1383,8 +1528,11 @@ async function createSelfBooking(payload = {}) {
     } catch (txErr) {
       // Expected race outcome — answer directly rather than throwing into
       // the global error middleware, which logs req.body (new_customer
-      // phone/email/address would land in the logs).
-      if (txErr.code === 'SLOT_TAKEN') {
+      // phone/email/address would land in the logs). DAY_FULL rides the same
+      // path: both are "pick another slot" outcomes, and both must roll back
+      // a just-created profile so the retry doesn't strand on the
+      // phone-already-on-file 409.
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -1885,19 +2033,32 @@ router.get('/sources', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Strict per-IP limiter for the confirmation-code lookup: legacy codes are
+// 4 chars (~20 bits), so without a tight cap the endpoint is enumerable and
+// each hit returns customer details. A genuine customer checks their own
+// code a handful of times at most. Mirrors captureIntentLimiter's style.
+const bookingStatusLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookups — please try again later.' },
+});
+
 // GET /api/booking/status/:code — public (anyone holding a confirmation code).
 // Selects the explicit allow-list, NOT the wildcard row: the attribution jsonb
 // (click ids, referrer/landing URLs with handoff tokens) and referrer_url must
-// never ride along on a public payload.
-router.get('/status/:code', async (req, res, next) => {
+// never ride along on a public payload. Customer fields are trimmed to a
+// friendly minimum (first name + city) — no client in the repo consumes this
+// endpoint, so the full name and street address were pure PII exposure.
+router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
   try {
     const booking = await db('self_booked_appointments')
       .where('confirmation_code', req.params.code)
       .leftJoin('customers', 'self_booked_appointments.customer_id', 'customers.id')
       .select(
         ...PUBLIC_BOOKING_FIELDS.map((field) => `self_booked_appointments.${field}`),
-        'customers.first_name', 'customers.last_name',
-        'customers.address_line1', 'customers.city'
+        'customers.first_name', 'customers.city'
       )
       .first();
 
@@ -1926,6 +2087,15 @@ module.exports._internals = {
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,
+  // Commit-time slot validation shared with the availability builder, the
+  // CSPRNG confirmation-code generator, the public-coordinate rounding rule,
+  // and the /status/:code enumeration limiter (exported for tests).
+  bookingSlotWindow,
+  resolveBookingDuration,
+  validateBookingSlotGeometry,
+  generateConfirmationCode,
+  roundPublicCoord,
+  bookingStatusLimiter,
   // Public-response allow-list for self_booked_appointments rows (P1 guard:
   // the raw row carries the full attribution capture).
   PUBLIC_BOOKING_FIELDS,

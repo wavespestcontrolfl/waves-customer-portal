@@ -31,7 +31,7 @@ import BrandFooter from '../components/BrandFooter';
 import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
-import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
@@ -1393,11 +1393,12 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
 // Tap either to switch mode — slider, add-ons, and price card respond
 // to the mode change (one-time hides slider + add-ons, shows one-time
 // price card content).
-function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
+function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false }) {
   const pillBase = {
     padding: '12px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
-    cursor: 'pointer', border: 'none', textAlign: 'center', flex: 1,
+    cursor: disabled ? 'wait' : 'pointer', border: 'none', textAlign: 'center', flex: 1,
     transition: docTransition('background', 'color'),
+    opacity: disabled ? 0.65 : 1,
   };
   return (
     <div style={{
@@ -1408,6 +1409,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
     }}>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange('recurring')}
         style={{
           ...pillBase,
@@ -1417,6 +1419,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
       >Recurring Pest Control</button>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange('one_time')}
         style={{
           ...pillBase,
@@ -2000,7 +2003,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
           A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
-          {' '}Credit cards add a small processing fee; debit and bank cards don&rsquo;t.
+          {' '}{CARD_SURCHARGE_DISCLOSURE}
         </div>
         <div ref={mountRef} />
         {error ? (
@@ -2122,7 +2125,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
   );
 }
 
-function SuccessCard({ acceptResult }) {
+export function SuccessCard({ acceptResult }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
@@ -2231,7 +2234,12 @@ function SuccessCard({ acceptResult }) {
         You're booked.
       </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-        Check your phone for the confirmation text. Our team will confirm the schedule.
+        {/* A retry of an already-accepted estimate returns the full success
+            payload with alreadyAccepted: true — the original confirmation
+            text may not re-send, so don't promise one. */}
+        {acceptResult?.alreadyAccepted
+          ? 'This estimate was already accepted — you\'re all set. Our team will confirm the schedule.'
+          : 'Check your phone for the confirmation text. Our team will confirm the schedule.'}
       </div>
     </div>
   );
@@ -2254,6 +2262,24 @@ export function DraftPreviewBanner() {
         This is the exact page the customer will get. Booking, payment, and
         requests stay disabled until the estimate is sent.
       </div>
+    </div>
+  );
+}
+
+// Shared failure banner for the reserve/accept/deposit/card-hold flow.
+// Accept-path failures land the customer back in the REVIEW phase, not just
+// configure, so both branches must render it — a review-phase 500 used to
+// show nothing at all.
+function EstimateErrorBanner({ error }) {
+  if (!error) return null;
+  return (
+    <div style={{
+      background: '#fee', borderRadius: 12, padding: 12,
+      border: `1px solid ${W.red}`, marginBottom: 16,
+      color: W.red, fontSize: 14,
+    }}>
+      Something went wrong: {error}. Try again or call{' '}
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
     </div>
   );
 }
@@ -3176,10 +3202,15 @@ export default function EstimateViewPage() {
     setCtaPhase('configure');
     setReservation(null);
     setPaymentPreference(null);
-    // Don't clear selectedSlotId — the customer may want to retry with
-    // the same slot if the reservation call succeeded. Reservation row
-    // still exists server-side for up to 15 min; the commit-on-accept
-    // is idempotent.
+    setError(null);
+    // Don't clear selectedSlotId — the customer usually goes back to tweak
+    // something and continues with the same slot. The hold stays live
+    // server-side (up to 15 min) and is intentionally NOT released here:
+    // continuing re-POSTs /reserve, which is idempotent for the customer's
+    // own same-slot hold (returns/refreshes it) and supersedes it when a
+    // different slot is picked. A /reserve 409 therefore still means a
+    // genuine conflict (someone else holds the slot) and keeps its
+    // slot_conflict handling.
   }, []);
 
   // Entering review (and success) swaps the tall configure page for a much
@@ -3721,6 +3752,10 @@ export default function EstimateViewPage() {
               ReviewPhase, and anchoring the group leaves the confirm action
               below the fold on mobile (Codex #2545). */}
           <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+          {/* Inside the scroll anchor so a failed confirm scrolls the error
+              into view along with the confirm card. Cleared on every retry
+              (performAccept/handleConfirm) and on Go back (handleReviewCancel). */}
+          <EstimateErrorBanner error={error} />
           <ReviewPhase
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
@@ -3735,7 +3770,7 @@ export default function EstimateViewPage() {
             manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
-              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
                 ? (invoiceOnlyAccept
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
@@ -3776,6 +3811,10 @@ export default function EstimateViewPage() {
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
+              // The configure layout is what renders while ctaPhase is
+              // 'submitting' (reserve/accept in flight) — a mode flip
+              // mid-submit would clear the slot the request is committing.
+              disabled={ctaPhase === 'submitting'}
               onChange={(m) => {
                 reserveAttemptRef.current += 1;
                 setServiceMode(m);
@@ -3809,20 +3848,30 @@ export default function EstimateViewPage() {
 
           <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {canShowSlotPicker ? (
-              <SlotPicker
-                token={token}
-                askToken={estimate.askToken}
-                selectedSlotId={selectedSlotId}
-                onSelect={setSelectedSlotId}
-                onSelectMeta={setSelectedSlotMeta}
-                selectedSlotFallbackMeta={selectedSlotMeta}
-                licenseNumber={estimate.licenseNumber}
-                refreshSignal={slotsRefreshSignal}
-                serviceMode={serviceMode}
-                selectedFrequency={selectedFrequency}
-                onFirstSlotDate={setFirstSlotDate}
-                cityLabel={estimateCity}
-              />
+              // SlotPicker takes no disabled prop, so freeze it from out here
+              // while a reserve/accept is in flight (ctaPhase 'submitting'
+              // renders this configure layout): pointer-events blocks taps,
+              // the guarded handlers block keyboard selection, and the wrapper
+              // stays mounted either way so the slot fetch doesn't restart.
+              <div
+                aria-disabled={ctaPhase === 'submitting' || undefined}
+                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
+              >
+                <SlotPicker
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedSlotId={selectedSlotId}
+                  onSelect={(slotId) => { if (ctaPhase !== 'submitting') setSelectedSlotId(slotId); }}
+                  onSelectMeta={(meta) => { if (ctaPhase !== 'submitting') setSelectedSlotMeta(meta); }}
+                  selectedSlotFallbackMeta={selectedSlotMeta}
+                  licenseNumber={estimate.licenseNumber}
+                  refreshSignal={slotsRefreshSignal}
+                  serviceMode={serviceMode}
+                  selectedFrequency={selectedFrequency}
+                  onFirstSlotDate={setFirstSlotDate}
+                  cityLabel={estimateCity}
+                />
+              </div>
             ) : (
               <AcceptanceModeCard acceptance={acceptance} />
             )}
@@ -3878,16 +3927,7 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {error ? (
-            <div style={{
-              background: '#fee', borderRadius: 12, padding: 12,
-              border: `1px solid ${W.red}`, marginBottom: 16,
-              color: W.red, fontSize: 14,
-            }}>
-              Something went wrong: {error}. Try again or call{' '}
-              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
-            </div>
-          ) : null}
+          <EstimateErrorBanner error={error} />
 
           {/* Glass-ordered tail (approved section positioning): why-price-
               custom with its lock-in CTA, reviews with the join CTA, the app
