@@ -184,7 +184,14 @@ exports.down = async function down(knex) {
   // estimate_followup_expiring is KEPT (the old cron uses it) but restored to
   // its old-compatible body via RETIRED_TEMPLATES — the new body requires
   // {service_hook}, which the old cron never passes and getTemplate fails
-  // closed on.
+  // closed on. Its A/B variants clear too: getTemplate prefers a variant
+  // body, so a variant authored against the new copy would re-break the old
+  // cron even with the base row restored.
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    await knex('sms_template_variants')
+      .whereIn('template_key', ['estimate_followup_expiring'])
+      .del();
+  }
   await upsertTemplates(knex, RETIRED_TEMPLATES);
 };
 

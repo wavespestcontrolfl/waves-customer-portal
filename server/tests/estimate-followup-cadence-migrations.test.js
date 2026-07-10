@@ -254,15 +254,24 @@ describe('estimate_followup_cadence_templates migration', () => {
 
     await templateMigration.down(knex);
 
-    // The row is NOT in the delete set…
-    const deletedKeys = ops.deletes.flatMap((op) => op.criteria.template_key);
-    expect(deletedKeys).not.toContain('estimate_followup_expiring');
+    // The sms_templates ROW is NOT deleted (its A/B variants ARE — see
+    // below — but the base row survives for the old cron)…
+    const deletedRowKeys = ops.deletes
+      .filter((op) => op.table === 'sms_templates')
+      .flatMap((op) => op.criteria.template_key);
+    expect(deletedRowKeys).not.toContain('estimate_followup_expiring');
     // …and it is rewritten to the old-variable body.
     const expiring = ops.upserts.find((op) => op.key === 'estimate_followup_expiring');
     expect(expiring).toBeTruthy();
     expect(expiring.row.body).not.toContain('{service_hook}');
     expect(JSON.parse(expiring.row.variables).sort())
       .toEqual(['estimate_url', 'expires_at', 'first_name']);
+    // Its A/B variants clear too — getTemplate prefers a variant body, so a
+    // variant authored against the new copy would re-break the old cron.
+    expect(ops.deletes).toContainEqual({
+      table: 'sms_template_variants',
+      criteria: { template_key: ['estimate_followup_expiring'] },
+    });
   });
 
   test('all bodies stay GSM-7 friendly: no em-dashes or curly quotes', async () => {

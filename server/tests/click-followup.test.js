@@ -761,6 +761,42 @@ describe('cadenceStageDueSoon', () => {
     expect(cadenceStageDueSoon(est, NOW)).toBe(true);
   });
 
+  test('check-in yield judged at the EFFECTIVE send time, not now()', () => {
+    // Floor is ~2h out (touch-1 gap), expiry is 49h out: at the effective
+    // send time expiry is inside the 48h yield window — the cron will yield
+    // to the last-day notice, so the mirror must NOT read "due".
+    const est = makeEstimate({
+      sent_at: new Date(NOW.getTime() - 6 * 24 * H),
+      followup_credit_sent_at: null,
+      followup_questions_sent_at: new Date(NOW.getTime() - 46 * H),
+      expires_at: new Date(NOW.getTime() + 49 * H),
+      followup_expiring_sent_at: 'claimed',
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(false);
+  });
+
+  test('expiring touch honors its 12h spacing — recent manual SMS + short fuse ≠ covered', () => {
+    // Expires in 6h, last touch 1h ago: the 12h spacing gate holds the
+    // expiring touch until NOW+11h — after expiry. Nothing can send, so the
+    // click must NOT be dismissed as cadence-covered.
+    const est = makeEstimate({
+      expires_at: new Date(NOW.getTime() + 6 * H),
+      followup_expiring_sent_at: null,
+      last_follow_up_at: new Date(NOW.getTime() - 1 * H),
+    });
+    expect(cadenceStageDueSoon(est, NOW)).toBe(false);
+  });
+
+  test('expiring touch due when spacing clears before expiry', () => {
+    const est = makeEstimate({
+      expires_at: new Date(NOW.getTime() + 20 * H),
+      followup_expiring_sent_at: null,
+      last_follow_up_at: new Date(NOW.getTime() - 5 * H),
+    });
+    // Spacing clears at NOW+7h, expiry NOW+20h — window open inside lookahead.
+    expect(cadenceStageDueSoon(est, NOW)).toBe(true);
+  });
+
   test('spacing floor past the window end = empty window → not due', () => {
     const est = makeEstimate({
       status: 'sent', viewed_at: null,

@@ -187,20 +187,34 @@ function cadenceStageDueSoon(est, now = new Date(), soonHours = 24) {
   //    sent_at whether or not the estimate was viewed — only the copy varies.
   if (sentAt && unclaimed('followup_questions_sent_at')
       && overlapsSoon(Math.max(sentAt + 48 * H, spacingFloor), sentAt + 120 * H)) return true;
-  // 2. Day-5 check-in: sent 5–8d ago (CHECKIN_WINDOW); yields when expiry is
-  //    inside 48h (CHECKIN_EXPIRY_YIELD_HOURS — the last-day notice owns
-  //    short-fuse estimates); waits out the touch-1 gap and normal spacing.
+  // 2. Day-5 check-in: sent 5–8d ago (CHECKIN_WINDOW); waits out the touch-1
+  //    gap and normal spacing. The 48h expiry yield
+  //    (CHECKIN_EXPIRY_YIELD_HOURS — the last-day notice owns short-fuse
+  //    estimates) is evaluated at the EFFECTIVE send time (the floor when it
+  //    is in the future), matching checkCheckInTouch which applies the rule
+  //    when the touch actually runs — judged at now(), a floor 2h out with
+  //    expiry 49h out would read "due" here while the cron later yields, and
+  //    neither follow-up fires.
   const checkinFloor = Math.max(
     sentAt + 5 * 24 * H,
     questionsAt == null ? -Infinity : questionsAt + 48 * H,
     spacingFloor,
   );
+  const checkinEffectiveAt = Math.max(checkinFloor, nowMs);
   if (sentAt && unclaimed('followup_credit_sent_at')
-      && expiresAt && expiresAt > nowMs + 48 * H
+      && expiresAt && expiresAt > checkinEffectiveAt + 48 * H
       && overlapsSoon(checkinFloor, sentAt + 8 * 24 * H)) return true;
-  // 3. Last-day notice: expires within 30h (EXPIRING_HORIZON_HOURS).
+  // 3. Last-day notice: expires within 30h (EXPIRING_HORIZON_HOURS), spaced
+  //    12h off the last touch (EXPIRING_SPACING_HOURS) like the real sender —
+  //    a click right after a manual SMS must not be dismissed as
+  //    cadence-covered when the spacing gate would hold the expiring touch
+  //    past the estimate's expiry.
+  const expiringFloor = Math.max(
+    expiresAt == null ? Infinity : expiresAt - 30 * H,
+    lastTouchAt == null ? -Infinity : lastTouchAt + 12 * H,
+  );
   if (expiresAt && unclaimed('followup_expiring_sent_at')
-      && overlapsSoon(expiresAt - 30 * H, expiresAt)) return true;
+      && overlapsSoon(expiringFloor, expiresAt)) return true;
   return false;
 }
 
