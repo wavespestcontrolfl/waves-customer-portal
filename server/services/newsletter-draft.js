@@ -363,12 +363,18 @@ async function assemblePestInsiderNewsletter(draft) {
   const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
   const parts = [];
 
-  // Parallel GIF prefetch — same rationale as the flagship assembler.
-  const [introGif, crawlGif, pitchGif] = await Promise.all([
-    searchGiphy(draft.introGifTerm),
-    searchGiphy(draft.crawlGifTerm),
-    searchGiphy(draft.pitchGifTerm),
+  // Parallel candidate prefetch — same rationale as the flagship assembler.
+  // Selection runs sequentially afterward so the same GIF can never appear
+  // twice in one issue.
+  const usedGifIds = new Set();
+  const [introCandidates, crawlCandidates, pitchCandidates] = await Promise.all([
+    searchGiphyCandidates(draft.introGifTerm),
+    searchGiphyCandidates(draft.crawlGifTerm),
+    searchGiphyCandidates(draft.pitchGifTerm),
   ]);
+  const introGif = pickUniqueGif(introCandidates, usedGifIds);
+  const crawlGif = pickUniqueGif(crawlCandidates, usedGifIds);
+  const pitchGif = pickUniqueGif(pitchCandidates, usedGifIds);
 
   // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
@@ -508,7 +514,12 @@ const COLORS = {
   get rule() { return newsletterPalette().rule; },
 };
 
-const WAVES_DIVIDER_GIF = 'https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/952b11dc-99a2-4de3-8def-481a1c34f8d7/giphy.gif';
+// Animated circular mascot badge built from the CURRENT brand mascot
+// (client/public/waves-logo-2026.png art, wordmark cropped out — illegible
+// at divider size anyway), self-hosted on our CDN. Replaces the Beehiiv-era
+// mascot GIF that (a) was the old logo art and (b) lived on media.beehiiv.com,
+// a platform we left — that asset can vanish without notice.
+const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif';
 
 async function generateHeroImage(subject) {
   const s3Ready = config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket && process.env.SOCIAL_MEDIA_CDN_DOMAIN;
@@ -537,18 +548,41 @@ async function generateHeroImage(subject) {
     return null;
   }
 }
-async function searchGiphy(term) {
-  if (!term) return null;
+// Fetch up to 10 candidate GIFs for a search term as [{ id, url }].
+// Candidates (not a single winner) so the assembler can dedupe across the
+// whole issue: similar search terms ("excited dance", "happy dancing")
+// share Giphy's top result, and limit=1 shipped the same GIF 6× in one
+// issue (2026-07-09 draft). Never rejects — [] on any failure.
+async function searchGiphyCandidates(term) {
+  if (!term) return [];
   const apiKey = process.env.GIPHY_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) return [];
   try {
-    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=1&rating=pg`;
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=10&rating=pg`;
     const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
     const data = await res.json();
-    const gif = data.data?.[0];
-    return gif?.images?.downsized_medium?.url || gif?.images?.original?.url || null;
-  } catch { return null; }
+    return (Array.isArray(data.data) ? data.data : [])
+      .map((gif) => ({
+        id: gif?.id,
+        url: gif?.images?.downsized_medium?.url || gif?.images?.original?.url || null,
+      }))
+      .filter((c) => c.id && c.url);
+  } catch { return []; }
+}
+
+// Issue-level GIF dedupe: first candidate whose Giphy id hasn't been used
+// in this issue wins and is marked used. A term whose candidates are ALL
+// taken yields null — the renderer falls back to the event photo, because
+// repeating a GIF is never acceptable (owner rule 2026-07-09).
+function pickUniqueGif(candidates, usedIds) {
+  for (const c of candidates || []) {
+    if (!usedIds.has(c.id)) {
+      usedIds.add(c.id);
+      return c.url;
+    }
+  }
+  return null;
 }
 
 // HTML-escape a string before it is interpolated into the email body.
@@ -583,7 +617,7 @@ function slugify(text) {
 function dividerHtml() {
   return `<div style="text-align:center;margin:28px 0;">
 <a href="https://www.wavespestcontrol.com/" style="text-decoration:none;">
-<img src="${WAVES_DIVIDER_GIF}" alt="" width="64" style="width:64px;height:auto;display:inline-block;" />
+<img src="${WAVES_DIVIDER_GIF}" alt="" width="48" style="width:48px;height:auto;display:inline-block;" />
 </a></div>`;
 }
 
@@ -932,15 +966,20 @@ async function assembleBeehiivNewsletter(draft) {
   const parts = [];
   const events = draft.events || [];
 
-  // Prefetch ALL Giphy lookups concurrently. GIF-first rendering would
-  // otherwise await searchGiphy serially inside the event loop — with
+  // Prefetch ALL Giphy candidate lists concurrently. GIF-first rendering
+  // would otherwise await Giphy serially inside the event loop — with
   // Giphy slow/unreachable that's 5s × 12 events of dead time; in
-  // parallel the worst case is one 5s timeout. searchGiphy never
-  // rejects (catch → null), so Promise.all is safe.
-  const [introGif, ...eventGifs] = await Promise.all([
-    searchGiphy(draft.introGifTerm),
-    ...events.map((ev) => searchGiphy(ev.gifSearchTerm)),
+  // parallel the worst case is one 5s timeout. searchGiphyCandidates never
+  // rejects (catch → []), so Promise.all is safe. Selection then runs
+  // sequentially (intro first, events in order) against a shared used-set
+  // so one issue can never repeat a GIF.
+  const usedGifIds = new Set();
+  const [introCandidates, ...eventCandidates] = await Promise.all([
+    searchGiphyCandidates(draft.introGifTerm),
+    ...events.map((ev) => searchGiphyCandidates(ev.gifSearchTerm)),
   ]);
+  const introGif = pickUniqueGif(introCandidates, usedGifIds);
+  const eventGifs = eventCandidates.map((candidates) => pickUniqueGif(candidates, usedGifIds));
 
   // ── Hero Image ──
   const heroUrl = safeUrl(draft.heroImageUrl);
@@ -1413,6 +1452,9 @@ module.exports = {
   assembleBeehiivNewsletter,
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,
+  // GIF dedupe (one issue never repeats a GIF)
+  searchGiphyCandidates,
+  pickUniqueGif,
   displayCity,
   formatLockedLocation,
   linkifyFirst,
