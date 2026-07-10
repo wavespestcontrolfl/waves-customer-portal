@@ -19,9 +19,25 @@ router.get('/:code', async (req, res) => {
     const referer = req.headers['referer'] || '';
 
     // Find promoter by referral_code
-    const promoter = await db('referral_promoters')
+    let promoter = await db('referral_promoters')
       .where({ referral_code: code, status: 'active' })
       .first();
+
+    // Merged-away promoter: a customer-dedupe merge retires the duplicate's
+    // enrollment as a code ALIAS (status 'merged', merged_into_promoter_id →
+    // the surviving row) so invite links already in the wild keep
+    // attributing clicks and rewards to the merged customer.
+    if (!promoter) {
+      const alias = await db('referral_promoters')
+        .where({ referral_code: code, status: 'merged' })
+        .whereNotNull('merged_into_promoter_id')
+        .first('merged_into_promoter_id');
+      if (alias) {
+        promoter = await db('referral_promoters')
+          .where({ id: alias.merged_into_promoter_id, status: 'active' })
+          .first();
+      }
+    }
 
     if (!promoter) {
       // Fallback: check customers.referral_code

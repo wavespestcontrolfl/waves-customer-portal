@@ -838,7 +838,7 @@ describe('executeMerge', () => {
     };
     const state = {
       referralRepoint: null, inviteRepoint: null, clickRepoint: null, payoutRepoint: null,
-      promoterUpdate: null, promoterDeleted: null,
+      promoterUpdates: {}, promoterDeleted: null,
     };
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') {
@@ -856,7 +856,10 @@ describe('executeMerge', () => {
           if (w.id === 9) return loserPromoterRow;
           return null;
         }
-        if (q.called('update')) { state.promoterUpdate = q.args('update')[0]; return 1; }
+        if (q.called('update')) {
+          state.promoterUpdates[q.args('where')[0].id] = q.args('update')[0];
+          return 1;
+        }
       }
       if (table === 'referrals' && q.called('update')) {
         state.referralRepoint = [q.args('where')[0], q.args('update')[0]];
@@ -891,7 +894,7 @@ describe('executeMerge', () => {
     expect(state.payoutRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
     // Balances/counters sum — including the live v2 balances the portal
     // displays (available/pending); zero-add columns untouched.
-    expect(state.promoterUpdate).toEqual({
+    expect(state.promoterUpdates[7]).toEqual({
       click_balance_cents: 150,
       referral_balance_cents: 200,
       total_earned_cents: 350,
@@ -902,7 +905,19 @@ describe('executeMerge', () => {
       pending_earnings_cents: 150,
       updated_at: 'NOW',
     });
-    expect(state.promoterDeleted).toEqual({ id: 9 });
+    // The loser row is NOT deleted — it survives as a code alias so /r/:code
+    // links already in the wild keep attributing to the winner.
+    expect(state.promoterDeleted).toBe(null);
+    expect(state.promoterUpdates[9]).toEqual({
+      customer_id: null,
+      status: 'merged',
+      merged_into_promoter_id: 7,
+      click_balance_cents: 0,
+      referral_balance_cents: 0,
+      available_balance_cents: 0,
+      pending_earnings_cents: 0,
+      updated_at: 'NOW',
+    });
     expect(result.repointed['referral_promoters.consolidated']).toMatch(/9 into 7/);
   });
 
@@ -936,6 +951,63 @@ describe('executeMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'auto' }))
       .rejects.toThrow(/not a shell \(third_party_payer\)/);
+  });
+
+  it('refuses two different billing modes; transfers a loser-only mode + fee; clears them on retire', async () => {
+    const conflicted = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: 'annual_prepay' },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', billing_mode: 'per_application' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(conflicted.trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/different billing modes/);
+
+    const { trx, state } = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: null, per_application_fee: null },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', billing_mode: 'per_application', per_application_fee: '65.00' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.billing_mode).toBe('per_application');
+    expect(result.backfills.per_application_fee).toBe('65.00');
+    expect(state.retired.billing_mode).toBe(null);
+  });
+
+  it('auto mode refuses a loser carrying a billing mode', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', billing_mode: 'annual_prepay' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'auto' }))
+      .rejects.toThrow(/not a shell \(billing_mode\)/);
+  });
+
+  it('service contacts backfill SLOT-wise — never mixing fields across customers', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      // Slot 1 fully empty; slot 2 partially filled (name only).
+      service_contact_name: null, service_contact_phone: null, service_contact_email: null, service_contact_role: null,
+      service_contact2_name: 'Existing PM', service_contact2_phone: null, service_contact2_email: null, service_contact2_role: null,
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      service_contact_name: 'Tenant Tia', service_contact_phone: '+19415550142', service_contact_email: null, service_contact_role: 'tenant',
+      service_contact2_name: 'Other PM', service_contact2_phone: '+19415550199', service_contact2_email: null, service_contact2_role: 'property_manager',
+    };
+    const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // Slot 1: winner empty → the loser's whole slot moves.
+    expect(result.backfills.service_contact_name).toBe('Tenant Tia');
+    expect(result.backfills.service_contact_phone).toBe('+19415550142');
+    expect(result.backfills.service_contact_role).toBe('tenant');
+    // Slot 2: winner has a name → the loser's phone must NOT graft onto it.
+    expect(result.backfills.service_contact2_phone).toBeUndefined();
+    expect(result.backfills.service_contact2_name).toBeUndefined();
   });
 });
 

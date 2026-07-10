@@ -169,6 +169,12 @@ async function batchAutoBlockers(database, losers) {
     // homeowner instead of the AP payer. Review-queue only; the manual path
     // transfers or refuses inside executeMerge.
     if (loser.payer_id) byId.get(loser.id).push('third_party_payer');
+    // A non-null billing_mode (per_application / annual_prepay) is billing
+    // state: the monthly cron reads NULL as legacy monthly membership, so
+    // retiring the only row that carries the mode flips the merged account
+    // to the wrong cadence. Review-queue only; the manual path transfers or
+    // refuses inside executeMerge.
+    if (loser.billing_mode) byId.get(loser.id).push('billing_mode');
     // A live-stage row (any stage whereLiveCustomer treats as a real
     // customer — active, won, or at-risk) is never a disposable shell:
     // retiring it would drop account state (stage/tier/rate) the merge
@@ -248,7 +254,7 @@ async function findDuplicateGroups(database = db) {
     .whereRaw("COALESCE(phone, '') <> ''")
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
       'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
-      'pipeline_stage', 'lead_source', 'created_at', 'payer_id');
+      'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode');
   const byPhone = new Map();
   for (const row of rows) {
     const p10 = phone10(row.phone);
@@ -692,6 +698,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     if (winner.payer_id && loser.payer_id && winner.payer_id !== loser.payer_id) {
       throw new Error('executeMerge: customers have different third-party payers — resolve billing first');
     }
+    // Same contract for billing cadence: two DIFFERENT non-null modes is a
+    // human billing decision. (A loser-only mode transfers with the
+    // backfills below — the monthly cron treats NULL as legacy monthly
+    // membership, so dropping the only per_application/annual_prepay marker
+    // would bill the merged account on the wrong cadence.)
+    if (winner.billing_mode && loser.billing_mode && winner.billing_mode !== loser.billing_mode) {
+      throw new Error('executeMerge: customers have different billing modes — reconcile billing first');
+    }
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
@@ -818,8 +832,24 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
           await trx('referral_promoters').where({ id: winnerPromoter.id })
             .update({ ...sums, updated_at: trx.fn.now() });
         }
-        await trx('referral_promoters').where({ id: loserPromoter.id }).del();
-        repointed['referral_promoters.consolidated'] = `folded promoter ${loserPromoter.id} into ${winnerPromoter.id}`;
+        // The loser row becomes a RETIRED ALIAS instead of deleting: its
+        // /r/:code links are already in the wild (SMS/email invites), and
+        // the public resolver attributes clicks/rewards only via a promoter
+        // row. customer_id nulls (the portal loads one promoter per customer
+        // via .first()), balances zero (they folded above), and
+        // merged_into_promoter_id points the resolver at the winner so
+        // in-flight invites keep earning credit there.
+        await trx('referral_promoters').where({ id: loserPromoter.id }).update({
+          customer_id: null,
+          status: 'merged',
+          merged_into_promoter_id: winnerPromoter.id,
+          click_balance_cents: 0,
+          referral_balance_cents: 0,
+          available_balance_cents: 0,
+          pending_earnings_cents: 0,
+          updated_at: trx.fn.now(),
+        });
+        repointed['referral_promoters.consolidated'] = `folded promoter ${loserPromoter.id} into ${winnerPromoter.id} (loser kept as code alias)`;
       }
     }
 
@@ -849,6 +879,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       email: null,
       stripe_customer_id: null,
       payer_id: null,
+      billing_mode: null,
       account_credits: 0,
       active: false,
       deleted_at: trx.fn.now(),
@@ -871,6 +902,31 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // instead of the AP payer. (Different-payers was refused above.)
     if (!winner.payer_id && loser.payer_id) {
       backfills.payer_id = loser.payer_id;
+    }
+    // A loser-only billing mode transfers the same way; per_application_fee
+    // rides along when the winner has none (the completion biller reads it
+    // with the mode).
+    if (!winner.billing_mode && loser.billing_mode) {
+      backfills.billing_mode = loser.billing_mode;
+      if (isEmptyValue(winner.per_application_fee) && !isEmptyValue(loser.per_application_fee)) {
+        backfills.per_application_fee = loser.per_application_fee;
+      }
+    }
+    // On-location service contacts route appointment/service-report comms
+    // (customer-contact.js): copy slot-WISE, never field-wise — mixing one
+    // slot's name with another's phone would invent a contact that doesn't
+    // exist. A slot moves only when the winner's whole slot is empty.
+    const CONTACT_SLOTS = [
+      ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
+      ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
+      ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
+    ];
+    for (const slot of CONTACT_SLOTS) {
+      const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
+      if (!winnerSlotEmpty) continue;
+      for (const f of slot) {
+        if (!isEmptyValue(loser[f])) backfills[f] = loser[f];
+      }
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
