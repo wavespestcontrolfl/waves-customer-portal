@@ -354,7 +354,12 @@ function formatReportTitleDate(value) {
 }
 
 function serviceDisplayName(data = {}) {
-  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+  const raw = data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+  // Customers see the service, not the billing cadence: "Quarterly Pest Control"
+  // renders as "Pest Control" (owner 2026-07-09 — match lawn / tree & shrub, which
+  // carry no term qualifier).
+  const stripped = String(raw).replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '').trim();
+  return stripped || raw;
 }
 
 function reportDocumentTitle(data = {}) {
@@ -434,6 +439,17 @@ function formatCustomerPhone(phone) {
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
 // The displayed arrival window is ALWAYS window_start + 2 hours — window_end
 // is the internal job block and never renders on customer surfaces.
+// "Every 6 Weeks Lawn Care Service" -> "Lawn Care": the next-service cell names
+// the service, not the billing cadence (owner 2026-07-09).
+function nextServiceName(serviceType) {
+  const cleaned = String(serviceType || '')
+    .replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '')
+    .replace(/^every\s+\d+\s+(weeks?|months?|days?)\s+/i, '')
+    .replace(/\s+service$/i, '')
+    .trim();
+  return cleaned || null;
+}
+
 function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
   const dateLabel = (() => {
@@ -444,7 +460,8 @@ function formatNextAppointmentLabel(nextAppointment) {
   })();
   if (!dateLabel) return null;
   const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
-  if (!m) return dateLabel;
+  const noWindowName = nextServiceName(nextAppointment.serviceType);
+  if (!m) return noWindowName ? `${noWindowName} · ${dateLabel}` : dateLabel;
   const fmt = (mins) => {
     const h24 = Math.floor(mins / 60) % 24;
     const h12 = h24 % 12 || 12;
@@ -452,7 +469,9 @@ function formatNextAppointmentLabel(nextAppointment) {
     return `${h12}:${String(mm).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
   };
   const start = (Number(m[1]) * 60) + Number(m[2]);
-  return `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+  const when = `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+  const name = nextServiceName(nextAppointment.serviceType);
+  return name ? `${name} · ${when}` : when;
 }
 
 export function serviceReportDateTimeLabel(data = {}) {
@@ -1112,14 +1131,85 @@ function weatherIconInfo(conditions = {}, weatherCall) {
   const headline = String(weatherCall?.headline || '').toLowerCase();
   const signal = `${sky} ${headline}`.toLowerCase();
 
-  if ((Number.isFinite(wind) && wind > 10) || /\bwind\b/.test(headline)) return { Icon: Wind, label: 'Wind noted' };
+  if ((Number.isFinite(wind) && wind > 10) || /\bwind\b/.test(headline)) return { Icon: Wind, label: 'Wind noted', kind: 'wind' };
   if ((Number.isFinite(rain) && rain > 0.1) || /\brain|storm|shower|drizzle\b/.test(signal)) {
-    return { Icon: CloudRain, label: 'Rain noted' };
+    return { Icon: CloudRain, label: 'Rain noted', kind: 'rain' };
   }
-  if (/\bclear|sun|sunny\b/.test(signal)) return { Icon: Sun, label: 'Sunny conditions' };
-  if (/\bpartly|mostly sunny|few clouds\b/.test(signal)) return { Icon: CloudSun, label: 'Partly cloudy' };
-  if (/\bcloud|overcast\b/.test(signal)) return { Icon: Cloud, label: 'Cloud cover' };
-  return { Icon: CloudSun, label: 'Treatment weather' };
+  if (/\bclear|sun|sunny\b/.test(signal)) return { Icon: Sun, label: 'Sunny conditions', kind: 'sun' };
+  if (/\bpartly|mostly sunny|few clouds\b/.test(signal)) return { Icon: CloudSun, label: 'Partly cloudy', kind: 'partly' };
+  if (/\bcloud|overcast\b/.test(signal)) return { Icon: Cloud, label: 'Cloud cover', kind: 'cloud' };
+  return { Icon: CloudSun, label: 'Treatment weather', kind: 'partly' };
+}
+
+// Animated weather mark for the conditions panel — etched-instrument line work
+// in the report ink at one 1.6px stroke weight, cool glass tints, and a single
+// condition-matched motion each (sun turns, rain falls, clouds drift, wind
+// flows). Animates in live mode only; static/pdf/reduced-motion get the
+// settled frame via the shared media block.
+function AnimatedWeatherIcon({ kind = 'partly', live = false }) {
+  const ink = 'var(--text)';
+  const s = { fill: 'none', stroke: ink, strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  const cloud = (d, tint = 'rgba(175, 225, 255, 0.28)', w = 1.6) => (
+    <path d={d} fill={tint} stroke={ink} strokeWidth={w} strokeLinejoin="round" />
+  );
+  return (
+    <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true" className={live ? 'wx wx--live' : 'wx'} style={{ display: 'block', overflow: 'visible' }}>
+      {kind === 'sun' && (
+        <>
+          <g className="wx-rays">
+            {[0, 45, 90, 135, 180, 225, 270, 315].map((a) => (
+              <line key={a} x1="18" y1="5" x2="18" y2={a % 90 === 0 ? '8.4' : '7.4'} {...s} strokeWidth={1.4} transform={`rotate(${a} 18 18)`} />
+            ))}
+          </g>
+          <circle className="wx-core" cx="18" cy="18" r="6.2" fill="rgba(255, 222, 120, 0.4)" stroke={ink} strokeWidth="1.6" />
+          <path d="M13.6 15.4 a5.4 5.4 0 0 1 3.4-2.4" fill="none" stroke="rgba(255,255,255,0.95)" strokeWidth="1.1" strokeLinecap="round" />
+        </>
+      )}
+      {kind === 'partly' && (
+        <>
+          <g className="wx-rays" style={{ transformOrigin: '13px 12px' }}>
+            {[0, 60, 120, 180, 240, 300].map((a) => (
+              <line key={a} x1="13" y1="3.6" x2="13" y2="5.8" {...s} strokeWidth={1.3} transform={`rotate(${a} 13 12)`} />
+            ))}
+          </g>
+          <circle cx="13" cy="12" r="4.2" fill="rgba(255, 222, 120, 0.4)" stroke={ink} strokeWidth="1.4" />
+          <g className="wx-cloud">
+            {cloud('M11.5 28.5 a4.9 4.9 0 0 1 1.2-9.6 A6.4 6.4 0 0 1 25 17 a4.5 4.5 0 0 1 1.5 8.8 Z', 'rgba(255,255,255,0.92)')}
+            <path d="M13.6 20.6 a5 5 0 0 1 3.2-1.9" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          </g>
+        </>
+      )}
+      {kind === 'cloud' && (
+        <>
+          <g className="wx-cloud-back">
+            {cloud('M14.5 16.5 a4.2 4.2 0 0 1 1-8.2 A5.6 5.6 0 0 1 26 7.4 a3.9 3.9 0 0 1 1.3 7.6 Z', 'rgba(175, 225, 255, 0.22)', 1.3)}
+          </g>
+          <g className="wx-cloud">
+            {cloud('M9.5 27.5 a5.3 5.3 0 0 1 1.3-10.4 A7 7 0 0 1 24.6 14.6 a4.9 4.9 0 0 1 1.7 9.6 Z', 'rgba(255,255,255,0.92)')}
+            <path d="M11.8 20.6 a5.4 5.4 0 0 1 3.5-2.1" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          </g>
+        </>
+      )}
+      {kind === 'rain' && (
+        <>
+          {cloud('M10 22.5 a5.6 5.6 0 0 1 1.4-11 A7.4 7.4 0 0 1 26 9.9 a5.1 5.1 0 0 1 1.7 10.1 Z', 'rgba(255,255,255,0.92)')}
+          <path d="M12.4 15.2 a5.6 5.6 0 0 1 3.6-2.2" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          <g stroke="#0A7EC2" strokeWidth="1.7" strokeLinecap="round">
+            <line className="wx-drop wx-drop-1" x1="13.5" y1="26" x2="12.4" y2="30" />
+            <line className="wx-drop wx-drop-2" x1="19" y1="26" x2="17.9" y2="30" />
+            <line className="wx-drop wx-drop-3" x1="24.5" y1="26" x2="23.4" y2="30" />
+          </g>
+        </>
+      )}
+      {kind === 'wind' && (
+        <g fill="none" strokeLinecap="round">
+          <path className="wx-gust wx-gust-1" d="M4.5 13 h15.5 a3.4 3.4 0 1 0 -3.4 -3.4" stroke="#0A7EC2" strokeWidth="1.7" />
+          <path className="wx-gust wx-gust-2" d="M4.5 19 h21.5 a3.4 3.4 0 1 1 -3.4 3.4" stroke={ink} strokeWidth="1.6" />
+          <path className="wx-gust wx-gust-3" d="M4.5 25 h12.5 a2.9 2.9 0 1 1 -2.9 2.9" stroke="#7CC7F0" strokeWidth="1.6" />
+        </g>
+      )}
+    </svg>
+  );
 }
 
 function recommendedFinding(findings = []) {
@@ -1666,13 +1756,23 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <h1 className="sr-title">Hey {firstName}, {headline}</h1>
         {(() => {
           // Mirrors the estimate header's contact block: each of name / email /
-          // phone / address on its own eyebrow-styled line.
+          // phone / address on its own line, rendered mixed-case ("Chris Whitney",
+          // not "CHRIS WHITNEY" — owner 2026-07-09). Records stored ALL-CAPS
+          // (common on older customer rows) are title-cased for display only.
+          const displayContactLine = (raw) => {
+            const s = String(raw || '').trim();
+            if (!s || s !== s.toUpperCase()) return s;
+            if (s.includes('@')) return s.toLowerCase();
+            return s.toLowerCase()
+              .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+              .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+          };
           const contactLines = [
             data.customerName,
             data.customerEmail,
             formatCustomerPhone(data.customerPhone),
             data.serviceAddress,
-          ].map((line) => String(line || '').trim()).filter(Boolean);
+          ].map(displayContactLine).filter(Boolean);
           return contactLines.length ? (
             <div className="service-meta-contact">
               {contactLines.map((line) => (
@@ -1710,8 +1810,9 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           </div>
           {nextAppointmentLabel && (
             <div className="sr-cell">
-              <div className="sr-cell-label">Next appointment</div>
+              <div className="sr-cell-label">Next service</div>
               <div className="sr-cell-value">{nextAppointmentLabel}</div>
+              <div className="sr-cell-note">Subject to change</div>
             </div>
           )}
         </div>
@@ -1719,6 +1820,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+          live={mode === 'live'}
         />
       </div>
     </section>
@@ -1867,17 +1969,17 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall }) {
+function HeroConditions({ conditions, weatherCall, live = false }) {
   const rows = conditionRows(conditions);
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
-  const { Icon, label } = weatherIconInfo(conditions, weatherCall);
+  const { label, kind } = weatherIconInfo(conditions, weatherCall);
   return (
     <div className="hero-conditions">
       <div className="hero-conditions-copy">
         <div className="weather-call-title">
-          <span className="weather-call-icon" aria-hidden="true"><Icon size={18} strokeWidth={1.8} /></span>
+          <span className="weather-call-icon weather-call-icon-animated" aria-hidden="true"><AnimatedWeatherIcon kind={kind} live={live} /></span>
           <div>
             <div className="section-eyebrow">{weatherCall ? 'Weather call' : 'Conditions at application'}</div>
             <div className="weather-call-icon-label">{label}</div>
@@ -2007,6 +2109,96 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
         ))}
       </div>
       {answer && <div className="report-ask-answer">{answer}</div>}
+    </div>
+  );
+}
+
+// Floating Ask Waves — the report's AI helper as a slim bar pinned under the
+// shell header while the customer scrolls (owner ask 2026-07-09: inline, sleek —
+// small header, contextual prompt pills, chat input + button). Live mode only;
+// pdf/static keep the legacy "Need help with this report?" section untouched.
+function FloatingAskWaves({ mode, token, serviceLine, data }) {
+  const prompts = reportAskPrompts(data, serviceLine);
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [asking, setAsking] = useState(false);
+
+  const ask = async (text) => {
+    const q = String((text ?? question) || '').trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setAnswer('');
+    try {
+      const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'question_failed');
+      // Server records report_question_asked — no client event (double-count).
+      setAnswer(payload.answer || 'I could not answer that from this report.');
+    } catch {
+      setAnswer('I could not answer that right now. Reply to the text message or call Waves for help.');
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  if (mode !== 'live') return null;
+
+  return (
+    <div className="floating-ask-wrap">
+      <section data-glass="card" className="floating-ask-bar" aria-label="Waves AI — ask about this report">
+        <span className="floating-ask-title">Waves AI</span>
+
+        {/* marquee: prompts drift slowly left, vanish behind the label edge, and
+            re-enter from the input side; list is doubled for a seamless loop.
+            Hover/focus pauses so a moving pill can be clicked. */}
+        <div className="floating-ask-pills" aria-label="Example questions">
+          <div className="floating-ask-track">
+            {[...prompts, ...prompts].map((prompt, i) => (
+              <button
+                data-glass="chip"
+                type="button"
+                key={`${prompt}-${i}`}
+                className="floating-ask-pill"
+                onClick={() => ask(prompt)}
+                disabled={asking}
+                tabIndex={i < prompts.length ? 0 : -1}
+                aria-hidden={i >= prompts.length}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="floating-ask-form">
+          <input
+            id="floating-report-question"
+            name="floating_report_question"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                ask();
+              }
+            }}
+            placeholder="Ask Waves"
+            aria-label="Ask Waves about this service report"
+          />
+          <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+            {asking ? 'Checking…' : 'Ask'}
+          </button>
+        </div>
+        {answer && (
+          <div className="floating-ask-answer" role="status" data-glass="soft">
+            <span>{answer}</span>
+            <button type="button" className="floating-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'\u2715'}</button>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -4853,7 +5045,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-meta {
           margin-top: 8px;
-          color: ${ESTIMATE_BODY};
+          /* var(--muted): one supporting gray on this surface (was ESTIMATE_BODY,
+             a third ink — owner palette reduction 2026-07-09) */
+          color: var(--muted);
           font-size: 15px;
           line-height: 1.5;
         }
@@ -4882,11 +5076,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 12px;
+          font-size: 13px;
           line-height: 1.5;
-          font-weight: 700;
+          font-weight: 600;
           letter-spacing: 0;
-          text-transform: uppercase;
+          /* mixed-case contact lines (owner 2026-07-09) — no uppercase transform */
         }
         .service-meta-contact {
           margin-top: 4px;
@@ -5036,8 +5230,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 34px;
           border: 1px solid #86efac;
           border-radius: 999px;
-          background: #dcfce7;
-          color: #14532d;
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
           font-size: 12px;
           line-height: 1;
           font-weight: 800;
@@ -5050,9 +5244,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .status-badge.status-warning {
-          border-color: #fdba74;
-          background: #ffedd5;
-          color: #7c2d12;
+          border-color: rgba(245, 158, 11, 0.45);
+          background: rgba(245, 158, 11, 0.12);
+          color: #B45309;
         }
         .status-badge.status-neutral {
           border-color: #cbd5e1;
@@ -5099,9 +5293,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          border: 1px solid #bbf7d0;
-          background: #dcfce7;
-          color: #14532d;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
         }
         .status-timeline-marker-pending {
           border-color: #cbd5e1;
@@ -5151,7 +5345,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         .readiness-card {
-          border-color: #bbf7d0;
+          border-color: rgba(22, 163, 74, 0.35);
           background: #f0fdf4;
         }
         .readiness-card h2 {
@@ -5276,9 +5470,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .service-coverage-chip strong {
           font-size: 14px;
         }
-        .service-coverage-chip.status-green { border-color: #86efac; background: #dcfce7; color: #14532d; }
-        .service-coverage-chip.status-blue { border-color: #93c5fd; background: #dbeafe; color: #1e3a8a; }
-        .service-coverage-chip.status-orange { border-color: #fdba74; background: #ffedd5; color: #7c2d12; }
+        .service-coverage-chip.status-green { border-color: #86efac; background: rgba(22, 163, 74, 0.12); color: #15803D; }
+        .service-coverage-chip.status-blue { border-color: rgba(10, 126, 194, 0.45); background: rgba(10, 126, 194, 0.12); color: #0A7EC2; }
+        .service-coverage-chip.status-orange { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #B45309; }
         .service-coverage-card-grid {
           display: grid;
           grid-template-columns: minmax(0, .88fr) minmax(320px, 1.12fr);
@@ -5354,8 +5548,23 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 16px;
           padding: 24px;
-          margin-top: 16px;
+          /* 20px rhythm: the glass hover lift (translateY(-4px) + scale 1.016)
+             intrudes ~8px into the gap above a card — at 16px cards read as
+             near-collision on hover (owner 2026-07-09). */
+          margin-top: 20px;
           break-inside: avoid;
+        }
+        /* a nested glass card that closes its host section drops its trailing
+           margin — the host's 24px padding is the tail spacing; the stacked
+           margin+padding read as dead space (owner 2026-07-09). The embed
+           wrapper's trailing chain flattens for the same reason (an inner
+           grouping div was still holding 16px of tail). */
+        .sr-section [data-glass="card"]:last-child,
+        .sr-section div:last-child > [data-glass="card"]:last-child,
+        .report-v2-embed > :last-child,
+        .report-v2-embed > :last-child > :last-child,
+        .report-v2-embed > :last-child > :last-child > :last-child {
+          margin-bottom: 0 !important;
         }
         .sr-section h2 {
           margin: 0 0 16px;
@@ -5473,7 +5682,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-area.status-green,
         .coverage-marker.status-green .coverage-marker-inner {
           fill: #15803D;
-          stroke: #14532d;
+          stroke: #15803D;
         }
         .coverage-area.status-light-green,
         .coverage-area.status-partially_treated {
@@ -5483,7 +5692,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-area.status-blue,
         .coverage-marker.status-blue .coverage-marker-inner {
           fill: #2563eb;
-          stroke: #1e3a8a;
+          stroke: #0A7EC2;
         }
         .coverage-area.status-orange,
         .coverage-marker.status-orange .coverage-marker-inner {
@@ -5504,7 +5713,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           fill: rgba(22,163,74,.28);
         }
         .coverage-partial-line {
-          stroke: #14532d;
+          stroke: #15803D;
           stroke-width: 2;
           opacity: .65;
         }
@@ -5606,16 +5815,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
         }
         .coverage-legend-item.status-green .coverage-legend-swatch,
-        .coverage-status-chip.status-green { background: #dcfce7; border-color: #86efac; color: #14532d; }
+        .coverage-status-chip.status-green { background: rgba(22, 163, 74, 0.12); border-color: #86efac; color: #15803D; }
         .coverage-legend-item.status-green .coverage-legend-swatch { background: #16a34a; color: #fff; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch,
         .coverage-status-chip.status-light-green { background: #ecfccb; border-color: #bef264; color: #365314; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch { background: #65a30d; color: #fff; }
         .coverage-legend-item.status-blue .coverage-legend-swatch,
-        .coverage-status-chip.status-blue { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+        .coverage-status-chip.status-blue { background: rgba(10, 126, 194, 0.12); border-color: rgba(10, 126, 194, 0.45); color: #0A7EC2; }
         .coverage-legend-item.status-blue .coverage-legend-swatch { background: #2563eb; color: #fff; }
         .coverage-legend-item.status-orange .coverage-legend-swatch,
-        .coverage-status-chip.status-orange { background: #ffedd5; border-color: #fdba74; color: #7c2d12; }
+        .coverage-status-chip.status-orange { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.45); color: #B45309; }
         .coverage-legend-item.status-orange .coverage-legend-swatch { background: #f59e0b; color: #fff; }
         .coverage-legend-item.status-red .coverage-legend-swatch,
         .coverage-status-chip.status-red { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
@@ -5766,9 +5975,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           width: 34px;
           height: 34px;
           border-radius: 999px;
-          border: 1px solid #bbf7d0;
-          background: #dcfce7;
-          color: #14532d;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -5780,14 +5989,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .workflow-status-current .workflow-event-icon {
-          border-color: #93c5fd;
-          background: #dbeafe;
-          color: #1e3a8a;
+          border-color: rgba(10, 126, 194, 0.45);
+          background: rgba(10, 126, 194, 0.12);
+          color: #0A7EC2;
         }
         .workflow-status-skipped .workflow-event-icon {
-          border-color: #fdba74;
-          background: #ffedd5;
-          color: #7c2d12;
+          border-color: rgba(245, 158, 11, 0.45);
+          background: rgba(245, 158, 11, 0.12);
+          color: #B45309;
         }
         .workflow-event-body {
           min-width: 0;
@@ -6098,6 +6307,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-grid-2 { display: grid; grid-template-columns: 1fr; gap: 0; }
         .sr-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--line); }
         .sr-cell { background: #fff; padding: 16px; min-height: 72px; }
+        .sr-cell-note {
+          margin-top: 3px;
+          color: var(--muted);
+          font-size: 11px;
+          line-height: 1.4;
+        }
         .sr-cell-label { font-size: 12px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
         .sr-list { display: grid; gap: 12px; }
@@ -6160,6 +6375,183 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--wash);
           font-size: 14px;
           line-height: 1.5;
+        }
+        /* Floating Ask Waves bar — sticky under the 49px shell header (live only).
+           Grid areas: desktop "title pills form"; phone stacks form + pills. */
+        .floating-ask-wrap {
+          position: sticky;
+          top: 57px;
+          z-index: 8;
+          margin-top: 20px;
+        }
+        .floating-ask-bar {
+          display: grid;
+          grid-template-areas: 'title pills form';
+          grid-template-columns: auto minmax(0, 1fr) minmax(280px, 38%);
+          align-items: center;
+          gap: 10px;
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          background: var(--wash);
+          padding: 10px 14px;
+        }
+        .floating-ask-title {
+          grid-area: title;
+          color: var(--text);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        .floating-ask-title::before {
+          /* \\2726 = four-pointed star (escaped: raw glyphs fail check:portal-brand) */
+          content: '\\2726  ';
+          color: ${B.yellow};
+        }
+        /* prompt marquee: pills drift slowly left, fade out behind the Waves AI
+           label and re-enter from the input side (owner ask 2026-07-09). The
+           track holds the prompt list twice and loops at exactly half its own
+           width, so the belt is seamless; hover/focus pauses it for clicking. */
+        .floating-ask-pills {
+          grid-area: pills;
+          min-width: 0;
+          overflow: hidden;
+          -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+          mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+        }
+        .floating-ask-track {
+          display: flex;
+          gap: 8px;
+          width: max-content;
+          animation: floatingPillMarquee 56s linear infinite;
+        }
+        .floating-ask-pills:hover .floating-ask-track,
+        .floating-ask-track:focus-within {
+          animation-play-state: paused;
+        }
+        @keyframes floatingPillMarquee {
+          from { transform: translateX(0); }
+          /* -4px = half the 8px gap, so the loop point is invisible */
+          to { transform: translateX(calc(-50% - 4px)); }
+        }
+        .floating-ask-pill {
+          flex: 0 0 auto;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--text);
+          font: inherit;
+          font-size: 13px;
+          line-height: 1;
+          font-weight: 700;
+          padding: 9px 12px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .floating-ask-track { animation: none; }
+        }
+        .floating-ask-form {
+          grid-area: form;
+          display: flex;
+          gap: 8px;
+          min-width: 0;
+        }
+        .floating-ask-form input {
+          flex: 1;
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 9px 14px;
+          color: var(--text);
+          font: inherit;
+          font-size: 14px;
+          outline: none;
+          background: #fff;
+        }
+        .floating-ask-form button {
+          border: 1px solid ${B.blueDeeper};
+          border-radius: 999px;
+          background: ${B.yellow};
+          color: ${B.blueDeeper};
+          font: inherit;
+          font-size: 14px;
+          font-weight: 800;
+          padding: 9px 16px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .floating-ask-form button:disabled,
+        .floating-ask-pills button:disabled {
+          opacity: .5;
+          cursor: default;
+        }
+        /* answer floats as a dropdown UNDER the bar (absolute — an in-flow answer
+           grows the sticky bar and scroll-anchoring yanks the page) */
+        .floating-ask-answer {
+          position: absolute !important;
+          top: calc(100% + 8px);
+          left: 0;
+          right: 0;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          background: var(--wash);
+          padding: 12px 14px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.5;
+          box-shadow: 0 18px 50px rgba(4, 57, 94, 0.18);
+        }
+        .floating-ask-dismiss {
+          flex: 0 0 auto;
+          border: 0;
+          background: transparent;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1;
+          padding: 2px 4px;
+          cursor: pointer;
+        }
+        @media (max-width: 700px) {
+          .floating-ask-bar {
+            grid-template-areas:
+              'title form'
+              'pills pills';
+            grid-template-columns: auto minmax(0, 1fr);
+            border-radius: 16px;
+          }
+        }
+        /* animated weather mark — live only; the media block below parks it */
+        .weather-call-icon-animated {
+          width: 44px;
+          height: 44px;
+          display: grid;
+          place-items: center;
+        }
+        .wx .wx-rays, .wx .wx-core { transform-box: view-box; transform-origin: 18px 18px; }
+        .wx--live .wx-rays { animation: wxSpin 70s linear infinite; }
+        .wx--live .wx-core { animation: wxPulse 9s ease-in-out infinite; }
+        .wx--live .wx-cloud { animation: wxDrift 12s ease-in-out infinite; }
+        .wx--live .wx-cloud-back { animation: wxDriftBack 15s ease-in-out infinite; }
+        .wx--live .wx-drop { animation: wxDrop 3.4s linear infinite; }
+        .wx--live .wx-drop-2 { animation-delay: 1.1s; }
+        .wx--live .wx-drop-3 { animation-delay: 2.2s; }
+        .wx--live .wx-gust { stroke-dasharray: 34 14; animation: wxFlow 5.6s linear infinite; }
+        .wx--live .wx-gust-2 { animation-duration: 6.8s; }
+        .wx--live .wx-gust-3 { animation-duration: 4.8s; }
+        @keyframes wxSpin { to { transform: rotate(360deg); } }
+        @keyframes wxPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+        @keyframes wxDrift { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(2.5px); } }
+        @keyframes wxDriftBack { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-2.5px); } }
+        @keyframes wxDrop { 0% { transform: translateY(-2px); opacity: 0; } 25% { opacity: 1; } 80% { opacity: 1; } 100% { transform: translateY(5px); opacity: 0; } }
+        @keyframes wxFlow { to { stroke-dashoffset: -48; } }
+        @media (print), (prefers-reduced-motion: reduce) {
+          .wx--live * { animation: none !important; }
         }
         .report-ask-box {
           margin-top: 16px;
@@ -6510,7 +6902,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--report-border);
           border-radius: 16px;
           padding: 20px;
-          margin-top: 16px;
+          /* matches .sr-section's 20px rhythm — hover-lift headroom */
+          margin-top: 20px;
           break-inside: avoid;
           page-break-inside: avoid;
         }
@@ -6615,6 +7008,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 12px;
+        }
+        /* a single ready-time target fills the row instead of leaving a
+           half-empty column (owner ask 2026-07-09) */
+        .readiness-target-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         }
         .reentry-target-tile {
           border: 1px solid var(--report-border);
@@ -7381,11 +7779,34 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* inner fact grids + weather panel: the navy hairline wash / solid-white
            panels read legacy on the scene — go whisper-white (owner ask 2026-07-05) */
-        html[data-glass-theme] .service-report-v1 .service-status-grid,
-        html[data-glass-theme] .service-report-v1 .hero-condition-row,
-        html[data-glass-theme] .service-report-v1 .readiness-facts {
+        html[data-glass-theme] .service-report-v1 .hero-condition-row {
           background: rgba(255, 255, 255, 0.6);
           border-color: rgba(255, 255, 255, 0.7);
+        }
+        /* fact grids: the legacy 1px-hairline separators disappear on glass and the
+           cells read as one merged slab — give the tiles real gutters instead
+           (owner ask 2026-07-09) */
+        html[data-glass-theme] .service-report-v1 .service-status-grid,
+        html[data-glass-theme] .service-report-v1 .readiness-facts,
+        html[data-glass-theme] .service-report-v1 .supporting-detail-grid {
+          gap: 10px;
+          background: transparent;
+          border: 0;
+          overflow: visible;
+        }
+        html[data-glass-theme] .service-report-v1 .service-status-grid .sr-cell,
+        html[data-glass-theme] .service-report-v1 .readiness-facts .sr-cell,
+        html[data-glass-theme] .service-report-v1 .supporting-detail-grid .sr-cell {
+          border: 1px solid rgba(255, 255, 255, 0.7);
+        }
+        /* visit-timeline event tiles: solid #fff borders vanish on glass — restate
+           as glass tiles and keep the connector visible (owner ask 2026-07-09) */
+        html[data-glass-theme] .service-report-v1 .workflow-event-body {
+          background: rgba(255, 255, 255, 0.42);
+          border-color: rgba(255, 255, 255, 0.7);
+        }
+        html[data-glass-theme] .service-report-v1 .workflow-event:not(:last-child)::before {
+          background: rgba(4, 57, 94, 0.14);
         }
         html[data-glass-theme] .service-report-v1 .hero-conditions {
           background: rgba(255, 255, 255, 0.42);
@@ -7474,6 +7895,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           ? <InternalReviewBar />
           : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
 
+        {/* Ask Waves floats with the customer: sticky under the shell header for
+            the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
+            document keeps the legacy section below instead. */}
+        <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
+
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
@@ -7519,21 +7945,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
-            <div id="service-timeline">
+            {/* marginTop keeps the 20px card rhythm — the V2 timeline card carries
+                only a bottom margin, so without this it sat flush against the
+                Re-enter card above (owner-flagged overlap 2026-07-09). */}
+            <div id="service-timeline" style={{ marginTop: 20 }}>
               <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
             </div>
-            <QuickNavigationAndAsk
-              mode={mode}
-              token={token}
-              serviceLine={data.serviceLine}
-              data={data}
-              hasProducts={hasApplications}
-              hasVisitTimeline={normalizedVisitTimeline.enabled}
-              hasPestPressure={hasPestPressure}
-              hasReentry={hasReentry}
-              hasActivity={Boolean(data.activity)}
-              hasCoverageMap={!hideCoverageCard}
-            />
+            {mode !== 'live' && (
+              <QuickNavigationAndAsk
+                mode={mode}
+                token={token}
+                serviceLine={data.serviceLine}
+                data={data}
+                hasProducts={hasApplications}
+                hasVisitTimeline={normalizedVisitTimeline.enabled}
+                hasPestPressure={hasPestPressure}
+                hasReentry={hasReentry}
+                hasActivity={Boolean(data.activity)}
+                hasCoverageMap={!hideCoverageCard}
+              />
+            )}
           </>
         )}
 
@@ -7644,8 +8075,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
         )}
 
-        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here. */}
-        {!isV2LeadLayout && (
+        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here.
+            Live mode replaces this section with the floating bar; pdf/static keep it. */}
+        {!isV2LeadLayout && mode !== 'live' && (
           <QuickNavigationAndAsk
             mode={mode}
             token={token}
