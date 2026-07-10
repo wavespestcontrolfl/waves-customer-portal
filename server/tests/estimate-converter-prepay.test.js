@@ -1,4 +1,5 @@
 const {
+  annualPrepayDiscountComponents,
   annualPrepayDiscountPctLabel,
   annualPrepayRecurringUnitCount,
   calculateAnnualPrepayAmount,
@@ -187,6 +188,36 @@ describe('estimate converter annual prepay amount', () => {
     expect(floored.amount).toBe(659.5); // 650 protected + 5% off only the $10 discountable remainder
     expect(floored.discount).toBe(0.5);
     expect(floored.rate).toBeCloseTo(0.0008, 4);
+  });
+
+  test('annualPrepayDiscountComponents feed the SSR refresh with the SAME math as the invoice calc', () => {
+    // The SSR page re-derives the prepay total client-side when a preference
+    // toggle changes the annual (refreshBillingAmounts). It must use these
+    // components — floor + configured rate — because the effective rate is a
+    // function of the annual and goes stale the moment the annual moves.
+    const lawnMix = [{ service: 'lawn_care', name: 'Lawn Care' }];
+    const estimateData = { result: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 660 }] } };
+    const { discountRate, protectedFloor } = annualPrepayDiscountComponents({
+      recurringServices: lawnMix, estimateData,
+    });
+    expect(discountRate).toBe(0.05);
+    expect(protectedFloor).toBe(600); // full lawn floor slice
+    // Reassembling with the components reproduces resolveAnnualPrepayInvoiceTotal
+    // for ANY base annual — this is exactly the client-side refresh formula.
+    for (const base of [600, 660, 1068]) {
+      const floor = Math.min(base, protectedFloor);
+      const discountable = Math.max(0, Math.round((base - floor) * 100) / 100);
+      const reassembled = Math.round((floor + discountable * (1 - discountRate)) * 100) / 100;
+      expect(reassembled).toBe(resolveAnnualPrepayInvoiceTotal({
+        baseAnnual: base, recurringServices: lawnMix, estimateData,
+      }).amount);
+    }
+    // Pest mixes: no % (setup waiver is the incentive) — the refresh must
+    // leave the annual untouched.
+    expect(annualPrepayDiscountComponents({
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { result: { lineItems: [] } },
+    }).discountRate).toBe(0);
   });
 
   test('invoice prepay % label reflects the EFFECTIVE rate, never the configured 5%', () => {

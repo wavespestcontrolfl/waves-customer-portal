@@ -3,6 +3,7 @@ const {
   lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
   recurringLawnRowAtRetiredCadence,
+  storedLawnRowBelowProgramFloor,
   resolveEstimateQuoteRequirement,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
@@ -289,6 +290,58 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
         },
       },
     }).quoteRequired).toBe(false);
+    // ...but the engine carve-out is LAWN-ONLY: a mixed pest+lawn engine
+    // estimate exposes only pest frequencies (no lawn axis is rebuilt), so
+    // accept never restamps a sparse lawn row and the converter would fall
+    // back to the accepted pest cadence — typically the retired quarterly.
+    // Sparse mixed rows requote; a provable sold cadence keeps self-serve.
+    expect(resolveEstimateQuoteRequirement(null, {
+      engineInputs: { services: { pest: { frequency: 'quarterly' }, lawn: { grassType: 'A' } } },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', service: 'pest_control', mo: 50 },
+            { name: 'Lawn Care', service: 'lawn_care', mo: 55 },
+          ],
+        },
+      },
+    }).quoteRequired).toBe(true);
+    expect(resolveEstimateQuoteRequirement(null, {
+      engineInputs: { services: { pest: { frequency: 'quarterly' }, lawn: { grassType: 'A' } } },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', service: 'pest_control', mo: 50 },
+            { name: 'Lawn Care', service: 'lawn_care', mo: 55, visitsPerYear: 9 },
+          ],
+        },
+      },
+    }).quoteRequired).toBe(false);
+  });
+
+  test('SSR floor guard: stored below-floor lawn rows are detected; compliant and non-lawn rows are not', () => {
+    // The legacy SSR page renders from stored rows/totals (no clamp), so a
+    // pre-floor sold link must be routed to the requote state there — the
+    // React flow re-clamps at render and is not affected by this guard.
+    const withRows = (services) => ({ result: { recurring: { services } } });
+    expect(storedLawnRowBelowProgramFloor(withRows([
+      { name: 'Lawn Care', service: 'lawn_care', mo: 34, visitsPerYear: 6 },
+    ]))).toBe(true);
+    // Annual-only rows count via annual/12.
+    expect(storedLawnRowBelowProgramFloor(withRows([
+      { name: 'Lawn Care', service: 'lawn_care', ann: 408, visitsPerYear: 6 },
+    ]))).toBe(true);
+    // At/above floor passes; non-lawn rows never trip it; amount-less rows
+    // have nothing displayable to understate.
+    expect(storedLawnRowBelowProgramFloor(withRows([
+      { name: 'Lawn Care', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
+    ]))).toBe(false);
+    expect(storedLawnRowBelowProgramFloor(withRows([
+      { name: 'Pest Control', service: 'pest_control', mo: 34 },
+    ]))).toBe(false);
+    expect(storedLawnRowBelowProgramFloor(withRows([
+      { name: 'Lawn Care', service: 'lawn_care', visitsPerYear: 6 },
+    ]))).toBe(false);
   });
 
   test('annual-only lawn tier rows clamped by the floor derive a monthly too', () => {

@@ -3860,6 +3860,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
   const prepayDiscountAmount = annualPrepayWaivesMembership ? 0 : prepayResolved.discount;
   const prepayDiscountRate = annualPrepayWaivesMembership ? 0 : prepayResolved.rate;
+  // Components for the client-side refresh (refreshBillingAmounts): when a
+  // preference toggle changes the annual, the page must re-derive the prepay
+  // total with the SAME floor-aware math as resolveAnnualPrepayInvoiceTotal —
+  // the effective rate above is a function of THIS annual and goes stale the
+  // moment the annual moves (a flat re-multiply can undercut the lawn floor).
+  const prepayComponents = require('../services/estimate-converter').annualPrepayDiscountComponents({
+    recurringServices: recurring,
+    estimateData: estData,
+  });
+  const prepayRefreshFloor = annualPrepayWaivesMembership ? 0 : prepayComponents.protectedFloor;
+  const prepayRefreshRate = annualPrepayWaivesMembership ? 0 : prepayComponents.discountRate;
+  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"`;
   // Effective rate can drop below 1% when the lawn program minimum (or the
   // non-discountable margin floor) protects most of the base — show one
   // decimal there so the copy never reads "save 0%".
@@ -3951,11 +3963,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
-          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">${est.depositPolicy?.required
-          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
-          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
+          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
+          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -4960,15 +4972,22 @@ ${shellQuestionsBar()}
     document.querySelectorAll('[data-annual-total]').forEach((el) => {
       el.textContent = fmt(annual);
     });
+    // Mirror resolveAnnualPrepayInvoiceTotal exactly: the configured % applies
+    // only ABOVE the floor-protected slice (non-discountable lines + the lawn
+    // program minimum), so the prepay total for a NEW annual cannot be a flat
+    // effective-rate multiply — the effective rate changes with the annual.
+    const prepayTotalFor = (el) => {
+      const rate = Number(el.dataset.prepayConfiguredRate || 0);
+      const protectedFloor = Number(el.dataset.prepayProtectedFloor || 0);
+      const floor = Math.min(annual, protectedFloor);
+      const discountable = Math.max(0, roundMoney(annual - floor));
+      return Math.max(0, roundMoney(floor + discountable * (1 - rate)));
+    };
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
-      const discountRate = Number(el.dataset.prepayDiscountRate || 0);
-      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
-      el.textContent = fmt(invoiceTotal);
+      el.textContent = fmt(prepayTotalFor(el));
     });
     document.querySelectorAll('[data-prepay-copy-total]').forEach((el) => {
-      const discountRate = Number(el.dataset.prepayDiscountRate || 0);
-      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
-      el.textContent = fmt(invoiceTotal);
+      el.textContent = fmt(prepayTotalFor(el));
     });
     let firstVisitTotal = 0;
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
@@ -6587,6 +6606,17 @@ async function handleEstimateView(req, res, next) {
       logger.warn(`[estimate-view] pricing bundle quote guard skipped: ${e.message}`);
     }
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundleForView, estData);
+    // SSR-only lawn floor guard: this legacy server-HTML page renders its
+    // hero/billing figures from the STORED rows and totals (not the clamped
+    // pricing bundle), so a pre-floor sold-cadence lawn link would display a
+    // below-$50/mo price while accept bills the clamped amount. Show those
+    // links the call-to-refresh state here; the React /data flow keeps
+    // self-serve because it renders the clamped ladder.
+    const ssrLawnFloorRequote = !quoteRequirement.quoteRequired
+      && storedLawnRowBelowProgramFloor(estData);
+    const pageQuoteRequirement = ssrLawnFloorRequote
+      ? { ...quoteRequirement, quoteRequired: true, reason: 'legacy_lawn_pricing_requote' }
+      : quoteRequirement;
 
     // One-time alternative price for the inline toggle. Mirrors the
     // resolveAcceptOneTimeTotal logic on accept so the customer sees the
@@ -6642,9 +6672,9 @@ async function handleEstimateView(req, res, next) {
       id: estimate.id,
       status: estimate.status === 'accepted'
         ? estimate.status
-        : (quoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
-      quoteRequired: quoteRequirement.quoteRequired,
-      quoteRequiredReason: quoteRequirement.reason || null,
+        : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
+      quoteRequired: pageQuoteRequirement.quoteRequired,
+      quoteRequiredReason: pageQuoteRequirement.reason || null,
       customerName: estimate.customer_name,
       customerEmail: estimate.customer_email,
       customerPhone: estimate.customer_phone,
@@ -9452,7 +9482,16 @@ function retiredLawnRequoteNeeded(estData = null) {
     const lawnRows = (recurringSvcList || []).filter((svc) => recurringServiceKey(svc) === 'lawn_care');
     if (!lawnRows.length) return false;
     if (recurringLawnRowAtRetiredCadence(estData)) return true;
-    if (extractEngineInputs(estData)) return false;
+    // The engine-invocation carve-out applies ONLY to lawn-only mixes: the
+    // engine's no-pest path rebuilds the live 6/9/12 ladder
+    // (lawnFrequenciesFromEngineResult), so a sold restamp is available. A
+    // MIXED pest+lawn engine estimate exposes only pest frequencies — accept
+    // never restamps the lawn row, and the converter falls back to the
+    // accepted pest cadence (typically the retired quarterly) — so its lawn
+    // rows still need a provable sold cadence of their own.
+    const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
+    const lawnOnlyMix = recurringKeys.length > 0 && recurringKeys.every((key) => key === 'lawn_care');
+    if (lawnOnlyMix && extractEngineInputs(estData)) return false;
     const converter = require('../services/estimate-converter');
     return lawnRows.some((svc) => !converter.explicitServiceCadence(svc));
   }
@@ -9460,6 +9499,26 @@ function retiredLawnRequoteNeeded(estData = null) {
   const { recurringSvcList } = acceptanceServiceLists(estData);
   const recurringKeys = (recurringSvcList || []).map(recurringServiceKey).filter(Boolean);
   return recurringKeys.includes('lawn_care');
+}
+
+// Does the estimate STORE a recurring lawn price below the program minimum?
+// The React view re-clamps stored rows at render (clampLawnLadderEntry), but
+// the legacy SSR page derives its hero/billing figures straight from the
+// stored rows and estimate.monthly_total — a pre-floor sold-cadence link
+// would display (and let the customer approve) totals below what the clamped
+// accept path actually bills. Those links go to the requote state on the SSR
+// page instead; the React flow is unaffected (it renders the clamped ladder).
+function storedLawnRowBelowProgramFloor(estData = null) {
+  const minMonthly = lawnProgramMinimumMonthly();
+  if (!(minMonthly > 0) || !estData || typeof estData !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estData);
+  return (recurringSvcList || []).some((svc) => {
+    if (recurringServiceKey(svc) !== 'lawn_care') return false;
+    const monthly = firstPositiveNumber(svc?.mo, svc?.monthly, svc?.monthlyTotal);
+    const annual = firstPositiveNumber(svc?.ann, svc?.annual, svc?.annualAfterDiscount);
+    const effectiveMonthly = monthly ?? (annual != null ? annual / 12 : null);
+    return effectiveMonthly != null && effectiveMonthly < minMonthly - 0.005;
+  });
 }
 
 // Is a recurring lawn service row (still) at a RETIRED cadence? Used by the
@@ -13796,6 +13855,7 @@ module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
+module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;

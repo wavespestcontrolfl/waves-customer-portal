@@ -5845,8 +5845,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('we open the $99 setup invoice');
     // Prepay is still offered, but the $50/mo lawn program minimum protects
     // $600 of the $660 base — the 5% applies only to the $60 headroom:
-    // $660 → $657 (effective 0.45%).
-    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.0045">$657');
+    // $660 → $657. The element carries the floor + configured rate so the
+    // client-side refresh re-derives the floor-aware total for ANY annual.
+    expect(html).toContain('data-prepay-invoice-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
@@ -5916,9 +5917,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<strong>−$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     // Annual plan total $660 → prepay invoice $657 (5% off only the $60
-    // slice above the $600 lawn program minimum).
-    expect(html).toContain('data-prepay-discount-rate="0.0045">$657</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.0045">$657</span>');
+    // slice above the $600 lawn program minimum). The refresh attrs carry
+    // the floor + configured rate, never a flat effective rate.
+    expect(html).toContain('data-prepay-configured-rate="0.05">$657</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 657;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');

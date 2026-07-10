@@ -817,10 +817,25 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
 // Non-pest/mosquito mixes take ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual;
 // the non-discountable recurring floor (margin-protected non-lawn lines) still
 // clamps the result, so callers never quote a total below what is actually billed.
+// The two inputs the prepay math needs for ANY base annual: the configured
+// discount % for this service mix, and the floor-protected slice no discount
+// may cut into. Exposed so the SSR page's client-side refresh
+// (refreshBillingAmounts) can re-derive the SAME floor-aware total this
+// module invoices when the annual changes — multiplying a new annual by a
+// previously-computed flat "effective rate" goes stale immediately, because
+// the effective rate is itself a function of the annual.
+function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  const protectedFloor = Math.round((
+    nonDiscountableRecurringAnnualFloor(estimateData)
+    + lawnProgramMinimumProtectedAnnual(estimateData)
+  ) * 100) / 100;
+  return { discountRate, protectedFloor };
+}
+
 function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], estimateData = {} } = {}) {
   const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
   if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
-  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
   // Apply the prepay % ONLY to the discountable portion. Non-discountable
   // recurring lines (e.g. foam_recurring, whose cadence multiplier is its only
   // discount) are split out first and added back at full price — otherwise a
@@ -829,10 +844,8 @@ function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], e
   // The lawn program minimum's protected slice (owner directive 2026-07-09:
   // prepay is NOT exempt from the floor) joins the same non-discountable
   // floor — only lawn's above-floor headroom earns the prepay %.
-  const floor = Math.min(base, Math.round((
-    nonDiscountableRecurringAnnualFloor(estimateData)
-    + lawnProgramMinimumProtectedAnnual(estimateData)
-  ) * 100) / 100);
+  const { discountRate, protectedFloor } = annualPrepayDiscountComponents({ recurringServices, estimateData });
+  const floor = Math.min(base, protectedFloor);
   const discountableBase = Math.max(0, Math.round((base - floor) * 100) / 100);
   const amount = Math.round((floor + discountableBase * (1 - discountRate)) * 100) / 100;
   const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
@@ -2152,6 +2165,7 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;
