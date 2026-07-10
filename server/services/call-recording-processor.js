@@ -1376,7 +1376,33 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     state: clean(extracted.state, 2),
     zip: clean(extracted.zip, 10),
   };
-  if (!address.line1) return { propertyId: null, address: null, lat: null, lng: null };
+  if (!address.line1) {
+    // The caller didn't state an address on this call (e.g. an existing
+    // customer confirming a re-service). Dispatch to their on-file,
+    // Google-verified address instead of leaving the visit address blank —
+    // never book a location-less appointment.
+    try {
+      const cust = await trx('customers').where({ id: customerId })
+        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+      if (cust && String(cust.address_line1 || '').trim()) {
+        return {
+          propertyId: null,
+          address: {
+            line1: clean(cust.address_line1, 200),
+            line2: clean(cust.address_line2, 100),
+            city: clean(cust.city, 50),
+            state: clean(cust.state, 2),
+            zip: clean(cust.zip, 10),
+          },
+          lat: null,
+          lng: null,
+        };
+      }
+    } catch (e) {
+      logger.warn(`[call-proc] on-file address fallback failed for booking: ${e.code || e.message}`);
+    }
+    return { propertyId: null, address: null, lat: null, lng: null };
+  }
   let propertyId = null;
   let lat = null;
   let lng = null;
@@ -4898,16 +4924,20 @@ const CallRecordingProcessor = {
       transcription,
       services: bookableCallServices,
     });
-    // Never book a made-up service (owner directive 2026-07-10): the booking's
-    // service_type MUST be a real admin-catalog service. When nothing specific
-    // resolved and fail-open booking is active, fall back to the "Waves
-    // Assessment" catalog service — assess on-site rather than guess. This keeps
-    // service_type/service_id catalog-valid instead of a coarse invented label.
-    if (!callBookingCatalogRow && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
+    // Never book a made-up service (owner directive 2026-07-10): service_type
+    // MUST be a real admin-catalog service. When the service was UNCLEAR
+    // (serviceResolution.noMatch — no coarse label AND no catalog match) and
+    // fail-open is active, fall back to "Waves Assessment" (assess on-site) —
+    // a real catalog row, not an invented label. Gated on noMatch so it NEVER
+    // fires on a hard veto (unsupported/out-of-scope call, admin-only), which
+    // returns ok:false WITHOUT noMatch and must stay un-bookable, and never
+    // overrides a service that DID resolve.
+    if (!callBookingCatalogRow && serviceResolution.noMatch === true
+        && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
       const wavesAssessment = bookableCallServices.find((s) => /^waves assessment$/i.test(String(s.name || '')));
       if (wavesAssessment) {
         callBookingCatalogRow = wavesAssessment;
-        logger.info(`[call-proc] No specific service matched for ${maskSid(callSid)} — booking as "Waves Assessment" (catalog fallback; assess on-site)`);
+        logger.info(`[call-proc] Service unclear for ${maskSid(callSid)} — booking as "Waves Assessment" (catalog fallback; assess on-site)`);
       }
     }
     // Use the module-level isOutboundCall(call) helper — a local `const
@@ -4915,12 +4945,12 @@ const CallRecordingProcessor = {
     // phantom-guard references above (Step 0) in the temporal dead zone:
     // "Cannot access 'isOutboundCall' before initialization" on every call that
     // reaches them with a pre-linked customer_id.
+    // The Waves Assessment fallback (above) already set callBookingCatalogRow
+    // when the service was UNCLEAR (noMatch) under fail-open, so the existing
+    // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
+    // noMatch) never set a catalog row, so they stay un-bookable.
     const canCreateAppointmentFromCall = !isOutboundCall(call)
-      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true)
-        // Fail-open: a confirmed booking with a catalog-valid service (specific
-        // match OR the Waves Assessment fallback above) proceeds — assess on-site
-        // rather than drop the booking over an unresolved service.
-        || (isEnabled('callFailOpenBooking') && !isOutboundCall(call) && !!callBookingCatalogRow));
+      && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,

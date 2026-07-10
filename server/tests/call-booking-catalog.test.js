@@ -64,7 +64,7 @@ const CATALOG = [
   {
     id: 'svc-exclusion',
     service_key: 'rodent_exclusion',
-    name: 'Rodent Exclusion',
+    name: 'Rodent Exclusion & Trapping Service',
     short_name: 'Exclusion',
     billing_type: 'one_time',
     pricing_type: 'variable',
@@ -73,7 +73,30 @@ const CATALOG = [
     requires_follow_up: false,
     follow_up_interval_days: null,
   },
+  { id: 'svc-rodent-general', service_key: 'rodent_general_one_time', name: 'Rodent Pest Control Service', short_name: 'Rodent', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  { id: 'svc-rodent-inspection', service_key: 'rodent_inspection', name: 'Rodent Inspection Service', short_name: 'Rodent Insp', billing_type: 'one_time', pricing_type: 'fixed', base_price: '75.00', default_duration_minutes: 60 },
+  { id: 'svc-rodent-trapping', service_key: 'rodent_trapping', name: 'Rodent Trapping Service', short_name: 'Rodent Trap', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
 ];
+
+describe('rodent intent → catalog service (owner directive)', () => {
+  const R = (transcription, extracted = {}) => resolveCallBookingCatalogService({ extracted, transcription, services: CATALOG })?.service_key;
+  test('general rodent mention defaults to Rodent Pest Control Service', () => {
+    expect(R('I have rats in my attic')).toBe('rodent_general_one_time');
+  });
+  test('inspection wins over general and trapping', () => {
+    expect(R('I need a rodent inspection', { requested_service: 'rodent inspection' })).toBe('rodent_inspection');
+    expect(R('rats — need an inspection then trapping')).toBe('rodent_inspection');
+  });
+  test('trapping mention maps to Rodent Trapping Service', () => {
+    expect(R('I need rat trapping')).toBe('rodent_trapping');
+  });
+  test('trapping + exclusion maps to the combined service', () => {
+    expect(R('rats, need trapping and exclusion to seal them out')).toBe('rodent_exclusion');
+  });
+  test('a non-rodent call never maps to a rodent service', () => {
+    expect(R('I have ants in the kitchen')).toBeUndefined();
+  });
+});
 
 describe('resolveCallBookingCatalogService', () => {
   test('model specific_service_name pick wins (verbatim catalog name)', () => {

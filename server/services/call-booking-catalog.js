@@ -77,11 +77,22 @@ function hasAffirmativeRoachMention(text) {
 // exact catalog pick. Each maps to a service_key that must exist in the
 // loaded catalog (missing/inactive keys are simply skipped), so a rule can
 // never book a service the catalog doesn't offer.
+// Rodent intent → the right catalog service (owner directive 2026-07-10:
+// map coarse rodent calls to real catalog rows by intent, never a made-up
+// label). Most-specific first — inspection wins over trapping wins over a
+// general rodent call. A rodent mention with no specific action defaults to
+// the general "Rodent Pest Control Service".
+const RODENT_RE = /\b(rodent|rat|rats|mouse|mice|rats?)\b/i;
 const KEYWORD_SERVICE_RULES = [
   {
     serviceKey: 'cockroach_control',
     matches: hasAffirmativeRoachMention,
   },
+  { serviceKey: 'rodent_inspection', matches: (h) => RODENT_RE.test(h) && /\binspect/i.test(h) },
+  { serviceKey: 'rodent_exclusion', matches: (h) => RODENT_RE.test(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_trapping', matches: (h) => RODENT_RE.test(h) && /\btrap/i.test(h) },
+  { serviceKey: 'rodent_exclusion_only', matches: (h) => RODENT_RE.test(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_general_one_time', matches: (h) => RODENT_RE.test(h) },
 ];
 
 async function loadBookableCallServices(conn) {
