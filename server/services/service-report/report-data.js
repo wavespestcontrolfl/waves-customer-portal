@@ -2570,11 +2570,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
-  // Tree & Shrub Report V2 — visual plant-health payload (flag-gated, additive).
-  // Mirrors the lawn path: a tech-confirmed tree_shrub_assessments row, scored from
-  // the visit's photos, drives the five diagnosis categories + insights. Best-effort:
-  // a build hiccup or unmigrated tables must never break the report.
-  if (!reportV2 && serviceLine === 'tree_shrub' && process.env.TREE_SHRUB_REPORT_V2 === 'true') {
+  // Tree & Shrub Report V2 — visual plant-health payload (unconditional, like
+  // lawn: the TREE_SHRUB_REPORT_V2 env flag is retired — owner ungated
+  // 2026-07-09 after prod ran flag-on since 06-26). Mirrors the lawn path: a
+  // tech-confirmed tree_shrub_assessments row, scored from the visit's
+  // photos, drives the five diagnosis categories + insights. Best-effort: a
+  // build hiccup or unmigrated tables must never break the report.
+  if (!reportV2 && serviceLine === 'tree_shrub') {
     try {
       const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
       const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);

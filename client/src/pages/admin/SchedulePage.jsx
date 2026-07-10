@@ -7067,9 +7067,12 @@ export function CompletionPanel({
   // otherwise a pre-load submit hides the field the server still requires (422).
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
-  // Tree & Shrub exception-based closeout — flag-gated (default off). When off the
-  // completion flow is unchanged and the server's post-commit auto-score still runs.
-  const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
+  // Tree & Shrub exception-based closeout — UNCONDITIONAL (the per-user
+  // tree-shrub-closeout-v2 flag is retired; owner ungated 2026-07-09). This
+  // also closes a trap: the server's validateTreeShrubCloseout enforcement is
+  // unconditional for tree_shrub/palm completions, so a tech WITHOUT the old
+  // flag had no closeout UI to collect the required fields and every
+  // completion hard-400'd (tree_shrub_closeout_lockout).
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
@@ -7361,8 +7364,7 @@ export function CompletionPanel({
   const observationChips = observationChipsForLine(chipServiceLine);
   const recommendationChips = recommendationChipsForLine(chipServiceLine);
   const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
-  const treeShrubCloseoutOn =
-    treeShrubCloseoutReady && treeShrubCloseoutFlag && serviceLineForCloseout === "tree_shrub";
+  const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence) and returns the findings
