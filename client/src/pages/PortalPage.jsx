@@ -1347,6 +1347,18 @@ function formatPostDate(d) {
 // unreachable. Titles are deliberately plain and uniform (owner 2026-07-10
 // — reverted the playful set); the icon tile + CTA label carry the "where
 // does this go" signal.
+function WavesLogoTile({ compact }) {
+  return (
+    <span style={{
+      width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
+      background: '#fff', border: '1px solid #E7E2D7', overflow: 'hidden',
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <img src="/waves-logo.png" alt="" style={{ width: '84%', height: '84%', objectFit: 'contain', display: 'block' }} />
+    </span>
+  );
+}
+
 function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
@@ -2034,7 +2046,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         compact={compact}
         title="From the Blog"
         ctaLabel="Read Post"
-        iconTile={<ShellIconTile icon="waves" size={compact ? 30 : 38} />}
+        iconTile={<WavesLogoTile compact={compact} />}
         posts={blogPosts.map((p) => ({
           url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate, external: true,
         }))}
@@ -2061,7 +2073,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         compact={compact}
         title="The Waves Newsletter"
         ctaLabel="Read Issue"
-        iconTile={<ShellIconTile icon="waves" size={compact ? 30 : 38} />}
+        iconTile={<WavesLogoTile compact={compact} />}
         posts={newsletterPosts.map((p) => ({
           url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate,
           external: !String(p.link || '').startsWith('/'),
