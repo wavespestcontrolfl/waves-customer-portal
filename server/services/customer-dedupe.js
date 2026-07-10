@@ -100,8 +100,22 @@ function unitFromLine2(line2) {
 }
 
 function addressCompat(winner, loser) {
+  const wRaw = String(winner.address_line1 || '').trim();
+  const lRaw = String(loser.address_line1 || '').trim();
   const wk = normalizeStreetKey(winner.address_line1);
   const lk = normalizeStreetKey(loser.address_line1);
+  // A NON-EMPTY address that doesn't parse (PO Box, lot name, no leading
+  // street number) is not "missing" — it's an address we can't compare.
+  // Identical raw strings still match; anything else fails toward review,
+  // never toward an auto-merge. Not a positive conflict either: a PO Box vs
+  // a street address can be the same person's mailing/service split, so it
+  // must not feed the two-people red rule.
+  if ((wRaw && !wk) || (lRaw && !lk)) {
+    if (!lRaw) return { status: 'loser_missing' };
+    if (!wRaw) return { status: 'winner_missing' };
+    const squash = (s) => s.toLowerCase().replace(/\s+/g, ' ');
+    return squash(wRaw) === squash(lRaw) ? { status: 'match' } : { status: 'unparsable' };
+  }
   if (!lk && !wk) return { status: 'both_missing' };
   if (!lk) return { status: 'loser_missing' };
   if (!wk) return { status: 'winner_missing' };
@@ -149,10 +163,13 @@ async function batchAutoBlockers(database, losers) {
   for (const loser of losers) {
     if (loser.stripe_customer_id) byId.get(loser.id).push('stripe_customer_id');
     if (loser.password_hash) byId.get(loser.id).push('portal_login');
-    // An active-stage row is never a disposable shell — retiring it would
-    // drop account state (stage/tier/rate) the merge deliberately does not
-    // copy. Also feeds winner selection: active rows weigh like billed rows.
-    if (loser.pipeline_stage === 'active_customer') byId.get(loser.id).push('active_stage');
+    // A live-stage row (any stage whereLiveCustomer treats as a real
+    // customer — active, won, or at-risk) is never a disposable shell:
+    // retiring it would drop account state (stage/tier/rate) the merge
+    // deliberately does not copy. A won/at_risk row can carry pricing and
+    // membership state before its first invoice exists. Also feeds winner
+    // selection: live rows weigh like billed rows.
+    if (REAL_CUSTOMER_STAGES.has(loser.pipeline_stage)) byId.get(loser.id).push('live_stage');
   }
   const ids = [...byId.keys()];
   if (!ids.length) return byId;
@@ -181,10 +198,14 @@ async function loserAutoBlockers(database, loser) {
 // Detection
 // ---------------------------------------------------------------------------
 
+// The stages whereLiveCustomer treats as a real customer — mirrored here so
+// blocker/winner logic can't drift from the live-customer definition.
+const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+
 function winnerScore(row) {
   return (row.stripe_customer_id ? 8 : 0)
     + (row.password_hash ? 4 : 0)
-    + (row.pipeline_stage === 'active_customer' ? 2 : 0);
+    + (REAL_CUSTOMER_STAGES.has(row.pipeline_stage) ? 2 : 0);
 }
 
 // extraScore lets detection weight real business rows (invoices, scheduled
@@ -407,7 +428,22 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   }
   const booleanMode = SINGLETON_BOOLEAN_SEMANTICS[table] || 'and';
   const sentinels = PREF_DEFAULT_SENTINELS[table];
-  const isDefaultish = (v) => v === null || v === '' || (sentinels ? sentinels.has(v) : false);
+  // Empty jsonb defaults ([] / {}) mean "never filled in" exactly like null:
+  // a winner with special_features [] must still take the loser's real
+  // access/pet/irrigation details before the loser's row is deleted. knex
+  // returns jsonb as parsed values, but check string forms too.
+  const isEmptyJson = (v) => {
+    if (Array.isArray(v)) return v.length === 0;
+    if (v && typeof v === 'object' && v.constructor === Object) return Object.keys(v).length === 0;
+    if (typeof v === 'string') { const s = v.trim(); return s === '[]' || s === '{}'; }
+    return false;
+  };
+  const isDefaultish = (v) => v === null || v === '' || isEmptyJson(v) || (sentinels ? sentinels.has(v) : false);
+  // Plain arrays/objects headed for a jsonb column must be stringified: the
+  // pg driver would otherwise encode a JS array as a Postgres ARRAY literal,
+  // which jsonb rejects. Dates and other typed objects pass through.
+  const forUpdate = (v) => (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object))
+    ? JSON.stringify(v) : v;
   const updates = {};
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
@@ -421,7 +457,7 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     ) {
       if (CHANNEL_RESTRICTIVENESS[loserVal] > CHANNEL_RESTRICTIVENESS[winnerVal]) updates[col] = loserVal;
     } else if (isDefaultish(winnerVal) && !isDefaultish(loserVal)) {
-      updates[col] = loserVal;
+      updates[col] = forUpdate(loserVal);
     }
   }
   if (Object.keys(updates).length) {
@@ -733,7 +769,9 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
             'Duplicate customer auto-merged',
             `Merged a duplicate row into ${name} (same phone, matching identity, no billing on the duplicate). Reversible — full snapshot in the merge journal.`,
             {
-              link: `/admin/customers/${group.winner.id}`,
+              // The SPA registers /admin/customers and opens Customer 360
+              // via ?customerId= — a /admin/customers/<uuid> path 404s.
+              link: `/admin/customers?customerId=${group.winner.id}`,
               metadata: { winnerId: group.winner.id, loserId: candidate.loser.id },
             },
           );

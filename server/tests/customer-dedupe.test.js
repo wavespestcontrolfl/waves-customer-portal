@@ -125,6 +125,15 @@ describe('addressCompat', () => {
   it('match on same normalized street', () => {
     expect(addressCompat(base, { address_line1: '4414 Ozark Avenue', zip: '34207' }).status).toBe('match');
   });
+  it('routes non-empty unparsable addresses to review, never to "missing"', () => {
+    // PO Box vs street: incomparable, not a match and not a positive conflict
+    expect(addressCompat({ address_line1: 'PO Box 742' }, base).status).toBe('unparsable');
+    // Identical raw strings (case/space variants) still match
+    expect(addressCompat({ address_line1: 'PO Box 742' }, { address_line1: 'po  box 742' }).status).toBe('match');
+    // Truly blank sides keep the missing statuses — blank is not unparsable
+    expect(addressCompat({ address_line1: 'PO Box 742' }, { address_line1: null }).status).toBe('loser_missing');
+    expect(addressCompat({ address_line1: '' }, { address_line1: 'Lot 12 Palm Grove' }).status).toBe('winner_missing');
+  });
   it('loser_missing when the duplicate is an address-less shell', () => {
     expect(addressCompat(base, { address_line1: null, zip: null }).status).toBe('loser_missing');
   });
@@ -218,6 +227,23 @@ describe('findDuplicateGroups', () => {
     expect(groups[0].winner.id).toBe(complete.id);
     expect(groups[0].candidates).toHaveLength(1);
     expect(groups[0].candidates[0].tier).toBe('green');
+  });
+
+  it('demotes a same-name pair with an unparsable address to yellow — never auto-merged', async () => {
+    const poBox = { ...shell, address_line1: 'PO Box 742' };
+    installDb(router({ customers: [complete, poBox] }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].candidates[0].tier).toBe('yellow');
+    expect(groups[0].candidates[0].reasons).toContain('address_unparsable');
+  });
+
+  it('blocks a won-stage shell from green — live stages carry account state the merge does not copy', async () => {
+    const wonShell = { ...shell, pipeline_stage: 'won' };
+    installDb(router({ customers: [complete, wonShell] }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].winner.id).toBe(complete.id);
+    expect(groups[0].candidates[0].tier).toBe('yellow');
+    expect(groups[0].candidates[0].reasons).toContain('loser_has_live_stage');
   });
 
   it('never ships credential material to callers', async () => {
@@ -466,6 +492,21 @@ describe('mergeSingletonPrefRow', () => {
     });
     await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
     expect(state.updated).toBe(null);
+    expect(state.deleted).toBe(true);
+  });
+
+  it('property_preferences: empty jsonb defaults ([]/{}) count as empty; real details copy stringified', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', special_features: [], pets_structured: {}, watering_days: null, created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', special_features: ['gate code 4482'], pets_structured: { dogs: 1 }, watering_days: [], created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
+    // Loser's real access/pet details survive onto the winner, stringified so
+    // the pg driver sends jsonb (not a Postgres ARRAY literal).
+    expect(state.updated.special_features).toBe(JSON.stringify(['gate code 4482']));
+    expect(state.updated.pets_structured).toBe(JSON.stringify({ dogs: 1 }));
+    // The loser's own empty [] is defaultish too — never copied over null.
+    expect(state.updated.watering_days).toBeUndefined();
     expect(state.deleted).toBe(true);
   });
 
@@ -731,5 +772,45 @@ describe('executeMerge', () => {
     expect(state.notificationsWhere).toEqual({ recipient_type: 'customer', recipient_id: LOSER });
     expect(result.repointed['notifications.recipient_id']).toBe(1);
     expect(result.repointed['email_messages.recipient_id']).toBe(1);
+  });
+});
+
+describe('runAutoMergeSweep', () => {
+  it('notifies with a routable Customer 360 deep link (?customerId=, not a path segment)', async () => {
+    const winnerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000001',
+      first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
+      address_line1: '4414 Ozark Ave', zip: '34207',
+      pipeline_stage: 'new_lead', created_at: '2026-07-08',
+    };
+    const loserRow = {
+      id: 'cccccccc-0000-0000-0000-000000000002',
+      first_name: 'Diana', last_name: null, phone: '6124074763',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-07-09',
+    };
+    // Detection path (module-level db mock)
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') return [];
+      return [];
+    });
+    // Merge path (transaction mock)
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers' && q.called('forUpdate')) return [winnerRow, loserRow];
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+    expect(results.merged).toHaveLength(1);
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][3].link).toBe(`/admin/customers?customerId=${winnerRow.id}`);
   });
 });
