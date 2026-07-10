@@ -105,9 +105,11 @@ export default function DuplicateCustomersPage() {
     setToast("");
     try {
       const result = await api(endpoint, { method: "POST", body: JSON.stringify(body) });
+      // Reload FIRST — load() clears the error banner, so a partial-failure
+      // message from onResult must be applied after it, not wiped by it.
+      await load();
       if (onResult) onResult(result);
       else setToast(successText);
-      await load();
     } catch (err) {
       setError(err.message || "Action failed");
     } finally {

@@ -323,6 +323,53 @@ describe('findDuplicateGroups', () => {
     expect(groups[0].candidates[0].loser.id).toBe(oldShell.id);
   });
 
+  it('prefers a billed row over a Stripe-only shell as the kept winner', async () => {
+    const stripeShell = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000041',
+      first_name: 'Sam', last_name: 'Green', phone: '+19995550004',
+      address_line1: null, zip: null, stripe_customer_id: 'cus_shell',
+      pipeline_stage: 'new_lead', created_at: '2026-05-01',
+    };
+    const billed = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000042',
+      first_name: 'Sam', last_name: 'Green', phone: '9995550004',
+      address_line1: '3 Third St', zip: '34205',
+      pipeline_stage: 'new_lead', created_at: '2026-06-20',
+    };
+    installDb(router({
+      customers: [stripeShell, billed],
+      blockerRows: {
+        invoices: [{ customer_id: billed.id, n: '3' }],
+        scheduled_services: [{ customer_id: billed.id, n: '2' }],
+      },
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].winner.id).toBe(billed.id);
+  });
+
+  it('re-picks the winner after unnamed rows join — an unnamed real account beats a named shell', async () => {
+    const namedShell = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000051',
+      first_name: 'Pat', last_name: 'Lee', phone: '+19995550005',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-05-01',
+    };
+    const unnamedAccount = {
+      id: 'aaaaaaaa-0000-0000-0000-000000000052',
+      first_name: 'Unknown', last_name: '', phone: '9995550005',
+      address_line1: '9 Ninth St', zip: '34205',
+      pipeline_stage: 'active_customer', created_at: '2026-06-01',
+    };
+    installDb(router({
+      customers: [namedShell, unnamedAccount],
+      blockerRows: { invoices: [{ customer_id: unnamedAccount.id, n: '4' }] },
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    // The account row is kept (name backfills on merge); the shell is the loser.
+    expect(groups[0].winner.id).toBe(unnamedAccount.id);
+    expect(groups[0].candidates[0].loser.id).toBe(namedShell.id);
+  });
+
   it('never lets an unknown-name row seed a cluster and hide identity conflicts', async () => {
     const oldUnknown = {
       id: 'aaaaaaaa-0000-0000-0000-000000000031',
@@ -452,6 +499,17 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.updated.pet_details).toBe('Large dog — gate must stay closed');
     expect(state.deleted).toBe(true);
   });
+
+  it('property_preferences: default sentinels (0, no_preference) count as empty', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', pet_count: 0, preferred_day: 'no_preference', created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', pet_count: 2, preferred_day: 'monday', created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
+    expect(state.updated.pet_count).toBe(2);
+    expect(state.updated.preferred_day).toBe('monday');
+    expect(state.deleted).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -523,8 +581,8 @@ describe('executeMerge', () => {
 
   it('refuses when both rows have Stripe profiles', async () => {
     const { trx } = buildTrx({
-      winner: { id: WINNER, stripe_customer_id: 'cus_a' },
-      loser: { id: LOSER, stripe_customer_id: 'cus_b' },
+      winner: { id: WINNER, stripe_customer_id: 'cus_a', phone: '+19995550003' },
+      loser: { id: LOSER, stripe_customer_id: 'cus_b', phone: '9995550003' },
       fkRows: FK_ROWS,
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
@@ -532,15 +590,36 @@ describe('executeMerge', () => {
       .rejects.toThrow(/Stripe profiles/);
   });
 
+  it('refuses when the rows no longer share a phone (post-detection edit race)', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Diana', last_name: null, phone: '+19995550099' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/no longer share a phone/);
+  });
+
   it('refuses auto mode when the loser is not a shell', async () => {
     const { trx } = buildTrx({
-      winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers' },
-      loser: { id: LOSER, first_name: 'Diana', last_name: 'Blowers', password_hash: 'x' },
+      winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Diana', last_name: 'Blowers', password_hash: 'x', phone: '9995550003' },
       fkRows: FK_ROWS,
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'auto' }))
       .rejects.toThrow(/not a shell/);
+  });
+
+  it('transfers a loser-only Stripe profile to the winner and clears it on the retired row', async () => {
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', email: 'd@x.com', stripe_customer_id: null, phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, email: null, stripe_customer_id: 'cus_only', phone: '9995550003' };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.stripe_customer_id).toBe('cus_only');
+    expect(state.retired.stripe_customer_id).toBe(null);
   });
 
   it('repoints FKs, merges the prefs collision most-restrictively, retires the loser, and journals', async () => {
@@ -578,8 +657,8 @@ describe('executeMerge', () => {
   });
 
   it('aborts the merge on an unexpected repoint failure (non-droppable table)', async () => {
-    const winner = { id: WINNER, first_name: 'A', last_name: 'B' };
-    const loser = { id: LOSER, first_name: 'A', last_name: 'B' };
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
     const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'invoices', column_name: 'customer_id' }] });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     trx.transaction = jest.fn(async () => { const e = new Error('boom'); e.code = '23505'; throw e; });
