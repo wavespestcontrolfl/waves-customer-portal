@@ -110,8 +110,9 @@ function htmlReplyToText(html) {
     s = s.replace(/<blockquote\b[^>]*>(?:(?!<blockquote\b)[\s\S])*?<\/blockquote>/gi, '\n');
   }
   // Gmail/Yahoo wrap the whole quoted thread in a marker div — drop from
-  // the marker to the end (the typed reply always precedes it).
-  s = s.replace(/<div[^>]*class="[^"]*(?:gmail_quote|yahoo_quoted)[^"]*"[\s\S]*$/i, '\n');
+  // the marker to the end (the typed reply always precedes it). Class
+  // attributes may be double-quoted, single-quoted, or bare.
+  s = s.replace(/<div[^>]*class\s*=\s*(?:"[^"]*(?:gmail_quote|yahoo_quoted)[^"]*"|'[^']*(?:gmail_quote|yahoo_quoted)[^']*'|[^\s>]*(?:gmail_quote|yahoo_quoted)[^\s>]*)[\s\S]*$/i, '\n');
   return s
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|tr|li|h[1-6]|blockquote)>/gi, '\n')
@@ -128,7 +129,9 @@ function htmlReplyToText(html) {
  * "approve"/"approved" and must not negate it.
  */
 function isApprovalReply(text) {
-  const t = String(text || '').toLowerCase();
+  // Normalize smart apostrophes first — iOS/macOS type "don’t"/"can’t"
+  // with U+2019, which would sail past ASCII-only negation alternatives.
+  const t = String(text || '').toLowerCase().replace(/[‘’ʼ]/g, "'");
   if (!/\bapproved?\b/.test(t)) return false;
   // Negation guard: a negating/hold word ANYWHERE in the typed reply fails
   // closed — "not approved", "can't approve yet", and equally "approved?
@@ -424,6 +427,12 @@ async function maybeHandleProofApproval(email) {
   // updated_at — so an edit or re-proof landing between the staleness
   // check above and this write turns the claim into a 0-row no-op instead
   // of broadcasting content the owner never proofed.
+  // The claim also flips the row to 'scheduled' with scheduled_for = now:
+  // the scheduler's processScheduledSends tick is the DURABLE executor, so
+  // a process crash between this commit and the dispatch below can't
+  // strand an approved campaign as an unsendable draft. The immediate
+  // dispatch below is just the fast path — sendCampaign's atomic
+  // scheduled→sending claim keeps the two from double-sending.
   const approvalClaim = db('newsletter_sends')
     .where({ id: send.id, proof_token: token, status: send.status })
     .whereNull('proof_approved_at');
@@ -431,6 +440,8 @@ async function maybeHandleProofApproval(email) {
   const claimed = await approvalClaim.update({
     proof_approved_at: new Date(),
     proof_approval_email_id: email.id || null,
+    status: 'scheduled',
+    scheduled_for: new Date(),
     updated_at: new Date(),
   });
   if (!claimed) {

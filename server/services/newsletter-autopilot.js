@@ -196,15 +196,19 @@ async function autoDraftFlagship() {
   if (existingCalendar && existingCalendar.send_id) {
     const reason = `Calendar already has send_id: ${existingCalendar.send_id}`;
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
-    // This is the path every catch-up tick takes once the week is drafted,
-    // so it's also the retry lane for a proof whose SendGrid call failed
-    // transiently — sendNewsletterProof is idempotent (proof_sent_at claim)
-    // and skips non-draft sends, so calling it here is safe every tick.
-    try {
-      const { sendNewsletterProof } = require('./newsletter-proof');
-      await sendNewsletterProof(existingCalendar.send_id);
-    } catch (e) {
-      logger.warn(`[newsletter-autopilot] proof retry failed: ${e.message}`);
+    // Retry lane for a proof whose SendGrid call failed transiently.
+    // ONLY for 'drafted' weeks — a linked row whose status is 'skipped'
+    // (or scheduled/sent) was deliberately retired by the operator, and
+    // proofing it would let an approval reply send a retired campaign.
+    // sendNewsletterProof is idempotent (proof_sent_at claim) and skips
+    // non-draft sends, so calling it here is safe every tick.
+    if (existingCalendar.status === 'drafted') {
+      try {
+        const { sendNewsletterProof } = require('./newsletter-proof');
+        await sendNewsletterProof(existingCalendar.send_id);
+      } catch (e) {
+        logger.warn(`[newsletter-autopilot] proof retry failed: ${e.message}`);
+      }
     }
     return { skipped: true, reason };
   }

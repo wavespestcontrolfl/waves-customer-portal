@@ -152,7 +152,9 @@ describe('isApprovalReply', () => {
     "can't approve this yet", 'cannot approve', "won't approve",
     'hold off on approving', 'wait to approve', 'no, do not approve',
     'approved? no', "approved — wait, don't send", 'approved... actually hold off',
-    'approved but stop the send', 'looks good', 'send it', '', undefined,
+    'approved but stop the send',
+    'approved — don’t send yet', 'can’t approve yet', // smart apostrophes (iOS/macOS)
+    'looks good', 'send it', '', undefined,
   ])('rejects %j', (t) => expect(isApprovalReply(t)).toBe(false));
 });
 
@@ -167,6 +169,12 @@ describe('htmlReplyToText — quote-aware HTML conversion', () => {
     const html = '<div dir="ltr">approved<br></div><div class="gmail_quote gmail_quote_container">On Thu wrote: Reply APPROVED to this email</div>';
     const text = htmlReplyToText(html);
     expect(text.trim()).toBe('approved');
+  });
+  test('drops single-quoted and bare class quote containers too', () => {
+    const single = "<div dir='ltr'>needs changes</div><div class='gmail_quote'>On Thu wrote: Reply APPROVED to this email</div>";
+    expect(htmlReplyToText(single)).not.toMatch(/APPROVED/);
+    const bare = '<div>hold off</div><div class=yahoo_quoted>Reply APPROVED to this email</div>';
+    expect(htmlReplyToText(bare)).not.toMatch(/APPROVED/);
   });
   test('nested blockquotes all removed', () => {
     const html = '<p>hold off</p><blockquote>outer APPROVED <blockquote>inner APPROVED</blockquote></blockquote>';
@@ -408,9 +416,13 @@ describe('maybeHandleProofApproval', () => {
       id: 'send-1', proof_token: 'ab12cd34', status: 'draft',
     });
     expect(sendsChain.where).toHaveBeenCalledWith('updated_at', PROOF_STAMP);
+    // Crash-safe: the claim itself schedules the send so the scheduler
+    // tick is the durable executor if the immediate dispatch dies.
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
       proof_approved_at: expect.any(Date),
       proof_approval_email_id: 'email-1',
+      status: 'scheduled',
+      scheduled_for: expect.any(Date),
     }));
     expect(mockSendCampaign).toHaveBeenCalledWith('send-1');
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_approved', expect.objectContaining({
