@@ -4192,12 +4192,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
     // tree_shrub_assessments row that feeds the customer Tree & Shrub Report V2.
     // Post-commit + fire-and-forget: it never blocks completion latency or success
-    // (the report self-heals on view). Flag-gated, tree_shrub-only, fully guarded —
-    // a scoring hiccup can't affect any completion. Replays return earlier, so this
-    // runs once on the genuine first completion (no duplicate assessments).
+    // (the report self-heals on view). Unconditional (the TREE_SHRUB_REPORT_V2
+    // env flag is retired — owner ungated 2026-07-09), tree_shrub-only, fully
+    // guarded — a scoring hiccup can't affect any completion. Replays return
+    // earlier, so this runs once on the genuine first completion (no duplicate
+    // assessments).
     if (
-      process.env.TREE_SHRUB_REPORT_V2 === 'true'
-      && reportServiceLine === 'tree_shrub'
+      reportServiceLine === 'tree_shrub'
       && !isIncompleteVisit
       && Array.isArray(completionPhotos) && completionPhotos.length
     ) {
@@ -6545,12 +6546,10 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
 // confirms/hides/edits and the decisions are submitted with completion.
 router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
   try {
-    // Server kill-switch + cost guard: the dual-vision scoring is paid, so refuse
-    // (before any model call) unless the feature is rolled out — mirrors the gate on
-    // the completion auto-score hook, so the UI flag alone can't trigger paid calls.
-    if (process.env.TREE_SHRUB_REPORT_V2 !== 'true') {
-      return res.status(404).json({ error: 'Not found' });
-    }
+    // The TREE_SHRUB_REPORT_V2 kill-switch is retired (owner ungated
+    // 2026-07-09) — the feature is fully rolled out, matching the
+    // now-unconditional completion auto-score hook. Ownership + service-line
+    // guards below still bound who can trigger the paid dual-vision call.
     // Per-service ownership (same guard as photo-analysis/draft): a tech may only
     // score photos for a service they're assigned to; admins are unrestricted.
     if (!(await assertRecapOwnership(req, res))) return;
