@@ -824,14 +824,16 @@ describe('executeMerge', () => {
   it('folds a duplicate referral enrollment into the winner promoter row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
+    // NOTE: no click_balance_cents — 20260401000100 dropped it; row shapes
+    // here mirror the LIVE schema so a stale column reference fails the test.
     const winnerPromoter = {
-      id: 7, customer_id: WINNER, click_balance_cents: 100, referral_balance_cents: 0,
+      id: 7, customer_id: WINNER, referral_balance_cents: 0,
       total_earned_cents: 100, total_paid_out_cents: 0, total_clicks: 4,
       total_referrals_sent: 1, total_referrals_converted: 0,
       available_balance_cents: 0, pending_earnings_cents: 100,
     };
     const loserPromoterRow = {
-      id: 9, customer_id: LOSER, click_balance_cents: 50, referral_balance_cents: 200,
+      id: 9, customer_id: LOSER, referral_balance_cents: 200,
       total_earned_cents: 250, total_paid_out_cents: 0, total_clicks: 2,
       total_referrals_sent: 3, total_referrals_converted: 1,
       available_balance_cents: 300, pending_earnings_cents: 50,
@@ -895,7 +897,6 @@ describe('executeMerge', () => {
     // Balances/counters sum — including the live v2 balances the portal
     // displays (available/pending); zero-add columns untouched.
     expect(state.promoterUpdates[7]).toEqual({
-      click_balance_cents: 150,
       referral_balance_cents: 200,
       total_earned_cents: 350,
       total_clicks: 6,
@@ -912,7 +913,6 @@ describe('executeMerge', () => {
       customer_id: null,
       status: 'merged',
       merged_into_promoter_id: 7,
-      click_balance_cents: 0,
       referral_balance_cents: 0,
       available_balance_cents: 0,
       pending_earnings_cents: 0,
@@ -1008,6 +1008,47 @@ describe('executeMerge', () => {
     // Slot 2: winner has a name → the loser's phone must NOT graft onto it.
     expect(result.backfills.service_contact2_phone).toBeUndefined();
     expect(result.backfills.service_contact2_name).toBeUndefined();
+  });
+
+  it('carries a loser autopay opt-out and live pause onto the winner (most-restrictive)', async () => {
+    const future = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      autopay_enabled: true, autopay_paused_until: null,
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      autopay_enabled: false, autopay_paused_until: future, autopay_pause_reason: 'customer asked to hold',
+    };
+    const state = { autopayUpdate: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (payload.autopay_enabled === false) state.autopayUpdate = payload;
+          return 1;
+        }
+        return [];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'referral_promoters' && q.called('first')) return null;
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.autopayUpdate).toMatchObject({
+      autopay_enabled: false,
+      autopay_paused_until: future,
+      autopay_pause_reason: 'customer asked to hold',
+    });
+    expect(result.repointed['customers.autopay_restrictions'])
+      .toBe('autopay_enabled, autopay_paused_until, autopay_pause_reason');
   });
 });
 

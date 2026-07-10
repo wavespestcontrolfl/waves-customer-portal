@@ -101,7 +101,7 @@ async function handleMerge(req, res, { linkAsProperty }) {
     logger.error(`[admin-customer-duplicates] merge failed: ${err.message}`);
     // "refresh the queue" covers the executor's under-lock rechecks (phone no
     // longer shared, pair now red) — stale-queue races are conflicts, not 500s.
-    const conflict = /Stripe profiles|third-party payers|not found|deleted customer|refresh the queue/.test(err.message);
+    const conflict = /Stripe profiles|third-party payers|billing modes|not found|deleted customer|refresh the queue/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
 }

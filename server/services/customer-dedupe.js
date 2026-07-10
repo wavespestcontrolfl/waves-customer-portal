@@ -820,7 +820,10 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         const loserRow = await trx('referral_promoters').where({ id: loserPromoter.id }).first();
         // Legacy counters AND the live v2 balances (available/pending) the
         // referral portal displays and payout approval checks.
-        const counters = ['click_balance_cents', 'referral_balance_cents', 'total_earned_cents',
+        // click_balance_cents was DROPPED by 20260401000100_referral_unification
+        // — only live columns here (a stale column in the UPDATE below would
+        // abort the whole merge).
+        const counters = ['referral_balance_cents', 'total_earned_cents',
           'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
           'available_balance_cents', 'pending_earnings_cents'];
         const sums = {};
@@ -843,7 +846,6 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
           customer_id: null,
           status: 'merged',
           merged_into_promoter_id: winnerPromoter.id,
-          click_balance_cents: 0,
           referral_balance_cents: 0,
           available_balance_cents: 0,
           pending_earnings_cents: 0,
@@ -851,6 +853,28 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         });
         repointed['referral_promoters.consolidated'] = `folded promoter ${loserPromoter.id} into ${winnerPromoter.id} (loser kept as code alias)`;
       }
+    }
+
+    // Autopay consent is most-restrictive, like notification_prefs: an
+    // explicit opt-out or live pause on EITHER row survives the merge — the
+    // monthly cron must never charge a customer whose retired row said stop.
+    // autopay_log keeps the provenance; re-enabling is an operator action on
+    // the surviving row.
+    const autopayRestrictions = {};
+    if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
+      autopayRestrictions.autopay_enabled = false;
+    }
+    const pauseTs = (v) => (v ? new Date(v).getTime() : null);
+    const loserPause = pauseTs(loser.autopay_paused_until);
+    const winnerPause = pauseTs(winner.autopay_paused_until);
+    if (loserPause && loserPause > Date.now() && (!winnerPause || loserPause > winnerPause)) {
+      autopayRestrictions.autopay_paused_until = loser.autopay_paused_until;
+      if (loser.autopay_pause_reason) autopayRestrictions.autopay_pause_reason = loser.autopay_pause_reason;
+    }
+    if (Object.keys(autopayRestrictions).length) {
+      await trx('customers').where({ id: winnerId })
+        .update({ ...autopayRestrictions, updated_at: trx.fn.now() });
+      repointed['customers.autopay_restrictions'] = Object.keys(autopayRestrictions).join(', ');
     }
 
     // customers.account_credits caches the ledger sum (customer-credit.js
