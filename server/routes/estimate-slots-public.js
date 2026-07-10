@@ -35,6 +35,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
+const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
@@ -217,8 +218,19 @@ router.get('/:token/available-slots', async (req, res) => {
       opts.windowDays = windowDays;
     }
     // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
+    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
+    // rejects any slot past MAX_SLOT_HORIZON_DAYS in ET, so browsing must not
+    // display far-future days whose every slot would 409 on the first tap.
+    // Same ET day-string compare, same strict `>` so the boundary day both
+    // displays and reserves. Silently substituting the default window (the
+    // windowDays treatment) would mislead here — the customer asked for a
+    // specific day — so an out-of-horizon date is a 400 like find-slots'
+    // out-of-bound query.
     const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
+        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      }
       opts.dateFrom = date;
       opts.dateTo = date;
     }

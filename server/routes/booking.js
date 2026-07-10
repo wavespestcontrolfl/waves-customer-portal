@@ -629,13 +629,16 @@ function bookingSlotWindow(config = {}) {
   };
 }
 
-// Server-side duration: the same source the availability builder uses — the
-// client's requested minutes when they are a sane funnel value, else the
-// configured slot duration. The /book funnel's service catalog runs 45–90
-// minutes, so anything outside these bounds (a forged 1-minute slot that
-// would slide under the overlap check, or a day-blocking 600) falls back.
-const MIN_BOOKING_DURATION_MINUTES = 15;
-const MAX_BOOKING_DURATION_MINUTES = 240;
+// Server-side duration. There is NO server-side per-service catalog to derive
+// from — the /book funnel's catalog is the client-side SERVICES array
+// (client/src/pages/PublicBookingPage.jsx), and the availability builder runs
+// its overlap math on the same client-sent minutes — so the requested value is
+// honored ONLY inside the range that catalog actually emits (45–90). Anything
+// outside it (a forged 1-minute slot that would slide under the overlap check,
+// a day-blocking 600, or a 15/240 no funnel service ever sends) falls back to
+// the configured slot duration.
+const MIN_BOOKING_DURATION_MINUTES = 45;
+const MAX_BOOKING_DURATION_MINUTES = 90;
 function resolveBookingDuration(requested, config = {}) {
   const n = parseInt(requested, 10);
   if (Number.isInteger(n) && n >= MIN_BOOKING_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
@@ -657,6 +660,25 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
   // Lunch windows are reserved for route health and are never self-bookable.
   if (startMin < lunchEndMin && endMin > lunchStartMin) {
     return 'That time isn\'t available — please pick another slot.';
+  }
+  return null;
+}
+
+// Commit-time mirror of the availability builder's ET date bounds: /availability
+// clamps every offer to [today+advance_days_min, today+MAX_BOOKING_HORIZON_DAYS]
+// (see its minDate/maxDate), so a direct /confirm POST must not be able to book
+// a day the builder could never have offered. Anchored to ET calendar days like
+// the builder, so the bounds don't shift between 8 PM ET and midnight UTC.
+// Returns null when the date is bookable, else a customer-facing rejection.
+// `now` is injectable for tests only.
+function validateBookingSlotDate(slotDateStr, config = {}, now = new Date()) {
+  const minDate = etDateString(addETDays(now, config.advance_days_min ?? 1));
+  const maxDate = etDateString(addETDays(now, MAX_BOOKING_HORIZON_DAYS));
+  if (slotDateStr < minDate) {
+    return 'That date is no longer open for online booking — please pick a later day.';
+  }
+  if (slotDateStr > maxDate) {
+    return 'That date is beyond our online booking window — please pick an earlier day.';
   }
   return null;
 }
@@ -1142,9 +1164,73 @@ async function createSelfBooking(payload = {}) {
       custId = addressVerifiedCustomer.id;
     }
 
-    // Create customer from new_customer payload if none resolved
+    // Same condition the creation block below uses — resolved up front so the
+    // identity failure keeps its early return while every validation that
+    // needs no customer row runs BEFORE the insert.
+    const willCreateCustomer = !!(!custId && new_customer && phoneDigits && new_customer.first_name);
+    if (!custId && !willCreateCustomer) {
+      return { ok: false, status: 400, error: 'customer_id, estimate_id, or new_customer required' };
+    }
+
+    const config = await loadBookingConfig();
+
+    // Commit-time mirror of the builder's ET date bounds (advance_days_min
+    // floor, 90-day browse horizon): the past-date checks above only reject
+    // yesterday-and-earlier, so without this a direct POST could book a
+    // same-day or far-future date the builder never offers.
+    const slotDateError = validateBookingSlotDate(slotDateStr, config);
+    if (slotDateError) {
+      return { ok: false, status: 400, error: slotDateError };
+    }
+
+    // Duration is derived server-side (clamped to the funnel's real range,
+    // config fallback) — never trusted raw from the payload, where a tiny
+    // forged value would shrink the overlap-check window.
+    const duration = resolveBookingDuration(duration_minutes, config);
+
+    // End time is ALWAYS start + server-resolved duration. A provided
+    // slot_end must agree — a forged early end would slide under the
+    // advisory-locked conflict check below.
+    const endMin = timeToMin(slot_start) + duration;
+    if (slot_end && timeToMin(slot_end) !== endMin) {
+      return { ok: false, status: 400, error: 'slot_end doesn\'t match the requested slot — please pick your time again.' };
+    }
+    const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+
+    // Commit-time re-check of the availability builder's slot rules (grid
+    // alignment, working hours, lunch block): the builder only OFFERS
+    // conforming slots, but this endpoint is public, so a crafted payload
+    // must not be able to book a slot the builder would never have offered.
+    const geometryError = validateBookingSlotGeometry({
+      startMin: timeToMin(slot_start), duration, config,
+    });
+    if (geometryError) {
+      return { ok: false, status: 400, error: geometryError };
+    }
+
+    // technician_id comes straight from the client (an opaque id echoed from
+    // the availability response) — verify it names a real, active technician
+    // before it drives advisory locks, the conflict predicate, and the
+    // dispatch row. The shape guard keeps a non-UUID from throwing a
+    // Postgres cast error (500) out of the lookup.
+    if (technician_id) {
+      const techIdStr = String(technician_id);
+      const tech = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(techIdStr)
+        ? await db('technicians').where('id', techIdStr).first('id', 'active')
+        : null;
+      if (!tech || tech.active === false) {
+        return { ok: false, status: 400, error: 'That time slot is no longer available. Please pick another.' };
+      }
+    }
+
+    // Create customer from new_customer payload if none resolved. Runs AFTER
+    // every no-customer-needed validation above: a rejection past this point
+    // would strand the just-created profile, and the retry would then hit the
+    // phone-already-on-file 409. (The transaction's DAY_FULL / SLOT_TAKEN
+    // catch below rolls the profile back for the failures that can only be
+    // detected under the advisory locks.)
     let createdCustomerId = null;
-    if (!custId && new_customer && phoneDigits && new_customer.first_name) {
+    if (willCreateCustomer) {
       const [created] = await db('customers').insert(applyContactNormalization({
         first_name: new_customer.first_name,
         last_name: new_customer.last_name || '',
@@ -1165,8 +1251,6 @@ async function createSelfBooking(payload = {}) {
         .onConflict('customer_id')
         .ignore();
     }
-
-    if (!custId) return { ok: false, status: 400, error: 'customer_id, estimate_id, or new_customer required' };
 
     const customer = await db('customers').where('id', custId).first();
     if (!customer) return { ok: false, status: 404, error: 'Customer not found' };
@@ -1210,46 +1294,8 @@ async function createSelfBooking(payload = {}) {
     // when this booking just created the customer, or on a different street.
     const visitUnit = createdCustomerId ? '' : carriedVisitUnit(customer, new_customer);
 
-    const config = await loadBookingConfig();
-    // Duration is derived server-side (clamped to the funnel's real range,
-    // config fallback) — never trusted raw from the payload, where a tiny
-    // forged value would shrink the overlap-check window.
-    const duration = resolveBookingDuration(duration_minutes, config);
-
-    // End time is ALWAYS start + server-resolved duration. A provided
-    // slot_end must agree — a forged early end would slide under the
-    // advisory-locked conflict check below.
-    const endMin = timeToMin(slot_start) + duration;
-    if (slot_end && timeToMin(slot_end) !== endMin) {
-      return { ok: false, status: 400, error: 'slot_end doesn\'t match the requested slot — please pick your time again.' };
-    }
-    const endTime = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-
-    // Commit-time re-check of the availability builder's slot rules (grid
-    // alignment, working hours, lunch block): the builder only OFFERS
-    // conforming slots, but this endpoint is public, so a crafted payload
-    // must not be able to book a slot the builder would never have offered.
-    const geometryError = validateBookingSlotGeometry({
-      startMin: timeToMin(slot_start), duration, config,
-    });
-    if (geometryError) {
-      return { ok: false, status: 400, error: geometryError };
-    }
-
-    // technician_id comes straight from the client (an opaque id echoed from
-    // the availability response) — verify it names a real, active technician
-    // before it drives advisory locks, the conflict predicate, and the
-    // dispatch row. The shape guard keeps a non-UUID from throwing a
-    // Postgres cast error (500) out of the lookup.
-    if (technician_id) {
-      const techIdStr = String(technician_id);
-      const tech = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(techIdStr)
-        ? await db('technicians').where('id', techIdStr).first('id', 'active')
-        : null;
-      if (!tech || tech.active === false) {
-        return { ok: false, status: 400, error: 'That time slot is no longer available. Please pick another.' };
-      }
-    }
+    // (config / duration / slot geometry / technician were all validated
+    // ABOVE, before the customer insert — see the willCreateCustomer block.)
 
     const confCode = generateConfirmationCode();
 
@@ -1381,6 +1427,17 @@ async function createSelfBooking(payload = {}) {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],
+      );
+      // The locks above are customer-, tech-, and zone-scoped, but the
+      // max_self_books_per_day cap below is GLOBAL by date — two confirms in
+      // different zones share none of those locks, so both could observe a
+      // cap-1 count and insert, exceeding the cap. One date-scoped lock
+      // serializes the count+insert across zones. Taken last, keeping the
+      // acquisition order fixed (customer → tech → zone → day) so concurrent
+      // confirms can't deadlock.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['self-booking-day-cap', slotDateStr],
       );
 
       // Idempotent replay: same customer, same day, same start time →
@@ -2093,6 +2150,7 @@ module.exports._internals = {
   bookingSlotWindow,
   resolveBookingDuration,
   validateBookingSlotGeometry,
+  validateBookingSlotDate,
   generateConfirmationCode,
   roundPublicCoord,
   bookingStatusLimiter,

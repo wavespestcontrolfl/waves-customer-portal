@@ -61,8 +61,11 @@ jest.mock('../routes/estimate-public', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const { getAvailableSlots } = require('../services/estimate-slot-availability');
+const { getAvailableSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
+// Real ET helpers (not mocked) — the route compares the explicit ?date against
+// the horizon in ET, exactly like slot-reservation.js does at reserve time.
+const { addETDays, etDateString } = require('../utils/datetime-et');
 
 const TOKEN = 'test-token-abc123';
 
@@ -142,6 +145,43 @@ describe('slot endpoints status-gate parity with /:token/data', () => {
     const res = await fetch(`${base}/${TOKEN}/available-slots`);
     expect(res.status).toBe(200);
     expect(lastFirstArgs).toContain('archived_at');
+  });
+});
+
+describe('specific-date browse horizon (parity with reserveSlot)', () => {
+  const VIEWABLE = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
+
+  test('an explicit date beyond MAX_SLOT_HORIZON_DAYS is rejected without a slots lookup', async () => {
+    currentEstimate = VIEWABLE;
+    const farFuture = etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS + 1));
+    const res = await fetch(`${base}/${TOKEN}/available-slots?date=${farFuture}`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'date is beyond the booking horizon' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('an in-horizon explicit date still pins the lookup to that single day', async () => {
+    currentEstimate = VIEWABLE;
+    getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
+    const inHorizon = etDateString(addETDays(new Date(), 7));
+    const res = await fetch(`${base}/${TOKEN}/available-slots?date=${inHorizon}`);
+    expect(res.status).toBe(200);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({
+      dateFrom: inHorizon,
+      dateTo: inHorizon,
+    }));
+  });
+
+  test('the boundary day (exactly MAX_SLOT_HORIZON_DAYS out) is browsable — reserveSlot uses strict >', async () => {
+    currentEstimate = VIEWABLE;
+    getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
+    const boundary = etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS));
+    const res = await fetch(`${base}/${TOKEN}/available-slots?date=${boundary}`);
+    expect(res.status).toBe(200);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({
+      dateFrom: boundary,
+      dateTo: boundary,
+    }));
   });
 });
 

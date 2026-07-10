@@ -6,9 +6,13 @@
 // 2. While ctaPhase === 'submitting' the configure layout is on screen — the
 //    one-time toggle and the slot picker must be frozen so the in-flight
 //    reserve/accept payload can't be mutated from under the request.
+// 3. A slot search started BEFORE the submit retains a selectSlot callback
+//    with the old ctaPhase in its closure — when it resolves mid-accept its
+//    selectSlot(null) must not clear the slot the request is committing
+//    (only the synchronously updated submittingRef can catch it).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
 
@@ -89,11 +93,13 @@ function slotsPayload() {
 }
 
 // Routes every fetch the booking flow makes; acceptImpl lets each test choose
-// the /accept outcome (500 vs. hanging forever). Order matters: match the
-// specific booking endpoints before the catch-all /data.
-function makeFetchMock(acceptImpl) {
+// the /accept outcome (500 vs. hanging forever), findSlotsImpl the AI-search
+// /find-slots outcome. Order matters: match the specific booking endpoints
+// before the catch-all /data.
+function makeFetchMock(acceptImpl, { findSlotsImpl = null } = {}) {
   return vi.fn(async (url) => {
     const u = String(url);
+    if (findSlotsImpl && u.includes('/find-slots')) return findSlotsImpl();
     if (u.includes('/available-slots')) return jsonResponse(slotsPayload());
     if (u.includes('/reserve')) {
       return jsonResponse({
@@ -190,5 +196,50 @@ describe('EstimateViewPage review-phase accept failure', () => {
     expect(otherSlot).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(otherSlot);
     expect(otherSlot).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('a slot search started before submit cannot clear the selection when it resolves mid-accept', async () => {
+    stubLocalStorage();
+    // The AI slot search stays in flight until the test releases it — AFTER
+    // the accept is submitting — modeling the stale-callback race: the
+    // search's selectSlot(null) closure carries the pre-submit ctaPhase.
+    let releaseFindSlots;
+    const findSlotsGate = new Promise((resolve) => { releaseFindSlots = resolve; });
+    vi.stubGlobal('fetch', makeFetchMock(
+      () => new Promise(() => {}), // /accept never resolves → stays 'submitting'
+      { findSlotsImpl: () => findSlotsGate },
+    ));
+
+    render(<EstimateViewPage />);
+
+    // Pick a slot, then start an AI search that hangs on the gate.
+    const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+    fireEvent.click(slotButtons[0]);
+    const searchInput = screen.getByLabelText('Search for a service date or time');
+    fireEvent.change(searchInput, { target: { value: 'anything next tuesday' } });
+    fireEvent.submit(searchInput.closest('form'));
+
+    // Reserve → review → confirm; the hanging /accept keeps 'submitting'
+    // (frozen configure layout) on screen.
+    fireEvent.click(await screen.findByRole('button', { name: /Pay per application/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm booking' }));
+    const recurringPill = await screen.findByRole('button', { name: 'Recurring Pest Control' });
+    expect(recurringPill).toBeDisabled();
+
+    // The pre-submit search resolves mid-accept and its retained callback
+    // fires selectSlot(null).
+    await act(async () => {
+      releaseFindSlots(jsonResponse({ primary: [], expander: [], summary: 'Found a match' }));
+      await findSlotsGate;
+      // Drain the search continuation (res.json() → selectSlot → setState).
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Selection survives: the slot the in-flight accept is committing stays
+    // picked, and the payment section (gated on selectedSlotId) stays up.
+    const slotsAfter = screen.getAllByRole('button', { name: /Arrival window/i });
+    expect(slotsAfter[0]).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /Pay per application/i })).toBeInTheDocument();
   });
 });

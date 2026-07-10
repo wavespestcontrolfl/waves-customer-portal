@@ -1,30 +1,33 @@
 const logger = require('../services/logger');
 
-// Keys whose values are PII/secrets and must never land in error logs raw
-// (req.body is logged on every unhandled error). Substring match, biased to
-// redact: `name` catches first_name/last_name, `address` catches
-// address_line1/2, `code` catches gate_code/confirmation_code, `token`
-// catches capture/estimate/share tokens. (The content pii-redactor in
-// services/content is a free-TEXT scrubber for publishing surfaces — this is
-// the structured, key-based counterpart for log payloads.)
-const SENSITIVE_BODY_KEY_RE = /phone|e-?mail|address|name|card|token|password|passwd|pwd|secret|code|ssn/i;
-const REDACTED = '[REDACTED]';
-
-// Recursively mask sensitive values in a request body while preserving its
-// shape: every key survives, only matched values are replaced — so the log
-// still shows WHAT was posted without leaking the contents. Depth-capped and
-// cycle-safe (a crafted body must not be able to crash the error handler).
+// req.body is logged on every unhandled error, and a key-based denylist kept
+// leaking PII through keys it didn't anticipate — admin SMS payloads
+// ({ to, body, fromNumber, message }) reach this handler via next(err) and
+// would log the recipient phone and the full SMS body raw (AGENTS.md non-card
+// PII rule). So instead of guessing which keys are sensitive, keep only the
+// body's SHAPE: every key survives, every string/number value is replaced by
+// a type:length marker (e.g. '[string:34]') — no free text or number can leak
+// through ANY key, while the log still shows what was posted and roughly how
+// big. Booleans and null/undefined carry no PII and pass through as debugging
+// signal. Depth-capped and cycle-safe (a crafted body must not be able to
+// crash the error handler). (The content pii-redactor in services/content is
+// a free-TEXT scrubber for publishing surfaces — this is the structured,
+// shape-only counterpart for log payloads.)
 function redactSensitiveBody(value, depth = 0, seen = new WeakSet()) {
-  if (value == null || typeof value !== 'object') return value;
+  if (value == null) return value;
+  const type = typeof value;
+  if (type === 'boolean') return value;
+  if (type === 'string' || type === 'number' || type === 'bigint') {
+    return `[${type}:${String(value).length}]`;
+  }
+  if (type !== 'object') return `[${type}]`;
   if (depth > 8) return '[Truncated]';
   if (seen.has(value)) return '[Circular]';
   seen.add(value);
   if (Array.isArray(value)) return value.map((v) => redactSensitiveBody(v, depth + 1, seen));
   const out = {};
   for (const [key, val] of Object.entries(value)) {
-    out[key] = SENSITIVE_BODY_KEY_RE.test(key)
-      ? (val == null ? val : REDACTED)
-      : redactSensitiveBody(val, depth + 1, seen);
+    out[key] = redactSensitiveBody(val, depth + 1, seen);
   }
   return out;
 }

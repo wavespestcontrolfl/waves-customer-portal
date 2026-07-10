@@ -4,8 +4,10 @@
  *
  * POST /booking/confirm is public: the availability builder only OFFERS
  * conforming slots, so every rule it applies (day window, whole-hour grid,
- * lunch block, day cap, real active tech, sane duration) must be re-checked
- * at commit or a crafted payload books whatever it likes. Unit tests cover
+ * lunch block, ET date bounds, day cap, real active tech, catalog-range
+ * duration) must be re-checked at commit or a crafted payload books whatever
+ * it likes — and every check that needs no customer row must run BEFORE the
+ * new-customer insert, or a rejection strands an orphan profile. Unit tests cover
  * the pure helpers; source-pattern guards (house style — see
  * attribution-capture-wiring.test.js) pin the call sites so a refactor can't
  * silently drop them.
@@ -18,11 +20,14 @@ const {
   bookingSlotWindow,
   resolveBookingDuration,
   validateBookingSlotGeometry,
+  validateBookingSlotDate,
   generateConfirmationCode,
   roundPublicCoord,
   bookingStatusLimiter,
   createSelfBooking,
+  MAX_BOOKING_HORIZON_DAYS,
 } = _internals;
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
 
@@ -104,6 +109,7 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
 describe('resolveBookingDuration — server-derived, never trusted raw', () => {
   test('accepts the funnel catalog range (45–90) including string form', () => {
     expect(resolveBookingDuration(45, {})).toBe(45);
+    expect(resolveBookingDuration(75, {})).toBe(75);
     expect(resolveBookingDuration(90, {})).toBe(90);
     expect(resolveBookingDuration('60', {})).toBe(60);
   });
@@ -113,6 +119,45 @@ describe('resolveBookingDuration — server-derived, never trusted raw', () => {
       expect(resolveBookingDuration(forged, {})).toBe(60);
       expect(resolveBookingDuration(forged, { slot_duration_minutes: 45 })).toBe(45);
     }
+  });
+
+  test('durations OUTSIDE what the catalog actually emits (45–90) fall back — no 15-minute overlap-shrink, no 240-minute day block', () => {
+    // The client SERVICES catalog (PublicBookingPage.jsx) only emits 45/60/90.
+    // 15 and 240 were the old accepted bounds — a forged 15 shrank the
+    // overlap-check window against 60-minute route slots.
+    for (const outside of [15, 30, 44, 91, 120, 240]) {
+      expect(resolveBookingDuration(outside, {})).toBe(60);
+      expect(resolveBookingDuration(outside, { slot_duration_minutes: 90 })).toBe(90);
+    }
+  });
+});
+
+describe('validateBookingSlotDate — commit mirrors the builder\'s ET date bounds', () => {
+  // Pin `now` so boundary math is deterministic; the helper computes both
+  // bounds from the same injectable instant.
+  const now = new Date('2026-07-10T16:00:00Z');
+  const day = (n) => etDateString(addETDays(now, n));
+
+  test('accepts every day the builder can offer (advance_days_min .. horizon)', () => {
+    expect(validateBookingSlotDate(day(1), {}, now)).toBeNull();
+    expect(validateBookingSlotDate(day(14), {}, now)).toBeNull();
+    expect(validateBookingSlotDate(day(MAX_BOOKING_HORIZON_DAYS), {}, now)).toBeNull();
+  });
+
+  test('rejects days before the advance_days_min floor (default 1 — same-day never offered)', () => {
+    expect(validateBookingSlotDate(day(0), {}, now)).toMatch(/no longer open/i);
+    expect(validateBookingSlotDate(day(-3), {}, now)).toMatch(/no longer open/i);
+  });
+
+  test('honors a configured advance_days_min floor', () => {
+    const config = { advance_days_min: 3 };
+    expect(validateBookingSlotDate(day(2), config, now)).toMatch(/no longer open/i);
+    expect(validateBookingSlotDate(day(3), config, now)).toBeNull();
+  });
+
+  test('rejects days beyond the 90-day booking horizon', () => {
+    expect(validateBookingSlotDate(day(MAX_BOOKING_HORIZON_DAYS + 1), {}, now)).toMatch(/beyond our online booking window/i);
+    expect(validateBookingSlotDate('2099-01-01', {}, now)).toMatch(/beyond our online booking window/i);
   });
 });
 
@@ -149,6 +194,59 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   test('technician_id must name a real, ACTIVE technician (uuid-shape guarded)', () => {
     expect(src).toMatch(/await db\('technicians'\)\.where\('id', techIdStr\)\.first\('id', 'active'\)/);
     expect(src).toMatch(/if \(!tech \|\| tech\.active === false\)/);
+  });
+
+  test('ET date bounds enforced at commit, from the shared config, before any write', () => {
+    expect(src).toMatch(/const slotDateError = validateBookingSlotDate\(slotDateStr, config\);/);
+    // ...and the check runs before the customer insert AND the transaction
+    const dateIdx = src.indexOf('const slotDateError = validateBookingSlotDate(slotDateStr, config);');
+    expect(dateIdx).toBeGreaterThan(-1);
+    expect(dateIdx).toBeLessThan(src.indexOf("await db('customers').insert(applyContactNormalization("));
+    expect(dateIdx).toBeLessThan(src.indexOf('txResult = await db.transaction'));
+  });
+
+  test('EVERY no-customer-needed validation runs BEFORE the customer insert — a rejected payload never strands an orphan profile', () => {
+    // The insert used to precede the slot-end / geometry / technician checks:
+    // a failure left an orphan customer whose retry hit the
+    // phone-already-on-file 409. Pin the order so it can't regress.
+    const insertIdx = src.indexOf("await db('customers').insert(applyContactNormalization(");
+    expect(insertIdx).toBeGreaterThan(-1);
+    for (const validation of [
+      'const slotDateError = validateBookingSlotDate(slotDateStr, config);', // ET date bounds
+      'const duration = resolveBookingDuration(duration_minutes, config);', // server duration
+      'if (slot_end && timeToMin(slot_end) !== endMin)', // slot_end agreement
+      'const geometryError = validateBookingSlotGeometry({', // grid/hours/lunch
+      "await db('technicians').where('id', techIdStr).first('id', 'active')", // real active tech
+    ]) {
+      const idx = src.indexOf(validation);
+      expect(idx).toBeGreaterThan(-1);
+      expect(idx).toBeLessThan(insertIdx);
+    }
+    // Failures only detectable under the advisory locks still roll the
+    // just-created profile back (the DAY_FULL / SLOT_TAKEN catch).
+    expect(src).toMatch(/if \(createdCustomerId\) \{\s*\n\s*await db\('notification_prefs'\)\.where\(\{ customer_id: createdCustomerId \}\)\.del\(\)/);
+  });
+
+  test('identity failure still answers 400 BEFORE the config/date/tech checks (DB-free contract)', () => {
+    const identityIdx = src.indexOf("if (!custId && !willCreateCustomer) {");
+    expect(identityIdx).toBeGreaterThan(-1);
+    expect(identityIdx).toBeLessThan(src.indexOf('const slotDateError = validateBookingSlotDate(slotDateStr, config);'));
+  });
+
+  test('day-cap count is serialized under a DATE-scoped advisory lock (cross-zone)', () => {
+    // The customer/tech/zone locks don't cover two confirms in DIFFERENT
+    // zones — both could observe a cap-1 count. The cap is global by date,
+    // so the lock key must be the bare date, nothing else.
+    expect(src).toMatch(/\['self-booking-day-cap', slotDateStr\],/);
+    const lockIdx = src.indexOf("['self-booking-day-cap', slotDateStr],");
+    const txIdx = src.indexOf('txResult = await db.transaction');
+    const capCountIdx = src.indexOf("const dayCountRow = await trx('self_booked_appointments')");
+    expect(txIdx).toBeGreaterThan(-1);
+    expect(lockIdx).toBeGreaterThan(txIdx); // inside the transaction (xact-scoped)
+    expect(lockIdx).toBeLessThan(capCountIdx); // taken before the count it serializes
+    // same pg_advisory_xact_lock(hashtext, hashtext) style as the other locks
+    const lockCall = src.slice(src.lastIndexOf('trx.raw', lockIdx), lockIdx);
+    expect(lockCall).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
   });
 
   test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {

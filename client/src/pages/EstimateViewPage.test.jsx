@@ -733,6 +733,37 @@ describe('SuccessCard — already-accepted retry', () => {
     expect(screen.getByText(/Check your phone for the confirmation text/)).toBeInTheDocument();
   });
 
+  it('does not promise a booking-link text for an already-accepted one-time retry, but keeps the booking button', () => {
+    // An already-accepted unbooked one-time retry returns book_one_time plus
+    // a FRESH booking URL without re-sending the SMS — the on-screen button
+    // is the real path, so the copy must not claim a text was sent.
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true,
+          alreadyAccepted: true,
+          nextStep: 'book_one_time',
+          bookingUrl: 'https://book.example/one-time',
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/Check your phone/)).not.toBeInTheDocument();
+    expect(screen.getByText(/already accepted — pick your appointment now/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick appointment' })).toHaveAttribute('href', 'https://book.example/one-time');
+  });
+
+  it('keeps the booking-link text for a fresh one-time accept', () => {
+    render(
+      <SuccessCard
+        acceptResult={{ success: true, nextStep: 'book_one_time', bookingUrl: 'https://book.example/one-time' }}
+      />,
+    );
+
+    expect(screen.getByText(/Check your phone for the booking link/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick appointment' })).toHaveAttribute('href', 'https://book.example/one-time');
+  });
+
   it('routes an already-accepted retry to its nextStep card when one resolves', () => {
     render(
       <SuccessCard

@@ -2214,7 +2214,12 @@ export function SuccessCard({ acceptResult }) {
         </div>
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {bookingUrl
-            ? 'Check your phone for the booking link, or pick your appointment now.'
+            ? (acceptResult?.alreadyAccepted
+              // Already-accepted retry: /accept returns a fresh booking URL
+              // but does NOT re-send the SMS — don't promise a text that
+              // never went out; the on-screen button is the real path.
+              ? 'This estimate was already accepted — pick your appointment now.'
+              : 'Check your phone for the booking link, or pick your appointment now.')
             : 'Our team will follow up to help schedule your appointment.'}
         </div>
         {bookingUrl ? (
@@ -2583,7 +2588,19 @@ export default function EstimateViewPage() {
   // the data endpoint loads.
   const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
-  const [ctaPhase, setCtaPhase] = useState('configure');
+  const [ctaPhase, setCtaPhaseState] = useState('configure');
+  // Mirrors ctaPhase === 'submitting' SYNCHRONOUSLY. ctaPhase is React state,
+  // so async work started before a submit — e.g. a SlotPicker AI slot search —
+  // captures the OLD phase in its closure: when it resolved mid-submission its
+  // selectSlot(null) passed the state guard and cleared the slot the in-flight
+  // accept was committing. The ref object is stable across renders, so even a
+  // stale callback reads the live value. Every phase transition goes through
+  // setCtaPhase below, keeping the ref in lockstep on all submit/exit paths.
+  const submittingRef = useRef(false);
+  const setCtaPhase = useCallback((phase) => {
+    submittingRef.current = phase === 'submitting';
+    setCtaPhaseState(phase);
+  }, []);
   const [reservation, setReservation] = useState(null);
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
@@ -3853,6 +3870,9 @@ export default function EstimateViewPage() {
               // renders this configure layout): pointer-events blocks taps,
               // the guarded handlers block keyboard selection, and the wrapper
               // stays mounted either way so the slot fetch doesn't restart.
+              // The handler guards read submittingRef, NOT ctaPhase — a slot
+              // search started before the submit retains a callback with the
+              // old phase in its closure, and only the ref stays live there.
               <div
                 aria-disabled={ctaPhase === 'submitting' || undefined}
                 style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
@@ -3861,8 +3881,8 @@ export default function EstimateViewPage() {
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
-                  onSelect={(slotId) => { if (ctaPhase !== 'submitting') setSelectedSlotId(slotId); }}
-                  onSelectMeta={(meta) => { if (ctaPhase !== 'submitting') setSelectedSlotMeta(meta); }}
+                  onSelect={(slotId) => { if (!submittingRef.current) setSelectedSlotId(slotId); }}
+                  onSelectMeta={(meta) => { if (!submittingRef.current) setSelectedSlotMeta(meta); }}
                   selectedSlotFallbackMeta={selectedSlotMeta}
                   licenseNumber={estimate.licenseNumber}
                   refreshSignal={slotsRefreshSignal}
