@@ -1568,7 +1568,7 @@ const SocialMediaService = {
         key: 'twitter',
         enabled: SOCIAL_FLAGS.twitterEnabled && twitterService.configured,
         reason: !SOCIAL_FLAGS.twitterEnabled ? 'Disabled'
-          : 'X credentials not configured (TWITTER_API_KEY/SECRET + TWITTER_ACCESS_TOKEN/SECRET)',
+          : 'X posting not configured (ZERNIO_API_KEY)',
       },
     ].filter((platform) => requestedPlatforms.has(platform.key));
 

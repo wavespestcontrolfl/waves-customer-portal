@@ -37,6 +37,7 @@ export const GLASS_COPY = {
   schedExcerpt: 'Our soonest openings — and if we’re already on your street that day, snag it and skip the line.',
   appTitle: 'Stop waiting around for service windows — watch your tech drive to your door, live',
   appExcerpt: 'Where’s the tech? Check your phone. What did we treat? Check your phone. Live GPS, photo reports, alerts you control.',
+  appHouseholdLine: 'One login for the whole household — everyone in the loop, nobody playing messenger.',
   reviewsTitle: 'See why your neighbors switched to Waves',
   reviewsExcerpt: 'Real Google reviews — unedited, unfiltered, from people whose backyards look like yours.',
   textButton: 'Text us — fast answers',

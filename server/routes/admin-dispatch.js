@@ -4192,12 +4192,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
     // tree_shrub_assessments row that feeds the customer Tree & Shrub Report V2.
     // Post-commit + fire-and-forget: it never blocks completion latency or success
-    // (the report self-heals on view). Flag-gated, tree_shrub-only, fully guarded —
-    // a scoring hiccup can't affect any completion. Replays return earlier, so this
-    // runs once on the genuine first completion (no duplicate assessments).
+    // (the report self-heals on view). Unconditional (the TREE_SHRUB_REPORT_V2
+    // env flag is retired — owner ungated 2026-07-09), tree_shrub-only, fully
+    // guarded — a scoring hiccup can't affect any completion. Replays return
+    // earlier, so this runs once on the genuine first completion (no duplicate
+    // assessments).
     if (
-      process.env.TREE_SHRUB_REPORT_V2 === 'true'
-      && reportServiceLine === 'tree_shrub'
+      reportServiceLine === 'tree_shrub'
       && !isIncompleteVisit
       && Array.isArray(completionPhotos) && completionPhotos.length
     ) {
@@ -4666,7 +4667,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         prepaidPiId = guard.piId;
       }
 
-      return db.transaction(async (trx) => {
+      let flippedPaidByPrepayment = false;
+      const creditedResult = await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceRow.id })
           .forUpdate()
@@ -4698,6 +4700,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
         const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
         const paidByPrepayment = remainingCents <= 0;
+        flippedPaidByPrepayment = paidByPrepayment;
         const [updatedInvoice] = await trx('invoices')
           .where({ id: lockedInvoice.id })
           .update({
@@ -4733,6 +4736,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         });
         return creditedInvoice;
       });
+      // A cash/Zelle prepayment that fully covers the invoice flips it paid
+      // with NO Stripe webhook behind it, so the annual-prepay payment sync
+      // (pending-term activation + the pending-window slice resolution the
+      // reconcile left "until the invoice resolves") would never run.
+      // Mirror the prepaid-receipt path (admin-schedule): best-effort — the
+      // daily covered-term sweep is the recovery net.
+      if (flippedPaidByPrepayment && creditedResult?.id) {
+        try {
+          await AnnualPrepayRenewals.syncTermForInvoicePayment(creditedResult);
+        } catch (err) {
+          logger.warn(`[dispatch] annual-prepay sync after prepaid credit failed for invoice ${creditedResult.id}: ${err.message}`);
+        }
+      }
+      return creditedResult;
     };
 
     if (shouldInvoice) {
@@ -5237,17 +5254,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           completionSmsWasTruncated = false;
         } else {
           if (usePaidCompletionTemplate) {
-            const body = await renderTemplate('service_complete_prepaid', {
+            // Annual-prepay coverage means the plan paid for this visit when
+            // it was bought, not today — service_complete_prepaid's "Thanks
+            // for your payment today" reads wrong there (owner report
+            // 2026-07-09). Plan-covered visits get the annual-prepay variant;
+            // a disabled/missing variant falls back to the base paid template
+            // so the toggle can never cost the customer their completion text.
+            const paidTemplateVars = {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
-            }, {
+            };
+            const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
               entity_id: record.id,
-            });
+            };
+            let body = null;
+            if (annualPrepayCovered) {
+              sentSmsType = 'service_complete_annual_prepay';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
+            if (!body) {
+              sentSmsType = 'service_complete_prepaid';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
             if (!body) throw new Error('SMS template service_complete_prepaid is missing or inactive');
-            sentSmsType = 'service_complete_prepaid';
             sentSmsBody = `${body}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
@@ -6514,12 +6546,10 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
 // confirms/hides/edits and the decisions are submitted with completion.
 router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
   try {
-    // Server kill-switch + cost guard: the dual-vision scoring is paid, so refuse
-    // (before any model call) unless the feature is rolled out — mirrors the gate on
-    // the completion auto-score hook, so the UI flag alone can't trigger paid calls.
-    if (process.env.TREE_SHRUB_REPORT_V2 !== 'true') {
-      return res.status(404).json({ error: 'Not found' });
-    }
+    // The TREE_SHRUB_REPORT_V2 kill-switch is retired (owner ungated
+    // 2026-07-09) — the feature is fully rolled out, matching the
+    // now-unconditional completion auto-score hook. Ownership + service-line
+    // guards below still bound who can trigger the paid dual-vision call.
     // Per-service ownership (same guard as photo-analysis/draft): a tech may only
     // score photos for a service they're assigned to; admins are unrestricted.
     if (!(await assertRecapOwnership(req, res))) return;

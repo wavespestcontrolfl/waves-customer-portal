@@ -220,6 +220,14 @@ function TaskRow({ item, pendingAction, onAction }) {
         {item.summary && (
           <div style={{ marginTop: 5, fontSize: 13, color: D.text, lineHeight: 1.45, overflowWrap: "anywhere" }}>{item.summary}</div>
         )}
+        {item.metadata?.reported_content && (
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ fontSize: 12, color: D.muted, cursor: "pointer" }}>Full reported reply</summary>
+            <div style={{ marginTop: 5, fontSize: 13, color: D.text, lineHeight: 1.45, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {item.metadata.reported_content}
+            </div>
+          </details>
+        )}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: D.muted }}>
           <span>{timeLabel(item.createdAt)}</span>
           {item.dueAt && <span>Due {timeLabel(item.dueAt)}</span>}

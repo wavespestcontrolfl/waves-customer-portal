@@ -201,7 +201,10 @@ class WavesAssistant {
         sent_to_customer: true,
       }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
 
-      return { reply: finalReply, conversationId: conversation.id, escalated, escalationId };
+      // generated marks true model output — canned fallbacks and the
+      // deterministic escalation template never carry it, so the portal's
+      // "report AI content" affordance only attaches to real AI replies.
+      return { reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true };
 
     } catch (err) {
       logger.error(`[ai-assistant] Claude API error: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });

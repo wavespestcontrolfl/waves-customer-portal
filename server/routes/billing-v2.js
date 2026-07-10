@@ -345,12 +345,36 @@ router.get('/balance', async (req, res, next) => {
     // money arrived on the retry's own paid row, so they must not count
     // as balance still owed (the customer would be shown — and could
     // pay — an amount already taken). Payer-linked failures are excluded too.
+    // INVOICE-LINKED failures (metadata.invoice_id) are also excluded: the
+    // obligation they were collecting lives on the invoice row itself — while
+    // the invoice is open it's already counted in unpaidInvoices below, and
+    // once it settles nothing is owed — so summing the attempt row would count
+    // the same debt twice, forever (nothing supersedes these rows: no
+    // next_retry_at for the sweep, and a fresh pay-page attempt mints a new
+    // PI). EXCEPTION: a failure linked to a DRAFT invoice keeps counting —
+    // unpaidInvoices only sums sent/viewed/overdue, so dropping the row too
+    // would show $0 owed after a failed completion autopay whose draft
+    // invoice/pay-link is still collectible (Codex P2 on this PR).
     const failedRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .select('amount', 'metadata');
+    const failedInvoiceIds = [...new Set(failedRows.map(metadataInvoiceId).filter(Boolean))];
+    const balanceCarryingInvoiceIds = new Set(
+      failedInvoiceIds.length
+        ? (await db('invoices')
+            .whereIn('id', failedInvoiceIds)
+            .whereNot({ status: 'draft' })
+            .select('id')
+            .catch(() => [])).map((r) => String(r.id))
+        : [],
+    );
     const failedTotal = failedRows
       .filter((p) => !isPayerPayment(p))
+      .filter((p) => {
+        const invId = metadataInvoiceId(p);
+        return !invId || !balanceCarryingInvoiceIds.has(invId);
+      })
       .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 
     // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the

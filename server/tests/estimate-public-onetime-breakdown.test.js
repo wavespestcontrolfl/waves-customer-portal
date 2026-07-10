@@ -2501,9 +2501,11 @@ describe('public estimate one-time breakdown', () => {
     });
 
     // Termite carries no WaveGuard setup fee under the unified model, but it is
-    // still annual-prepay eligible (5% discount). A stale cached $99 membership
-    // fee is netted out via a one_time_adjustment so it is never charged; the
-    // bait-station install stays a separate one-time charge.
+    // still annual-prepay eligible (5% discount). A stale explicit $99 setup row
+    // is dropped outright (owner ask 2026-07-09: non-pest estimates must never
+    // show the membership setup) and its amount is stripped from the explicit
+    // total, so no netting adjustment row is minted; the bait-station install
+    // stays a separate one-time charge.
     expect(payload.annualPrepayEligible).toBe(true);
     expect(payload.setupFee).toBeNull();
     expect(payload.firstVisitFees).not.toContainEqual(expect.objectContaining({
@@ -2516,9 +2518,48 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.renderFlags.showWaveGuardSetupFee).toBe(false);
     expect(payload.oneTimeBreakdown.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ service: 'termite_bait_installation', amount: 556 }),
-      expect.objectContaining({ service: 'one_time_adjustment', amount: -99 }),
     ]));
+    expect(payload.oneTimeBreakdown.items).not.toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+    }));
+    expect(payload.oneTimeBreakdown.items).not.toContainEqual(expect.objectContaining({
+      service: 'one_time_adjustment',
+    }));
     expect(payload.oneTimeBreakdown.total).toBe(556);
+  });
+
+  test('public pricing bundle: lawn-only estimate drops a stale explicit WaveGuard setup row', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-only-setup-suppression-test',
+      estimate_data: {
+        result: {
+          recurring: {
+            monthlyTotal: 120,
+            annualAfterDiscount: 1440,
+            services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 120 }],
+          },
+          oneTime: {
+            total: 99,
+            items: [
+              { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, detail: 'Membership setup fee' },
+            ],
+          },
+        },
+      },
+      monthly_total: 120,
+      annual_total: 1440,
+      onetime_total: 99,
+    });
+
+    // Lawn carries no WaveGuard membership setup (owner ask 2026-07-09): the
+    // stale explicit $99 row saved in oneTime.items is dropped, its amount is
+    // stripped from the explicit total, and no netting adjustment row is
+    // minted — the one-time card disappears entirely.
+    expect(payload.oneTimeBreakdown.items).toEqual([]);
+    expect(payload.oneTimeBreakdown.total).toBe(0);
+    expect(payload.firstVisitFees || []).not.toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+    }));
   });
 
   test('classifies fallback-saved native roach initial by service key', async () => {
@@ -4648,6 +4689,30 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Treatable lawn', value: '4,200 sq ft' },
       { label: 'Grass type', value: 'St. Augustine' },
     ]));
+  });
+
+  test('Waves AI payload drops Pool/Lanai and Complexity for lawn-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 1900,
+        lotSqFt: 7200,
+        lawnSqFt: 4200,
+        services: { lawn: { track: 'st_augustine' } },
+        landscapeComplexity: 'COMPLEX',
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'medium',
+      },
+      result: {
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Grass type', value: 'St. Augustine' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
   });
 
   test('Waves AI payload uses later object turf fields when the first field is a placeholder', () => {

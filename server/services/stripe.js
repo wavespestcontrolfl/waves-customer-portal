@@ -1301,6 +1301,18 @@ const StripeService = {
         }
         logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
         try {
+          // Stamp the invoice link: the obligation this attempt was collecting
+          // lives on the invoice row, which stays 'sent' — an unlinked failed
+          // row would be double-counted by billing-v2 /balance (invoice +
+          // failed attempt for the same debt) with nothing ever superseding
+          // it, since this path sets no next_retry_at for the retry sweep.
+          // Deliberately NO stripe_payment_intent_id on this row: a declined
+          // off-session PI (e.g. authentication_required) can still succeed
+          // later, and the webhook's succeeded-handler would then flip THIS
+          // row to paid by PI match and return before linking the invoice
+          // (which this failure path never stamped a PI onto) — a paid row
+          // beside a still-collectible invoice, with dunning continuing after
+          // the money arrived (Codex P1 on this PR).
           await db('payments').insert({
             customer_id: invoice.customer_id,
             payment_method_id: card.id,
@@ -1310,6 +1322,10 @@ const StripeService = {
             status: 'failed',
             description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
             failure_reason: err.message,
+            metadata: JSON.stringify({
+              invoice_id: invoice.id,
+              source: 'card_on_file_failed_attempt',
+            }),
           });
         } catch { /* non-fatal */ }
         throw new Error(err.message || 'Card charge failed');
@@ -1903,6 +1919,15 @@ const StripeService = {
             card_surcharge: '0',
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
+            // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+            // MERGE) so a reused PI that was previously finalized can't carry a
+            // stale surcharge_policy_version — which the webhook guard reads as
+            // "finalized" and would settle a later base-only card confirm without
+            // surcharge. Empty string deletes the key on update. Mirrors
+            // createStatementPaymentIntent, which fixed exactly this failure mode.
+            surcharge_policy_version: '',
+            surcharge_rate_bps: '',
+            card_funding: '',
           },
           payment_method_types: ['card'],
         };
@@ -2194,6 +2219,15 @@ const StripeService = {
         card_surcharge: '0',
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
+        // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+        // MERGE) — a declined /finalize leaves surcharge_policy_version on the
+        // PI, and the webhook's surcharge-bypass quarantine reads that stale key
+        // as "finalized", settling a later base-only card confirm without the
+        // surcharge. Empty string deletes the key on update. Mirrors
+        // createStatementPaymentIntent.
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
       },
     };
 
@@ -3193,6 +3227,21 @@ const StripeService = {
           && String(lockedInvoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
           throw new Error('Invoice has a different active payment');
         }
+        // Dispute guard (mirrors the webhook succeeded-handler): after a
+        // chargeback the payments row is 'disputed', the invoice is reopened
+        // 'overdue', and its PI is cleared — so a replayed /confirm with the old
+        // PI id passes every guard above (the PI still retrieves 'succeeded' at
+        // Stripe). Without this check it would flip the charged-back invoice
+        // back to paid, kill dunning, and overwrite the disputed row — erasing
+        // dispute_id/dispute_final, which also neutralizes the webhook's own
+        // late-replay guards. The money already went back via the chargeback:
+        // 'disputed' is terminal for this PI, refuse to settle on it.
+        const disputedRow = await trx('payments')
+          .where({ stripe_payment_intent_id: paymentIntentId, status: 'disputed' })
+          .first('id');
+        if (disputedRow) {
+          throw new Error('This payment was disputed after it succeeded — the invoice cannot be re-marked paid from the old payment session');
+        }
         if (paymentStatus === 'processing') {
           // Expected ACH amount prices from amount due (total − applied credit).
           const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), resolvedPaymentMethod);
@@ -3284,10 +3333,25 @@ const StripeService = {
           .orderBy('created_at', 'desc')
           .first();
         if (existingPayment) {
+          // Never clobber a money-LEFT row: refunded/disputed rows record cash
+          // that went back to the customer. A miss here means the row flipped
+          // to one of those between the dispute pre-check above and this write
+          // (a dispute/refund webhook landing mid-flight) — THROW so the whole
+          // transaction rolls back, including the invoice update above;
+          // returning would let /confirm settle the invoice as paid beside a
+          // row recording that the money just left. A 'paid' row is the
+          // OPPOSITE case and passes through deliberately: the webhook writes
+          // the payments row before it settles the invoice, so /confirm racing
+          // (or repairing after) a half-applied webhook must still be able to
+          // mark the open invoice paid — money genuinely arrived (Codex P2).
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
+            .whereNotIn('status', ['refunded', 'disputed'])
             .update(paymentPayload)
             .returning('*');
+          if (!record) {
+            throw new Error('Payment record changed while confirming — refresh the invoice and try again');
+          }
           return record;
         }
 

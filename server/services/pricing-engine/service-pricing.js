@@ -25,6 +25,11 @@ const {
   lawnComplexityMinutes,
   computeLawnCostFloor,
 } = require('@waves/lawn-cost-floor');
+// Pest post-discount program floor (owner decision 2026-07-09). Tier rows
+// carry the floor amounts so downstream payload shapers (v1-legacy-mapper →
+// estimate-public shapeFromV1) can hold the customer-visible discounted price
+// at the floor without re-deriving cadence math from constants.
+const { pestProgramFloorPerVisit, pestProgramFloorAnnual } = require('./discount-engine');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -1465,12 +1470,22 @@ function pricePestControl(property, options = {}) {
     const fm = freqDiscounts[freqKey] || 1.0;
     const pa = Math.round((basePrice * fm + roachAddOn) * 100) / 100;
     const ann = Math.round(pa * v * 100) / 100;
+    // Post-discount program floor for this cadence. Emitted only while
+    // enforcement is on: estimates generated with the floor keep it for the
+    // life of the stored payload (snapshot semantics); flipping the DB kill
+    // switch stops NEW estimates from carrying it.
+    const floorAnn = PEST.enforceFloorPostDiscount ? pestProgramFloorAnnual(fm, v) : null;
     return {
       frequency: freqKey,
       freq: v,
       perApp: pa,
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
+      ...(floorAnn !== null ? {
+        programFloorPerVisit: pestProgramFloorPerVisit(fm),
+        programFloorAnnual: floorAnn,
+        programFloorMonthly: Math.round(floorAnn / 12 * 100) / 100,
+      } : {}),
       label: freqKey === 'monthly' ? 'Monthly' : freqKey === 'bimonthly' ? 'Bi-Monthly' : 'Quarterly',
       recommended: freqKey === frequency,
       selected: freqKey === frequency,

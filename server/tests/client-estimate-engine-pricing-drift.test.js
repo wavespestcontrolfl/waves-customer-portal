@@ -175,6 +175,63 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).not.toContain('disc: 0.92');
   });
 
+  test('mirrors the pest post-discount program floor (floor 89, per-visit basis rounded first)', () => {
+    // Server: constants.PEST.floor + discount-engine pestProgramFloorAnnual.
+    // The mirror must (a) stamp floor metadata on the stored pest tier rows so
+    // the public estimator can hold the discounted price at the floor, and
+    // (b) cap the pooled WaveGuard discount on the pest line the same way the
+    // server's per-line margin guard does.
+    expect(source).toContain('const floorPa = Math.round(89 * ft.disc * 100) / 100;');
+    expect(source).toContain('const floorAnn = Math.round(floorPa * ft.f * 100) / 100;');
+    expect(source).toContain('pestProgramFloorApplied');
+  });
+
+  test('client fallback holds a floor-priced Platinum pest line at the program floor', () => {
+    // 800 sf footprint + light shrubs/trees + simple landscape → adj -30 →
+    // pest per-visit clamps to the $89 floor; 4 qualifying services → Platinum 20%.
+    const bundle = {
+      homeSqFt: 800,
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      measuredTurfSf: 4000,
+      grassType: 'st_augustine',
+      shrubDensity: 'LIGHT',
+      treeDensity: 'LIGHT',
+      landscapeComplexity: 'SIMPLE',
+      svcPest: true,
+      svcLawn: true,
+      svcTs: true,
+      svcMosquito: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+      isRecurringCustomer: false,
+    };
+    const estimate = calculateEstimate(bundle);
+    expect(estimate.error).toBeUndefined();
+    expect(estimate.recurring.waveGuardTier).toBe('Platinum');
+    expect(estimate.results.pest.pa).toBe(89);
+    expect(estimate.results.pest).toEqual(expect.objectContaining({
+      floorPa: 89, floorAnn: 356, floorMo: 29.67,
+    }));
+    // Pest sits exactly at the floor, so its entire 20% share is given back;
+    // the other services keep their full percent.
+    const ra = estimate.recurring.annualBeforeDiscount;
+    const fullDa = Math.round(ra * 0.20 * 100) / 100;
+    const pestShare = Math.round(356 * 0.20 * 100) / 100;
+    expect(estimate.recurring.pestProgramFloorApplied).toBe(true);
+    expect(estimate.recurring.savings).toBe(Math.round((fullDa - pestShare) * 100) / 100);
+    expect(estimate.recurring.annualAfterDiscount)
+      .toBe(Math.round((ra - estimate.recurring.savings) * 100) / 100);
+
+    // Above the floor (standard 2,000 sf home) the full percent applies untouched.
+    const standard = calculateEstimate({ ...bundle, homeSqFt: 2000, shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE' });
+    expect(standard.error).toBeUndefined();
+    expect(standard.recurring.pestProgramFloorApplied).toBe(false);
+    const standardRa = standard.recurring.annualBeforeDiscount;
+    expect(standard.recurring.savings).toBe(Math.round(standardRa * 0.20 * 100) / 100);
+  });
+
   test('keeps recurring roach premium retired in the client display engine', () => {
     expect(source).toContain('const roachAddOn = 0;');
     expect(source).not.toMatch(/basePrice\s*\*\s*0\.15|pp\s*\*\s*0\.15|117\s*\*\s*0\.15/);

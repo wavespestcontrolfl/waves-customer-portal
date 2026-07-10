@@ -4,12 +4,17 @@ const {
   constants,
 } = require('../services/pricing-engine');
 
-// These tests exercise the pest-control margin guard and the one-time anchor.
-// Several mutate `constants.PEST.base` to force a below-floor scenario, so we
-// snapshot and restore it around every test.
+// These tests exercise the pest-control margin guard, the post-discount
+// program floor, and the one-time anchor. Several mutate `constants.PEST`
+// knobs to force below-floor scenarios, so we snapshot and restore them
+// around every test.
 const ORIGINAL_PEST_BASE = constants.PEST.base;
+const ORIGINAL_PEST_FLOOR = constants.PEST.floor;
+const ORIGINAL_ENFORCE_FLOOR = constants.PEST.enforceFloorPostDiscount;
 afterEach(() => {
   constants.PEST.base = ORIGINAL_PEST_BASE;
+  constants.PEST.floor = ORIGINAL_PEST_FLOOR;
+  constants.PEST.enforceFloorPostDiscount = ORIGINAL_ENFORCE_FLOOR;
 });
 
 function platinumBundle(extra = {}) {
@@ -41,7 +46,27 @@ describe('pest control margin guard (WaveGuard auto-discount)', () => {
     expect(pest.actualDiscountPct).toBeLessThan(0.2);
     // Displayed margin is held at the floor, never below.
     expect(pest.finalMargin).toBeGreaterThanOrEqual(0.35 - 1e-9);
+    // The program floor (floor × freqMult × visits) dominates the margin
+    // minimum for pest at every cadence, so the collected price lands at the
+    // program floor — which at a floor-level base equals the undiscounted
+    // annual.
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBe(pest.programFloorAnnual);
+    expect(pest.annualAfterDiscount).toBe(pest.annualBeforeDiscount);
+  });
+
+  test('with the program floor disabled, the margin guard alone caps at the 35% minimum', () => {
+    constants.PEST.base = 89;
+    constants.PEST.enforceFloorPostDiscount = false;
+    const est = generateEstimate(platinumBundle());
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    expect(pest.marginGuardApplied).toBe(true);
+    expect(pest.programFloorApplied).toBeFalsy();
+    expect(pest.finalMargin).toBeGreaterThanOrEqual(0.35 - 1e-9);
     expect(pest.annualAfterDiscount).toBe(pest.minAnnualForMargin);
+    // The margin minimum sits BELOW the program floor — this is exactly the
+    // gap the program floor closes.
+    expect(pest.annualAfterDiscount).toBeLessThan(pest.annualBeforeDiscount);
   });
 
   test('guard never lifts the price above the undiscounted annual', () => {
@@ -49,6 +74,83 @@ describe('pest control margin guard (WaveGuard auto-discount)', () => {
     const est = generateEstimate(platinumBundle());
     const pest = est.lineItems.find(i => i.service === 'pest_control');
     expect(pest.annualAfterDiscount).toBeLessThanOrEqual(pest.annualBeforeDiscount);
+  });
+});
+
+describe('pest post-discount program floor (owner decision 2026-07-09)', () => {
+  function bundleWithPestFrequency(frequency, extra = {}) {
+    return {
+      property: { footprint: 2000 },
+      services: { pest: { frequency }, lawn: true, mosquito: true, treeShrub: true },
+      ...extra,
+    };
+  }
+
+  test('Platinum on a floor-priced quarterly collects the full program floor', () => {
+    constants.PEST.base = 89; // basePrice clamps to the $89 floor at 2,000 sf
+    const est = generateEstimate(bundleWithPestFrequency('quarterly'));
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    expect(est.waveGuard.tier).toBe('platinum');
+    // floor × 1.00 × 4 = $356 — the 20% discount is fully suppressed.
+    expect(pest.annualBeforeDiscount).toBeCloseTo(356, 2);
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBeCloseTo(356, 2);
+    expect(pest.actualDiscountPct).toBe(0);
+    expect(pest.discountCapped).toBe(true);
+  });
+
+  test('bimonthly floor scales by the cadence multiplier', () => {
+    constants.PEST.base = 89;
+    const est = generateEstimate(bundleWithPestFrequency('bimonthly'));
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    // floor × 0.85 × 6 = $453.90 (v1 cadence curve is the engine default).
+    expect(pest.annualBeforeDiscount).toBeCloseTo(453.90, 2);
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBeCloseTo(453.90, 2);
+  });
+
+  test('cents-tuned DB floor: floor annual uses the rounded per-visit basis', () => {
+    // pricePestControl rounds the per-app amount BEFORE annualizing, so the
+    // floor must too: round(89.99 × 0.85) = 76.49 → $458.94/yr, exactly the
+    // list annual. A single end-rounding (89.99 × 0.85 × 6 → $458.95) would
+    // sit a cent ABOVE list, defeat the never-above-list cap, and mark the
+    // floor applied at a collected price below it (codex P3).
+    constants.PEST.base = 89.99;
+    constants.PEST.floor = 89.99;
+    const est = generateEstimate(bundleWithPestFrequency('bimonthly'));
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    expect(pest.annualBeforeDiscount).toBeCloseTo(458.94, 2);
+    expect(pest.programFloorAnnual).toBeCloseTo(458.94, 2);
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBeCloseTo(458.94, 2);
+    expect(pest.annualAfterDiscount).toBeGreaterThanOrEqual(pest.programFloorAnnual);
+  });
+
+  test('discounts above the floor are untouched — modal-priced quarterly keeps full Platinum 20%', () => {
+    // Default base ($117): quarterly annual $468, Platinum collects $374.40,
+    // still above the $356 program floor.
+    const est = generateEstimate(bundleWithPestFrequency('quarterly'));
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    expect(pest.programFloorApplied).toBe(false);
+    expect(pest.annualAfterDiscount).toBeCloseTo(468 * 0.8, 2);
+  });
+
+  test('manual discount below the program floor stays warn-only with a distinct warning', () => {
+    constants.PEST.base = 89;
+    const est = generateEstimate(bundleWithPestFrequency('quarterly', {
+      manualDiscount: { type: 'PERCENT', value: 10, source: 'test', eligibilityConfirmed: true },
+    }));
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    // Pest is already sitting exactly at the floor post-WaveGuard, so any
+    // manual share cuts below it — warned, never capped.
+    expect(pest.manualPestFloorWarning).toBe(true);
+    const warning = est.marginWarnings.find(w => w.type === 'manual_discount_below_pest_program_floor');
+    expect(warning).toBeTruthy();
+    expect(warning.programFloorAnnual).toBeCloseTo(356, 2);
+    expect(warning.finalAnnual).toBeLessThan(356);
+    // The manual discount itself is NOT reduced (owner loss-leader override).
+    expect(est.summary.manualDiscount.amount).toBeGreaterThan(0);
+    expect(est.summary.manualDiscount.capped).toBe(false);
   });
 });
 
@@ -88,7 +190,10 @@ describe('pest control manual discount (warn-only, not capped)', () => {
     }));
     const pest = est.lineItems.find(i => i.service === 'pest_control');
     expect(pest.manualMarginWarning).toBeUndefined();
-    expect(est.marginWarnings.find(w => w.service === 'pest_control')).toBeUndefined();
+    // Scoped to the margin-floor warning: the program-floor warning is a
+    // separate (dollar-bound) check and can fire while margin is healthy —
+    // e.g. this 5% manual cut lands $0.67 under the monthly program floor.
+    expect(est.marginWarnings.find(w => w.type === 'manual_discount_below_margin_floor' && w.service === 'pest_control')).toBeUndefined();
   });
 });
 

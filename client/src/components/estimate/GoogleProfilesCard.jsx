@@ -50,8 +50,8 @@ function ProfileTile({ profile }) {
       </strong>
       {/* Google's own rating presentation: numeric rating, then amber stars
           (#FBBC04, the G-mark yellow), Roboto-adjacent gray text. */}
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, lineHeight: 1 }}>
-        <span style={{ fontSize: 13, fontWeight: 400, color: '#70757A', fontFamily: 'Roboto, Arial, sans-serif' }}>5.0</span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, lineHeight: 1 }}>
+        <span style={{ fontSize: 14, fontWeight: 400, color: '#70757A', fontFamily: 'Roboto, Arial, sans-serif' }}>5.0</span>
         <span aria-hidden="true" style={{ color: '#FBBC04', fontSize: 14, letterSpacing: 1, lineHeight: 1 }}>
           ★★★★★
         </span>

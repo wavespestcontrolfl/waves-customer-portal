@@ -1,26 +1,58 @@
-// X (Twitter) posting service — OAuth 1.0a user-context creds from env, v2
-// create-Tweet endpoint. Blog shares tweet text + article URL (X wraps URLs
-// to a fixed 23-char t.co link and renders the card from the page og:image).
+// X (Twitter) posting service — publishes through Zernio (the daily-content
+// backend) since X's Feb-2026 pay-per-use credits closed the free direct
+// write path. Blog shares tweet text + article URL (X wraps URLs to a fixed
+// 23-char t.co link and renders the card from the page og:image).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ s3: {} }));
 
 const twitter = require('../services/twitter');
-const { TWEETS_URL, TCO_URL_LENGTH, TWEET_LIMIT, pctEncode } = twitter._test;
+const { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT } = twitter._test;
 
 const LINK = 'https://www.wavespestcontrol.com/pest-control/lizard-droppings/';
+const ACCOUNT_ID = '6a500d943ecd8aa344819c49';
 
 function setCreds() {
-  process.env.TWITTER_API_KEY = 'ck';
-  process.env.TWITTER_API_SECRET = 'cs';
-  process.env.TWITTER_ACCESS_TOKEN = 'at';
-  process.env.TWITTER_ACCESS_TOKEN_SECRET = 'as';
+  process.env.ZERNIO_API_KEY = 'zk';
 }
 function clearCreds() {
-  delete process.env.TWITTER_API_KEY;
-  delete process.env.TWITTER_API_SECRET;
-  delete process.env.TWITTER_ACCESS_TOKEN;
-  delete process.env.TWITTER_ACCESS_TOKEN_SECRET;
+  delete process.env.ZERNIO_API_KEY;
+  delete process.env.ZERNIO_TWITTER_ACCOUNT_ID;
+}
+
+// One fetch mock covering the createPost round-trip: account discovery,
+// post create, then the bounded publish-status poll.
+function mockZernio({ createStatus = 200, pollStatus = 'published', platformPostId = '1234567890' } = {}) {
+  return jest.fn(async (url, opts = {}) => {
+    if (url === `${ZERNIO_API}/accounts`) {
+      return {
+        ok: true,
+        json: async () => ({ accounts: [
+          { _id: 'fb-id', platform: 'facebook', isActive: true },
+          { _id: ACCOUNT_ID, platform: 'twitter', isActive: true },
+        ] }),
+        text: async () => '',
+      };
+    }
+    if (url === `${ZERNIO_API}/posts` && opts.method === 'POST') {
+      if (createStatus !== 200) {
+        return { ok: false, status: createStatus, text: async () => 'create rejected' };
+      }
+      return { ok: true, json: async () => ({ post: { _id: 'zp1' } }), text: async () => '' };
+    }
+    if (url === `${ZERNIO_API}/posts/zp1`) {
+      return {
+        ok: true,
+        json: async () => ({ post: {
+          _id: 'zp1',
+          status: pollStatus,
+          platforms: [{ platform: 'twitter', status: pollStatus, platformPostId, error: pollStatus === 'failed' ? 'duplicate content' : undefined }],
+        } }),
+        text: async () => '',
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
 }
 
 describe('twitter service', () => {
@@ -28,20 +60,14 @@ describe('twitter service', () => {
   afterEach(() => {
     global.fetch = realFetch;
     clearCreds();
+    twitter._account = { id: null, fetchedAt: 0 };
     jest.clearAllMocks();
   });
 
-  test('configured requires all four OAuth 1.0a env vars', () => {
+  test('configured requires ZERNIO_API_KEY', () => {
     expect(twitter.configured).toBe(false);
     setCreds();
     expect(twitter.configured).toBe(true);
-    delete process.env.TWITTER_ACCESS_TOKEN_SECRET;
-    expect(twitter.configured).toBe(false);
-  });
-
-  test('pctEncode is RFC 3986 (encodes the characters encodeURIComponent leaves bare)', () => {
-    expect(pctEncode("a!*'()b")).toBe('a%21%2A%27%28%29b');
-    expect(pctEncode('a b&c')).toBe('a%20b%26c');
   });
 
   describe('composeTweet', () => {
@@ -62,41 +88,127 @@ describe('twitter service', () => {
   });
 
   describe('createPost', () => {
-    test('throws without credentials, without calling the API', async () => {
+    test('throws without ZERNIO_API_KEY, without calling the API', async () => {
       global.fetch = jest.fn();
       await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/not configured/);
       expect(global.fetch).not.toHaveBeenCalled();
     });
 
-    test('posts to /2/tweets with an OAuth 1.0a header and text ending in the article URL', async () => {
+    test('discovers the twitter account, creates a publish-now Zernio post, and returns the platform post id', async () => {
       setCreds();
-      global.fetch = jest.fn(async () => ({
-        ok: true,
-        json: async () => ({ data: { id: '1234567890' } }),
-        text: async () => '',
-      }));
+      global.fetch = mockZernio();
 
       const res = await twitter.createPost({ text: 'Lizard droppings caption', link: LINK });
 
       expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      const [url, opts] = global.fetch.mock.calls[0];
-      expect(url).toBe(TWEETS_URL);
-      expect(opts.method).toBe('POST');
-      const auth = opts.headers.Authorization;
-      expect(auth).toMatch(/^OAuth /);
-      for (const k of ['oauth_consumer_key="ck"', 'oauth_token="at"', 'oauth_signature_method="HMAC-SHA1"', 'oauth_signature=']) {
-        expect(auth).toContain(k);
-      }
-      expect(JSON.parse(opts.body)).toEqual({ text: `Lizard droppings caption\n\n${LINK}` });
-    });
+      const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(createCall).toBeTruthy();
+      expect(createCall[1].headers.Authorization).toBe('Bearer zk');
+      expect(JSON.parse(createCall[1].body)).toEqual({
+        content: `Lizard droppings caption\n\n${LINK}`,
+        platforms: [{ platform: 'twitter', accountId: ACCOUNT_ID }],
+        publishNow: true,
+      });
+    }, 15000);
 
-    test('surfaces API errors with status and body', async () => {
+    test('ZERNIO_TWITTER_ACCOUNT_ID pin skips account discovery', async () => {
       setCreds();
-      global.fetch = jest.fn(async () => ({ ok: false, status: 403, text: async () => 'no write access' }));
+      process.env.ZERNIO_TWITTER_ACCOUNT_ID = 'pinned-id';
+      global.fetch = mockZernio();
 
-      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/X API 403: no write access/);
+      await twitter.createPost({ text: 'T', link: LINK });
+
+      expect(global.fetch.mock.calls.some(([u]) => u === `${ZERNIO_API}/accounts`)).toBe(false);
+      const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(JSON.parse(createCall[1].body).platforms).toEqual([{ platform: 'twitter', accountId: 'pinned-id' }]);
+    }, 15000);
+
+    test('replayed create (Zernio 409 dedupe) converges on the existing post instead of failing', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/posts` && opts.method === 'POST') {
+          return { ok: false, status: 409, text: async () => JSON.stringify({ existingPostId: 'zp1' }) };
+        }
+        return base(url, opts);
+      });
+
+      const res = await twitter.createPost({ text: 'T', link: LINK });
+      expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
+    }, 20000);
+
+    test('409 dedupe id under details.existingPostId also converges', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/posts` && opts.method === 'POST') {
+          return { ok: false, status: 409, text: async () => JSON.stringify({ details: { existingPostId: 'zp1' } }) };
+        }
+        return base(url, opts);
+      });
+      const res = await twitter.createPost({ text: 'T', link: LINK });
+      expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
+    }, 20000);
+
+    test('stale/disconnected sibling X entries are ignored — healthy account selected, no false ambiguity', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/accounts`) {
+          return {
+            ok: true,
+            json: async () => ({ accounts: [
+              { _id: 'x-stale-status', platform: 'twitter', isActive: true, platformStatus: 'expired' },
+              { _id: 'x-disabled', platform: 'twitter', isActive: true, enabled: false },
+              { _id: 'x-disconnected', platform: 'twitter', isActive: true, intentionalDisconnectAt: '2026-07-01T00:00:00Z' },
+              { _id: ACCOUNT_ID, platform: 'twitter', isActive: true, enabled: true, platformStatus: 'active' },
+            ] }),
+            text: async () => '',
+          };
+        }
+        return base(url, opts);
+      });
+      await twitter.createPost({ text: 'T', link: LINK });
+      const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(JSON.parse(createCall[1].body).platforms).toEqual([{ platform: 'twitter', accountId: ACCOUNT_ID }]);
+    }, 20000);
+
+    test('multiple active X accounts without a pin → fail closed', async () => {
+      setCreds();
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => ({ accounts: [
+          { _id: 'x-one', platform: 'twitter', isActive: true },
+          { _id: 'x-two', platform: 'twitter', isActive: true },
+        ] }),
+        text: async () => '',
+      }));
+      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/Multiple active X \(twitter\) accounts.*ZERNIO_TWITTER_ACCOUNT_ID/);
+      expect(global.fetch.mock.calls.every(([u]) => u === `${ZERNIO_API}/accounts`)).toBe(true);
     });
+
+    test('no connected X account in Zernio → clear error before any create', async () => {
+      setCreds();
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => ({ accounts: [{ _id: 'fb-id', platform: 'facebook', isActive: true }] }),
+        text: async () => '',
+      }));
+      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/No active X \(twitter\) account/);
+      expect(global.fetch.mock.calls.every(([u]) => u === `${ZERNIO_API}/accounts`)).toBe(true);
+    });
+
+    test('surfaces Zernio create errors with status and body', async () => {
+      setCreds();
+      global.fetch = mockZernio({ createStatus: 402 });
+      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/Zernio POST \/posts 402: create rejected/);
+    });
+
+    test('platform-side publish failure surfaces as an error', async () => {
+      setCreds();
+      global.fetch = mockZernio({ pollStatus: 'failed' });
+      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/Zernio X publish failed: duplicate content/);
+    }, 15000);
 
     test('empty text (and no link) is rejected before hitting the API', async () => {
       setCreds();
@@ -118,17 +230,14 @@ describe('publishToAll twitter integration', () => {
     delete process.env.SOCIAL_AUTOMATION_ENABLED;
     delete process.env.SOCIAL_TWITTER_ENABLED;
     clearCreds();
+    twitter._account = { id: null, fetchedAt: 0 };
     jest.clearAllMocks();
   });
 
-  test('blog share on channels:[twitter] tweets caption + article URL', async () => {
+  test('blog share on channels:[twitter] tweets caption + article URL via Zernio', async () => {
     process.env.SOCIAL_TWITTER_ENABLED = 'true';
     setCreds();
-    global.fetch = jest.fn(async () => ({
-      ok: true,
-      json: async () => ({ data: { id: '99' } }),
-      text: async () => '',
-    }));
+    global.fetch = mockZernio({ platformPostId: '99' });
 
     const res = await social.publishToAll({
       title: 'T', description: 'D', link: LINK, source: 'autonomous_blog',
@@ -136,12 +245,11 @@ describe('publishToAll twitter integration', () => {
     });
 
     expect(res.platforms).toEqual([expect.objectContaining({ platform: 'twitter', postId: '99', success: true })]);
-    const [url, opts] = global.fetch.mock.calls[0];
-    expect(url).toBe(TWEETS_URL);
-    expect(JSON.parse(opts.body).text).toBe(`X caption\n\n${LINK}`);
-  });
+    const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+    expect(JSON.parse(createCall[1].body).content).toBe(`X caption\n\n${LINK}`);
+  }, 15000);
 
-  test('flag off (or creds missing) → skipped, never a failure', async () => {
+  test('flag off (or key missing) → skipped, never a failure', async () => {
     global.fetch = jest.fn();
 
     const off = await social.publishToAll({
@@ -151,11 +259,11 @@ describe('publishToAll twitter integration', () => {
     expect(off.platforms).toEqual([{ platform: 'twitter', skipped: 'Disabled' }]);
 
     process.env.SOCIAL_TWITTER_ENABLED = 'true'; // enabled but unconfigured
-    const noCreds = await social.publishToAll({
+    const noKey = await social.publishToAll({
       title: 'T', link: LINK, source: 'autonomous_blog',
       channels: ['twitter'], customContent: { twitter: 'X caption' }, noAiImage: true,
     });
-    expect(noCreds.platforms).toEqual([{ platform: 'twitter', skipped: expect.stringMatching(/credentials not configured/) }]);
+    expect(noKey.platforms).toEqual([{ platform: 'twitter', skipped: expect.stringMatching(/not configured/) }]);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });

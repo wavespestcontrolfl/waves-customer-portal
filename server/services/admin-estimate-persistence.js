@@ -75,6 +75,112 @@ function estimateResultRoot(estimateData) {
     : estimateData;
 }
 
+// Pest post-discount program floor is SERVER-authoritative. The deprecated
+// client fallback engine stamps floorPa/floorAnn/floorMo from its own
+// constants.js literal ($89) AND bakes an 89-based give-back into its
+// recurring totals — both ignore the DB-tuned pest_base.floor and the
+// enforce_floor_post_discount kill switch. On save this normalizes the
+// payload to the live synced constants:
+//   1. Rows carrying CLIENT-stamped metadata (the 89-literal basis values)
+//      are restamped from the live floor — or stripped when enforcement is
+//      off. Rows with no metadata get stamped. Rows with OTHER values are
+//      server-stamped (possibly a v2 cadence curve) and are left untouched.
+//   2. When the payload is a client-engine result (it carries the
+//      pestProgramFloorApplied flag), the baked 89-based lift is replaced in
+//      recurring/totals by the server-correct lift, so the persisted
+//      monthly_total / annual_total collect per the configured floor.
+// Runs before totals resolution; a successful server recompute replaces the
+// whole result afterward, making this a no-op for server-priced saves. The
+// client fallback prices on the v1 cadence curve, so the restamp mirrors it.
+// Manual discounts are warn-only and their computed amount is kept as-is.
+const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
+// round(89 × v1 mult) per cadence — the exact values the client literal produces.
+const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30]);
+function pestFloorLiftForAnnual(pestAnn, discountPct, floorAnn) {
+  if (!(discountPct > 0) || !Number.isFinite(pestAnn) || pestAnn <= 0) return 0;
+  if (!Number.isFinite(floorAnn) || floorAnn <= 0) return 0;
+  const cappedFloor = Math.min(floorAnn, pestAnn);
+  return Math.max(0, roundMoney(pestAnn * discountPct - (pestAnn - cappedFloor)));
+}
+function normalizeClientPestFloorMetadata(estimateData) {
+  const root = estimateResultRoot(estimateData);
+  const results = root?.results;
+  if (!results || typeof results !== 'object') return;
+  const pestRow = results.pest && typeof results.pest === 'object' ? results.pest : null;
+  const rows = [
+    ...(Array.isArray(results.pestTiers) ? results.pestTiers : []),
+    ...(pestRow ? [pestRow] : []),
+  ];
+  if (!rows.length) return;
+  const { PEST } = pricingEngine.constants;
+
+  // Reconstruct the client-baked lift BEFORE mutating the metadata.
+  const recurring = root.recurring && typeof root.recurring === 'object' ? root.recurring : null;
+  const isClientEngineResult = !!recurring
+    && Object.prototype.hasOwnProperty.call(recurring, 'pestProgramFloorApplied');
+  const discountPct = Number(recurring?.discount) || 0;
+  const pestAnn = Number(pestRow?.ann);
+  const clientLift = isClientEngineResult && recurring.pestProgramFloorApplied === true
+    ? pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn))
+    : 0;
+
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const stampedPa = Number(row.floorPa);
+    const hasMetadata = Number.isFinite(stampedPa);
+    const isClientStamped = hasMetadata && CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa);
+    if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
+    // Metadata-less rows get stamped only on client-engine payloads, where the
+    // totals correction below applies the matching lift. Stamping a legacy
+    // no-flag payload would let the public reprice collect the floor while
+    // the persisted columns keep the old discounted amount — divergence.
+    if (!hasMetadata && !isClientEngineResult) continue;
+    delete row.floorPa;
+    delete row.floorAnn;
+    delete row.floorMo;
+    if (!PEST.enforceFloorPostDiscount) continue;
+    const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
+    if (!frequencyKey) continue;
+    const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+    const floorAnn = pricingEngine.pestProgramFloorAnnual(freqMult, Number(row.apps ?? row.v));
+    if (floorAnn === null) continue;
+    row.floorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
+    row.floorAnn = floorAnn;
+    row.floorMo = Math.round((floorAnn / 12) * 100) / 100;
+  }
+
+  // Replace the client-baked lift with the server-correct one in the totals.
+  if (!isClientEngineResult) return;
+  const serverLift = pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn));
+  const delta = roundMoney(serverLift - clientLift);
+  recurring.pestProgramFloorApplied = serverLift > 0;
+  if (Math.abs(delta) < 0.005) return;
+  const adjust = (obj, key, d) => {
+    const v = Number(obj?.[key]);
+    if (Number.isFinite(v)) obj[key] = Math.max(0, roundMoney(v + d));
+  };
+  adjust(recurring, 'savings', -delta);
+  adjust(recurring, 'annualAfterDiscount', delta);
+  const newAnnualAfter = Number(recurring.annualAfterDiscount);
+  if (Number.isFinite(newAnnualAfter)) {
+    const oldMonthly = Number(recurring.monthlyTotal);
+    const newMonthly = roundMoney(newAnnualAfter / 12);
+    recurring.monthlyTotal = newMonthly;
+    if (Number.isFinite(oldMonthly)) {
+      adjust(recurring, 'grandTotal', roundMoney(newMonthly - oldMonthly));
+    }
+  }
+  const totals = root.totals && typeof root.totals === 'object' ? root.totals : null;
+  if (totals) {
+    adjust(totals, 'year2', delta);
+    const year2 = Number(totals.year2);
+    if (Number.isFinite(year2) && Number.isFinite(Number(totals.year2mo))) {
+      totals.year2mo = roundMoney(year2 / 12);
+    }
+    adjust(totals, 'year1', delta);
+  }
+}
+
 function sumPositiveAmounts(rows = [], fields = ['price']) {
   return roundMoney((rows || []).reduce((sum, row) => {
     if (!row || typeof row !== 'object') return sum;
@@ -422,6 +528,23 @@ async function createOrReuseAdminEstimate({
     technicianId,
     now,
   });
+  // Server-authoritative pest program floor: normalize client-stamped floor
+  // metadata AND the client-baked lift in the totals BEFORE resolving the
+  // billable preview, so CLIENT_FALLBACK persists collect per the live
+  // DB-synced floor/kill switch. Sync the pricing constants first —
+  // serverRecomputeFromEstimateData returns NO_INPUTS before any sync on
+  // fallback payloads, so without this the restamp could use a stale
+  // in-memory floor right after a pricing_config edit. Best-effort: a sync
+  // failure must not block the save (the restamp then uses the last-synced
+  // constants, same as every other pricing surface).
+  try {
+    if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+      await pricingEngine.syncConstantsFromDB(database);
+    }
+  } catch (err) {
+    logger.warn(`[admin-estimate] pricing-config sync before floor normalize skipped: ${err.message}`);
+  }
+  normalizeClientPestFloorMetadata(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -586,6 +709,7 @@ module.exports = {
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,
+  normalizeClientPestFloorMetadata,
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,
   compareClientToServer,

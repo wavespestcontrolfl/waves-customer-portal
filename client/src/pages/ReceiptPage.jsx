@@ -32,8 +32,8 @@
 // - Email forwarding: if the customer forwards the receipt URL,
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
-import { FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import DocumentActionBar from '../components/DocumentActionBar';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -84,16 +84,12 @@ function fmtDate(d) {
 const subtlePanel = {
   background: CUSTOMER_SURFACE.page,
   border: `1px solid ${CUSTOMER_SURFACE.border}`,
-  borderRadius: 8,
+  borderRadius: RADIUS.input,
 };
 
-const eyebrow = {
-  fontSize: 12,
-  color: 'var(--text-muted)',
-  fontWeight: 850,
-  letterSpacing: 0,
-  textTransform: 'uppercase',
-};
+// The shared uppercase eyebrow spec (DOC_EYEBROW); margin stays a
+// per-call-site delta, so zero out the token's default.
+const eyebrow = { ...DOC_EYEBROW, marginBottom: 0 };
 
 function fullName(customer = {}) {
   return [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Waves customer';
@@ -106,11 +102,11 @@ function cityStateZip(customer = {}) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    paid: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
+    paid: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
     processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    refunded: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
+    refunded: { bg: 'rgba(200,16,46,0.08)', color: DOC.danger, border: 'rgba(200,16,46,0.22)' },
     partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
   };
   const t = tones[tone] || tones.neutral;
   const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
@@ -120,13 +116,13 @@ function StatusPill({ tone = 'neutral', children }) {
       alignItems: 'center',
       gap: 6,
       minHeight: 28,
-      padding: '5px 9px',
-      borderRadius: 8,
+      padding: '4px 8px',
+      borderRadius: RADIUS.input,
       background: t.bg,
       border: `1px solid ${t.border}`,
       color: t.color,
-      fontSize: 12,
-      fontWeight: 850,
+      fontSize: FS.caption,
+      fontWeight: FW.heavy,
       letterSpacing: 0,
       textTransform: 'uppercase',
       whiteSpace: 'nowrap',
@@ -139,8 +135,8 @@ function StatusPill({ tone = 'neutral', children }) {
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ ...eyebrow, marginBottom: 7 }}>{label}</div>
-      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.55 }}>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
+      <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
         {children}
       </div>
     </div>
@@ -152,20 +148,20 @@ function SummaryRow({ label, value, strong, danger }) {
     <div style={{
       display: 'flex',
       justifyContent: 'space-between',
-      gap: 16,
-      padding: strong ? '12px 0 0' : '7px 0',
-      marginTop: strong ? 8 : 0,
-      borderTop: strong ? '1px solid var(--border)' : 'none',
-      color: danger ? 'var(--danger)' : strong ? 'var(--text)' : 'var(--text-muted)',
-      fontSize: strong ? 16 : 14,
-      fontWeight: strong ? 850 : danger ? 750 : 500,
-      fontFamily: FONTS.body,
+      gap: SP.md,
+      padding: strong ? '12px 0 0' : '8px 0',
+      marginTop: strong ? SP.xs : 0,
+      borderTop: strong ? `1px solid ${DOC.border}` : 'none',
+      color: danger ? DOC.danger : strong ? DOC.ink : DOC.muted,
+      fontSize: strong ? FS.lead : FS.body,
+      fontWeight: strong ? FW.heavy : danger ? FW.bold : FW.medium,
+      fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
-        color: danger ? 'var(--danger)' : 'var(--text)',
-        fontFamily: FONTS.mono,
-        fontWeight: strong ? 850 : 650,
+        color: danger ? DOC.danger : DOC.ink,
+        fontFamily: DOC_FONT,
+        fontWeight: strong ? FW.heavy : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -235,7 +231,7 @@ export default function ReceiptPage() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ padding: '64px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+        <div style={{ padding: '64px 20px', textAlign: 'center', color: DOC.muted }}>
           Loading receipt…
         </div>
       </WavesShell>
@@ -247,8 +243,8 @@ export default function ReceiptPage() {
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            <SerifHeading style={{ marginBottom: 12 }}>We couldn't find that receipt</SerifHeading>
-            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't find that receipt</SerifHeading>
+            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
               The link may be mistyped. Give us a call and we'll pull up your records — <HelpPhoneLink tone="dark" inline />.
             </p>
           </BrandCard>
@@ -362,23 +358,23 @@ export default function ReceiptPage() {
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              gap: 10,
-              marginBottom: 20,
+              gap: SP.sm,
+              marginBottom: SP.lg,
               padding: '20px 16px',
               textAlign: 'center',
             }}
           >
             {/* Checkmark graphic removed (owner 2026-07-09 — no decorative icons on customer document pages). */}
             <div style={{
-              fontFamily: FONTS.body,
-              fontWeight: 750,
-              fontSize: 24,
-              color: 'var(--text)',
-              lineHeight: 1.2,
+              fontFamily: DOC_FONT,
+              fontWeight: FW.bold,
+              fontSize: FS.h2,
+              color: DOC.ink,
+              lineHeight: LH.heading,
             }}>
               {heading}
             </div>
-            <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>
+            <div style={{ fontSize: FS.body, color: DOC.muted }}>
               {processing
                 ? `Thanks, ${customer.firstName || 'there'} - your bank payment is processing.`
                 : `Thanks, ${customer.firstName || 'there'} - a receipt is on its way to you.`}
@@ -388,22 +384,22 @@ export default function ReceiptPage() {
 
         {consentFailed && (
           <div className="waves-no-print" style={{
-            marginBottom: 16,
-            padding: 14,
-            borderRadius: 8,
+            marginBottom: SP.md,
+            padding: SP.md,
+            borderRadius: RADIUS.input,
             background: 'rgba(200,16,46,0.06)',
             border: '1px solid rgba(200,16,46,0.28)',
-            color: 'var(--text)',
-            fontSize: 14,
-            lineHeight: 1.5,
+            color: DOC.ink,
+            fontSize: FS.body,
+            lineHeight: LH.body,
             display: 'flex',
-            gap: 10,
+            gap: SP.sm,
             alignItems: 'flex-start',
           }}>
-            <Icon name="warning" size={17} strokeWidth={2} style={{ color: 'var(--danger)', marginTop: 1, flexShrink: 0 }} />
+            <Icon name="warning" size={17} strokeWidth={2} style={{ color: DOC.danger, marginTop: 1, flexShrink: 0 }} />
             <div>
-              <div style={{ fontWeight: 850, color: 'var(--danger)', marginBottom: 3 }}>Save-on-file authorization not recorded</div>
-              <div style={{ color: 'var(--text-muted)' }}>
+              <div style={{ fontWeight: FW.heavy, color: DOC.danger, marginBottom: SP.xxs }}>Save-on-file authorization not recorded</div>
+              <div style={{ color: DOC.muted }}>
                 Your payment went through, but we couldn't record your authorization to save this payment method on file. Waves will reach out to confirm before any future charge. Questions: call <HelpPhoneLink tone="dark" inline />.
               </div>
             </div>
@@ -412,17 +408,17 @@ export default function ReceiptPage() {
 
         {refundState === 'fully_refunded' && (
           <div className="waves-no-print" style={{
-            marginBottom: 16,
-            padding: 14,
-            borderRadius: 8,
+            marginBottom: SP.md,
+            padding: SP.md,
+            borderRadius: RADIUS.input,
             background: 'rgba(200,16,46,0.06)',
             border: '1px solid rgba(200,16,46,0.28)',
-            color: 'var(--danger)',
-            fontSize: 14,
-            fontWeight: 750,
+            color: DOC.danger,
+            fontSize: FS.body,
+            fontWeight: FW.bold,
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
+            gap: SP.sm,
           }}>
             <Icon name="warning" size={17} strokeWidth={2} />
             <span>
@@ -434,22 +430,22 @@ export default function ReceiptPage() {
 
         {refundState === 'partially_refunded' && (
           <div className="waves-no-print" style={{
-            marginBottom: 16,
-            padding: 14,
-            borderRadius: 8,
+            marginBottom: SP.md,
+            padding: SP.md,
+            borderRadius: RADIUS.input,
             background: '#EEF6FF',
             border: '1px solid #BFE4F8',
-            color: 'var(--text)',
-            fontSize: 14,
-            lineHeight: 1.5,
+            color: DOC.ink,
+            fontSize: FS.body,
+            lineHeight: LH.body,
             display: 'flex',
-            gap: 10,
+            gap: SP.sm,
             alignItems: 'flex-start',
           }}>
             <Icon name="refresh" size={17} strokeWidth={2} style={{ color: '#065A8C', marginTop: 1 }} />
             <div>
-              <div style={{ fontWeight: 850, color: '#065A8C', marginBottom: 3 }}>Partial refund issued</div>
-              <div style={{ color: 'var(--text-muted)' }}>
+              <div style={{ fontWeight: FW.heavy, color: '#065A8C', marginBottom: SP.xxs }}>Partial refund issued</div>
+              <div style={{ color: DOC.muted }}>
                 {fmtCurrency(payment.refundAmount)} refunded
                 {payment.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}
                 {' · '}
@@ -464,23 +460,23 @@ export default function ReceiptPage() {
           pdfFileName="Waves_Receipt.pdf"
           shareTitle="Waves receipt"
         />
-        <BrandCard className="waves-print-card" padding={28} style={{ marginBottom: 20 }}>
+        <BrandCard className="waves-print-card" padding={28} style={{ marginBottom: SP.lg }}>
           <div style={{
             display: 'flex',
             justifyContent: 'space-between',
-            gap: 16,
+            gap: SP.md,
             alignItems: 'flex-start',
             flexWrap: 'wrap',
-            marginBottom: 18,
+            marginBottom: SP.lg,
           }}>
-            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: SP.md, alignItems: 'flex-start', minWidth: 0 }}>
               {/* Status icon tile removed (owner 2026-07-09 — no decorative icons). */}
               <div style={{ minWidth: 0 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>
                   {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
                 </div>
-                <SerifHeading style={{ marginBottom: 8 }}>{heading}</SerifHeading>
-                <p style={{ margin: 0, fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                <SerifHeading style={{ marginBottom: SP.xs }}>{heading}</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.muted, lineHeight: LH.body }}>
                   {serviceLabel}
                   {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
                 </p>
@@ -491,19 +487,19 @@ export default function ReceiptPage() {
 
           <div data-glass-clear="" style={{
             ...subtlePanel,
-            padding: 18,
-            marginBottom: 20,
+            padding: SP.md,
+            marginBottom: SP.lg,
             display: 'grid',
             gridTemplateColumns: 'minmax(0, 1fr) auto',
-            gap: 18,
+            gap: SP.lg,
             alignItems: 'center',
           }}>
             <div>
               <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
-              <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
+              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.heavy, color: DOC.ink, fontFamily: DOC_FONT }}>
                 {fmtCurrency(chargedTotal)}
               </div>
-              <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+              <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
                 {statusDetail}
               </div>
             </div>
@@ -513,31 +509,31 @@ export default function ReceiptPage() {
           <div style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-            gap: 16,
-            marginBottom: 20,
+            gap: SP.md,
+            marginBottom: SP.lg,
           }}>
             <DetailBlock label="Billed to">
               {payer ? (
                 <>
-                  <div style={{ fontWeight: 800 }}>{payer.name}</div>
+                  <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
                   {payer.address && <div>{payer.address}</div>}
                   {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                     <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
                   )}
-                  {payer.poNumber && <div style={{ color: 'var(--text-muted)' }}>PO: {payer.poNumber}</div>}
+                  {payer.poNumber && <div style={{ color: DOC.muted }}>PO: {payer.poNumber}</div>}
                 </>
               ) : (
                 <>
-                  <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
-                  {customer.email && <div style={{ color: 'var(--text-muted)' }}>{customer.email}</div>}
+                  {customer.email && <div style={{ color: DOC.muted }}>{customer.email}</div>}
                 </>
               )}
             </DetailBlock>
             {payer && (
               <DetailBlock label="Service address">
-                <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
                 {customer.address && <div>{customer.address}</div>}
                 {locationLine && <div>{locationLine}</div>}
               </DetailBlock>
@@ -546,42 +542,39 @@ export default function ReceiptPage() {
             <DetailBlock label="Payment details">
               {paidAt && (
                 <div>
-                  <span style={{ color: 'var(--text-muted)' }}>{processing ? 'Submitted: ' : 'Paid: '}</span>
+                  <span style={{ color: DOC.muted }}>{processing ? 'Submitted: ' : 'Paid: '}</span>
                   {fmtDate(paidAt)}
                 </div>
               )}
               {methodDisplay && (
                 <div>
-                  <span style={{ color: 'var(--text-muted)' }}>Method: </span>
+                  <span style={{ color: DOC.muted }}>Method: </span>
                   {methodDisplay}
                 </div>
               )}
               {service.techName && (
                 <div>
-                  <span style={{ color: 'var(--text-muted)' }}>Technician: </span>
+                  <span style={{ color: DOC.muted }}>Technician: </span>
                   {service.techName}
                 </div>
               )}
               <div>
-                <span style={{ color: 'var(--text-muted)' }}>Receipt #: </span>
-                <span style={{ fontFamily: FONTS.mono, fontSize: 14 }}>{invoice.invoiceNumber}</span>
+                <span style={{ color: DOC.muted }}>Receipt #: </span>
+                <span style={{ fontFamily: DOC_FONT, fontSize: FS.body }}>{invoice.invoiceNumber}</span>
               </div>
             </DetailBlock>
           </div>
 
           {visibleLineItems.length > 0 && (
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ ...eyebrow, marginBottom: 8 }}>Receipt items</div>
-              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ marginBottom: SP.lg }}>
+              <div style={{ ...eyebrow, marginBottom: SP.xs }}>Receipt items</div>
+              <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
                 <div data-glass-clear="" style={{
+                  ...eyebrow,
                   display: 'grid',
                   gridTemplateColumns: '1fr auto auto',
-                  gap: '0 14px',
-                  padding: '10px 12px',
-                  fontSize: 12,
-                  color: 'var(--text-muted)',
-                  fontWeight: 850,
-                  textTransform: 'uppercase',
+                  gap: '0 16px',
+                  padding: '12px',
                   background: CUSTOMER_SURFACE.page,
                   borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                 }}>
@@ -595,17 +588,17 @@ export default function ReceiptPage() {
                     style={{
                       display: 'grid',
                       gridTemplateColumns: '1fr auto auto',
-                      gap: '0 14px',
+                      gap: '0 16px',
                       padding: '12px',
-                      borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
-                      fontSize: 14,
-                      color: 'var(--text)',
+                      borderBottom: idx < visibleLineItems.length - 1 ? `1px solid ${DOC.border}` : 'none',
+                      fontSize: FS.body,
+                      color: DOC.ink,
                       alignItems: 'start',
                     }}
                   >
-                    <div style={{ lineHeight: 1.45, minWidth: 0 }}>{item.description}</div>
-                    <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>{item.quantity || 1}</div>
-                    <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 82, fontWeight: 650 }}>
+                    <div style={{ lineHeight: LH.snug, minWidth: 0 }}>{item.description}</div>
+                    <div style={{ textAlign: 'right', fontFamily: DOC_FONT }}>{item.quantity || 1}</div>
+                    <div style={{ textAlign: 'right', fontFamily: DOC_FONT, minWidth: 82, fontWeight: FW.semibold }}>
                       {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
                     </div>
                   </div>
@@ -614,7 +607,7 @@ export default function ReceiptPage() {
             </div>
           )}
 
-          <div data-glass-clear="" style={{ ...subtlePanel, padding: 16 }}>
+          <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md }}>
             <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
             {invoice.discountAmount > 0 && (
               <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -649,9 +642,9 @@ export default function ReceiptPage() {
           </div>
 
           {invoice.notes && (
-            <div data-glass-clear="" style={{ marginTop: 18, ...subtlePanel, padding: 16 }}>
-              <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
-              <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+            <div data-glass-clear="" style={{ marginTop: SP.lg, ...subtlePanel, padding: SP.md }}>
+              <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
+              <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                 {invoice.notes}
               </p>
             </div>
@@ -661,7 +654,7 @@ export default function ReceiptPage() {
               the top of the page (owner 2026-07-09). The processing note
               stays — it explains the missing Download button. */}
           {!hasReceiptPdf && processing ? (
-            <div className="waves-no-print" style={{ marginTop: 22, fontSize: 14, color: 'var(--text-muted)' }}>
+            <div className="waves-no-print" style={{ marginTop: SP.xl, fontSize: FS.body, color: DOC.muted }}>
               Receipt PDF available after bank payment clears
             </div>
           ) : null}

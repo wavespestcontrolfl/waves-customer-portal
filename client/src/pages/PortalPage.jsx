@@ -1341,9 +1341,12 @@ function formatPostDate(d) {
 }
 
 // Home-page content row (owner 2026-07-09): one glass section per source —
-// Facebook, the Waves blog, and the newsletter — each a swipeable card rail
-// mirroring the wavespestcontrol.com Social Hub cards (View Post + Share,
-// no quote CTA). Hidden entirely while its feed is empty or unreachable.
+// Facebook, the Waves blog, Instagram, and the newsletter — each a swipeable
+// card rail mirroring the wavespestcontrol.com Social Hub cards (View Post +
+// Share, no quote CTA). Hidden entirely while its feed is empty or
+// unreachable. Titles are the branded names (owner 2026-07-09) — playful
+// over literal; the icon tile + CTA label carry the "where does this go"
+// signal.
 function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
@@ -1445,11 +1448,12 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [satOfficeName, setSatOfficeName] = useState('');
   const [satSubmitting, setSatSubmitting] = useState(false);
   const [satDismissed, setSatDismissed] = useState(false);
-  // Home-page content rows (owner 2026-07-09) — Facebook (same public feed
-  // the wavespestcontrol.com Social Hub renders, Facebook only), the Waves
-  // blog, and the newsletter. Best-effort: an empty/failed feed just hides
-  // its row.
+  // Home-page content rows (owner 2026-07-09) — Facebook and Instagram
+  // (same public feed the wavespestcontrol.com Social Hub renders), the
+  // Waves blog, and the newsletter. Best-effort: an empty/failed feed just
+  // hides its row.
   const [facebookPosts, setFacebookPosts] = useState([]);
+  const [instagramPosts, setInstagramPosts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
@@ -1501,10 +1505,11 @@ function DashboardTab({ customer, onSwitchTab }) {
     fetch(`${API_BASE}/public/social-feed`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        const posts = (d?.posts || [])
-          .filter((p) => p.platform === 'facebook' && p.postUrl)
+        const byPlatform = (platform) => (d?.posts || [])
+          .filter((p) => p.platform === platform && p.postUrl)
           .slice(0, 6);
-        setFacebookPosts(posts);
+        setFacebookPosts(byPlatform('facebook'));
+        setInstagramPosts(byPlatform('instagram'));
       })
       .catch(() => {});
     api.getBlogPosts()
@@ -2004,12 +2009,13 @@ function DashboardTab({ customer, onSwitchTab }) {
         </section>
       )}
 
-      {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog, and
-          the newsletter — Social Hub-style cards in glass, each with View
-          Post + Share (no quote CTA). */}
+      {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog,
+          Instagram, and the newsletter — Social Hub-style cards in glass,
+          each with View Post + Share (no quote CTA). Order is deliberate:
+          Facebook → blog → Instagram → newsletter. */}
       <HomeContentRow
         compact={compact}
-        title="Latest from Facebook"
+        title="Making Waves on Facebook"
         ctaLabel="View Post"
         iconTile={(
           <span style={{
@@ -2026,18 +2032,36 @@ function DashboardTab({ customer, onSwitchTab }) {
       />
       <HomeContentRow
         compact={compact}
-        title="Latest from the Blog"
+        title="The Buzz — Fresh from the Blog"
         ctaLabel="Read Post"
-        iconTile={<ShellIconTile icon="bulb" size={compact ? 30 : 38} />}
+        iconTile={<ShellIconTile icon="waves" size={compact ? 30 : 38} />}
         posts={blogPosts.map((p) => ({
           url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate, external: true,
         }))}
       />
       <HomeContentRow
         compact={compact}
-        title="The Waves Newsletter"
+        title="Fresh Catch on Instagram"
+        ctaLabel="View Post"
+        iconTile={(
+          <span style={{
+            width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
+            background: 'radial-gradient(circle at 30% 107%, #FDF497 0%, #FDF497 5%, #FD5949 45%, #D6249F 60%, #285AEB 90%)',
+            color: '#fff',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <svg viewBox="0 0 24 24" width={compact ? 15 : 18} height={compact ? 15 : 18} fill="currentColor" aria-hidden="true"><path d="M12 0C8.74 0 8.333.015 7.053.072 5.775.132 4.905.333 4.14.63c-.789.306-1.459.717-2.126 1.384S.935 3.35.63 4.14C.333 4.905.131 5.775.072 7.053.012 8.333 0 8.74 0 12s.015 3.667.072 4.947c.06 1.277.261 2.148.558 2.913.306.788.717 1.459 1.384 2.126.667.666 1.336 1.079 2.126 1.384.766.296 1.636.499 2.913.558C8.333 23.988 8.74 24 12 24s3.667-.015 4.947-.072c1.277-.06 2.148-.262 2.913-.558.788-.306 1.459-.718 2.126-1.384.666-.667 1.079-1.335 1.384-2.126.296-.765.499-1.636.558-2.913.06-1.28.072-1.687.072-4.947s-.015-3.667-.072-4.947c-.06-1.277-.262-2.149-.558-2.913-.306-.789-.718-1.459-1.384-2.126C21.319 1.347 20.651.935 19.86.63c-.765-.297-1.636-.499-2.913-.558C15.667.012 15.26 0 12 0zm0 2.16c3.203 0 3.585.016 4.85.071 1.17.055 1.805.249 2.227.415.562.217.96.477 1.382.896.419.42.679.819.896 1.381.164.422.36 1.057.413 2.227.057 1.266.07 1.646.07 4.85s-.015 3.585-.074 4.85c-.061 1.17-.256 1.805-.421 2.227-.224.562-.479.96-.899 1.382-.419.419-.824.679-1.38.896-.42.164-1.065.36-2.235.413-1.274.057-1.649.07-4.859.07-3.211 0-3.586-.015-4.859-.074-1.171-.061-1.816-.256-2.236-.421-.569-.224-.96-.479-1.379-.899-.421-.419-.69-.824-.9-1.38-.165-.42-.359-1.065-.42-2.235-.045-1.26-.061-1.649-.061-4.844 0-3.196.016-3.586.061-4.861.061-1.17.255-1.814.42-2.234.21-.57.479-.96.9-1.381.419-.419.81-.689 1.379-.898.42-.166 1.051-.361 2.221-.421 1.275-.045 1.65-.06 4.859-.06l.045.03zm0 3.678c-3.405 0-6.162 2.76-6.162 6.162 0 3.405 2.76 6.162 6.162 6.162 3.405 0 6.162-2.76 6.162-6.162 0-3.405-2.76-6.162-6.162-6.162zM12 16c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm7.846-10.405c0 .795-.646 1.44-1.44 1.44-.795 0-1.44-.646-1.44-1.44 0-.794.646-1.439 1.44-1.439.793-.001 1.44.645 1.44 1.439z" /></svg>
+          </span>
+        )}
+        posts={instagramPosts.map((p) => ({
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Instagram.', date: p.postedAt, external: true,
+        }))}
+      />
+      <HomeContentRow
+        compact={compact}
+        title="The Tide Report — Our Newsletter"
         ctaLabel="Read Issue"
-        iconTile={<ShellIconTile icon="newspaper" size={compact ? 30 : 38} />}
+        iconTile={<ShellIconTile icon="waves" size={compact ? 30 : 38} />}
         posts={newsletterPosts.map((p) => ({
           url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate,
           external: !String(p.link || '').startsWith('/'),
@@ -11801,9 +11825,32 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // Per-message report state, keyed by message index: 'sending' | 'done' | 'error'.
+  const [reportState, setReportState] = useState({});
   const messagesEndRef = useRef(null);
   const sessionId = useRef(`chat-${Date.now()}`);
   const initialSentRef = useRef(false);
+
+  // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
+  // users must be able to flag AI-generated content for review).
+  const reportMessage = async (idx, content) => {
+    if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
+    setReportState(prev => ({ ...prev, [idx]: 'sending' }));
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
+        },
+        body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
+      });
+      if (!res.ok) throw new Error('report failed');
+      setReportState(prev => ({ ...prev, [idx]: 'done' }));
+    } catch {
+      setReportState(prev => ({ ...prev, [idx]: 'error' }));
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -11849,7 +11896,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
       const data = await res.json();
-      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749." }]);
+      // Only model-generated replies are reportable — the greeting and the
+      // hardcoded fallback/error strings are not AI output.
+      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false }]);
       if (data.escalated) {
         setMessages(prev => [...prev, { role: 'system', content: 'A team member has been notified and will follow up shortly.' }]);
       }
@@ -11921,7 +11970,8 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
-              display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              display: 'flex', flexDirection: 'column',
+              alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
               marginBottom: 10,
             }}>
               <div style={{
@@ -11944,6 +11994,29 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               }}>
                 {msg.content}
               </div>
+              {msg.reportable && (
+                reportState[i] === 'done' ? (
+                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Icon name="check" size={12} strokeWidth={2} /> Reported — our team will review this response.
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => reportMessage(i, msg.content)}
+                    disabled={reportState[i] === 'sending'}
+                    aria-label="Report this AI response as inappropriate"
+                    style={{
+                      border: 'none', background: 'transparent', cursor: 'pointer',
+                      fontSize: 12, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
+                      textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
+                    }}
+                  >
+                    {reportState[i] === 'sending' ? 'Reporting…'
+                      : reportState[i] === 'error' ? "Couldn't send report — try again"
+                      : 'Report this response'}
+                  </button>
+                )
+              )}
             </div>
           ))}
           {sending && (

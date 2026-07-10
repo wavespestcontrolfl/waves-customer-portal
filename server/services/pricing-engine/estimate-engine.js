@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, LAWN_PRICING_V2 } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2 } = require('./constants');
 
 // All-in annual cost (direct + admin) + margin floor for the guarded services,
 // mirroring discount-engine.applyMarginGuard's per-service cost shapes. Returns
@@ -43,7 +43,8 @@ const {
   normalizeRoachType,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard,
+  pestProgramFloorAnnual, validateEstimateDiscounts,
 } = require('./discount-engine');
 const {
   isCommercialProperty,
@@ -1473,9 +1474,13 @@ function generateEstimate(input) {
         item.finalMonthly = Math.round(guarded.finalAnnual / 12 * 100) / 100;
         item.finalMargin = guarded.finalMargin;
         item.marginGuardApplied = guarded.marginGuardApplied;
+        item.programFloorApplied = guarded.programFloorApplied === true;
         item.discountCapped = guarded.discountCapped;
         if (guarded.minAnnualForMargin !== undefined) {
           item.minAnnualForMargin = guarded.minAnnualForMargin;
+        }
+        if (guarded.programFloorAnnual !== undefined) {
+          item.programFloorAnnual = guarded.programFloorAnnual;
         }
         item.annualAfterDiscount = guarded.finalAnnual;
       } else if (item.service === 'lawn_care') {
@@ -1686,6 +1691,24 @@ function generateEstimate(input) {
           manualDiscountShare: Math.round(lineManualCut * 100) / 100,
           message: `${item.service} manual discount drops margin to ${(lineMargin * 100).toFixed(1)}% (below ${(marginFloor * 100).toFixed(0)}% floor)`,
         });
+      }
+      // Pest program floor: manual owner discounts stay warn-only (deliberate
+      // loss-leader pricing is an owner override), but surface a distinct
+      // warning when the pest share of the pool cuts below the post-discount
+      // program floor that caps automatic WaveGuard discounts.
+      if (item.service === 'pest_control' && PEST.enforceFloorPostDiscount) {
+        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear);
+        if (floorAnnual !== null && lineFinalAnnual < floorAnnual) {
+          item.manualPestFloorWarning = true;
+          manualMarginWarnings.push({
+            service: item.service,
+            type: 'manual_discount_below_pest_program_floor',
+            programFloorAnnual: floorAnnual,
+            finalAnnual: lineFinalAnnual,
+            manualDiscountShare: Math.round(lineManualCut * 100) / 100,
+            message: `pest_control manual discount drops annual to $${lineFinalAnnual.toFixed(2)} (below the $${floorAnnual.toFixed(2)} program floor)`,
+          });
+        }
       }
     }
   }

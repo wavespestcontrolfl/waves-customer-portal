@@ -72,7 +72,7 @@
 
 /* ── Offer-stack accordion hint ──────────────────────────────────────── */
 [data-glass-theme] .gc-svc-hint {
-  font-size: 13px;
+  font-size: 14px; /* 13px banned on customer surfaces (glass ruling) */
   font-weight: 600;
   color: #0369a1;
   margin-top: 8px;
@@ -193,14 +193,14 @@
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  font-size: 13px;
+  font-size: 14px; /* 13px banned on customer surfaces (glass ruling) */
   color: hsl(216, 42%, 30%);
   white-space: nowrap;
 }
 [data-glass-theme] .gc-proof-stars {
   color: #f0a500;
   letter-spacing: 2px;
-  font-size: 13px;
+  font-size: 14px; /* 13px banned on customer surfaces (glass ruling) */
 }
 
 /* ── GBP-native review marquee ───────────────────────────────────────── */
@@ -300,7 +300,7 @@
 }
 [data-glass-theme] .gc-mbb-period {
   font-weight: 400;
-  font-size: 13px;
+  font-size: 14px; /* 13px banned on customer surfaces (glass ruling) */
   color: hsl(216, 42%, 38%);
 }
 [data-glass-theme] .gc-mbb-btn {

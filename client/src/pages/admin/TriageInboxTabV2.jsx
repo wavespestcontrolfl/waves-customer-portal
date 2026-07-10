@@ -121,6 +121,26 @@ export function ConfirmEvidence({ payload }) {
       label: emailCandidates.length === 1 ? "Likely" : "Candidates",
       value: emailCandidates.map((c) => `${c.value}${typeof c.confidence === "number" ? ` (${Math.round(c.confidence * 100)}%)` : ""}`).join(" · "),
     },
+    // Quarantine-arbiter findings: without these rows the operator sees only
+    // the original ambiguous candidates and re-does the DNS/ownership work
+    // the arbiter already did.
+    p.arbiter?.verdict && {
+      label: "Arbiter",
+      value: `${String(p.arbiter.verdict).replace(/_/g, " ")}`
+        + (typeof p.arbiter.confidence === "number" ? ` (${Math.round(p.arbiter.confidence * 100)}%)` : "")
+        + (p.arbiter.chosen_value ? ` → ${p.arbiter.chosen_value}` : "")
+        + (p.arbiter.reasoning ? ` — ${p.arbiter.reasoning}` : ""),
+    },
+    Array.isArray(p.arbiter?.eliminated) && p.arbiter.eliminated.length > 0 && {
+      label: "Ruled out",
+      value: p.arbiter.eliminated.map((e) => `${e.value}${e.reason ? ` (${e.reason})` : ""}`).join(" · "),
+    },
+    Array.isArray(p.arbiter?.domain_evidence) && p.arbiter.domain_evidence.length > 0 && {
+      label: "DNS",
+      value: p.arbiter.domain_evidence.map((d) =>
+        `${d.domain}: ${d.deliverable === true ? "deliverable" : d.deliverable === false ? "no mail records" : "unverified"}`
+      ).join(" · "),
+    },
   ].filter(Boolean);
   if (!rows.length && !p.confirmation_question) return null;
   return (

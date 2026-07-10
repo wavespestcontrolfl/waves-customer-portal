@@ -15,7 +15,9 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // hide the per-visit "Time on site" duration. 20260705: headline carries the
 // service type, contact block (name/email/phone/address) under the headline,
 // Visit Timeline moved directly below Re-entry — all change rendered content.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'public-surface-20260705';
+// 20260709: report styling normalized onto the theme-doc tokens (type scale,
+// spacing grid, eyebrow spec) — rendered output shifts, so re-render.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'style-tokens-20260709';
 
 const s3 = new S3Client({
   region: config.s3?.region,

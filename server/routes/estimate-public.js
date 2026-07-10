@@ -10,6 +10,7 @@ const { verifyStaffBearer } = require('../middleware/admin-auth');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
+const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -432,6 +433,92 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   return row;
 }
 
+// Legacy name concatenations ("${first} ${last}") baked literal "undefined"/
+// "null" into some stored names ("Deborah undefined"). Strip those tokens so
+// they never reach a customer-facing page; a name that IS only such a token
+// collapses to '' so the caller's fallback chain takes over.
+function cleanStoredName(value) {
+  return String(value == null ? '' : value)
+    .trim()
+    .replace(/(?:^|\s)(?:undefined|null)(?=\s|$)/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+// The estimate hero lists the customer's own contact block (name / email /
+// phone / service address), but estimate rows are minted by several paths
+// (admin UI, Intelligence Bar, lead webhook) that only stamp the fields they
+// were given — a row created with just a name + phone renders an incomplete
+// block even when the linked customer or lead record has the rest on file.
+// Fill the gaps at read time, display-only: the estimate's own columns stay
+// authoritative when set, then the linked customer (customer_id), then the
+// linked lead (leads.estimate_id). Never throws — on any lookup failure the
+// page simply renders what the estimate row has (today's behavior).
+async function resolveEstimateContactFields(estimate = {}, opts = {}) {
+  const conn = opts.database || db;
+  const out = {
+    customerName: cleanStoredName(estimate.customer_name) || null,
+    customerEmail: String(estimate.customer_email || '').trim() || null,
+    customerPhone: String(estimate.customer_phone || '').trim() || null,
+    address: String(estimate.address || '').trim() || null,
+  };
+  const complete = () => out.customerName && out.customerEmail && out.customerPhone && out.address;
+  if (complete()) return out;
+
+  const fillFrom = ({ name, email, phone, address }) => {
+    out.customerName = out.customerName || cleanStoredName(name) || null;
+    out.customerEmail = out.customerEmail || String(email || '').trim() || null;
+    out.customerPhone = out.customerPhone || String(phone || '').trim() || null;
+    out.address = out.address || String(address || '').trim() || null;
+  };
+
+  try {
+    if (estimate.customer_id) {
+      const customer = await conn('customers')
+        .where({ id: estimate.customer_id })
+        .first('first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+      if (customer) {
+        // Region-only output ("Venice, FL 34285" with no street) is worse
+        // than leaving the gap for the lead fallback below — customers rows
+        // minted with default city/state but a blank street must not block
+        // the lead's complete address. Street line required.
+        const customerStreet = String(customer.address_line1 || '').trim();
+        fillFrom({
+          name: [cleanStoredName(customer.first_name), cleanStoredName(customer.last_name)].filter(Boolean).join(' '),
+          email: customer.email,
+          phone: customer.phone,
+          address: customerStreet
+            ? formatAddress({
+              line1: [customerStreet, String(customer.address_line2 || '').trim()].filter(Boolean).join(', '),
+              city: customer.city,
+              state: customer.state,
+              zip: customer.zip,
+            })
+            : null,
+        });
+      }
+    }
+    if (!complete() && estimate.id) {
+      const lead = await conn('leads')
+        .where({ estimate_id: estimate.id })
+        .whereNull('deleted_at')
+        .orderBy('created_at', 'desc')
+        .first('first_name', 'last_name', 'email', 'phone', 'address');
+      if (lead) {
+        fillFrom({
+          name: [cleanStoredName(lead.first_name), cleanStoredName(lead.last_name)].filter(Boolean).join(' '),
+          email: lead.email,
+          phone: lead.phone,
+          address: lead.address,
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn(`[estimate-public] contact fallback lookup failed for estimate ${estimate.id}: ${err.message}`);
+  }
+  return out;
+}
+
 async function renderTemplate(templateKey, vars, fallback, context = {}) {
   const body = await renderEditableSmsTemplate(templateKey, vars, context);
   return body || fallback;
@@ -459,13 +546,11 @@ const BRAND = {
 
 const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
 
-// App-store links — the iOS app is live, so the Apple badge links to the
-// listing by default (env var still overrides). Android isn't published yet,
-// so the Google Play badge is hidden entirely until WAVES_ANDROID_APP_URL is
-// set (no dead/non-clickable badge once one store is live). Only when BOTH are
-// empty does the card fall back to the "coming soon" preview with both badges.
+// App-store links — both stores are live (Play went live 2026-07-09, owner
+// confirmed), so both badges link to their listings by default; the env vars
+// still override.
 const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
-const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || '';
+const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
 // Self-contained inline-SVG store badges (no hosted assets / no broken images).
 function appStoreBadgeSvg() {
@@ -620,7 +705,17 @@ function recurringServiceFirstVisitPrice(svc = {}, {
     return base == null ? null : Math.round(base * 100) / 100;
   })();
   const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? Number(tierDiscount || 0) : 0;
-  const basePrice = anchorPrice == null ? null : Math.round(anchorPrice * (1 - serviceDiscount) * 100) / 100;
+  let basePrice = anchorPrice == null ? null : Math.round(anchorPrice * (1 - serviceDiscount) * 100) / 100;
+  // Pest program floor: the WaveGuard-discounted first-application price may
+  // not dip below the tier row's per-visit floor (floorPa, stamped at
+  // generation; absent on legacy payloads) — never above the pre-discount
+  // price. Keeps the pay-at-visit copy consistent with the clamped bundle.
+  if (basePrice != null && n.includes('pest')) {
+    const floorPa = Number(pestTier?.floorPa);
+    if (Number.isFinite(floorPa) && floorPa > 0) {
+      basePrice = Math.max(basePrice, Math.round(Math.min(floorPa, anchorPrice) * 100) / 100);
+    }
+  }
   const prefPerTreatmentOff = n.includes('pest') && visits > 0
     ? (Number(prefMonthlyOff || 0) * 12) / visits
     : 0;
@@ -1448,12 +1543,46 @@ function resolveRecurringMonthlyParts(estimate, parsedData) {
   };
 }
 
-function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount) {
+// pestFloorLift: pest post-discount program-floor give-back (see
+// pestFloorMonthlyLift). Added before the manual/pref offs — the floor caps
+// the WaveGuard tier percent only; manual discounts stay warn-only.
+function monthlyForRecurringPartsExact(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount, pestFloorLift = 0) {
   const discountable = Number(parts.discountableBaseMonthly || 0);
   const nonDiscountable = Number(parts.nonDiscountableMonthly || 0);
   const off = Number(monthlyOff || 0);
-  const total = discountable * (1 - discountResolver(tier)) + nonDiscountable - off;
-  return Math.max(0, Math.round(total * 100) / 100);
+  const lift = Number(pestFloorLift) || 0;
+  return Math.max(0, discountable * (1 - discountResolver(tier)) + lift + nonDiscountable - off);
+}
+
+function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount, pestFloorLift = 0) {
+  return Math.round(monthlyForRecurringPartsExact(parts, tier, monthlyOff, discountResolver, pestFloorLift) * 100) / 100;
+}
+
+// Pest post-discount program floor for the stored-payload repricers
+// (select-tier / preferences / tier ladder): v1-legacy-mapper stamps
+// floorAnn/floorMo on results.pest for estimates generated with enforcement
+// on. The WaveGuard tier percent may not take pest's collected monthly below
+// the floor for the SELECTED cadence, so these paths add back the pest
+// line's overshoot — mirroring discount-engine.applyMarginGuard. Returns 0
+// for legacy payloads without floor metadata. The exact (unrounded)
+// floorAnn/12 basis keeps ×12 derivations from shaving the floor by cents.
+function pestFloorMonthlyLift(estData, tierName, discountResolver = tierDiscount) {
+  const root = estData && typeof estData === 'object'
+    ? (estData.result && typeof estData.result === 'object' ? estData.result : estData)
+    : null;
+  const pest = root?.results?.pest;
+  const floorAnn = Number(pest?.floorAnn);
+  const pestMo = Number(pest?.mo ?? pest?.monthly);
+  if (!Number.isFinite(floorAnn) || floorAnn <= 0 || !Number.isFinite(pestMo) || pestMo <= 0) return 0;
+  const disc = Number(discountResolver(tierName)) || 0;
+  if (disc <= 0) return 0;
+  // Never-above-list cap on the EXACT annual basis (row's ann), not the
+  // rounded display monthly — min(floorAnn/12, pestMo) would re-shave the
+  // bimonthly floor to 37.82 × 12 = 453.84 on anchor-less payloads.
+  const pestAnnRaw = Number(pest?.ann ?? pest?.annual);
+  const listAnn = Number.isFinite(pestAnnRaw) && pestAnnRaw > 0 ? pestAnnRaw : pestMo * 12;
+  const floorMoExact = Math.min(floorAnn, listAnn) / 12;
+  return Math.max(0, floorMoExact - pestMo * (1 - disc));
 }
 
 function normalizeManualDiscountSummary(estData = {}) {
@@ -2886,13 +3015,16 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const treeShrubProfile = isTreeShrubOnly
     ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
     : null;
-  const complexity = prettySignalValue(
+  // Lawn-only estimates price off the treatable turf, so Pool/Lanai and
+  // landscape Complexity read as irrelevant noise there (owner ask 2026-07-09)
+  // — both tiles stay pest/other-mix only.
+  const complexity = isLawnOnly ? null : prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
     || inputs.landscapeComplexity
   );
-  const poolLanaiValue = poolLanaiMetricValue({
+  const poolLanaiValue = isLawnOnly ? null : poolLanaiMetricValue({
     pool: firstFeaturePresence(
       inputs.pool,
       inputs.hasPool,
@@ -3515,16 +3647,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? recurring.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))
     : recurring;
   const baseMonthly = displayPestOnly ? Number(pestRecurring.monthlyBase || 0) : storedBaseMonthly;
+  // Pest program floor give-back for the displayed prices (0 for legacy
+  // payloads) — keeps the tier ladder consistent with what select-tier will
+  // actually persist.
+  const currentTierPestLift = pestFloorMonthlyLift(estData, null, () => estimateTierDiscount);
   const recurringMonthlyBeforeDiscounts = displayPestOnly
-    ? Math.round(baseMonthly * (1 - estimateTierDiscount) * 100) / 100
+    ? Math.round((baseMonthly * (1 - estimateTierDiscount) + currentTierPestLift) * 100) / 100
     : Math.max(0, Math.round((Number(est.monthlyTotal || 0) + manualDiscountMonthly + prefMonthlyOff) * 100) / 100);
 
   const tierPrices = {};
   const discountResolver = (t) => tierDiscountForEstimate(estData, t);
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
+    const tierPestLift = pestFloorMonthlyLift(estData, t, discountResolver);
     tierPrices[t] = displayPestOnly
-      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) - manualDiscountMonthly - prefMonthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, t, manualDiscountMonthly + prefMonthlyOff, discountResolver);
+      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) + tierPestLift - manualDiscountMonthly - prefMonthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, t, manualDiscountMonthly + prefMonthlyOff, discountResolver, tierPestLift);
   });
 
   const monthlyTotal = Math.max(0, Math.round((recurringMonthlyBeforeDiscounts - manualDiscountMonthly - prefMonthlyOff) * 100) / 100);
@@ -4854,6 +4991,45 @@ ${shellTopBar()}
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
+
+  <div class="card transparency-card">
+    <h2>Watch every visit &mdash; right from your phone</h2>
+    <p class="ai-blurb">Live GPS, visit reports, and alerts you control &mdash; the Waves app keeps you in the loop from booking to done.</p>
+    <div class="app-shots">
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-tracking.webp" width="760" height="1647" loading="lazy" alt="Waves app visit screen with a live-GPS tech-en-route update before arrival"></div>
+        <figcaption><strong>See your tech coming</strong><span>Live GPS, the hour before arrival</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-visits.webp" width="760" height="1647" loading="lazy" alt="Waves app Visits screen listing upcoming and completed service visits"></div>
+        <figcaption><strong>Every visit &amp; report</strong><span>Upcoming, past, and what we did</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-alerts.webp" width="760" height="1647" loading="lazy" alt="Waves app notification settings, with each alert set to text, email, or both"></div>
+        <figcaption><strong>Alerts you control</strong><span>Text, email, or both</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-contacts.webp" width="760" height="1647" loading="lazy" alt="Waves app on-location contacts screen to add a spouse, tenant, or property manager"></div>
+        <figcaption><strong>Loop in your family</strong><span>Spouse, tenant, or property manager</span></figcaption>
+      </figure>
+    </div>
+    <div class="app-promo">
+      <span class="app-promo-head"><strong>It&rsquo;s all in the Waves app</strong><span>One login for your whole household &mdash; everything in one place.</span></span>
+      <div class="app-features">
+        <div class="app-feature"><span class="af-ico">${ICON_PIN}</span><span>Live tech tracking</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CHAT}</span><span>Text your tech</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_DOC}</span><span>Photo &amp; video reports</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_FAMILY}</span><span>Add family to alerts</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CARD}</span><span>Billing &amp; autopay</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CAL}</span><span>Reschedule &amp; history</span></div>
+      </div>
+      <span class="app-badges${APP_STORE_URL || PLAY_STORE_URL ? '' : ' is-coming-soon'}">
+        ${APP_STORE_URL || !PLAY_STORE_URL ? appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store') : ''}
+        ${PLAY_STORE_URL || !APP_STORE_URL ? appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play') : ''}
+        ${APP_STORE_URL || PLAY_STORE_URL ? '' : '<span class="app-badge-caption">Coming soon to iPhone &amp; Android</span>'}
+      </span>
+    </div>
+  </div>
 
   <div class="card">
     <h2>Customer reviews</h2>
@@ -6668,6 +6844,10 @@ async function handleEstimateView(req, res, next) {
       ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
       : 0;
 
+    // Display-only: fill contact gaps from the linked customer/lead so the
+    // hero always lists email/phone/address when Waves has them on file.
+    const contact = await resolveEstimateContactFields(estimate);
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       status: estimate.status === 'accepted'
@@ -6675,10 +6855,10 @@ async function handleEstimateView(req, res, next) {
         : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
       quoteRequired: pageQuoteRequirement.quoteRequired,
       quoteRequiredReason: pageQuoteRequirement.reason || null,
-      customerName: estimate.customer_name,
-      customerEmail: estimate.customer_email,
-      customerPhone: estimate.customer_phone,
-      address: estimate.address,
+      customerName: contact.customerName,
+      customerEmail: contact.customerEmail,
+      customerPhone: contact.customerPhone,
+      address: contact.address,
       estimateSlug: estimate.estimate_slug || null,
       monthlyTotal: parseFloat(estimate.monthly_total || 0),
       annualTotal: parseFloat(estimate.annual_total || 0),
@@ -7768,6 +7948,47 @@ router.put('/:token/accept', async (req, res, next) => {
         if (!customerId) {
           throw estimateAcceptError('annual prepay acceptance requires a customer record before creating the prepay invoice');
         }
+        // ATOMIC overlap guard (money-path audit P1): every ADMIN term-creation
+        // surface asserts no overlapping term under the per-customer advisory
+        // lock — this customer-facing accept was the one unguarded lane. The
+        // converter's own dedupe only matches an exact-window term, so an
+        // overlapping accept (e.g. an unlinked re-quote whose accept-time phone
+        // match links back to an existing prepay customer) minted a SECOND
+        // active term + a second auto-delivered full-year invoice, while
+        // term-agnostic coverage selection silently shorted the new term's
+        // visits. Same lock + assertion as estimate-manual-acceptance, inside
+        // this accept transaction.
+        // termStart mirrors the converter's own anchor: convertEstimate reads
+        // the committed reservation rows in this same trx and starts the term
+        // on the earliest one (falling back to today for no-slot accepts,
+        // where createTermForAnnualPrepay defaults the start). Guarding with
+        // bare "today" 409'd a legitimate next-term renewal whose current
+        // term ends before the booked first visit.
+        const reservedStartRow = await trx('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNotNull('customer_id')
+          .whereNull('reservation_expires_at')
+          .orderBy('scheduled_date', 'asc')
+          .first('scheduled_date');
+        const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
+        const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
+        try {
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx,
+            customerId,
+            overlapTermStart,
+            false,
+            'Customer already has an annual prepay term through',
+          );
+        } catch (overlapErr) {
+          if (overlapErr && overlapErr.annualPrepayOverlap) {
+            throw estimateAcceptError(
+              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+              409,
+            );
+          }
+          throw overlapErr;
+        }
         const EstimateConverter = require('../services/estimate-converter');
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
@@ -8399,13 +8620,28 @@ router.put('/:token/select-tier', async (req, res, next) => {
     const recurringMonthlyParts = resolveRecurringMonthlyParts(estimate, parsedData);
     const { baseMonthly, source: baseSource } = recurringMonthlyParts;
     const manualMonthlyOff = manualDiscountMonthlyAmount(parsedData);
+    const tierResolver = (tierName) => tierDiscountForEstimate(parsedData, tierName);
+    // Pest program floor: the selected tier's percent may not take pest's
+    // collected monthly below the floor for its cadence (0 for legacy
+    // payloads without floor metadata).
+    const pestLift = pestFloorMonthlyLift(parsedData, selectedTier, tierResolver);
     const monthlyTotal = monthlyForRecurringParts(
       recurringMonthlyParts,
       selectedTier,
       manualMonthlyOff,
-      (tierName) => tierDiscountForEstimate(parsedData, tierName),
+      tierResolver,
+      pestLift,
     );
-    const annualTotal = anchoredAnnualTotal(parsedData, monthlyTotal);
+    let annualTotal = anchoredAnnualTotal(parsedData, monthlyTotal);
+    if (pestLift > 0) {
+      // Same exact-floor invariant as shapeFromV1's acceptance amount:
+      // rounding the lifted monthly to cents can shave the ×12 annual a few
+      // cents under the floor — never persist below the exact figure.
+      const exactMonthly = monthlyForRecurringPartsExact(
+        recurringMonthlyParts, selectedTier, manualMonthlyOff, tierResolver, pestLift,
+      );
+      annualTotal = Math.max(annualTotal, Math.round(exactMonthly * 12 * 100) / 100);
+    }
 
     // Self-heal estimate_data.baseMonthly when we resolved it from the
     // engine result or summed services. Doesn't write when source is
@@ -8520,13 +8756,25 @@ router.put('/:token/preferences', async (req, res, next) => {
 
     const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
     const manualMonthlyOff = manualDiscountMonthlyAmount(parsedData);
+    // Pest program floor give-back per tier (0 for legacy payloads). Applies
+    // to BOTH branches — the pest-only price is the same pest line the pooled
+    // path discounts.
+    const prefPestLift = (tierName) => pestFloorMonthlyLift(parsedData, tierName, preferenceDiscountResolver);
+    const currentPestLift = prefPestLift(currentTier);
     const recurringMonthlyBeforeManualAndPrefs = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-      ? Math.max(0, Math.round(baseMonthly * (1 - currentDiscount) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, 0, preferenceDiscountResolver);
+      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) + currentPestLift) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, 0, preferenceDiscountResolver, currentPestLift);
     const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - manualMonthlyOff - monthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
-    const annualTotal  = anchoredAnnualTotal(parsedData, monthlyTotal);
+      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) + currentPestLift - manualMonthlyOff - monthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver, currentPestLift);
+    let annualTotal  = anchoredAnnualTotal(parsedData, monthlyTotal);
+    if (currentPestLift > 0) {
+      // Exact-floor invariant on the persisted annual (see select-tier above).
+      const exactMonthly = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
+        ? Math.max(0, baseMonthly * (1 - currentDiscount) + currentPestLift - manualMonthlyOff - monthlyOff)
+        : monthlyForRecurringPartsExact(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver, currentPestLift);
+      annualTotal = Math.max(annualTotal, Math.round(exactMonthly * 12 * 100) / 100);
+    }
     const derivedOneTimeChoiceBase = estimate.show_one_time_option
       ? oneTimeChoiceAmountForEstimate(
           { ...estimate, estimate_data: parsedData },
@@ -8539,8 +8787,8 @@ router.put('/:token/preferences', async (req, res, next) => {
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
       tierPrices[t] = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) - manualMonthlyOff - monthlyOff) * 100) / 100)
-        : monthlyForRecurringParts(recurringMonthlyParts, t, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
+        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) + prefPestLift(t) - manualMonthlyOff - monthlyOff) * 100) / 100)
+        : monthlyForRecurringParts(recurringMonthlyParts, t, manualMonthlyOff + monthlyOff, preferenceDiscountResolver, prefPestLift(t));
     });
 
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
@@ -9410,18 +9658,39 @@ function normalizeOneTimeBreakdown(estData) {
     });
   }
 
+  // An explicit WaveGuard setup row saved in the estimate's one-time items
+  // bypasses the synthesized-fee guard above — drop it for the same
+  // non-pest/mosquito mixes so a lawn-only estimate never shows the $99
+  // membership setup. estimate-converter's
+  // shouldIncludeWaveGuardSetupFeeForRecurring already refuses to CHARGE it
+  // for these mixes, so this keeps the page consistent with the invoice.
+  let suppressedExplicitSetupTotal = 0;
+  if (!hasRecurringPest && !hasRecurringMosquito) {
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      if (row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row)) {
+        suppressedExplicitSetupTotal += Number(row.amount) || 0;
+        rows.splice(i, 1);
+      }
+    }
+  }
+
   const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
   const rawExplicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
-  // If we suppressed the WaveGuard setup row above (non-pest/mosquito estimate
-  // with a stale membershipFee cached in oneTime.total), strip that fee from the
-  // explicit total so the difference logic doesn't resurface it as a generic
-  // "Other one-time services" charge.
-  const suppressedMembershipFee = Number.isFinite(membershipFee)
-    && membershipFee > 0
-    && !hasRecurringPest
-    && !hasRecurringMosquito
-    ? membershipFee
-    : 0;
+  // If we suppressed the WaveGuard setup above (non-pest/mosquito estimate
+  // with a stale membershipFee or explicit setup row cached in oneTime), strip
+  // that fee from the explicit total so the difference logic doesn't resurface
+  // it as a generic "Other one-time services" charge. Explicit rows win over
+  // the cached membershipFee (mirrors the add path, which only synthesizes the
+  // fee when no explicit row exists) so the fee is never subtracted twice.
+  const suppressedMembershipFee = suppressedExplicitSetupTotal > 0
+    ? suppressedExplicitSetupTotal
+    : (Number.isFinite(membershipFee)
+      && membershipFee > 0
+      && !hasRecurringPest
+      && !hasRecurringMosquito
+      ? membershipFee
+      : 0);
   const explicitTotal = Number.isFinite(rawExplicitTotal)
     ? Math.round((rawExplicitTotal - suppressedMembershipFee) * 100) / 100
     : rawExplicitTotal;
@@ -12676,8 +12945,63 @@ function normalizeBreakdownItemLabel(item = {}) {
   return mapped && mapped !== label ? { ...item, label: mapped } : item;
 }
 
+// Strip a stale WaveGuard setup fee from a pricing bundle whose recurring mix
+// has no pest/mosquito — the only mixes that carry the $99 membership setup.
+// normalizeOneTimeBreakdown already suppresses the fee when it builds a fresh
+// breakdown, but send-snapshot and cached bundles were frozen with the fee
+// baked into oneTimeBreakdown/firstVisitFees at send time, so the chokepoint
+// every bundle path returns through has to drop it too. Display-only
+// alignment: estimate-converter's shouldIncludeWaveGuardSetupFeeForRecurring
+// already refuses to charge the fee for these mixes.
+function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
+  const recurringServices = Array.isArray(result?.recurring?.services)
+    ? result.recurring.services
+    : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
+  const hasPestOrMosquito = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || ''))
+    || recurringServiceKey(s) === 'mosquito');
+  if (hasPestOrMosquito) return payload;
+
+  let next = payload;
+  const breakdown = payload.oneTimeBreakdown;
+  const isSetupRow = (row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {});
+  if (breakdown && Array.isArray(breakdown.items) && breakdown.items.some(isSetupRow)) {
+    let removedTotal = 0;
+    const kept = breakdown.items.filter((row) => {
+      if (!isSetupRow(row)) return true;
+      removedTotal += Number(row?.amount) || 0;
+      return false;
+    });
+    next = {
+      ...next,
+      oneTimeBreakdown: {
+        ...breakdown,
+        items: kept,
+        total: Number.isFinite(Number(breakdown.total))
+          ? Math.round((Number(breakdown.total) - removedTotal) * 100) / 100
+          : breakdown.total,
+      },
+    };
+  }
+  if (Array.isArray(payload.firstVisitFees) && payload.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) {
+    const firstVisitFees = payload.firstVisitFees.filter((fee) => fee?.service !== 'waveguard_setup');
+    next = {
+      ...next,
+      firstVisitFees,
+      setupFee: next.setupFee && next.setupFee.service === 'waveguard_setup'
+        ? (firstVisitFees.find((f) => f?.waivedWithPrepay) || null)
+        : next.setupFee,
+    };
+  } else if (next.setupFee && next.setupFee.service === 'waveguard_setup') {
+    next = { ...next, setupFee: null };
+  }
+  return next;
+}
+
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
-  const alignedPayload = alignOneTimeChoiceBreakdown(payload, estimate, estData);
+  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
@@ -12763,6 +13087,27 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const pestOnly = options.pestOnly === true && !!pestTier;
   const pestMoBefore = pestTier ? Number(pestTier.mo || 0) : 0;
   const pestAnnBefore = pestTier ? Number(pestTier.ann || 0) : 0;
+  // Pest post-discount program floor: tier rows generated with enforcement on
+  // carry floorMo/floorPa (v1-legacy-mapper). The WaveGuard tier percent may
+  // not take pest's collected price below the floor for its cadence, so the
+  // discounted figures clamp back up — never above the pre-discount price,
+  // mirroring discount-engine.applyMarginGuard. Older stored estimates have
+  // no floor metadata and reprice exactly as before.
+  const pestFloorMoRaw = pestTier ? Number(pestTier.floorMo) : NaN;
+  const pestFloorMo = Number.isFinite(pestFloorMoRaw) && pestFloorMoRaw > 0
+    ? Math.min(pestFloorMoRaw, pestMoBefore)
+    : null;
+  const pestFloorPaRaw = pestTier ? Number(pestTier.floorPa) : NaN;
+  const pestFloorAnnRaw = pestTier ? Number(pestTier.floorAnn) : NaN;
+  // Exact annual floor for the acceptance amount (falls back to the rounded
+  // monthly ×12 if a payload only carries floorMo), capped at the
+  // pre-discount annual.
+  const pestFloorAnnExact = pestFloorMo !== null
+    ? Math.min(
+        Number.isFinite(pestFloorAnnRaw) && pestFloorAnnRaw > 0 ? pestFloorAnnRaw : pestFloorMoRaw * 12,
+        pestAnnBefore > 0 ? pestAnnBefore : Infinity,
+      )
+    : null;
   const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
   const pestRecurring = pestTier
     ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
@@ -12781,7 +13126,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     }
     return after;
   };
-  const pestMoAfter = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
+  const pestMoDiscounted = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
+  const pestMoAfter = pestFloorMo !== null ? Math.max(pestMoDiscounted, pestFloorMo) : pestMoDiscounted;
   const nonPestMoAfter = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
     return sum + discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
   }, 0);
@@ -12830,7 +13176,19 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     }
   }
   const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 100) / 100);
-  const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+  let totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+  // Acceptance amount keeps the EXACT floor: floorMo rounds to cents for the
+  // display monthly, and ×12 can shave the billed annual a few cents under
+  // floorAnn (bimonthly: 37.82 × 12 = 453.84 vs the 453.90 floor). When the
+  // clamp is binding, rebuild the annual from the exact floor contribution
+  // and take the larger figure.
+  if (pestFloorAnnExact !== null && pestMoDiscounted < pestFloorAnnExact / 12) {
+    const exactAnn = Math.max(
+      0,
+      (pestFloorAnnExact / 12 + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 12,
+    );
+    totalAnnAfter = Math.max(totalAnnAfter, Math.round(exactAnn * 100) / 100);
+  }
   const treatmentDisplayPrice = (perTreatment, svc) => {
     const amount = Number(perTreatment);
     if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -12864,11 +13222,19 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const perServiceTreatments = [];
   if (pestTier) {
     const pestPa = Number(pestTier.pa);
+    // Same program-floor clamp as the monthly figure, on the per-visit basis:
+    // the displayed discounted per-treatment price never dips below floorPa.
+    const pestDisplayRaw = treatmentDisplayPrice(pestPa, { service: 'pest_control' });
+    const pestFloorPa = Number.isFinite(pestFloorPaRaw) && pestFloorPaRaw > 0 && Number.isFinite(pestPa)
+      ? Math.min(pestFloorPaRaw, pestPa)
+      : null;
     perServiceTreatments.push({
       service: 'pest_control',
       label: `Pest Control (${pestTier.label || 'Quarterly'})`,
       perTreatment: Number.isFinite(pestPa) && pestPa > 0 ? pestPa : null,
-      displayPrice: treatmentDisplayPrice(pestPa, { service: 'pest_control' }),
+      displayPrice: pestDisplayRaw !== null && pestFloorPa !== null
+        ? Math.max(pestDisplayRaw, pestFloorPa)
+        : pestDisplayRaw,
       visitsPerYear: Number(pestTier.apps || pestTier.v) || null,
       waveGuardDiscountEligible: true,
     });
@@ -13350,6 +13716,27 @@ const dataLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
+// GET /api/estimates/:token/pdf — customer-facing estimate PDF for the
+// estimate page's Download button (owner ask 2026-07-09: Download/Share/
+// Print/Portal Login on every estimate). Same generator as the admin
+// proposal.pdf download and the emailed proposal attachment, so every copy
+// of the document is byte-identical. Gated by isEstimateCustomerViewable —
+// identical exposure rules to /:token/data (drafts/expired/send_failed 404;
+// accepted/declined terminal views stay downloadable).
+router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Lazy require: pdfkit only loads when a PDF is actually requested.
+    const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
+    generateEstimateProposalPDF(estimate, res);
+  } catch (err) { next(err); }
+});
+
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
     // This JSON carries the customer's address, phone/email, notes, pricing,
@@ -13608,6 +13995,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ? await buildShowYourWork(estimate, estimateDataForIntelligence)
       : null;
 
+    // Display-only: fill contact gaps from the linked customer/lead so the
+    // hero always lists email/phone/address when Waves has them on file.
+    const contact = await resolveEstimateContactFields(estimate);
+
     res.json({
       // Only present on a verified staff draft preview — the React page keys
       // its "draft preview, not sent" banner + accept guards off this. Absent
@@ -13655,11 +14046,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         id: estimate.id,
         token: estimate.token,
         slug: estimate.estimate_slug || null,
-        customerFirstName: (estimate.customer_name || '').split(' ')[0] || null,
-        customerName: estimate.customer_name || null,
-        customerPhone: estimate.customer_phone || null,
-        customerEmail: estimate.customer_email || null,
-        address: estimate.address || null,
+        customerFirstName: (contact.customerName || '').split(' ')[0] || null,
+        customerName: contact.customerName,
+        customerPhone: contact.customerPhone,
+        customerEmail: contact.customerEmail,
+        address: contact.address,
         askToken: signEstimateAskToken(estimate),
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
@@ -13797,6 +14188,9 @@ module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
+module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
+module.exports.pestFloorMonthlyLift = pestFloorMonthlyLift;
+module.exports.recurringServiceFirstVisitPrice = recurringServiceFirstVisitPrice;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
@@ -13886,3 +14280,5 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
+module.exports.cleanStoredName = cleanStoredName;
+module.exports.resolveEstimateContactFields = resolveEstimateContactFields;

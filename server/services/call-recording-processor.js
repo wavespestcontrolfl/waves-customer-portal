@@ -67,6 +67,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -93,7 +94,10 @@ Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and prop
 Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
-const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+// Default tracks the newest stable Flash: Google retired gemini-2.5-flash
+// (rolling 404 brown-outs starting 2026-07-09), so a dead default here means
+// the fallback transcriber fails exactly when OpenAI needs it.
+const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-3.5-flash';
 // v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
 // v1.0.0 schema (better structured-output adherence + fewer hallucinations than
 // Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
@@ -105,7 +109,16 @@ const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'ge
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
 // V1 (legacy) extractor model — historically hardcoded in the request URL,
 // which made V1 the only lane without a zero-deploy rollback lever.
-const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-2.5-flash';
+// 2026-07-09: the old gemini-2.5-flash default 404'd (model retired by
+// Google) and six calls died unprocessed — keep this on a live model.
+const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-3.5-flash';
+
+// AI-extraction retry budget. A failure marks the row extraction_failed and
+// increments call_log.extraction_attempts; processAllPending re-runs it while
+// under this cap (≥10 min between attempts via the sweep's age gate), which
+// rides out transient provider errors. At the cap a blocking triage item is
+// filed so the call can't die silently.
+const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -2716,6 +2729,28 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
 
 // ══════════════════════════════════════════════════════════════
 // MAIN PROCESSOR
+// Retry budget exhausted — surface a blocking Needs Review card. Without it
+// the call dies with no route decision, no lead, no customer, and nothing in
+// any inbox (exactly how six calls were silently lost to a retired-model 404
+// on 2026-07-09). Shared by BOTH failure writers: the AI-extraction catch and
+// processRecording's outer guard — every path that stamps extraction_failed
+// counts against the same budget and surfaces the same card at the cap. The
+// partial unique index dedupes re-files while a card is already open.
+async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) {
+  if (attempts < CALL_EXTRACTION_MAX_ATTEMPTS) return;
+  try {
+    const failTriageItem = buildTriageItem({
+      callLogId,
+      flag: 'extraction_failed_permanent',
+      extraction: { meta: { call_summary: `Call processing failed ${attempts} time(s); automatic retries exhausted. Fix the cause, then use Reprocess on the call recording.` } },
+      extraPayload: { attempts, last_error: String(err?.message || err).slice(0, 500) },
+    });
+    await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+  } catch (triageErr) {
+    logger.warn(`[call-proc] extraction-failure triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 const CallRecordingProcessor = {
   /**
@@ -2765,6 +2800,21 @@ const CallRecordingProcessor = {
         .where(function () {
           this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
             .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+        })
+        // Retryable-failure guard: the sweep's cap/backoff filter only
+        // protects sweep-originated runs — direct callers (the
+        // recording-status webhook's setTimeout, duplicate Twilio callbacks)
+        // land here too. Without this clause a burst of timers could re-claim
+        // a just-failed row back-to-back and burn the whole retry budget in
+        // seconds instead of the intended 10-minute spacing, or keep poking a
+        // row already at the cap. Enforce both atomically at claim time.
+        // Admin Reprocess (force=true) takes the other branch and is exempt.
+        .where(function () {
+          this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
+            .orWhere(function () {
+              this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            });
         })
         .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
       if (claimed === 0) {
@@ -2984,12 +3034,17 @@ const CallRecordingProcessor = {
       extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
-      await db('call_log').where({ id: call.id }).update({
+      // Increment in SQL, not from the in-memory row: the stale-reclaim path
+      // means `call` can predate another run's failed attempt.
+      const [failedRow] = await db('call_log').where({ id: call.id }).update({
         processing_status: 'extraction_failed',
+        extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
         processing_token: null,
         processing_started_at: null,
         updated_at: new Date(),
-      });
+      }).returning(['extraction_attempts']);
+      const attempts = Number(failedRow?.extraction_attempts) || 0;
+      await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
 
@@ -3215,6 +3270,66 @@ const CallRecordingProcessor = {
           extracted.email = null;
           logger.info(`[call-proc-dictation] Demoted unconfirmed dictated email to email_raw for ${maskSid(callSid)}`);
         }
+
+        // ── Quarantine arbiter (dark: CONTACT_QUARANTINE_ARBITER_ENABLED) ──
+        // A quarantined email no longer just sits null awaiting review: a
+        // second agent rules on the candidates using evidence the transcripts
+        // can't provide (DNS deliverability per domain, cross-customer
+        // ownership, business-name coherence). adopt/adopt_with_confirmation
+        // fills extracted.email before the customer/lead upserts and
+        // first-touch sends read it; a decisive adopt also releases the
+        // forced read-back flag below. The module re-checks every hard gate
+        // deterministically (candidate membership, deliverable domain,
+        // ownership) before returning an adoptable verdict — and fails open
+        // to the existing quarantine on any error.
+        if (dictationEmailPayload?.email_candidates?.length && !extracted.email) {
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const arbiter = await arbitrateQuarantinedEmail({
+            entry: contactDictation.emails?.[0] || null,
+            demotedEmail: extracted.email_raw || null,
+            transcripts: { primary: transcription, contactPass: contactPassTranscript },
+            callerContext: {
+              first_name: extracted.first_name || null,
+              last_name: extracted.last_name || null,
+              organization: v2Result?.extraction?.caller?.organization_name || null,
+              call_summary: extracted.call_summary || null,
+            },
+            ownCustomerId,
+          });
+          if (arbiter) {
+            dictationEmailPayload.arbiter = {
+              verdict: arbiter.verdict,
+              chosen_value: arbiter.chosenValue,
+              confidence: arbiter.confidence,
+              reasoning: arbiter.reasoning,
+              eliminated: arbiter.eliminated,
+              domain_evidence: arbiter.domainEvidence,
+              ...(arbiter.confirmationQuestion ? { confirmation_question: arbiter.confirmationQuestion } : {}),
+            };
+            // The Needs Review card renders only the TOP-LEVEL
+            // confirmation_question (TriageInboxTabV2) — lift the arbiter's
+            // question there for any verdict that keeps the card open, or a
+            // decoder-questionless quarantine would open a card with no
+            // read-back prompt.
+            if (arbiter.verdict !== 'adopt' && arbiter.confirmationQuestion) {
+              dictationEmailPayload.confirmation_question = arbiter.confirmationQuestion;
+            }
+            // adopt_with_confirmation ALSO writes — owner ruling (2026-07-09):
+            // a quarantined profile never ships email-less when a candidate
+            // passes every hard gate; the promised first-touch email goes out
+            // and the read-back card stays open for the human confirm. The
+            // gates (candidate membership, deliverable domain, cross-customer
+            // ownership) are enforced deterministically inside the module.
+            if (arbiter.chosenValue && (arbiter.verdict === 'adopt' || arbiter.verdict === 'adopt_with_confirmation')) {
+              extracted.email = arbiter.chosenValue;
+              logger.info(`[quarantine-arbiter] ${arbiter.verdict} email for ${maskSid(callSid)} (confidence ${arbiter.confidence})`);
+            } else {
+              logger.info(`[quarantine-arbiter] review verdict for ${maskSid(callSid)} — quarantine stands`);
+            }
+          }
+        }
       }
     } catch (dictationErr) {
       logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
@@ -3435,7 +3550,23 @@ const CallRecordingProcessor = {
         // silent, which would drop the decoder's candidates/question on the
         // floor — exactly the malformed dictation this pass quarantines.
         // Force a read-back reason so the triage item (with payload) exists.
-        if (dictationEmailPayload
+        // A decisive arbiter adopt resolved the dictation — the read-back
+        // card would only re-ask a settled question. The bridge's
+        // deriveEmailReview gives EVERY call-captured email a read-back
+        // reason unconditionally, so the settled reasons must be REMOVED,
+        // not just not-re-added. adopt_with_confirmation and review verdicts
+        // keep the flag (card stays open). EXCEPTION: when the bridge's
+        // domain-typo corrector proposes a DIFFERENT value than the arbiter
+        // adopted (normalizedEmail below overwrites extracted.email), the
+        // question is NOT settled — the reasons stay so the card survives
+        // the conflicting correction.
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt'
+            && (!normalizedEmail || normalizedEmail === dictationEmailPayload.arbiter.chosen_value)) {
+          for (const settled of ['email_unverified', 'email_invalid']) {
+            const at = needsConfirmation.indexOf(settled);
+            if (at !== -1) needsConfirmation.splice(at, 1);
+          }
+        } else if (dictationEmailPayload
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
@@ -3532,7 +3663,19 @@ const CallRecordingProcessor = {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
         // Same decoder-only fallback as the shadow branch: dictation evidence
         // with no extracted email must still open a read-back triage item.
-        if (dictationEmailPayload
+        // Same arbiter release as the shadow branch: a decisive adopt closed
+        // the question, and deriveEmailReview adds a read-back reason for
+        // every call-captured email unconditionally — remove the settled
+        // ones. Anything less than a decisive adopt keeps the card, and so
+        // does a domain-typo correction that would CHANGE the adopted value
+        // (the correction write below must never land unreviewed).
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt'
+            && (!correctedEmail || correctedEmail === dictationEmailPayload.arbiter.chosen_value)) {
+          for (const settled of ['email_unverified', 'email_invalid']) {
+            const at = emailReasons.indexOf(settled);
+            if (at !== -1) emailReasons.splice(at, 1);
+          }
+        } else if (dictationEmailPayload
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
@@ -5758,17 +5901,30 @@ const CallRecordingProcessor = {
         // reclaim handed the lock to a peer, the peer's claim overwrote our
         // token and this UPDATE matches 0 rows — we log and bail without
         // disturbing the peer's lock or duplicating side effects.
-        const released = await db('call_log')
+        //
+        // This write shares the extraction retry budget: without the
+        // increment, a repeatable post-extraction error would come back
+        // through the sweep every 10 minutes with attempts still 0 —
+        // an uncapped retry loop over side-effect-laden code. Counting it
+        // here caps that loop at CALL_EXTRACTION_MAX_ATTEMPTS and files the
+        // same blocking card at the cap. (Re-running after partial side
+        // effects is bounded-safe: the idempotency keys, won-status skips,
+        // and same-date dup holds make reprocessing a supported operation.)
+        const releasedRows = await db('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
           .update({
             processing_status: 'extraction_failed',
+            extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
             processing_started_at: null,
             updated_at: new Date(),
-          });
-        if (released === 0) {
+          }).returning(['extraction_attempts']);
+        if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        } else {
+          const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
+          await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
       } catch (releaseErr) {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
@@ -5788,6 +5944,11 @@ const CallRecordingProcessor = {
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
+    //   - processing_status='extraction_failed' with retry budget left (extraction_attempts
+    //     < CALL_EXTRACTION_MAX_ATTEMPTS) — 10-min age gate spaces the attempts so a
+    //     provider brown-out isn't burned through in one cron tick. 7-day created_at fence:
+    //     belt-and-suspenders with the migration backfill (which parks pre-existing failures
+    //     at the cap) so ancient calls can never be resurrected into fresh leads/SMS.
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
@@ -5812,6 +5973,12 @@ const CallRecordingProcessor = {
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .orWhere('processing_status', 'no_transcription')
+        .orWhere(function () {
+          this.where('processing_status', 'extraction_failed')
+            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+            .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+        })
         .orWhere(function () {
           this.where('processing_status', 'processing')
             .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");

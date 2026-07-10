@@ -1,71 +1,109 @@
 /**
- * X (Twitter) posting service — single brand account, OAuth 1.0a user context.
+ * X (Twitter) posting service — publishes via Zernio (zernio.com), the same
+ * social-publishing backend the daily content calendar uses.
  *
- * Posting uses the v2 create-Tweet endpoint (POST /2/tweets), authorized with
- * OAuth 1.0a user-context credentials generated once in the X developer
- * portal (the app's consumer key/secret plus an access token/secret minted
- * for the brand account). No callback flow, no token rotation, nothing in the
- * DB — the four env vars are the whole grant. The free API tier's write cap
- * (~500 posts/month app-wide) comfortably covers blog-share cadence.
+ * History: v1 posted straight to X's v2 create-Tweet endpoint with OAuth 1.0a
+ * user-context creds. X's Feb-2026 switch to pay-per-use API credits closed
+ * the free write path (every create 402'd CreditsDepleted), so posting now
+ * rides the brand account's Zernio connection (flat per-account pricing —
+ * no X credits involved). Zernio holds the X OAuth; we hold one API key.
  *
- * Env: TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN,
- *      TWITTER_ACCESS_TOKEN_SECRET.
- *      (TWITTER_BEARER_TOKEN is the separate app-only READ credential used by
- *      the backlink-agent x-poller — a bearer token cannot create tweets.)
+ * Env: ZERNIO_API_KEY (required).
+ *      ZERNIO_TWITTER_ACCOUNT_ID (optional) pins the Zernio account id; when
+ *      unset, the connected twitter account is discovered via GET /accounts
+ *      and cached in-process.
+ *      (TWITTER_BEARER_TOKEN remains the separate app-only READ credential
+ *      used by the backlink-agent x-poller — X's write-credit change does not
+ *      affect reads. The four TWITTER_* OAuth 1.0a write vars are retired.)
  *
  * Tweets go out as text + article URL: X wraps every URL to a fixed-length
  * t.co link (23 chars against the 280 limit) and renders the link card from
  * the page's og:image, so no media upload is needed for blog shares.
  */
 
-const crypto = require('crypto');
 const logger = require('./logger');
 
-const TWEETS_URL = 'https://api.twitter.com/2/tweets';
+const ZERNIO_API = 'https://zernio.com/api/v1';
 // X counts every URL as a fixed t.co length regardless of the real URL.
 const TCO_URL_LENGTH = 23;
 const TWEET_LIMIT = 280;
-
-// RFC 3986 percent-encoding — encodeURIComponent leaves !*'() unencoded,
-// which breaks the OAuth 1.0a signature base string.
-function pctEncode(value) {
-  return encodeURIComponent(String(value))
-    .replace(/[!*'()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-}
+const ACCOUNT_CACHE_MS = 10 * 60 * 1000;
 
 class TwitterService {
-  get configured() {
-    return !!(
-      process.env.TWITTER_API_KEY
-      && process.env.TWITTER_API_SECRET
-      && process.env.TWITTER_ACCESS_TOKEN
-      && process.env.TWITTER_ACCESS_TOKEN_SECRET
-    );
+  constructor() {
+    this._account = { id: null, fetchedAt: 0 };
   }
 
-  // OAuth 1.0a HMAC-SHA1 Authorization header for a JSON-body request: only
-  // the oauth_* params (plus query params — none here) enter the signature
-  // base string; a JSON body is excluded by spec.
-  _authHeader(method, url) {
-    const oauth = {
-      oauth_consumer_key: process.env.TWITTER_API_KEY,
-      oauth_nonce: crypto.randomBytes(16).toString('hex'),
-      oauth_signature_method: 'HMAC-SHA1',
-      oauth_timestamp: String(Math.floor(Date.now() / 1000)),
-      oauth_token: process.env.TWITTER_ACCESS_TOKEN,
-      oauth_version: '1.0',
-    };
-    const paramString = Object.keys(oauth)
-      .sort()
-      .map((k) => `${pctEncode(k)}=${pctEncode(oauth[k])}`)
-      .join('&');
-    const baseString = [method.toUpperCase(), pctEncode(url), pctEncode(paramString)].join('&');
-    const signingKey = `${pctEncode(process.env.TWITTER_API_SECRET)}&${pctEncode(process.env.TWITTER_ACCESS_TOKEN_SECRET)}`;
-    oauth.oauth_signature = crypto.createHmac('sha1', signingKey).update(baseString).digest('base64');
-    return `OAuth ${Object.keys(oauth)
-      .sort()
-      .map((k) => `${pctEncode(k)}="${pctEncode(oauth[k])}"`)
-      .join(', ')}`;
+  get configured() {
+    return !!process.env.ZERNIO_API_KEY;
+  }
+
+  async _zernio(path, { method = 'GET', body, timeoutMs = 15000 } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(`${ZERNIO_API}/${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${process.env.ZERNIO_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!res.ok) {
+      const bodyText = (await res.text()).slice(0, 500);
+      const err = new Error(`Zernio ${method} /${path} ${res.status}: ${bodyText}`);
+      err.status = res.status;
+      err.bodyText = bodyText;
+      throw err;
+    }
+    return res.json();
+  }
+
+  // The Zernio account id for the connected X profile. Pinned via env when
+  // set; otherwise discovered from GET /accounts and cached (reconnecting the
+  // X profile in the Zernio dashboard mints a new id, hence the TTL).
+  async _resolveAccountId() {
+    if (process.env.ZERNIO_TWITTER_ACCOUNT_ID) return process.env.ZERNIO_TWITTER_ACCOUNT_ID;
+    if (this._account.id && Date.now() - this._account.fetchedAt < ACCOUNT_CACHE_MS) {
+      return this._account.id;
+    }
+    const data = await this._zernio('accounts');
+    const accounts = Array.isArray(data) ? data : (data?.accounts || []);
+    // Healthy-connection filter (fields observed on the live accounts API):
+    // an expired/reconnected profile leaves a stale sibling entry behind with
+    // platformStatus off 'active', enabled=false, or intentionalDisconnectAt
+    // set — those must never be selected or counted toward ambiguity.
+    const matches = accounts.filter((a) => a?.platform === 'twitter' && a?._id
+      && a?.isActive !== false && a?.enabled !== false
+      && (a?.platformStatus == null || a.platformStatus === 'active')
+      && !a?.intentionalDisconnectAt);
+    if (!matches.length) {
+      throw new Error('No active X (twitter) account connected in Zernio — connect one in the Zernio dashboard');
+    }
+    // Fail closed on ambiguity: a shared workspace with a second X profile
+    // must never receive brand posts by list-order accident.
+    if (matches.length > 1) {
+      throw new Error('Multiple active X (twitter) accounts connected in Zernio — set ZERNIO_TWITTER_ACCOUNT_ID to pin the brand account');
+    }
+    this._account = { id: matches[0]._id, fetchedAt: Date.now() };
+    return matches[0]._id;
+  }
+
+  _parseExistingPostId(bodyText) {
+    try {
+      const body = JSON.parse(bodyText);
+      const id = body?.existingPostId || body?.details?.existingPostId
+        || body?.post?._id || body?.error?.existingPostId;
+      return typeof id === 'string' && id ? id : null;
+    } catch {
+      return null;
+    }
   }
 
   // Compose the tweet text: caption + blank line + article URL, trimming the
@@ -79,30 +117,82 @@ class TwitterService {
     return `${trimmed}${separator}${link}`;
   }
 
+  // Zernio accepts publish-now posts asynchronously: the create returns the
+  // queued post, then a worker pushes it to X. Poll briefly for the terminal
+  // per-platform status so a platform-side rejection surfaces here as a
+  // partial failure (same reason the old direct path surfaced X's 402s)
+  // instead of dying silently in the queue. Still-pending after the budget is
+  // treated as accepted — the Zernio dashboard is the async monitor surface.
+  // The budget is WALL-CLOCK, and status reads use a short per-read timeout:
+  // hung reads must never stretch an already-created post into a long
+  // publish block for the calling request.
+  async _waitForPlatformResult(postId, { budgetMs = 12000, delayMs = 2000, readTimeoutMs = 3000 } = {}) {
+    const deadline = Date.now() + budgetMs;
+    let last = null;
+    while (Date.now() + delayMs < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      let data;
+      try {
+        data = await this._zernio(`posts/${postId}`, { timeoutMs: readTimeoutMs });
+      } catch (err) {
+        // Transient read failures never fail the (already-created) post.
+        logger.warn(`[twitter] Zernio status read failed for ${postId}: ${err.message}`);
+        continue;
+      }
+      const post = data?.post || data;
+      last = (post?.platforms || []).find((p) => p?.platform === 'twitter') || null;
+      const status = String(last?.status || post?.status || '').toLowerCase();
+      if (status === 'published') return last;
+      if (status === 'failed' || status === 'error') {
+        throw new Error(`Zernio X publish failed: ${(last?.error || post?.error || status).toString().slice(0, 300)}`);
+      }
+    }
+    logger.info(`[twitter] Zernio post ${postId} still pending at the ${budgetMs}ms poll budget — treating as accepted`);
+    return last;
+  }
+
   async createPost({ text, link } = {}) {
     if (!this.configured) {
-      throw new Error('X (Twitter) credentials not configured (TWITTER_API_KEY/SECRET + TWITTER_ACCESS_TOKEN/SECRET)');
+      throw new Error('X (Twitter) posting not configured (ZERNIO_API_KEY)');
     }
     const status = this.composeTweet(text, link);
     if (!status) throw new Error('X post requires text');
 
-    const res = await fetch(TWEETS_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: this._authHeader('POST', TWEETS_URL),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ text: status }),
-    });
-    if (!res.ok) {
-      throw new Error(`X API ${res.status}: ${(await res.text()).slice(0, 500)}`);
+    const accountId = await this._resolveAccountId();
+    // NOT retried: like the direct create-Tweet call this replaced, publish
+    // is non-idempotent — a lost response on a successful create would
+    // duplicate the tweet.
+    let created;
+    try {
+      created = await this._zernio('posts', {
+        method: 'POST',
+        body: {
+          content: status,
+          platforms: [{ platform: 'twitter', accountId }],
+          publishNow: true,
+        },
+      });
+    } catch (err) {
+      // Zernio dedupes identical content by hash: a replayed create (e.g. an
+      // operator channel-retry after a lost response) 409s with the id of the
+      // post that already exists. Converge on that post instead of recording
+      // a permanent failure the retry path could never clear.
+      const existingId = err.status === 409 ? this._parseExistingPostId(err.bodyText) : null;
+      if (!existingId) throw err;
+      logger.info(`[twitter] Zernio deduped a replayed create → existing post ${existingId}`);
+      created = { post: { _id: existingId } };
     }
-    const data = await res.json();
-    const postId = data?.data?.id || null;
-    logger.info(`[twitter] tweet created: ${postId}`);
+    const zernioPostId = (created?.post || created)?._id;
+    if (!zernioPostId) {
+      throw new Error(`Zernio create returned no post id: ${JSON.stringify(created).slice(0, 300)}`);
+    }
+
+    const platformEntry = await this._waitForPlatformResult(zernioPostId);
+    const postId = platformEntry?.platformPostId || zernioPostId;
+    logger.info(`[twitter] tweet created via Zernio: ${postId} (zernio post ${zernioPostId})`);
     return { platform: 'twitter', postId, success: true };
   }
 }
 
 module.exports = new TwitterService();
-module.exports._test = { pctEncode, TWEETS_URL, TCO_URL_LENGTH, TWEET_LIMIT };
+module.exports._test = { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT };

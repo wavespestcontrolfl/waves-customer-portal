@@ -776,6 +776,15 @@ async function syncConstantsFromDB(dbInstance) {
     }
 
     // ── Pest Control ─────────────────────────────────────────
+    // Post-discount program-floor kill switch: the constants object is
+    // mutated in place across syncs, so EVERY sync restores the in-code
+    // default (enabled) unless the DB carries an explicit boolean override —
+    // an absent key (or absent pest_base row) must not leave a previously
+    // synced false sticking until the process restarts.
+    constants.PEST.enforceFloorPostDiscount =
+      typeof config.pest_base?.enforce_floor_post_discount === 'boolean'
+        ? config.pest_base.enforce_floor_post_discount
+        : true;
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
       if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
