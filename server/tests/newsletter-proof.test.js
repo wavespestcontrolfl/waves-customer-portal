@@ -64,6 +64,7 @@ function chain(overrides = {}) {
   return q;
 }
 
+const DRAFT_VERSION = new Date('2026-07-09T17:00:00Z');
 const FLAGSHIP_DRAFT = {
   id: 'send-1',
   subject: 'Bubbles & Sea Lions',
@@ -77,6 +78,7 @@ const FLAGSHIP_DRAFT = {
   proof_token: 'ab12cd34',
   proof_sent_at: null,
   proof_approved_at: null,
+  updated_at: DRAFT_VERSION,
 };
 
 // Approval-ready fixture: proof stamped, no edits since (the proof write
@@ -149,7 +151,8 @@ describe('isApprovalReply', () => {
     'not approved', "don't approve", 'do not approve yet', 'never approve this',
     "can't approve this yet", 'cannot approve', "won't approve",
     'hold off on approving', 'wait to approve', 'no, do not approve',
-    'looks good', 'send it', '', undefined,
+    'approved? no', "approved — wait, don't send", 'approved... actually hold off',
+    'approved but stop the send', 'looks good', 'send it', '', undefined,
   ])('rejects %j', (t) => expect(isApprovalReply(t)).toBe(false));
 });
 
@@ -244,8 +247,10 @@ describe('sendNewsletterProof', () => {
     expect(args.asmGroupId).toBeUndefined();
     expect(args.html).toContain('Reply <strong>APPROVED</strong>');
     expect(args.html).toContain('606');
-    // Claim is whereNull-guarded and stamps token+sent_at+updated_at together
+    // Claim is whereNull-guarded, version-guarded on the fetched row's
+    // updated_at, and stamps token+sent_at+updated_at together
     expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_sent_at');
+    expect(sendsChain.where).toHaveBeenCalledWith('updated_at', DRAFT_VERSION);
     const claim = sendsChain.update.mock.calls[0][0];
     expect(claim.proof_token).toBe(r.token);
     expect(claim.proof_sent_at).toBeInstanceOf(Date);
@@ -398,6 +403,11 @@ describe('maybeHandleProofApproval', () => {
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approved_at');
+    // Approval claim is version-guarded: token + status + updated_at
+    expect(sendsChain.where).toHaveBeenCalledWith({
+      id: 'send-1', proof_token: 'ab12cd34', status: 'draft',
+    });
+    expect(sendsChain.where).toHaveBeenCalledWith('updated_at', PROOF_STAMP);
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
       proof_approved_at: expect.any(Date),
       proof_approval_email_id: 'email-1',

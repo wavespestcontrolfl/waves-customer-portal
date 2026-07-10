@@ -130,11 +130,11 @@ function htmlReplyToText(html) {
 function isApprovalReply(text) {
   const t = String(text || '').toLowerCase();
   if (!/\bapproved?\b/.test(t)) return false;
-  // Negation guard: a negating word within the same sentence before
-  // "approv…" ("not approved", "don't approve", "can't approve yet",
-  // "hold off on approving", "wait to approve") blocks the send.
-  // Ambiguity fails closed — the owner can always reply a clean "approved".
-  if (/\b(not|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|hold|wait|no)\b[^.!?\n]{0,40}approv/.test(t)) return false;
+  // Negation guard: a negating/hold word ANYWHERE in the typed reply fails
+  // closed — "not approved", "can't approve yet", and equally "approved?
+  // no" / "approved — wait, don't send" must all leave the draft alone.
+  // Ambiguity always loses; the owner can reply a clean "approved".
+  if (/\b(not|no|nope|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|hold|wait|stop|reject)\b/.test(t)) return false;
   return true;
 }
 
@@ -263,13 +263,18 @@ async function sendNewsletterProof(sendId) {
   // autopilot/catch-up workers must not both email proofs (the second
   // token would overwrite the first, making its reply a dead letter).
   // One `now` for both stamps so the approval-time staleness check
-  // (updated_at > proof_sent_at) has an exact baseline.
+  // (updated_at > proof_sent_at) has an exact baseline. The claim is also
+  // version-guarded on the fetched row's updated_at: an admin edit between
+  // our read and this write would otherwise be silently overwritten with
+  // updated_at === proof_sent_at — masking the edit from the staleness
+  // gate while we email a proof rendered from the pre-edit body.
   const token = crypto.randomBytes(4).toString('hex');
   const now = new Date();
-  const claimed = await db('newsletter_sends')
+  const claimQuery = db('newsletter_sends')
     .where({ id: send.id })
-    .whereNull('proof_sent_at')
-    .update({ proof_token: token, proof_sent_at: now, updated_at: now });
+    .whereNull('proof_sent_at');
+  if (send.updated_at) claimQuery.where('updated_at', send.updated_at);
+  const claimed = await claimQuery.update({ proof_token: token, proof_sent_at: now, updated_at: now });
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
   try {
@@ -414,16 +419,24 @@ async function maybeHandleProofApproval(email) {
   }
 
   // Atomic approval claim: two synced copies of the same reply (or a race
-  // with a manual Send click) can't both dispatch.
-  const claimed = await db('newsletter_sends')
-    .where({ id: send.id })
-    .whereNull('proof_approved_at')
-    .update({
-      proof_approved_at: new Date(),
-      proof_approval_email_id: email.id || null,
-      updated_at: new Date(),
-    });
-  if (!claimed) return true;
+  // with a manual Send click) can't both dispatch. Version-guarded on the
+  // exact row this approval was checked against — token, status, AND
+  // updated_at — so an edit or re-proof landing between the staleness
+  // check above and this write turns the claim into a 0-row no-op instead
+  // of broadcasting content the owner never proofed.
+  const approvalClaim = db('newsletter_sends')
+    .where({ id: send.id, proof_token: token, status: send.status })
+    .whereNull('proof_approved_at');
+  if (send.updated_at) approvalClaim.where('updated_at', send.updated_at);
+  const claimed = await approvalClaim.update({
+    proof_approved_at: new Date(),
+    proof_approval_email_id: email.id || null,
+    updated_at: new Date(),
+  });
+  if (!claimed) {
+    logger.info(`[newsletter-proof] approval claim for send ${send.id} lost a race (edit/re-proof/duplicate) — no dispatch`);
+    return true;
+  }
 
   logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — dispatching campaign to ${recipientCount} subscribers`);
 
