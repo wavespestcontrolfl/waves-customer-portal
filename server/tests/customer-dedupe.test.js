@@ -1,0 +1,334 @@
+/**
+ * customer-dedupe — matcher normalization (pinned to real prod duplicate
+ * pairs), tier assignment, and merge-executor guards.
+ */
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  fn.transaction = jest.fn();
+  return fn;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+
+const db = require('../models/db');
+const dedupe = require('../services/customer-dedupe');
+const { phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner, resetFkCache } = dedupe._test;
+
+// Chainable knex stub: every builder method returns the chain; awaiting the
+// chain resolves whatever the per-table router decides after inspecting the
+// recorded calls.
+function makeChain(table, route) {
+  const q = { _table: table, _calls: [] };
+  const methods = [
+    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotIn', 'select', 'groupBy',
+    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'onConflict',
+    'ignore', 'returning', 'first',
+  ];
+  for (const m of methods) {
+    q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
+  }
+  q.called = (m) => q._calls.some(([name]) => name === m);
+  q.args = (m) => q._calls.find(([name]) => name === m)?.[1];
+  q.then = (resolve, reject) => Promise.resolve().then(() => route(q)).then(resolve, reject);
+  return q;
+}
+
+function installDb(router) {
+  db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  resetFkCache();
+});
+
+// ---------------------------------------------------------------------------
+// Normalization
+// ---------------------------------------------------------------------------
+
+describe('phone10', () => {
+  it('normalizes formats to the last 10 digits', () => {
+    expect(phone10('+19413840224')).toBe('9413840224');
+    expect(phone10('(941) 384-0224')).toBe('9413840224');
+    expect(phone10('941-384-0224')).toBe('9413840224');
+  });
+  it('rejects short and sentinel values', () => {
+    expect(phone10('merged-7449e4f7')).toBe(null);
+    expect(phone10('')).toBe(null);
+    expect(phone10(null)).toBe(null);
+  });
+});
+
+describe('normalizeStreetKey (pinned to real prod pairs)', () => {
+  it('matches suffix/directional variants: 221 36th St NE ≡ 221 36th Street Northeast', () => {
+    expect(normalizeStreetKey('221 36th St NE').key)
+      .toBe(normalizeStreetKey('221 36th Street Northeast').key);
+  });
+  it('matches spacing variants: 5350 Desoto Rd ≡ 5350 De Soto Rd', () => {
+    expect(normalizeStreetKey('5350 Desoto Rd').key)
+      .toBe(normalizeStreetKey('5350 De Soto Rd').key);
+  });
+  it('captures the unit separately: 5350 De Soto Rd Apt 1418', () => {
+    const parsed = normalizeStreetKey('5350 De Soto Rd Apt 1418');
+    expect(parsed.key).toBe(normalizeStreetKey('5350 Desoto Rd').key);
+    expect(parsed.unit).toBe('1418');
+  });
+  it('does not collapse different streets', () => {
+    expect(normalizeStreetKey('18018 Littleton Pl').key)
+      .not.toBe(normalizeStreetKey('8120 Sternway Rd').key);
+  });
+  it('keeps a suffix-word street name from squashing to nothing', () => {
+    expect(normalizeStreetKey('123 Loop Rd')).not.toBe(null);
+    expect(normalizeStreetKey('123 Loop Rd').key).toBe('123 loop');
+  });
+  it('returns null when there is no leading street number', () => {
+    expect(normalizeStreetKey('PO Box 12')).toBe(null);
+    expect(normalizeStreetKey('')).toBe(null);
+    expect(normalizeStreetKey(null)).toBe(null);
+  });
+});
+
+describe('namesCompatible', () => {
+  it('treats empty and "Unknown" as wildcards', () => {
+    expect(namesCompatible(
+      { first_name: 'Diana', last_name: 'Blowers' },
+      { first_name: 'Unknown', last_name: '' },
+    )).toBe(true);
+    expect(namesCompatible(
+      { first_name: 'Diana', last_name: 'Blowers' },
+      { first_name: 'Diana', last_name: null },
+    )).toBe(true);
+  });
+  it('flags typo-variants as conflicts (review queue, never auto)', () => {
+    expect(namesCompatible(
+      { first_name: 'Trent', last_name: 'Ryles' },
+      { first_name: 'Trent', last_name: 'Ryals' },
+    )).toBe(false);
+  });
+});
+
+describe('addressCompat', () => {
+  const base = { address_line1: '4414 Ozark Ave', zip: '34207' };
+  it('match on same normalized street', () => {
+    expect(addressCompat(base, { address_line1: '4414 Ozark Avenue', zip: '34207' }).status).toBe('match');
+  });
+  it('loser_missing when the duplicate is an address-less shell', () => {
+    expect(addressCompat(base, { address_line1: null, zip: null }).status).toBe('loser_missing');
+  });
+  it('conflict on different streets', () => {
+    expect(addressCompat(base, { address_line1: '901 31st Avenue West', zip: '34207' }).status).toBe('conflict');
+  });
+  it('unit_conflict on same building, different units', () => {
+    expect(addressCompat(
+      { address_line1: '5350 Desoto Rd Apt 2', zip: '34243' },
+      { address_line1: '5350 De Soto Rd Apt 1418', zip: '34243' },
+    ).status).toBe('unit_conflict');
+  });
+  it('zip_conflict on same street key in different ZIPs', () => {
+    expect(addressCompat(
+      { address_line1: '100 Oak St', zip: '34205' },
+      { address_line1: '100 Oak Street', zip: '34293' },
+    ).status).toBe('zip_conflict');
+  });
+});
+
+describe('pickWinner', () => {
+  it('prefers Stripe, then portal login, then active stage, then oldest', () => {
+    const shell = { id: 'a', created_at: '2026-07-01', pipeline_stage: 'new_lead' };
+    const stripe = { id: 'b', created_at: '2026-07-05', pipeline_stage: 'new_lead', stripe_customer_id: 'cus_1' };
+    const active = { id: 'c', created_at: '2026-07-03', pipeline_stage: 'active_customer' };
+    expect(pickWinner([shell, stripe, active]).id).toBe('b');
+    expect(pickWinner([shell, active]).id).toBe('c');
+    expect(pickWinner([shell, { ...shell, id: 'd', created_at: '2026-06-01' }]).id).toBe('d');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Detection + tiering
+// ---------------------------------------------------------------------------
+
+describe('findDuplicateGroups', () => {
+  const complete = {
+    id: 'aaaaaaaa-0000-0000-0000-000000000001',
+    first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
+    address_line1: '4414 Ozark Ave', zip: '34207',
+    pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shell = {
+    id: 'aaaaaaaa-0000-0000-0000-000000000002',
+    first_name: 'Diana', last_name: null, phone: '6124074763',
+    address_line1: null, zip: null,
+    pipeline_stage: 'new_lead', created_at: '2026-07-09',
+  };
+  const stranger = {
+    id: 'aaaaaaaa-0000-0000-0000-000000000003',
+    first_name: 'Nicole', last_name: 'Tommelleo', phone: '+16124074763',
+    address_line1: '13712 Saw Palm Creek Trl', zip: '34211',
+    pipeline_stage: 'active_customer', created_at: '2026-07-01',
+  };
+
+  function router({ customers = [], dismissals = [], blockerRows = {} }) {
+    return (table, q) => {
+      if (table === 'customers') return customers;
+      if (table === 'customer_duplicate_dismissals') return dismissals;
+      // blocker tables: grouped counts keyed by table name
+      return blockerRows[table] || [];
+    };
+  }
+
+  it('tiers an address-less same-name shell green', async () => {
+    installDb(router({ customers: [complete, shell] }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups).toHaveLength(1);
+    expect(groups[0].winner.id).toBe(complete.id);
+    expect(groups[0].candidates).toHaveLength(1);
+    expect(groups[0].candidates[0].tier).toBe('green');
+  });
+
+  it('tiers a different-name different-address row red (winner has priority signals)', async () => {
+    const winner = { ...complete, stripe_customer_id: 'cus_9' };
+    installDb(router({ customers: [winner, stranger] }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].candidates[0].tier).toBe('red');
+  });
+
+  it('downgrades green to yellow when the loser has billing history', async () => {
+    installDb(router({
+      customers: [complete, shell],
+      blockerRows: { invoices: [{ customer_id: shell.id, n: '2' }] },
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups[0].candidates[0].tier).toBe('yellow');
+    expect(groups[0].candidates[0].reasons).toContain('loser_has_invoices');
+  });
+
+  it('excludes dismissed pairs', async () => {
+    const [a, b] = [complete.id, shell.id].sort();
+    installDb(router({
+      customers: [complete, shell],
+      dismissals: [{ customer_id_a: a, customer_id_b: b }],
+    }));
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge executor
+// ---------------------------------------------------------------------------
+
+describe('executeMerge', () => {
+  const WINNER = 'bbbbbbbb-0000-0000-0000-000000000001';
+  const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
+
+  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false }) {
+    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          const whereArg = q.args('where')?.[0];
+          if (payload.referred_by_customer_id === null && whereArg?.referred_by_customer_id) return 0;
+          if (payload.deleted_at) { state.retired = payload; return 1; }
+          state.backfilled = payload;
+          return 1;
+        }
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: journalId }];
+      }
+      if (q.called('del')) { state.prefsDeleted = true; return 1; }
+      if (q.called('update')) {
+        if (table === 'notification_prefs' && prefsConflict) {
+          const err = new Error('duplicate key value violates unique constraint');
+          err.code = '23505';
+          throw err;
+        }
+        state.repointUpdates.push(table);
+        return updates[table] ?? 1;
+      }
+      // blocker count checks (auto mode)
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: fkRows }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    return { trx, state };
+  }
+
+  const FK_ROWS = [
+    { table_name: 'leads', column_name: 'customer_id' },
+    { table_name: 'call_log', column_name: 'customer_id' },
+    { table_name: 'notification_prefs', column_name: 'customer_id' },
+  ];
+
+  it('refuses when both rows have Stripe profiles', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, stripe_customer_id: 'cus_a' },
+      loser: { id: LOSER, stripe_customer_id: 'cus_b' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/Stripe profiles/);
+  });
+
+  it('refuses auto mode when the loser is not a shell', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers' },
+      loser: { id: LOSER, first_name: 'Diana', last_name: 'Blowers', password_hash: 'x' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'auto' }))
+      .rejects.toThrow(/not a shell/);
+  });
+
+  it('repoints FKs, drops the singleton prefs collision, retires the loser, and journals', async () => {
+    const winner = {
+      id: WINNER, first_name: 'Diana', last_name: 'Blowers', email: null,
+      address_line1: '4414 Ozark Ave', phone: '+16124074763',
+    };
+    const loser = {
+      id: LOSER, first_name: 'Diana', last_name: null, email: 'diana@example.com',
+      address_line1: null, phone: '6124074763',
+    };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS, prefsConflict: true });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    expect(state.repointUpdates).toEqual(expect.arrayContaining(['leads', 'call_log']));
+    expect(state.prefsDeleted).toBe(true);
+    expect(result.repointed['notification_prefs.customer_id']).toMatch(/dropped/);
+    // Loser retired with an unmatchable phone sentinel and cleared email
+    expect(state.retired.phone).toBe(`merged-${LOSER.slice(0, 8)}`);
+    expect(state.retired.email).toBe(null);
+    expect(state.retired.deleted_at).toBeTruthy();
+    // Winner backfilled only where empty
+    expect(result.backfills).toEqual({ email: 'diana@example.com' });
+    // Journal snapshot keeps the ORIGINAL loser contact identity
+    expect(state.journal.loser_customer_id).toBe(LOSER);
+    expect(JSON.parse(state.journal.loser_snapshot).phone).toBe('6124074763');
+    expect(result.journalId).toBe('j1');
+    expect(result.loserSnapshot.id).toBe(LOSER);
+  });
+
+  it('aborts the merge on an unexpected repoint failure (non-droppable table)', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B' };
+    const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'invoices', column_name: 'customer_id' }] });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    trx.transaction = jest.fn(async () => { const e = new Error('boom'); e.code = '23505'; throw e; });
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/repoint failed on invoices/);
+  });
+
+  it('refuses identical or missing ids', async () => {
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: WINNER })).rejects.toThrow(/distinct/);
+  });
+});

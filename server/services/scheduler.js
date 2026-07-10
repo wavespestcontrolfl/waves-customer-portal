@@ -533,6 +533,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Customer duplicate auto-merge — 4:40 AM daily. Green-tier only (shell
+  // rows: same phone, compatible identity, zero billing/portal artifacts);
+  // everything ambiguous stays in the /admin/customers/duplicates review
+  // queue. Double-gated (cronJobs AND customerDedupeAutoMerge, the latter
+  // opt-in in every environment). Every merge is journaled + admin-notified.
+  // =========================================================================
+  cron.schedule('40 4 * * *', async () => {
+    if (!isEnabled('customerDedupeAutoMerge')) return;
+    logger.info('Running: Customer duplicate auto-merge sweep');
+    try {
+      // runExclusive: read-then-act — an overlapping tick could pick the same
+      // loser row before the first merge soft-deletes it.
+      await runExclusive('customer-dedupe-auto-merge', async () => {
+        const { runAutoMergeSweep } = require('./customer-dedupe');
+        const result = await runAutoMergeSweep();
+        logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+      });
+    } catch (err) {
+      logger.error(`Customer dedupe sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.

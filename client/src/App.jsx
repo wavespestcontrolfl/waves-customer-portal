@@ -246,6 +246,7 @@ const AdminPricingPage = lazyWithRetry(() => import('./pages/admin/PricingStrate
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
 const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDispatchPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
+const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/EquipmentCalibrationPanel'));
@@ -418,6 +419,7 @@ export default function App() {
             <Route index element={<Navigate to="dashboard" />} />
             <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
+            <Route path="customers/duplicates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading duplicates...</div>}><AdminDuplicateCustomersPage /></Suspense>} />
             <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface

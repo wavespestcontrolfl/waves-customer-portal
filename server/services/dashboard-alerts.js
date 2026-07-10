@@ -466,6 +466,27 @@ async function computeDashboardAlertsUncached() {
     }
   } catch (err) { logger.error(`[dashboard-alerts] leads_unattributed_7d: ${err.message}`); }
 
+  // Duplicate customers pending review — pairs sharing a phone that haven't
+  // been merged or dismissed. Green-tier pairs clear on the nightly auto-merge
+  // sweep (when its gate is on); everything else needs a human verdict in the
+  // review queue. Counts pending pairs, not groups, so the number matches what
+  // the queue page lists.
+  try {
+    const { findDuplicateGroups } = require('./customer-dedupe');
+    const groups = await findDuplicateGroups();
+    const count = groups.reduce((n, g) => n + g.candidates.length, 0);
+    if (count > 0) {
+      alerts.push({
+        id: 'customer_duplicates_review',
+        kind: 'action',
+        severity: 'warn',
+        count,
+        label: `${count} possible duplicate customer${count === 1 ? '' : 's'} to review`,
+        href: '/admin/customers/duplicates',
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] customer_duplicates_review: ${err.message}`); }
+
   // Everything not explicitly tagged above is a passive watch-state alarm; the
   // client separates do-this-now actions from alerts on this field.
   for (const a of alerts) {
