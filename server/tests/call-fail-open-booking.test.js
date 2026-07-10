@@ -3,7 +3,7 @@
 // (ANI present but caller_phone_missing; existing customer's on-file address;
 // garbled-email name_email_mismatch; low confidence on a short familiar call).
 const { canAutoRoute } = require('../services/call-triage-flags');
-const { checkTcpaConsent } = require('../services/call-routing-gates');
+const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
 // A confirmed booking with a high-enough confidence; flags injected per test.
 function extraction(flags, overall = 0.9) {
@@ -78,6 +78,28 @@ describe('canAutoRoute fail-open booking', () => {
     }
   });
 
+  test('a spoken address surviving only as raw_text counts as a new address and is NOT failed open (P1)', () => {
+    // The parser/AV couldn't split the spoken address into components — it
+    // survives only in raw_text. It is still a NEW address: fail-open must not
+    // drop the address flags, or the booking fallback would dispatch to the
+    // on-file primary instead of the stated property.
+    const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
+    ex.property = { service_address: { raw_text: '9999 Nonexistent Road, Venice' } };
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable']));
+  });
+
+  test('failed-open address_unverifiable files its advisory card in the address-review lane (P3)', () => {
+    const item = buildTriageItem({
+      callLogId: 'c1',
+      flag: 'address_unverifiable',
+      extraction: { meta: { call_summary: 'known customer, on-file address' } },
+      severity: 'advisory',
+    });
+    expect(item.category).toBe('address_review');
+  });
+
   test('existing customer who did NOT restate an address (uses on-file) IS failed open', () => {
     const ex = extraction(['address_unverifiable', 'low_confidence_address'], 0.9);
     ex.property = { service_address: {} }; // nothing given → on-file address used
@@ -125,5 +147,17 @@ describe('checkTcpaConsent inbound implied consent', () => {
   test('implied consent applies even with no consent block at all', () => {
     expect(checkTcpaConsent({}, { impliedConsent: true }).canSms).toBe(true);
     expect(checkTcpaConsent({}, {}).canSms).toBe(false);
+  });
+
+  test('reason distinguishes implied from explicit clearance (P1: send-site non-ANI hold keys on it)', () => {
+    // The processor holds a non-ANI recipient ONLY when the send was cleared
+    // by implied consent — explicit sms_consent_given must keep the legacy
+    // behavior (send to the resolved customer phone). That distinction rides
+    // entirely on the reason string, so pin it.
+    expect(checkTcpaConsent({ consent: { sms_consent_given: false } }, { impliedConsent: true }).reason)
+      .toBe('implied_consent_inbound');
+    expect(checkTcpaConsent({}, { impliedConsent: true }).reason).toBe('implied_consent_inbound');
+    expect(checkTcpaConsent({ consent: { sms_consent_given: true } }, { impliedConsent: true }).reason)
+      .toBe('sms_consent_given');
   });
 });

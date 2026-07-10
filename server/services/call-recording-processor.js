@@ -64,7 +64,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -3305,6 +3305,11 @@ const CallRecordingProcessor = {
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
+    // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
+    // inbound consent (no explicit sms_consent_given). The non-ANI recipient
+    // hold at the send site keys off this — a send cleared by explicit consent
+    // or by the legacy (V2-off) path must not be held.
+    let v2SmsClearedByImpliedConsent = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
     let v2ApprovedExtraction = null;
@@ -3502,6 +3507,7 @@ const CallRecordingProcessor = {
             impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),
           });
           v2SmsBlocked = !tcpa.canSms;
+          v2SmsClearedByImpliedConsent = tcpa.canSms && tcpa.reason === 'implied_consent_inbound';
           v2EmailBlocked = !tcpa.canEmail;
 
           const routeDecision = buildRouteDecision({
@@ -3610,6 +3616,25 @@ const CallRecordingProcessor = {
                 } catch (fe) {
                   logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
                 }
+              }
+              // Address flags failed open ⇒ V2 heard NO new address and this
+              // booking must dispatch to the customer's on-file address. AV
+              // never accepted anything on this call (an accept would have
+              // suppressed the flags instead), so any legacy V1 street still
+              // sitting in `extracted` is an unvalidated mishear/hallucination
+              // — left alone it would win over the on-file address at the
+              // property-linkage stamp. Clear it so
+              // resolveCallBookingPropertyLinkage falls back to the on-file,
+              // Google-verified address.
+              if (routingResult.failedOpenFlags.some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+                if (String(extracted.address_line1 || '').trim()) {
+                  logger.info(`[call-proc] Fail-open on-file address for ${maskSid(callSid)}: dropping unvalidated legacy street "${extracted.address_line1}"`);
+                }
+                extracted.address_line1 = null;
+                extracted.address_line2 = null;
+                extracted.city = null;
+                extracted.state = null;
+                extracted.zip = null;
               }
             }
             v2ApprovedExtraction = v2Extraction;
@@ -5607,11 +5632,14 @@ const CallRecordingProcessor = {
           if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
-          } else if (scheduledServiceId && !v2SmsConsentExplicit && !smsTargetIsInboundAni) {
-            // SMS cleared only by IMPLIED inbound consent, but the resolved
+          } else if (scheduledServiceId && v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni) {
+            // SMS cleared ONLY by IMPLIED inbound consent, but the resolved
             // target isn't the caller's own number (ANI) — implied consent
             // doesn't cover a spoken alternate recipient. Hold the text; the
             // appointment still books and the office can confirm the number.
+            // Keyed to the implied-consent clearance specifically: a send
+            // cleared by explicit sms_consent_given or by the legacy (V2
+            // enforce off) path goes to the resolved customer phone as before.
             logger.info(`[call-proc] Skipping SMS for ${callSid}: implied consent doesn't cover non-ANI recipient`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
           } else if (scheduledServiceId) {

@@ -96,6 +96,17 @@ describe('rodent intent → catalog service (owner directive)', () => {
   test('a non-rodent call never maps to a rodent service', () => {
     expect(R('I have ants in the kitchen')).toBeUndefined();
   });
+  test('negated rodent mention ("not rats, just ants") does NOT map to a rodent service (P2)', () => {
+    expect(R('No, it is not rats, just ants everywhere in the kitchen')).toBeUndefined();
+    expect(R("We don't have mice, the problem is fleas in the carpet")).toBeUndefined();
+  });
+  test('historical rodent mention does NOT anchor the booking (P2)', () => {
+    expect(R('We had mice last time but now we need the spiders treated')).toBeUndefined();
+    expect(R('Last visit it was rats; this time the lawn needs treatment')).toBeUndefined();
+  });
+  test('adversative after a negation keeps the affirmative rodent mention (P2)', () => {
+    expect(R("We don't have ants but rats are everywhere in the attic")).toBe('rodent_general_one_time');
+  });
 });
 
 describe('resolveCallBookingCatalogService', () => {

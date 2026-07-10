@@ -388,10 +388,13 @@ function canAutoRoute(extraction, opts = {}) {
     // location (city/ZIP/unit only) that AV returns missing_component/
     // unverified for must still stay blocked, or the booking fallback would
     // stamp the customer's on-file primary address instead of the stated one.
+    // raw_text counts too: a spoken address the parser couldn't split into
+    // components survives ONLY there, and it's still a new address.
     const sa = extraction.property?.service_address || {};
     const newAddressGiven = [
       'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
       'city', 'locality', 'state', 'region', 'postal_code', 'zip', 'zip_code',
+      'raw_text',
     ].some((k) => String(sa[k] || '').trim());
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
@@ -659,6 +662,7 @@ module.exports = {
   SMS_ONLY_FLAGS,
   ADVISORY_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
+  FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,
   isDialablePhone,

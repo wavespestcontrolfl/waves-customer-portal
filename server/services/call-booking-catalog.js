@@ -83,16 +83,36 @@ function hasAffirmativeRoachMention(text) {
 // general rodent call. A rodent mention with no specific action defaults to
 // the general "Rodent Pest Control Service".
 const RODENT_RE = /\b(rodent|rat|rats|mouse|mice|rats?)\b/i;
+// Rodent mentions get the same affirmative-only treatment as roaches: "not
+// rats, it's ants" and "we had mice last time but now need spiders treated"
+// describe what the visit is NOT for, and must not anchor the booking to a
+// rodent catalog row. Same negation window as NEGATED_ROACH_RE (negation word
+// + up to four plain-word fillers, adversative conjunctions excluded so
+// "don't have ants but rats are everywhere" keeps its affirmative mention)
+// and the same both-order historical strip.
+const RODENT_NOUN = "(?:rodents?|rats?|mouse|mice)";
+const NEGATED_RODENT_RE = new RegExp(`\\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RODENT_NOUN}\\b`, 'gi');
+const HISTORICAL_RODENT_RE = new RegExp(`\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)\\b[^.!?\\n]{0,40}?${RODENT_NOUN}\\b`, 'gi');
+const RODENT_HISTORICAL_RE = new RegExp(`\\b${RODENT_NOUN}\\b[^.!?\\n]{0,40}?\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|ago)\\b`, 'gi');
+
+function hasAffirmativeRodentMention(text) {
+  const cleaned = String(text || '')
+    .replace(NEGATED_RODENT_RE, ' ')
+    .replace(HISTORICAL_RODENT_RE, ' ')
+    .replace(RODENT_HISTORICAL_RE, ' ');
+  return RODENT_RE.test(cleaned);
+}
+
 const KEYWORD_SERVICE_RULES = [
   {
     serviceKey: 'cockroach_control',
     matches: hasAffirmativeRoachMention,
   },
-  { serviceKey: 'rodent_inspection', matches: (h) => RODENT_RE.test(h) && /\binspect/i.test(h) },
-  { serviceKey: 'rodent_exclusion', matches: (h) => RODENT_RE.test(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
-  { serviceKey: 'rodent_trapping', matches: (h) => RODENT_RE.test(h) && /\btrap/i.test(h) },
-  { serviceKey: 'rodent_exclusion_only', matches: (h) => RODENT_RE.test(h) && /\bexclu|seal/i.test(h) },
-  { serviceKey: 'rodent_general_one_time', matches: (h) => RODENT_RE.test(h) },
+  { serviceKey: 'rodent_inspection', matches: (h) => hasAffirmativeRodentMention(h) && /\binspect/i.test(h) },
+  { serviceKey: 'rodent_exclusion', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_trapping', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) },
+  { serviceKey: 'rodent_exclusion_only', matches: (h) => hasAffirmativeRodentMention(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_general_one_time', matches: (h) => hasAffirmativeRodentMention(h) },
 ];
 
 async function loadBookableCallServices(conn) {

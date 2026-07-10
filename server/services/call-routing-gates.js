@@ -103,6 +103,9 @@ function buildTriageItem({
     low_confidence_address: 'address_review',
     address_unverified: 'address_review',
     address_validation_unavailable: 'address_review',
+    // MODEL flag — fail-open books past it for a known customer, so its
+    // advisory card must land in the address-review lane, not service_unknown.
+    address_unverifiable: 'address_review',
     ambiguous_scheduling: 'time_ambiguous',
     reschedule_or_cancel: 'time_ambiguous',
     // Gate-rejection reason strings double as flags on the Needs Review row —
