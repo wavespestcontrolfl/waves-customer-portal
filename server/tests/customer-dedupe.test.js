@@ -14,7 +14,7 @@ const db = require('../models/db');
 const dedupe = require('../services/customer-dedupe');
 const {
   phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner,
-  mergeSingletonPrefRow, repointRowwiseDropCollisions, resetFkCache,
+  mergeSingletonPrefRow, repointRowwiseDropCollisions, mergeConversationRows, resetFkCache,
 } = dedupe._test;
 
 // Chainable knex stub: every builder method returns the chain; awaiting the
@@ -23,9 +23,9 @@ const {
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
-    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotIn', 'select', 'groupBy',
+    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'onConflict',
-    'ignore', 'returning', 'first',
+    'ignore', 'returning', 'first', 'increment',
   ];
   for (const m of methods) {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
@@ -566,6 +566,7 @@ describe('executeMerge', () => {
     const route = (table, q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
+        if (q.called('increment')) { state.credited = q.args('increment'); return 1; }
         if (q.called('update')) {
           const payload = q.args('update')[0];
           const whereArg = q.args('where')?.[0];
@@ -619,6 +620,13 @@ describe('executeMerge', () => {
         state.notificationsWhere = q.args('where')[0];
         state.repointUpdates.push(table);
         return 1;
+      }
+      // Default: not enrolled in referrals (tests that need enrollment use
+      // their own routers) — .first() must resolve a row or null, never [].
+      if (table === 'referral_promoters' && q.called('first')) return null;
+      if (table === 'scheduled_services' && q.called('update')) {
+        state.serviceStamp = { whereNull: q.args('whereNull'), payload: q.args('update')[0] };
+        return 2;
       }
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
@@ -772,6 +780,155 @@ describe('executeMerge', () => {
     expect(state.notificationsWhere).toEqual({ recipient_type: 'customer', recipient_id: LOSER });
     expect(result.repointed['notifications.recipient_id']).toBe(1);
     expect(result.repointed['email_messages.recipient_id']).toBe(1);
+  });
+
+  it('moves the cached account_credits with the ledger and zeroes the retired row', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', account_credits: '10.00' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', account_credits: '25.50' };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'customer_credit_ledger', column_name: 'customer_id' }],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // Ledger rows moved via the sweep, so the cached balance moves too —
+    // cache == ledger-sum stays true on both rows (customer-credit invariant).
+    expect(state.credited).toEqual(['account_credits', 25.5]);
+    expect(state.retired.account_credits).toBe(0);
+    expect(result.repointed['customers.account_credits']).toMatch(/25.5/);
+  });
+
+  it("stamps the loser's unstamped visits with the loser's own address before the repoint", async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', address_line1: '100 Main St', city: 'Bradenton', zip: '34205', phone: '+19995550003' };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', address_line1: '100 Main St', address_line2: 'Apt 3',
+      city: 'Bradenton', state: 'FL', zip: '34205', phone: '9995550003',
+    };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // Only unstamped visits, stamped with the LOSER's address (the visits
+    // were at their property) — never the winner's.
+    expect(state.serviceStamp.whereNull).toEqual(['service_address_line1']);
+    expect(state.serviceStamp.payload).toEqual({
+      service_address_line1: '100 Main St',
+      service_address_line2: 'Apt 3',
+      service_address_city: 'Bradenton',
+      service_address_state: 'FL',
+      service_address_zip: '34205',
+    });
+    expect(result.repointed['scheduled_services.service_address_stamp']).toBe(2);
+  });
+
+  it('folds a duplicate referral enrollment into the winner promoter row', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
+    const winnerPromoter = {
+      id: 7, customer_id: WINNER, click_balance_cents: 100, referral_balance_cents: 0,
+      total_earned_cents: 100, total_paid_out_cents: 0, total_clicks: 4,
+      total_referrals_sent: 1, total_referrals_converted: 0,
+    };
+    const loserPromoterRow = {
+      id: 9, customer_id: LOSER, click_balance_cents: 50, referral_balance_cents: 200,
+      total_earned_cents: 250, total_paid_out_cents: 0, total_clicks: 2,
+      total_referrals_sent: 3, total_referrals_converted: 1,
+    };
+    const state = { referralRepoint: null, inviteRepoint: null, promoterUpdate: null, promoterDeleted: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'referral_promoters') {
+        if (q.called('del')) { state.promoterDeleted = q.args('where')[0]; return 1; }
+        if (q.called('first')) {
+          const w = q.args('where')[0];
+          if (w.customer_id === LOSER) return { id: 9 };
+          if (w.customer_id === WINNER) return winnerPromoter;
+          if (w.id === 9) return loserPromoterRow;
+          return null;
+        }
+        if (q.called('update')) { state.promoterUpdate = q.args('update')[0]; return 1; }
+      }
+      if (table === 'referrals' && q.called('update')) {
+        state.referralRepoint = [q.args('where')[0], q.args('update')[0]];
+        return 1;
+      }
+      if (table === 'referral_invites' && q.called('update')) {
+        state.inviteRepoint = [q.args('where')[0], q.args('update')[0]];
+        return 1;
+      }
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.referralRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
+    expect(state.inviteRepoint).toEqual([{ promoter_id: 9 }, { promoter_id: 7 }]);
+    // Balances/counters sum; zero-add columns untouched.
+    expect(state.promoterUpdate).toEqual({
+      click_balance_cents: 150,
+      referral_balance_cents: 200,
+      total_earned_cents: 350,
+      total_clicks: 6,
+      total_referrals_sent: 4,
+      total_referrals_converted: 1,
+      updated_at: 'NOW',
+    });
+    expect(state.promoterDeleted).toEqual({ id: 9 });
+    expect(result.repointed['referral_promoters.consolidated']).toMatch(/9 into 7/);
+  });
+});
+
+describe('mergeConversationRows', () => {
+  it('moves clean threads; colliding threads merge — messages first (CASCADE), counters fold, loser row drops', async () => {
+    const loserConvs = [
+      { id: 'c-clean', channel: 'sms', our_endpoint_id: '+1941', message_count: 2, last_message_at: '2026-07-01', last_inbound_at: null },
+      { id: 'c-dup', channel: 'sms', our_endpoint_id: '+1942', message_count: 3, last_message_at: '2026-07-09', last_inbound_at: '2026-07-09' },
+    ];
+    const winnerConv = { id: 'c-win', channel: 'sms', our_endpoint_id: '+1942', message_count: 5, last_message_at: '2026-07-08', last_inbound_at: null };
+    const state = { childRepoints: [], counterUpdate: null, deleted: [], moved: [] };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'conversations') {
+        if (q.called('select')) return loserConvs;
+        if (q.called('del')) { state.deleted.push(q.args('where')[0]); return 1; }
+        if (q.called('first')) return winnerConv;
+        if (q.called('update')) {
+          const w = q.args('where')[0];
+          if (w.id === 'c-dup') { const e = new Error('dup'); e.code = '23505'; throw e; }
+          if (w.id === 'c-win') { state.counterUpdate = q.args('update')[0]; return 1; }
+          state.moved.push(w.id);
+          return 1;
+        }
+      }
+      if (['messages', 'agent_decisions', 'reply_training_examples'].includes(table) && q.called('update')) {
+        state.childRepoints.push([table, q.args('where')[0].conversation_id, q.args('update')[0].conversation_id]);
+        return 1;
+      }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+
+    const summary = await mergeConversationRows(trx, 'conversations', 'customer_id', 'W', 'L');
+    expect(summary).toMatch(/moved 1, merged 1/);
+    expect(state.moved).toEqual(['c-clean']);
+    expect(state.childRepoints).toEqual(expect.arrayContaining([
+      ['messages', 'c-dup', 'c-win'],
+      ['agent_decisions', 'c-dup', 'c-win'],
+      ['reply_training_examples', 'c-dup', 'c-win'],
+    ]));
+    expect(state.counterUpdate.message_count).toBe(8);
+    expect(state.counterUpdate.last_message_at).toBe('2026-07-09');
+    expect(state.counterUpdate.last_inbound_at).toBe('2026-07-09');
+    expect(state.deleted).toEqual([{ id: 'c-dup' }]);
   });
 });
 
