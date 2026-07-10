@@ -134,6 +134,18 @@ describe('canAutoRoute fail-open booking', () => {
     expect(item.category).toBe('customer_field_conflict');
   });
 
+  test('fail-open never strips flags from an UNCONFIRMED call (P2)', () => {
+    // Fail-open is for confirmed bookings only: an unconfirmed call keeps
+    // caller_phone_missing / name_email_mismatch etc., so the blocked branch
+    // files the contact/name review cards, not just the not_confirmed card.
+    const ex = extraction(['caller_phone_missing', 'name_email_mismatch']);
+    ex.scheduling = { status: 'tentative' };
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toBe('triage_flags');
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['caller_phone_missing', 'name_email_mismatch']));
+  });
+
   test('hard blocks are NEVER failed open', () => {
     for (const hard of ['out_of_service_area', 'caller_not_authorized', 'spam_or_wrong_number']) {
       const r = canAutoRoute(extraction([hard]), { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });

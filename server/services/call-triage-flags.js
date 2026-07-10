@@ -373,8 +373,14 @@ function canAutoRoute(extraction, opts = {}) {
   // (failedOpenFlags) so the office can confirm the field — it just no longer
   // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
   // caller_not_authorized, spam) are NOT recoverable and stay in the filter.
+  // Fail-open exists for CONFIRMED bookings only (the feature's contract).
+  // An unconfirmed call keeps every flag, so when it blocks on not_confirmed
+  // the blocked branch still files the contact/address/name review cards
+  // that protect the customer/lead writes — not just the time card.
   const failedOpenFlags = [];
-  if (opts.failOpen) {
+  const confirmedWithStart = extraction.scheduling?.status === 'confirmed'
+    && !!extraction.scheduling?.confirmed_start_at;
+  if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
     const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);

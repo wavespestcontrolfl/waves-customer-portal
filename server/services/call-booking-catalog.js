@@ -120,6 +120,10 @@ const KEYWORD_SERVICE_RULES = [
   // found rats, I need trapping" is a trapping call, and the prefix match
   // would book (and price) an inspection before the trapping rule runs.
   { serviceKey: 'rodent_inspection', matches: (h) => hasAffirmativeRodentMention(h) && /\binspect(?:ion)?s?\b/i.test(h) },
+  // Trap + seal prefers the dedicated bundle SKU (7% bundle pricing, its own
+  // duration); the older rodent_exclusion key is the fallback when the bundle
+  // row is absent/inactive (missing keys are skipped, so ordering does this).
+  { serviceKey: 'rodent_trapping_exclusion', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
   { serviceKey: 'rodent_exclusion', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
   { serviceKey: 'rodent_trapping', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) },
   { serviceKey: 'rodent_exclusion_only', matches: (h) => hasAffirmativeRodentMention(h) && /\bexclu|seal/i.test(h) },

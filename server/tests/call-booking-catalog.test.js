@@ -76,6 +76,7 @@ const CATALOG = [
   { id: 'svc-rodent-general', service_key: 'rodent_general_one_time', name: 'Rodent Pest Control Service', short_name: 'Rodent', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
   { id: 'svc-rodent-inspection', service_key: 'rodent_inspection', name: 'Rodent Inspection Service', short_name: 'Rodent Insp', billing_type: 'one_time', pricing_type: 'fixed', base_price: '75.00', default_duration_minutes: 60 },
   { id: 'svc-rodent-trapping', service_key: 'rodent_trapping', name: 'Rodent Trapping Service', short_name: 'Rodent Trap', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  { id: 'svc-rodent-bundle', service_key: 'rodent_trapping_exclusion', name: 'Rodent Trapping + Exclusion', short_name: 'Trap + Excl', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 240 },
 ];
 
 describe('rodent intent → catalog service (owner directive)', () => {
@@ -90,8 +91,17 @@ describe('rodent intent → catalog service (owner directive)', () => {
   test('trapping mention maps to Rodent Trapping Service', () => {
     expect(R('I need rat trapping')).toBe('rodent_trapping');
   });
-  test('trapping + exclusion maps to the combined service', () => {
-    expect(R('rats, need trapping and exclusion to seal them out')).toBe('rodent_exclusion');
+  test('trapping + exclusion maps to the dedicated bundle SKU (P2)', () => {
+    expect(R('rats, need trapping and exclusion to seal them out')).toBe('rodent_trapping_exclusion');
+  });
+  test('trapping + exclusion falls back to rodent_exclusion when the bundle row is absent (P2)', () => {
+    const withoutBundle = CATALOG.filter((s) => s.service_key !== 'rodent_trapping_exclusion');
+    const row = resolveCallBookingCatalogService({
+      extracted: {},
+      transcription: 'rats, need trapping and exclusion to seal them out',
+      services: withoutBundle,
+    });
+    expect(row?.service_key).toBe('rodent_exclusion');
   });
   test('a non-rodent call never maps to a rodent service', () => {
     expect(R('I have ants in the kitchen')).toBeUndefined();
