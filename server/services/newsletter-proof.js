@@ -117,10 +117,15 @@ function htmlReplyToText(html) {
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|tr|li|h[1-6]|blockquote)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, '&')
+    // Decode entities BEFORE the approval matcher runs: "don&rsquo;t" /
+    // "can&#8217;t" must become don't/can't or the negation guard never
+    // sees them (numeric first, then named; &amp; strictly last).
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return ' '; } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(Number(d)); } catch { return ' '; } })
+    .replace(/&(rsquo|lsquo|apos);/gi, "'")
+    .replace(/&(rdquo|ldquo|quot);/gi, '"')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
     .trim();
 }
 
@@ -276,7 +281,16 @@ async function sendNewsletterProof(sendId) {
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id })
     .whereNull('proof_sent_at');
-  if (send.updated_at) claimQuery.where('updated_at', send.updated_at);
+  // Millisecond-truncated comparison: DB-defaulted rows carry microsecond
+  // updated_at while node-pg hands back millisecond Dates — an exact
+  // equality guard would spuriously fail the very first proof of a fresh
+  // draft.
+  if (send.updated_at) {
+    claimQuery.whereRaw(
+      "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+      [send.updated_at],
+    );
+  }
   const claimed = await claimQuery.update({ proof_token: token, proof_sent_at: now, updated_at: now });
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
@@ -373,7 +387,10 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
 
-  if (!['draft', 'scheduled'].includes(send.status)) {
+  // Drafts ONLY. A 'scheduled' row means the operator already picked a
+  // future send time — an approval reply must not overwrite that schedule
+  // and broadcast immediately.
+  if (send.status !== 'draft') {
     logger.info(`[newsletter-proof] send ${send.id} is ${send.status} — approval reply is a no-op`);
     return true;
   }
@@ -436,7 +453,13 @@ async function maybeHandleProofApproval(email) {
   const approvalClaim = db('newsletter_sends')
     .where({ id: send.id, proof_token: token, status: send.status })
     .whereNull('proof_approved_at');
-  if (send.updated_at) approvalClaim.where('updated_at', send.updated_at);
+  // ms-truncated for the same node-pg precision reason as the proof claim
+  if (send.updated_at) {
+    approvalClaim.whereRaw(
+      "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+      [send.updated_at],
+    );
+  }
   const claimed = await approvalClaim.update({
     proof_approved_at: new Date(),
     proof_approval_email_id: email.id || null,

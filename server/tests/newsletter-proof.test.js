@@ -256,9 +256,13 @@ describe('sendNewsletterProof', () => {
     expect(args.html).toContain('Reply <strong>APPROVED</strong>');
     expect(args.html).toContain('606');
     // Claim is whereNull-guarded, version-guarded on the fetched row's
-    // updated_at, and stamps token+sent_at+updated_at together
+    // updated_at (ms-truncated raw compare — node-pg precision), and
+    // stamps token+sent_at+updated_at together
     expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_sent_at');
-    expect(sendsChain.where).toHaveBeenCalledWith('updated_at', DRAFT_VERSION);
+    expect(sendsChain.whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining("date_trunc('milliseconds', updated_at)"),
+      [DRAFT_VERSION],
+    );
     const claim = sendsChain.update.mock.calls[0][0];
     expect(claim.proof_token).toBe(r.token);
     expect(claim.proof_sent_at).toBeInstanceOf(Date);
@@ -377,6 +381,25 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
+  test('operator-scheduled future send is preserved — approval reply is a no-op', async () => {
+    const { sendsChain } = wireDb({ sends: { first: { ...PROOFED_DRAFT, status: 'scheduled', scheduled_for: new Date('2026-07-12T12:00:00Z') } } });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('HTML entity apostrophes decode before negation matching', async () => {
+    wireDb({ sends: { first: PROOFED_DRAFT } });
+    const r = await maybeHandleProofApproval({
+      ...APPROVAL_EMAIL,
+      body_text: null,
+      body_html: '<div dir="ltr">don&rsquo;t approve &#8212; can&#8217;t send yet</div>',
+    });
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
   test('draft edited AFTER the proof → approval refused, proof invalidated + reissued', async () => {
     const edited = { ...PROOFED_DRAFT, updated_at: new Date(PROOF_STAMP.getTime() + 60_000) };
     const { sendsChain } = wireDb({ sends: { first: edited } });
@@ -415,7 +438,10 @@ describe('maybeHandleProofApproval', () => {
     expect(sendsChain.where).toHaveBeenCalledWith({
       id: 'send-1', proof_token: 'ab12cd34', status: 'draft',
     });
-    expect(sendsChain.where).toHaveBeenCalledWith('updated_at', PROOF_STAMP);
+    expect(sendsChain.whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining("date_trunc('milliseconds', updated_at)"),
+      [PROOF_STAMP],
+    );
     // Crash-safe: the claim itself schedules the send so the scheduler
     // tick is the durable executor if the immediate dispatch dies.
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
