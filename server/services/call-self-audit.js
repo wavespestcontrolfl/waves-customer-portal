@@ -86,7 +86,10 @@ async function runSelfAudit(depsIn = {}) {
       if (Boolean(prod[f]) !== Boolean(verdict[f])) { disagreements++; diffs.push(f); }
     }
     if (prod.is_spam && verdict.is_spam === false) spamFalsePositives++;
-    if (call.disposition && verdict.is_lead && ['spam_discarded', 'wrong_number_closed', 'no_action_needed'].includes(call.disposition)) dispositionMismatches++;
+    // ANY terminal disposition that routes an auditor-confirmed lead away
+    // from revenue counts as drift — not just the discard-shaped ones.
+    const LEAD_LOSING = ['spam_discarded', 'wrong_number_closed', 'no_action_needed', 'vendor_logged', 'voicemail_processed', 'cancellation_processed'];
+    if (call.disposition && verdict.is_lead && LEAD_LOSING.includes(call.disposition)) dispositionMismatches++;
 
     if (diffs.length) {
       await db('call_audit_findings')
@@ -112,6 +115,10 @@ async function runSelfAudit(depsIn = {}) {
   const fieldRate = checkedFields ? disagreements / checkedFields : 0;
   const dispositionRate = audited ? dispositionMismatches / audited : 0;
   const breaches = [];
+  // Auditor-down is itself a breach: a provider/prompt outage must not read
+  // as a healthy night — that is exactly the silent-failure class this loop
+  // exists to kill.
+  if (calls.length > 0 && audited === 0) breaches.push(`auditor down: 0/${calls.length} sampled calls audited`);
   if (spamFalsePositives > 0) breaches.push(`${spamFalsePositives} spam false positive(s)`);
   if (fieldRate > FIELD_DRIFT_ALERT) breaches.push(`field disagreement ${(fieldRate * 100).toFixed(1)}% (baseline ${(BASELINE_DISAGREE_RATE * 100).toFixed(0)}%)`);
   if (dispositionRate > DISPOSITION_MISMATCH_ALERT) breaches.push(`disposition mismatch ${(dispositionRate * 100).toFixed(1)}%`);

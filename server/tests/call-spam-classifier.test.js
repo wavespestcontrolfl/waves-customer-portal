@@ -101,3 +101,41 @@ test('voip WITH a caller name is not line-risk', async () => {
   });
   expect(verdict).toBe('insufficient_signals');
 });
+
+test('voip with NO CNAM source at all is NOT line-risk (unknown ≠ known-nameless)', async () => {
+  mockHistory();
+  const { verdict, signals } = await classifyCall({
+    call: CALL(NOMO_CLEAN), legacy: { is_spam: true },
+    lineType: { type: 'nonFixedVoip' }, // no caller_name key, no AddOns CNAM
+  });
+  expect(signals.line.line_risk).toBe(false);
+  expect(verdict).toBe('insufficient_signals');
+});
+
+test('live path: CNAM from the AddOns envelope rescues a named VoIP caller', async () => {
+  mockHistory();
+  const addons = { results: {
+    nomorobo_spamscore: { status: 'successful', result: { score: 0 } },
+    twilio_caller_name: { status: 'successful', result: { caller_name: { caller_name: 'JANE EXAMPLE' } } },
+  } };
+  const { verdict, signals } = await classifyCall({
+    call: CALL(addons), legacy: { is_spam: true },
+    lineType: { type: 'nonFixedVoip' }, // cache has type only, like production
+  });
+  expect(signals.line.cnam).toBe('JANE EXAMPLE');
+  expect(signals.line.line_risk).toBe(false);
+  expect(verdict).toBe('insufficient_signals');
+});
+
+test('live path: AddOns CNAM ran and found nothing → known-nameless voip IS line-risk', async () => {
+  mockHistory();
+  const addons = { results: {
+    nomorobo_spamscore: { status: 'successful', result: { score: 0 } },
+    twilio_caller_name: { status: 'successful', result: { caller_name: { caller_name: null } } },
+  } };
+  const { verdict } = await classifyCall({
+    call: CALL(addons), legacy: { is_spam: true },
+    lineType: { type: 'nonFixedVoip' },
+  });
+  expect(verdict).toBe('spam');
+});

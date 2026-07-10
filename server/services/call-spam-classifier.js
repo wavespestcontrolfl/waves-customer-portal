@@ -58,10 +58,19 @@ async function classifyCall({ call, extraction = null, legacy = null, lineType =
   const meta = typeof call.metadata === 'string' ? safeParse(call.metadata) : (call.metadata || {});
   const risk = vendorSignalsFromAddOns(meta?.addons);
   const tollfree = TOLLFREE_RE.test(call.from_phone || '');
+  // CNAM comes from the caller-supplied lineType (offline validation) or,
+  // live, from the Twilio Caller Name add-on riding call_log.metadata.addons
+  // (#2556) — phone_line_types caches only the line type. When NO CNAM
+  // source exists, voip must NOT count as the independent risk signal:
+  // "unknown name" and "known-nameless" are different facts, and only the
+  // latter is evidence (keeps the zero-false-positive property live).
+  const cnamFromAddOns = cnamFromEnvelope(meta?.addons);
+  const cnam = lineType && 'caller_name' in lineType ? (lineType.caller_name ?? cnamFromAddOns) : cnamFromAddOns;
+  const cnamKnown = (lineType && 'caller_name' in lineType && lineType.caller_name !== undefined) || cnamFromAddOns !== undefined;
   const line = {
     type: lineType?.type || null,
-    cnam: lineType?.caller_name || null,
-    line_risk: (lineType?.type === 'nonFixedVoip' && !lineType?.caller_name) || tollfree,
+    cnam: cnam ?? null,
+    line_risk: (lineType?.type === 'nonFixedVoip' && cnamKnown && !cnam) || tollfree,
   };
 
   // Content signal: schema-1.5.0 spam_verdict preferred; V1 is_spam fallback.
@@ -123,6 +132,16 @@ async function recordVerdict(callLogId, { verdict, signals }) {
   } catch (err) {
     logger.warn(`[spam-classifier] verdict write failed for ${callLogId}: ${err.message}`);
   }
+}
+
+// Twilio Caller Name add-on result from the AddOns envelope. Returns the
+// name string, null when the add-on ran and found none (known-nameless),
+// or undefined when the add-on didn't run (unknown — never a risk signal).
+function cnamFromEnvelope(addons) {
+  const cn = addons?.results?.twilio_caller_name;
+  if (!cn || cn.status !== 'successful') return undefined;
+  const payload = cn.result?.caller_name || cn.result || {};
+  return payload.caller_name || null;
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return {}; } }
