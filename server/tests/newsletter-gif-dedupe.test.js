@@ -18,6 +18,8 @@
 const {
   searchGiphyCandidates,
   pickUniqueGif,
+  pickUniqueGifWithRetry,
+  heroTitleText,
   assembleBeehiivNewsletter,
 } = require('../services/newsletter-draft');
 
@@ -50,6 +52,48 @@ describe('pickUniqueGif', () => {
   });
 });
 
+describe('pickUniqueGifWithRetry — expanded-keyword fallback', () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+    delete process.env.GIPHY_API_KEY;
+  });
+
+  test('exhausted primary pool → broadened re-search finds an unused GIF', async () => {
+    process.env.GIPHY_API_KEY = 'test-key';
+    const searched = [];
+    global.fetch = jest.fn(async (url) => {
+      const q = decodeURIComponent(/q=([^&]+)/.exec(url)[1]).replace(/\+/g, ' ');
+      searched.push(q);
+      // broadened queries surface a fresh GIF the primary pool didn't have
+      const data = q.includes('reaction') ? [giphyGif('freshgif')] : [giphyGif('topgif')];
+      return { ok: true, json: async () => ({ data }) };
+    });
+    const used = new Set(['topgif']); // primary candidates all taken
+    const url = await pickUniqueGifWithRetry('bass drop', [{ id: 'topgif', url: 'https://x/top.gif' }], used);
+    expect(url).toContain('freshgif');
+    expect(searched).toContain('bass drop reaction');
+  });
+
+  test('every broadened variant exhausted too → null (photo fallback), never a repeat', async () => {
+    process.env.GIPHY_API_KEY = 'test-key';
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ data: [giphyGif('topgif')] }) }));
+    const used = new Set(['topgif']);
+    const url = await pickUniqueGifWithRetry('bass drop', [{ id: 'topgif', url: 'https://x/top.gif' }], used);
+    expect(url).toBeNull();
+  });
+});
+
+describe('heroTitleText — hero poster headline', () => {
+  test('strips emoji, keeps the content words', () => {
+    expect(heroTitleText('💣 Boom, Baby! The Only Fireworks Guide You’ll Need'))
+      .toBe('Boom, Baby! The Only Fireworks Guide You’ll Need');
+    expect(heroTitleText('Bubbles, Sea Lions & Sand Dollar Pillows — Full Send'))
+      .toBe('Bubbles, Sea Lions & Sand Dollar Pillows — Full Send');
+    expect(heroTitleText('')).toBe('');
+  });
+});
+
 describe('searchGiphyCandidates', () => {
   const realFetch = global.fetch;
   afterEach(() => {
@@ -57,7 +101,7 @@ describe('searchGiphyCandidates', () => {
     delete process.env.GIPHY_API_KEY;
   });
 
-  test('returns id+url candidates and requests limit=10', async () => {
+  test('returns id+url candidates and requests a broad limit=25 pool', async () => {
     process.env.GIPHY_API_KEY = 'test-key';
     let requestedUrl;
     global.fetch = jest.fn(async (url) => {
@@ -65,7 +109,7 @@ describe('searchGiphyCandidates', () => {
       return { ok: true, json: async () => ({ data: SHARED_RANKING }) };
     });
     const candidates = await searchGiphyCandidates('excited dancing');
-    expect(requestedUrl).toContain('limit=10');
+    expect(requestedUrl).toContain('limit=25');
     expect(candidates).toHaveLength(5);
     expect(candidates[0]).toEqual({ id: 'topgif', url: expect.stringContaining('topgif') });
   });

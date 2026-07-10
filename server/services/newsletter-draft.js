@@ -117,7 +117,7 @@ EVENT RULES:
 - Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved") — this is an events newsletter, not a service pitch.
 - title: a CURIOSITY-GAP headline that never uses the raw event name (it renders elsewhere). Proven formulas: question + affirmation ("...? Yes, Please" / "...? Say Less" / "...? Count Us In"), PSA framing ("PSA: You Might Meet Your New Best Friend This Weekend"), direct address ("This One's for You"), equation ("High Hair + Hot Dice = Ultimate Weekend").
 - Each event gets a unique thematic emoji (no repeats between events).
-- gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo.
+- gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo. Every gifSearchTerm in the issue (including introGifTerm) must be clearly DISTINCT from the others — different verbs, moods, and meme genres, never near-synonyms of another section's term — so no two sections pull similar GIFs.
 - description: 2-4 sentences, conversational, says WHY someone would actually go. Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
 - scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
 - highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
@@ -283,7 +283,7 @@ ISSUE SKELETON (every issue, same order — train the reader):
 5. Featured service — the ONE earnest pitch section tied to the month.
 6. Close — voice returns; one-line call CTA; quarterly tie-in ("this is what your quarterly visit is handling right now"); referral nudge.
 
-GIF CAPTIONS (introGifCaption, crawlGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive.
+GIF CAPTIONS (introGifCaption, crawlGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive. The three Giphy search terms (introGifTerm, crawlGifTerm, pitchGifTerm) must be clearly DISTINCT from each other — different moods and meme genres, never near-synonyms.
 
 SIGN-OFF: "${voice.pestInsiderSignoff || '— Adam, Waves Pest Control'}" (a real person, not "The Team" — the renderer appends the 🌊).
 
@@ -372,9 +372,9 @@ async function assemblePestInsiderNewsletter(draft) {
     searchGiphyCandidates(draft.crawlGifTerm),
     searchGiphyCandidates(draft.pitchGifTerm),
   ]);
-  const introGif = pickUniqueGif(introCandidates, usedGifIds);
-  const crawlGif = pickUniqueGif(crawlCandidates, usedGifIds);
-  const pitchGif = pickUniqueGif(pitchCandidates, usedGifIds);
+  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds);
+  const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds);
+  const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds);
 
   // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
@@ -521,18 +521,31 @@ const COLORS = {
 // a platform we left — that asset can vanish without notice.
 const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif';
 
+// The exact words the hero poster letters into the artwork: the issue's
+// subject line, emoji stripped (image models render emoji glyphs as mush;
+// the words are the content signal). Owner rule 2026-07-09: the hero must
+// carry text and it must match what the issue is actually delivering.
+function heroTitleText(subject) {
+  return String(subject || '')
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}️‍]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function generateHeroImage(subject) {
   const s3Ready = config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket && process.env.SOCIAL_MEDIA_CDN_DOMAIN;
   if (!s3Ready) return null;
 
   try {
     const imageGenerator = require('./content/image-generator');
+    const titleText = heroTitleText(subject);
     const result = await imageGenerator.generate({
       // The shipped issues' visual identity: a custom flat retro-cartoon
       // collage restating the subject (tornado + dog + pirate, Mozart +
-      // llama + pie). AI lettering garbles, so no text overlay — the
-      // subject line itself stays in the email chrome.
-      title: `Retro flat-cartoon poster collage for a Southwest Florida weekend events newsletter titled "${subject}". 2-4 playful cartoon vignettes representing the lineup's themes, vintage palette (teal, orange, cream, brick red), sunburst background, bold and fun, Florida coastal energy. Strictly NO text, NO lettering, NO words in the image.`,
+      // llama + pie), now WITH the subject lettered into the poster —
+      // owner rule 2026-07-09. The primary generators (gpt-image line)
+      // render typography reliably; the old "no text" rule predated them.
+      title: `Retro flat-cartoon poster collage for a Southwest Florida weekend events newsletter. 2-4 playful cartoon vignettes representing the lineup's themes ("${titleText}"), vintage palette (teal, orange, cream, brick red), sunburst background, bold and fun, Florida coastal energy. The poster prominently features the headline text "${titleText}" in bold retro hand-lettered poster typography — spelled EXACTLY as written, fully legible, integrated into the design as an arched or banner headline. No other words, letters, or writing anywhere else in the image.`,
       mode: 'blog-hero',
     });
     const match = /^data:([^;]+);base64,(.+)$/.exec(result.dataUrl || '');
@@ -548,17 +561,18 @@ async function generateHeroImage(subject) {
     return null;
   }
 }
-// Fetch up to 10 candidate GIFs for a search term as [{ id, url }].
+// Fetch up to 25 candidate GIFs for a search term as [{ id, url }].
 // Candidates (not a single winner) so the assembler can dedupe across the
 // whole issue: similar search terms ("excited dance", "happy dancing")
 // share Giphy's top result, and limit=1 shipped the same GIF 6× in one
-// issue (2026-07-09 draft). Never rejects — [] on any failure.
+// issue (2026-07-09 draft). Wide pool per owner ("slightly broader search
+// or scope"). Never rejects — [] on any failure.
 async function searchGiphyCandidates(term) {
   if (!term) return [];
   const apiKey = process.env.GIPHY_API_KEY;
   if (!apiKey) return [];
   try {
-    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=10&rating=pg`;
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(term)}&limit=25&rating=pg`;
     const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) return [];
     const data = await res.json();
@@ -581,6 +595,21 @@ function pickUniqueGif(candidates, usedIds) {
       usedIds.add(c.id);
       return c.url;
     }
+  }
+  return null;
+}
+
+// Expanded-keyword retry (owner 2026-07-09: "expand the keywords"): when a
+// term's whole candidate pool is already used, re-search with broadened
+// variants of the term before giving up. Only then does the renderer fall
+// back to the event photo — a repeat is still never an option.
+async function pickUniqueGifWithRetry(term, candidates, usedIds) {
+  const first = pickUniqueGif(candidates, usedIds);
+  if (first) return first;
+  if (!term) return null;
+  for (const broadened of [`${term} reaction`, `${term} meme`, `funny ${term}`]) {
+    const pick = pickUniqueGif(await searchGiphyCandidates(broadened), usedIds);
+    if (pick) return pick;
   }
   return null;
 }
@@ -978,8 +1007,11 @@ async function assembleBeehiivNewsletter(draft) {
     searchGiphyCandidates(draft.introGifTerm),
     ...events.map((ev) => searchGiphyCandidates(ev.gifSearchTerm)),
   ]);
-  const introGif = pickUniqueGif(introCandidates, usedGifIds);
-  const eventGifs = eventCandidates.map((candidates) => pickUniqueGif(candidates, usedGifIds));
+  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds);
+  const eventGifs = [];
+  for (let i = 0; i < eventCandidates.length; i++) {
+    eventGifs.push(await pickUniqueGifWithRetry(events[i]?.gifSearchTerm, eventCandidates[i], usedGifIds));
+  }
 
   // ── Hero Image ──
   const heroUrl = safeUrl(draft.heroImageUrl);
@@ -1455,6 +1487,9 @@ module.exports = {
   // GIF dedupe (one issue never repeats a GIF)
   searchGiphyCandidates,
   pickUniqueGif,
+  pickUniqueGifWithRetry,
+  // Hero poster headline text (subject, emoji-stripped)
+  heroTitleText,
   displayCity,
   formatLockedLocation,
   linkifyFirst,
