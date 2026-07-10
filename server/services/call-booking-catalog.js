@@ -82,7 +82,7 @@ function hasAffirmativeRoachMention(text) {
 // label). Most-specific first — inspection wins over trapping wins over a
 // general rodent call. A rodent mention with no specific action defaults to
 // the general "Rodent Pest Control Service".
-const RODENT_RE = /\b(rodent|rat|rats|mouse|mice|rats?)\b/i;
+const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
 // Rodent mentions get the same affirmative-only treatment as roaches: "not
 // rats, it's ants" and "we had mice last time but now need spiders treated"
 // describe what the visit is NOT for, and must not anchor the booking to a
@@ -108,7 +108,10 @@ const KEYWORD_SERVICE_RULES = [
     serviceKey: 'cockroach_control',
     matches: hasAffirmativeRoachMention,
   },
-  { serviceKey: 'rodent_inspection', matches: (h) => hasAffirmativeRodentMention(h) && /\binspect/i.test(h) },
+  // "inspection"/"inspect(s)" only — NOT "inspector": "the home inspector
+  // found rats, I need trapping" is a trapping call, and the prefix match
+  // would book (and price) an inspection before the trapping rule runs.
+  { serviceKey: 'rodent_inspection', matches: (h) => hasAffirmativeRodentMention(h) && /\binspect(?:ion)?s?\b/i.test(h) },
   { serviceKey: 'rodent_exclusion', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
   { serviceKey: 'rodent_trapping', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) },
   { serviceKey: 'rodent_exclusion_only', matches: (h) => hasAffirmativeRodentMention(h) && /\bexclu|seal/i.test(h) },

@@ -64,7 +64,7 @@ const CALL_EXTRACTION_V2_DRIVES_ROUTING =
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -535,6 +535,10 @@ function summarizeKnownCaller(customer) {
     // restating it on a familiar call.
     isExistingCustomer: accountType === 'established_customer',
     hasAddress: !!String(customer.address_line1 || '').trim(),
+    // The on-file street itself, for the fail-open V1-street comparison: a
+    // legacy V1 street that doesn't match it is a NEW address that must hold
+    // for review, never silently rebook to the primary.
+    addressLine1: String(customer.address_line1 || '').trim() || null,
   };
 }
 
@@ -3454,6 +3458,14 @@ const CallRecordingProcessor = {
       ? addressRecovery.avResult
       : v2AddressValidation;
 
+    // Explicit SMS consent is a property of the CALL, not of the routing mode:
+    // the secondary-contact fan-out at the send site requires it even when V2
+    // runs in shadow (or routing is legacy), where the enforce branch below
+    // never executes. Read it from the V2 extraction whenever one exists; with
+    // no V2 extraction there is no consent evidence and it stays false, so the
+    // fan-out remains fail-closed exactly as before.
+    v2SmsConsentExplicit = v2Result?.extraction?.consent?.sms_consent_given === true;
+
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Extraction = v2Result?.extraction || null;
@@ -3480,10 +3492,33 @@ const CallRecordingProcessor = {
           const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
           const knownCustomerForFailOpen = (knownCaller && knownCaller.isExistingCustomer)
             ? { hasAddress: knownCaller.hasAddress } : null;
-          const routingResult = canAutoRoute(v2Extraction, {
+          let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
           });
+          // Address fail-open is only safe when the on-file address really is
+          // the booking address. If legacy V1 captured a street that does NOT
+          // match the on-file street while V2 heard nothing (that's the only
+          // way address flags fail open), V1 may have heard a rental/secondary
+          // address V2 missed — a should-review new-address booking, not a
+          // confirmed visit at the primary. Demote it to the normal blocked
+          // path (address_review card) BEFORE the route decision is recorded.
+          // No street in the log line — addresses are PII and these logs are
+          // plaintext; the review card carries the details.
+          if (routingResult.allowed
+            && (routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+            const legacyV1Street = String(extracted.address_line1 || '').trim();
+            const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
+            if (legacyV1Street && (!onFileStreet || streetCompareKey(legacyV1Street) !== streetCompareKey(onFileStreet))) {
+              logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only street differs from the on-file address`);
+              routingResult = {
+                allowed: false,
+                reason: 'v1_only_new_address',
+                flags: routingResult.flags,
+                appointmentBlockingFlags: ['address_unverified'],
+              };
+            }
+          }
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
             logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
           }
@@ -3500,9 +3535,9 @@ const CallRecordingProcessor = {
           // NOT authorize texting a spoken alternate callback number (which the
           // customer.phone||extracted.phone||ANI resolution can prefer over the
           // ANI) nor fanning a confirmation out to a secondary service contact.
-          // Those alternate recipients still require explicit sms_consent_given,
-          // captured here (v2SmsConsentExplicit) and enforced at the send site.
-          v2SmsConsentExplicit = v2Extraction?.consent?.sms_consent_given === true;
+          // Those alternate recipients still require explicit sms_consent_given
+          // (v2SmsConsentExplicit, captured mode-independently above) and are
+          // enforced at the send site.
           const tcpa = checkTcpaConsent(v2Extraction, {
             impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),
           });
@@ -3618,17 +3653,17 @@ const CallRecordingProcessor = {
                 }
               }
               // Address flags failed open ⇒ V2 heard NO new address and this
-              // booking must dispatch to the customer's on-file address. AV
-              // never accepted anything on this call (an accept would have
-              // suppressed the flags instead), so any legacy V1 street still
-              // sitting in `extracted` is an unvalidated mishear/hallucination
-              // — left alone it would win over the on-file address at the
+              // booking must dispatch to the customer's on-file address. Any
+              // legacy V1 street that survives to this point key-matches the
+              // on-file street (a differing V1-only street was demoted to
+              // review above), so it's an unvalidated duplicate at best —
+              // left alone it would win over the on-file address at the
               // property-linkage stamp. Clear it so
               // resolveCallBookingPropertyLinkage falls back to the on-file,
-              // Google-verified address.
+              // Google-verified address. No street values in the log — PII.
               if (routingResult.failedOpenFlags.some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
                 if (String(extracted.address_line1 || '').trim()) {
-                  logger.info(`[call-proc] Fail-open on-file address for ${maskSid(callSid)}: dropping unvalidated legacy street "${extracted.address_line1}"`);
+                  logger.info(`[call-proc] Fail-open on-file address for ${maskSid(callSid)}: dropped an unvalidated legacy V1 street (key-matches the on-file address)`);
                 }
                 extracted.address_line1 = null;
                 extracted.address_line2 = null;

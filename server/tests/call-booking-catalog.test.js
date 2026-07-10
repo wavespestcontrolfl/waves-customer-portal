@@ -96,6 +96,13 @@ describe('rodent intent → catalog service (owner directive)', () => {
   test('a non-rodent call never maps to a rodent service', () => {
     expect(R('I have ants in the kitchen')).toBeUndefined();
   });
+  test('plural "rodents" maps to the general rodent service (P2)', () => {
+    expect(R('I have rodents in the attic')).toBe('rodent_general_one_time');
+  });
+  test('"inspector" context is not an inspection request (P2)', () => {
+    expect(R('the home inspector found rats, I need trapping')).toBe('rodent_trapping');
+    expect(R('the home inspector said we have mice')).toBe('rodent_general_one_time');
+  });
   test('negated rodent mention ("not rats, just ants") does NOT map to a rodent service (P2)', () => {
     expect(R('No, it is not rats, just ants everywhere in the kitchen')).toBeUndefined();
     expect(R("We don't have mice, the problem is fleas in the carpet")).toBeUndefined();

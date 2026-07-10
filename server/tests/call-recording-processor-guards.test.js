@@ -953,11 +953,11 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
 
   test('summarizes a known caller for the extraction prompt', () => {
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won' }))
-      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false, addressLine1: null });
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won', address_line1: '123 Main St' }))
-      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true, addressLine1: '123 Main St' });
     expect(summarizeKnownCaller({ first_name: 'Jake', pipeline_stage: 'new_lead' }))
-      .toEqual({ name: 'Jake', accountType: 'open_lead', isExistingCustomer: false, hasAddress: false });
+      .toEqual({ name: 'Jake', accountType: 'open_lead', isExistingCustomer: false, hasAddress: false, addressLine1: null });
     expect(summarizeKnownCaller(null)).toBeNull();
   });
 
