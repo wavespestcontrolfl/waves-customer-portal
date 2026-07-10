@@ -88,33 +88,45 @@ describe('adminDraftPreviewEligible (staff draft preview — cheap half of the /
 });
 
 describe('isEstimateExtensionRequestEligible (expired-page "Request an extension")', () => {
-  it('qualifies published estimates that died of expiry — by date or by the sweep', () => {
-    expect(isEstimateExtensionRequestEligible({ status: 'sent', expires_at: PAST })).toBe(true);
-    expect(isEstimateExtensionRequestEligible({ status: 'viewed', expires_at: PAST })).toBe(true);
-    // The daily sweep flips status to 'expired'; the row stays eligible even
-    // if expires_at were somehow missing.
-    expect(isEstimateExtensionRequestEligible({ status: 'expired', expires_at: PAST })).toBe(true);
-    expect(isEstimateExtensionRequestEligible({ status: 'expired', expires_at: null })).toBe(true);
-    // A date-expired send_failed row: customer is on the page, so they have
-    // the link — the office should hear about it.
-    expect(isEstimateExtensionRequestEligible({ status: 'send_failed', expires_at: PAST })).toBe(true);
+  it('qualifies published (sent_at/viewed_at) estimates that died of expiry — by date or by the sweep', () => {
+    expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: PAST })).toBe(true);
+    expect(isEstimateExtensionRequestEligible({ status: 'viewed', sent_at: PAST, viewed_at: PAST, expires_at: PAST })).toBe(true);
+    // viewed_at alone is publication evidence too (a viewed row whose sent_at
+    // write was lost is still plainly in the customer's hands).
+    expect(isEstimateExtensionRequestEligible({ status: 'viewed', viewed_at: PAST, expires_at: PAST })).toBe(true);
+    // The daily sweep flips status to 'expired'; a SENT one stays eligible
+    // even if expires_at were somehow missing.
+    expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: PAST, expires_at: PAST })).toBe(true);
+    expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: PAST, expires_at: null })).toBe(true);
+    // A date-expired send_failed row qualifies only when some channel actually
+    // delivered enough to stamp sent_at — then the customer really has the link.
+    expect(isEstimateExtensionRequestEligible({ status: 'send_failed', sent_at: PAST, expires_at: PAST })).toBe(true);
   });
 
   it('rejects estimates that still render in full (nothing to extend from the expired screen)', () => {
-    expect(isEstimateExtensionRequestEligible({ status: 'sent', expires_at: FUTURE })).toBe(false);
-    expect(isEstimateExtensionRequestEligible({ status: 'accepted', expires_at: PAST })).toBe(false);
-    expect(isEstimateExtensionRequestEligible({ status: 'declined', expires_at: PAST })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: FUTURE })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'accepted', sent_at: PAST, expires_at: PAST })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'declined', sent_at: PAST, expires_at: PAST })).toBe(false);
+  });
+
+  it('rejects rows without publication evidence — incl. the sweep-expired never-sent draft', () => {
+    // The expiration sweep flips ANY past-due non-terminal row to 'expired',
+    // including drafts that never went out. Status alone must not qualify.
+    expect(isEstimateExtensionRequestEligible({ status: 'expired', expires_at: PAST })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: null, viewed_at: null, expires_at: null })).toBe(false);
+    // A send_failed row that never delivered anything has no link to extend.
+    expect(isEstimateExtensionRequestEligible({ status: 'send_failed', expires_at: PAST })).toBe(false);
   });
 
   it('rejects unpublished, archived, and missing rows', () => {
     expect(isEstimateExtensionRequestEligible({ status: 'draft', expires_at: PAST })).toBe(false);
     expect(isEstimateExtensionRequestEligible({ status: 'scheduled', expires_at: PAST })).toBe(false);
-    expect(isEstimateExtensionRequestEligible({ status: 'sent', expires_at: PAST, archived_at: PAST })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: PAST, archived_at: PAST })).toBe(false);
     expect(isEstimateExtensionRequestEligible(null)).toBe(false);
     expect(isEstimateExtensionRequestEligible(undefined)).toBe(false);
   });
 
   it('a mid-send row with no expiry yet is NOT eligible (nothing has expired)', () => {
-    expect(isEstimateExtensionRequestEligible({ status: 'sending', expires_at: null })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'sending', sent_at: PAST, expires_at: null })).toBe(false);
   });
 });

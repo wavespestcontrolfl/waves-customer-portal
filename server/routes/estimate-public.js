@@ -9112,17 +9112,26 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
   }
 });
 
+// Same accepted formats as the estimate-slots-public router's TOKEN_RE:
+// legacy admin slug tokens (nameSlug-8hex) AND the 64-hex format every
+// post-estimate-versions token uses. Malformed tokens 404 before any DB read.
+const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
 // POST /api/estimates/:token/extension-request — one-click "my link expired
 // but I still want this" signal from the React expired/not-found screen.
-// Writes NOTHING customer-visible and sends NO customer comms: it records the
-// ask on the estimate row and raises an in-app admin notification so the
-// office can extend/resend on their own judgment. Token is the only gate
-// (same-origin auth model as /:token/data); the endpoint 404s identically for
-// unknown tokens, ineligible rows, and the gate being off, so it reveals no
-// more about a token than /data already does.
+// Contract (AGENTS.md public-by-token allowlist): estimate token format gate,
+// generic 404 (unknown token, malformed token, ineligible row, and gate-off
+// are indistinguishable), 5 req/hr rate limit, dark behind
+// GATE_ESTIMATE_EXTENSION_REQUEST. Writes NOTHING customer-visible and sends
+// NO customer comms: it records the ask on the estimate row and raises an
+// in-app admin notification so the office can extend/resend on their own
+// judgment.
 router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('estimateExtensionRequest')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
@@ -9130,43 +9139,54 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
-    // Dedupe: one admin notification per estimate per 24h. The stamp lives in
-    // estimate_data (no migration for a single timestamp); a non-object blob
-    // skips the stamp and the rate limiter alone bounds repeats.
-    let estData = {};
-    try {
-      estData = typeof estimate.estimate_data === 'string'
-        ? JSON.parse(estimate.estimate_data)
-        : (estimate.estimate_data || {});
-    } catch { estData = {}; }
-    const lastRequestedAt = Date.parse(estData?.extensionRequestedAt || '');
-    if (Number.isFinite(lastRequestedAt) && Date.now() - lastRequestedAt < 24 * 60 * 60 * 1000) {
+    // Dedupe: one admin notification per estimate per 24h, claimed ATOMICALLY
+    // — the conditional UPDATE both checks and stamps extensionRequestedAt in
+    // one statement, so concurrent POSTs can't each pass a read-then-write
+    // check and fan out duplicate notifications. The stamp lives in
+    // estimate_data (no migration for one timestamp). A non-object blob can't
+    // hold the stamp: it stays claimable every time (jsonb_set CASE leaves it
+    // unchanged) and the rate limiter alone bounds repeats — same tradeoff as
+    // the viewedMonthlyTotal stamp above.
+    const claimed = await db('estimates')
+      .where({ id: estimate.id })
+      .whereRaw(
+        `(jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) <> 'object'
+          OR COALESCE(estimate_data->>'extensionRequestedAt', '') = ''
+          OR (estimate_data->>'extensionRequestedAt')::timestamptz < NOW() - interval '24 hours')`,
+      )
+      .update({
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true) ELSE estimate_data END",
+          [new Date().toISOString()],
+        ),
+      });
+    if (!claimed) {
       return res.json({ success: true, alreadyRequested: true });
     }
 
-    // The notification IS the deliverable — unlike the best-effort notifies
-    // elsewhere in this file, a failure here must surface as a 500 so the
-    // customer gets the "call us" fallback instead of a false "request sent".
+    // The notification IS the deliverable — and NotificationService.create
+    // swallows insert errors and returns null, so check the value rather than
+    // relying on a rejection. On failure, release the claim (else the retry
+    // is suppressed for 24h with nothing delivered) and 500 so the customer
+    // gets the "call us" fallback instead of a false "request sent".
     const NotificationService = require('../services/notification-service');
     const expiredLine = estimate.expires_at
       ? `link expired ${new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`
       : 'link expired';
-    await NotificationService.notifyAdmin(
+    const notification = await NotificationService.notifyAdmin(
       'estimate',
       `Extension requested: ${estimate.customer_name}`,
       `${estimate.address || 'no address'} — ${expiredLine}; customer asked for more time on this estimate`,
       { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
     );
-
-    // Stamp after the notify commits so a failed notify can be retried; a
-    // failed stamp after a successful notify just risks one duplicate
-    // notification, which the office can live with.
-    await db('estimates').where({ id: estimate.id }).update({
-      estimate_data: db.raw(
-        "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true) ELSE estimate_data END",
-        [new Date().toISOString()],
-      ),
-    }).catch((e) => logger.warn(`[estimate-extension-request] stamp skipped for estimate ${estimate.id}: ${e.message}`));
+    if (!notification) {
+      await db('estimates').where({ id: estimate.id }).update({
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN estimate_data - 'extensionRequestedAt' ELSE estimate_data END",
+        ),
+      }).catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
+      return res.status(500).json({ error: 'extension_request_failed' });
+    }
 
     res.status(201).json({ success: true });
   } catch (err) { next(err); }
@@ -10589,15 +10609,19 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // expired slice of isEstimateCustomerViewable: a real, PUBLISHED estimate the
 // customer once legitimately held, now dead only because time ran out (past
 // expires_at, or the daily sweep already flipped status to 'expired').
-// send_failed rows qualify too once date-expired — if the customer is on the
-// page they clearly have the link. Everything else stays ineligible:
-// accepted/declined still render in full (no expired screen to ask from),
-// unpublished drafts/scheduled sends were never the customer's to extend, and
+// Publication is proven by sent_at/viewed_at, NOT by status: the expiration
+// sweep flips ANY past-due non-terminal row to 'expired' — including drafts
+// and scheduled sends that never went out — so a bare status check would
+// expose the extension UI for estimates the customer never held. (This also
+// means a send_failed row only qualifies if some channel actually delivered
+// enough to stamp sent_at.) Everything else stays ineligible:
+// accepted/declined still render in full (no expired screen to ask from), and
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (!estimate.sent_at && !estimate.viewed_at) return false;
   if (estimate.status === 'expired') return true;
   return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
 }
@@ -14440,12 +14464,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // SPA's not-found screen may offer the "Request an extension" button.
       // The legacy SSR path already reveals more for the same rows (a
       // personalized expired page), and POST /:token/extension-request
-      // re-checks eligibility + gate server-side regardless.
-      return res.status(404).json({
-        error: 'Estimate not found',
-        extensionRequestEligible: featureGates.isEnabled('estimateExtensionRequest')
-          && isEstimateExtensionRequestEligible(estimate),
-      });
+      // re-checks eligibility + gate server-side regardless. The flag is only
+      // ever INCLUDED when true — an explicit `false` here would distinguish
+      // real-but-ineligible tokens (drafts, archived, send_failed) from
+      // unknown ones and break the generic-404 contract.
+      if (featureGates.isEnabled('estimateExtensionRequest')
+        && isEstimateExtensionRequestEligible(estimate)) {
+        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
     }
 
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews

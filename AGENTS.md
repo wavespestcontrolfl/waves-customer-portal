@@ -305,6 +305,20 @@ finding and warns on P1. Reviewers must return JSON matching
   with metadata-pinned purpose/estimate id, NO money captured at booking —
   the saved card is charged on completion and a flat no-show fee only;
   dark behind ONE_TIME_CARD_HOLD).
+  `/api/estimates/:token/extension-request` (POST; one-click "my link
+  expired, I still want this" from the React estimate page's expired/
+  not-found screen. Estimate token format gate (same slug-or-64-hex regex as
+  the slots router), generic 404 — unknown token, malformed token, ineligible
+  row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
+  behind GATE_ESTIMATE_EXTENSION_REQUEST. Eligibility requires a PUBLISHED
+  estimate (sent_at/viewed_at set — the expiration sweep flips never-sent
+  drafts to 'expired' too, and those must never qualify) that is past
+  expires_at or sweep-expired, not accepted/declined/archived. Writes only an
+  atomic 24h-dedupe `extensionRequestedAt` stamp inside estimate_data
+  (claim-style conditional UPDATE so concurrent POSTs can't fan out
+  duplicates; released if the notify fails) and raises ONE in-app admin
+  notification — no customer comms, no expiry mutation, no PII in the
+  response),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
