@@ -32,6 +32,7 @@ function makeReviseDatabase({
 }) {
   const updates = [];
   const rawGuards = [];
+  const groupedWheres = [];
   const database = (table) => {
     if (table === 'customers') {
       let clause = null;
@@ -75,7 +76,13 @@ function makeReviseDatabase({
       throw new Error(`unexpected table ${table}`);
     }
     const chain = {
-      where: () => chain,
+      // The expiry mirror is a grouped where (whereNull OR >) — record the
+      // callback so tests can replay it against a recorder and assert the
+      // predicate without a real query builder.
+      where: (clause) => {
+        if (typeof clause === 'function') groupedWheres.push(clause);
+        return chain;
+      },
       whereNull: () => chain,
       whereNotIn: () => chain,
       whereRaw: (sql) => {
@@ -92,7 +99,7 @@ function makeReviseDatabase({
     };
     return chain;
   };
-  return { database, updates, rawGuards };
+  return { database, updates, rawGuards, groupedWheres };
 }
 
 const sentEstimate = {
@@ -388,6 +395,56 @@ describe('reviseAdminEstimate', () => {
       now: fixedNow,
     });
     expect(rawGuards.some((sql) => String(sql).includes("'COMMERCIAL'"))).toBe(true);
+  });
+
+  test('mirrors the date-expiry verdict inside the guarded update', async () => {
+    const { database, groupedWheres } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    // Replay the grouped where against a recorder: it must scope the commit
+    // to (expires_at IS NULL OR expires_at > now).
+    const recorded = [];
+    const recorder = {
+      whereNull: (...args) => { recorded.push(['whereNull', ...args]); return recorder; },
+      orWhere: (...args) => { recorded.push(['orWhere', ...args]); return recorder; },
+    };
+    expect(groupedWheres).toHaveLength(1);
+    groupedWheres[0](recorder);
+    expect(recorded).toEqual([
+      ['whereNull', 'expires_at'],
+      ['orWhere', 'expires_at', '>', fixedNow()],
+    ]);
+  });
+
+  test('clears the satellite snapshot when the revise changes the address', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, address: '789 Bay St' },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].satellite_url).toBeNull();
+  });
+
+  test('keeps the satellite snapshot across a pure address reformat', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, address: '  456  GULF dr ' },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].satellite_url).toBe('https://maps.example.com/sat.png');
   });
 
   test('409s when the revise moves the contact away from an FK-linked lead', async () => {

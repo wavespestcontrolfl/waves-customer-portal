@@ -815,6 +815,13 @@ async function reviseAdminEstimate({
   }
   const existingData = parseStoredEstimateData(estimate.estimate_data) || {};
 
+  // The satellite snapshot describes a PROPERTY, not the quote: it may only
+  // survive the revise while the address still matches. An address edit made
+  // without a fresh property lookup sends no replacement, and falling back to
+  // the row would pin the previous property's image to the revised quote.
+  const addressKey = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const sameAddress = addressKey(body.address) === addressKey(estimate.address);
+
   // The builder may reopen an estimate whose contact/customer linkage it did
   // not capture (auto-send or agent-drafted rows) — never let a blank field in
   // the edit payload sever the row's existing linkage or satellite snapshot.
@@ -823,7 +830,7 @@ async function reviseAdminEstimate({
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,
-      satelliteUrl: body.satelliteUrl || estimate.satellite_url || null,
+      satelliteUrl: body.satelliteUrl || (sameAddress ? estimate.satellite_url : null) || null,
     },
     technicianId,
     technician,
@@ -928,13 +935,18 @@ async function reviseAdminEstimate({
     .whereNull('archived_at')
     .whereNotIn('status', REVISE_BLOCKED_STATUSES)
     .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
+    // Mirrors the pre-read's date-expiry verdict: the payload resolution
+    // above (pricing recompute, DB lookups) leaves a window in which the
+    // row can pass its expires_at, and a commit after that would report
+    // saved while the public link already serves the expired page.
+    .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
     .update({
       ...writeFields,
       updated_at: now(),
     })
     .returning('*');
   if (!updated) {
-    throw errorWithStatus('Estimate was accepted, locked, or converted while you were editing. Refresh and retry.', 409);
+    throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
   }
   clearEstimatePricingCache(estimate.id);
   return { estimate: updated };

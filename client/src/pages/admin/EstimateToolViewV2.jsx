@@ -2480,6 +2480,11 @@ export default function EstimateToolViewV2({
           // silently flip the row's settings.
           showOneTimeOption: !!d.showOneTimeOption,
           billByInvoice: !!d.billByInvoice,
+          // Row notes win over the inputs snapshot for the same reason —
+          // lead/webhook/automation rows carry notes the builder never wrote,
+          // and the revise PUT sends form.notes back verbatim; seeding ""
+          // would erase them on a service-only edit.
+          notes: d.notes || "",
         };
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
@@ -4135,6 +4140,18 @@ export default function EstimateToolViewV2({
     if (generating || saving || sending) return;
     if (!estimate) {
       alert('Click "Generate Estimate" first.');
+      return;
+    }
+    // In edit mode, saving PUBLISHES: the PUT rewrites the live row behind
+    // the customer's existing link, so the implicit save below would let a
+    // "just looking" preview push a half-finished revision to a sent/viewed
+    // estimate. Require the explicit Save changes click first.
+    if (editMode?.id && !savedViewUrl) {
+      alert(
+        'This estimate is being edited in place — previewing requires saving, ' +
+          'and saving publishes the revision to the customer\'s existing link. ' +
+          'Click "Save changes" first, then preview.',
+      );
       return;
     }
 
