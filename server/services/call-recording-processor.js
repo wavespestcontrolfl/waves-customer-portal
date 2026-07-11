@@ -2082,7 +2082,7 @@ function hasUsablePhone(value) {
   return String(value || '').replace(/\D/g, '').length >= 10;
 }
 
-function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
+function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null, resolvedSecondaryContacts = []) {
   // A service-contact slot email satisfies the email requirement: it is a
   // deliverable account email (appointment-email's resolveRecipients includes
   // slot emails). Load-bearing for the realtor-books-for-buyer flow — the
@@ -2101,7 +2101,14 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   // Validation-only: nothing here writes it onto the customer
   // (backfillCustomerFromAppointmentContact reads extracted.email, which
   // stays clean), so the misattribution this prompt rule fixes can't recur.
-  const secondaryCandidates = [extracted.secondary_contact, ...(Array.isArray(extracted.secondary_contacts) ? extracted.secondary_contacts : [])];
+  // resolvedSecondaryContacts (resolveCallSecondaryContacts output) folds in
+  // contacts that exist only in the V2 payload — without it a realtor/lender
+  // call where V2 captured the buyer email but V1 did not still fails here.
+  const secondaryCandidates = [
+    extracted.secondary_contact,
+    ...(Array.isArray(extracted.secondary_contacts) ? extracted.secondary_contacts : []),
+    ...(Array.isArray(resolvedSecondaryContacts) ? resolvedSecondaryContacts : []),
+  ];
   const extractedSecondaryEmail = secondaryCandidates
     .map((c) => (c && typeof c === 'object' ? String(c.email || '').trim().toLowerCase() : ''))
     .find((e) => EMAIL_RE.test(e)) || null;
@@ -5391,7 +5398,7 @@ const CallRecordingProcessor = {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
           customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone);
-          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
+          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone, callSecondaryContacts);
           if (!customerValidation.ok) {
             appointmentResult = {
               service: serviceResolution.service,

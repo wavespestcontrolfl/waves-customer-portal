@@ -497,6 +497,14 @@ describe('persistCallSecondaryContact', () => {
       secondary_contacts: [{ first_name: 'Leslie', email: 'lferraro@hotmail.com', role: 'home_buyer' }],
     }, '+14074933469');
     expect(resArr.missing).not.toContain('email');
+
+    // V2-only capture: the buyer email exists only in the V2 payload, so it
+    // arrives via the RESOLVED contacts param (resolveCallSecondaryContacts),
+    // not the legacy extracted fields.
+    const resResolved = validatePhoneCallAppointmentCustomer(base, {}, '+14074933469', [
+      { first_name: 'Joseph', email: 'joseph.haught89431@gmail.com', role: 'home_buyer' },
+    ]);
+    expect(resResolved.missing).not.toContain('email');
   });
 
   test('lender is an agent-type slot role: a slot-phone hit alone never auto-links (serves many buyers)', () => {
