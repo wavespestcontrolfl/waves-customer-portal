@@ -275,27 +275,41 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
       transcript: result.transcription,
       contactPassTranscript: result.contactPassTranscript || null,
     });
-    const decoderCandidates = filterDecoderCandidatesToBounced(
-      (decoded?.emails || []).flatMap((e) => e.candidates || []),
-      bounced,
-    );
+    const allDecoderCandidates = (decoded?.emails || []).flatMap((e) => e.candidates || []);
 
     const v1 = (() => { try { return JSON.parse(call.ai_extraction) || {}; } catch { return {}; } })();
-    const nameCandidates = nameAnchoredEmailCandidates({
-      bouncedEmail: bounced,
-      firstName: v1.first_name,
-      lastName: v1.last_name,
-    });
 
-    const excluded = new Set([bounced, matchEmail, ...alsoExclude.map((e) => String(e || '').trim().toLowerCase())]);
-    const candidates = mergeCandidates({ bouncedEmail: bounced, decoderCandidates, nameCandidates })
-      .filter((c) => !excluded.has(c.value));
-    if (!candidates.length) {
-      // The claim row was only the mutex — an empty card would ask the office
-      // to confirm nothing.
+    // A SECOND bounced address may have been annotated onto the claim row
+    // while transcription ran (one recording can dictate two emails, both
+    // wrong). The audio work is already paid for — before giving up the
+    // shared mutex row, try each annotated address against the same decode.
+    const midRow = await db('triage_items').where({ id: cardId }).first('payload').catch(() => null);
+    const midPayload = typeof midRow?.payload === 'string'
+      ? (() => { try { return JSON.parse(midRow.payload); } catch { return {}; } })()
+      : (midRow?.payload || {});
+    const annotated = (Array.isArray(midPayload.additional_bounced_emails) ? midPayload.additional_bounced_emails : [])
+      .map((e) => String(e || '').trim().toLowerCase())
+      .filter((e) => EMAIL_RE.test(e) && e !== bounced);
+    const addressesToTry = [bounced, ...annotated];
+    // EVERY address on the card hard-bounced — none may resurface as a candidate.
+    const excluded = new Set([...addressesToTry, matchEmail, ...alsoExclude.map((e) => String(e || '').trim().toLowerCase())]);
+
+    let carded = null;
+    for (const addr of addressesToTry) {
+      const cands = mergeCandidates({
+        bouncedEmail: addr,
+        decoderCandidates: filterDecoderCandidatesToBounced(allDecoderCandidates, addr),
+        nameCandidates: nameAnchoredEmailCandidates({ bouncedEmail: addr, firstName: v1.first_name, lastName: v1.last_name }),
+      }).filter((c) => !excluded.has(c.value));
+      if (cands.length) { carded = { address: addr, candidates: cands }; break; }
+    }
+    if (!carded) {
+      // No address on the card produced candidates — the claim row was only
+      // the mutex, and an empty card would ask the office to confirm nothing.
       await db('triage_items').where({ id: cardId }).del().catch(() => {});
       return { skipped: 'no_candidates' };
     }
+    const { candidates } = carded;
 
     // Payload keys match the Needs Review renderer's contract
     // (ConfirmEvidence): email_as_heard → "Heard", email_candidates →
@@ -308,21 +322,26 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
     const currentPayload = typeof currentRow?.payload === 'string'
       ? (() => { try { return JSON.parse(currentRow.payload); } catch { return {}; } })()
       : (currentRow?.payload || {});
+    // Every bounced address on the card OTHER than the carded one rides along
+    // as additional — including the primary, when an annotated address won.
+    const otherBounced = [...new Set([
+      bounced,
+      ...(Array.isArray(currentPayload.additional_bounced_emails) ? currentPayload.additional_bounced_emails : [])
+        .map((e) => String(e || '').trim().toLowerCase()),
+    ])].filter((e) => EMAIL_RE.test(e) && e !== carded.address);
     await db('triage_items')
       .where({ id: cardId })
       .update({
-        summary: `Hard bounce on ${bounced} — audio re-verification proposes ${candidates[0].value}`,
+        summary: `Hard bounce on ${carded.address} — audio re-verification proposes ${candidates[0].value}`,
         payload: JSON.stringify({
           flag: 'email_bounce_reverify',
-          bounced_email: bounced,
-          email_as_heard: bounced,
+          bounced_email: carded.address,
+          email_as_heard: carded.address,
           email_candidates: candidates,
           confirmation_question: buildReadbackQuestion(candidates[0].value),
           transcriber: { provider: result.provider || null, contact_pass: !!result.contactPassTranscript },
           customer_id: customerId || call.customer_id || null,
-          ...(Array.isArray(currentPayload.additional_bounced_emails) && currentPayload.additional_bounced_emails.length
-            ? { additional_bounced_emails: currentPayload.additional_bounced_emails }
-            : {}),
+          ...(otherBounced.length ? { additional_bounced_emails: otherBounced } : {}),
         }),
         updated_at: new Date(),
       });

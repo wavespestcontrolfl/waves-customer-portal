@@ -5,6 +5,21 @@
 // ranked candidates for the owner's read-back — never writes, never sends.
 jest.mock('../models/db', () => { const fn = jest.fn(); fn.raw = jest.fn((s) => s); return fn; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Provider mocks so the orchestration test runs the real control flow with no
+// transcription/decoder work.
+jest.mock('../services/call-recording-processor', () => ({
+  transcribeRecording: jest.fn(async () => ({
+    transcription: 'the caller spells both email addresses on this recording',
+    contactPassTranscript: 'A-P-I-T-T-S',
+    provider: 'test-provider',
+  })),
+  isImplausibleTranscript: jest.fn(() => false),
+}));
+jest.mock('../services/contact-dictation', () => ({
+  decodeDictatedContacts: jest.fn(async () => ({
+    emails: [{ candidates: [{ value: 'apitts6958@yahoo.com', confidence: 0.9 }] }],
+  })),
+}));
 
 const {
   nameAnchoredEmailCandidates,
@@ -121,6 +136,64 @@ describe('escapeLike', () => {
     expect(escapeLike('first_last@example.com')).toBe('first\\_last@example.com');
     expect(escapeLike('100%@x.com')).toBe('100\\%@x.com');
     expect(escapeLike('plain@x.com')).toBe('plain@x.com');
+  });
+});
+
+describe('reverifyBouncedEmailFromCall — annotated second address survives a no-candidate primary', () => {
+  test('primary yields nothing → the annotated address is tried on the same decode; the card lives', async () => {
+    const db = require('../models/db');
+    const callRow = {
+      id: 'call1',
+      recording_url: 'https://recordings/x.mp3',
+      recording_duration_seconds: 60,
+      duration_seconds: 60,
+      customer_id: null,
+      ai_extraction: JSON.stringify({ first_name: 'Adam', last_name: 'Pitts' }),
+    };
+    // The card was claimed for an address that will decode to NOTHING; a
+    // second bounce (the real Pitts address) was annotated while
+    // transcription ran. Pre-fix, the no-candidate primary deleted the
+    // shared mutex row and the annotated address was never processed.
+    const cardPayload = {
+      bounced_email: 'zzqqxx@yahoo.com',
+      analyzing: true,
+      additional_bounced_emails: ['apitz6958@yahoo.com'],
+    };
+    const updateSpy = jest.fn(() => Promise.resolve(1));
+    const delSpy = jest.fn(() => Promise.resolve(1));
+    const makeChain = (terminal) => {
+      const chain = {};
+      for (const m of ['whereNotNull', 'whereRaw', 'select', 'modify', 'where', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'onConflict', 'ignore', 'insert']) {
+        chain[m] = jest.fn(() => chain);
+      }
+      chain.first = jest.fn(() => Promise.resolve(terminal.first));
+      chain.returning = jest.fn(() => Promise.resolve(terminal.returning));
+      chain.update = updateSpy;
+      chain.del = delSpy;
+      chain.then = (res, rej) => Promise.resolve(terminal.rows || []).then(res, rej);
+      return chain;
+    };
+    const queue = [
+      makeChain({ rows: [callRow] }),                                  // findSourceCall
+      makeChain({ returning: ['card1'] }),                             // claim insert (mutex won)
+      makeChain({ first: { payload: JSON.stringify(cardPayload) } }),  // mid-read: annotated addresses
+      makeChain({ first: { payload: JSON.stringify(cardPayload) } }),  // re-read before final write
+      makeChain({}),                                                   // final card update
+    ];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await reverifyBouncedEmailFromCall({ bouncedEmail: 'zzqqxx@yahoo.com' });
+
+    expect(delSpy).not.toHaveBeenCalled();
+    expect(res.carded).toBe(true);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const written = updateSpy.mock.calls[0][0];
+    const payload = JSON.parse(written.payload);
+    expect(payload.bounced_email).toBe('apitz6958@yahoo.com');
+    expect(payload.email_candidates[0].value).toBe('apitts6958@yahoo.com');
+    // The no-candidate primary rides along — the office still sees it bounced.
+    expect(payload.additional_bounced_emails).toEqual(['zzqqxx@yahoo.com']);
+    expect(written.summary).toContain('apitz6958@yahoo.com');
   });
 });
 

@@ -244,10 +244,13 @@ export default function TriageInboxTabV2() {
         setDenyFields([]);
         if (kind === "triage") {
           // A verdict is call-level: the server resolves every open flag for the
-          // call, so drop all sibling rows for this call_log_id, not just the
-          // clicked one, and move that many into the resolved bucket.
-          const removed = items.filter((i) => i.call_log_id === item.call_log_id).length || 1;
-          setItems((prev) => prev.filter((i) => i.call_log_id !== item.call_log_id));
+          // call EXCEPT email_bounce_reverify follow-ups (those judge a bounced
+          // address, not the call, and survive on the server) — so drop exactly
+          // the sibling rows the server resolved, and move that many.
+          const wasResolved = (i) =>
+            i.call_log_id === item.call_log_id && i.reason_code !== "email_bounce_reverify";
+          const removed = items.filter(wasResolved).length || 1;
+          setItems((prev) => prev.filter((i) => !wasResolved(i)));
           setCounts((prev) => {
             const c = { ...prev };
             if (c[status] != null) c[status] = Math.max(0, c[status] - removed);
@@ -282,6 +285,31 @@ export default function TriageInboxTabV2() {
           const c = { ...prev };
           if (c[status] != null) c[status] = Math.max(0, c[status] - 1);
           if (c.dismissed != null) c.dismissed += 1;
+          return c;
+        });
+      })
+      .catch((err) => {
+        setActioning(null);
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
+      });
+  };
+
+  // Resolve a single item WITHOUT a call verdict — the action for
+  // email_bounce_reverify cards, which aren't judgments on the call and are
+  // rejected by the /verdict endpoint. Removes only the clicked row.
+  const resolveItem = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/resolve`, {
+      method: "PUT",
+      body: JSON.stringify({}),
+    })
+      .then(() => {
+        setActioning(null);
+        setItems((prev) => prev.filter((i) => i.id !== item.id));
+        setCounts((prev) => {
+          const c = { ...prev };
+          if (c[status] != null) c[status] = Math.max(0, c[status] - 1);
+          if (c.resolved != null) c.resolved += 1;
           return c;
         });
       })
@@ -383,6 +411,9 @@ export default function TriageInboxTabV2() {
                 const synopsis = item.lead_synopsis || item.call_summary || item.summary || "No summary available.";
                 const recId = item.recording_sid || item.call_log_id;
                 const busyKey = isTriage ? item.id : item.call_log_id;
+                // Bounce follow-up cards aren't call verdicts — the server
+                // rejects accept/deny on them; they resolve individually.
+                const isBounceCard = isTriage && item.reason_code === "email_bounce_reverify";
                 return (
                   <div
                     key={isTriage ? item.id : item.route_decision_id}
@@ -428,22 +459,36 @@ export default function TriageInboxTabV2() {
                               <XCircle size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Dismiss
                             </Button>
                           )}
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={actioning === busyKey}
-                            onClick={() => openDeny(item, isTriage ? "triage" : "auto_routed")}
-                          >
-                            <ThumbsDown size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Deny
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            disabled={actioning === busyKey}
-                            onClick={() => recordVerdict(item, isTriage ? "triage" : "auto_routed", "accept")}
-                          >
-                            <ThumbsUp size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Accept
-                          </Button>
+                          {isBounceCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Saving…" : "Resolve"}
+                            </Button>
+                          ) : (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={actioning === busyKey}
+                                onClick={() => openDeny(item, isTriage ? "triage" : "auto_routed")}
+                              >
+                                <ThumbsDown size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Deny
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actioning === busyKey}
+                                onClick={() => recordVerdict(item, isTriage ? "triage" : "auto_routed", "accept")}
+                              >
+                                <ThumbsUp size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Accept
+                              </Button>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
