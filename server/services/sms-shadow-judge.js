@@ -1,14 +1,21 @@
 /**
  * SMS Shadow Judge — Phase C of the SMS brand-voice loop.
  *
- * Nightly: pairs each unjudged message_drafts status='shadow' row with the
- * reply a human actually sent (first human-authored 'manual' or
- * human-approved 'ai_approved'/'ai_revised' outbound that really left the
- * system, to the same customer within REPLY_WINDOW_HOURS of the inbound),
- * scores the AI draft against it
- * per intent class, and writes shadow_draft_judgments. Per-intent score
- * history is what eventually graduates an intent from shadow → suggest →
- * auto-send (Phase E); escalation classes never graduate regardless.
+ * Nightly: pairs each unjudged eligible draft with the reply a human
+ * actually sent (first human-authored 'manual' or human-approved
+ * 'ai_approved'/'ai_revised' outbound that really left the system, to the
+ * same customer within REPLY_WINDOW_HOURS of the inbound), scores the AI
+ * draft against it per intent class, and writes shadow_draft_judgments.
+ * Per-intent score history is what eventually graduates an intent from
+ * shadow → suggest → auto-send (Phase E); escalation classes never graduate.
+ *
+ * Eligible drafts (owner 2026-07-11: maximize training signal, no autonomy):
+ *   - status='shadow' — the classic silent lane; and
+ *   - status='suggested' whose Agent Review decision resolved CORRECTED —
+ *     the human EDITED the draft before sending, so the sent text is
+ *     independent ground truth and the edit itself is the richest signal we
+ *     get. ACCEPTED (verbatim) suggestions stay excluded: judging a draft
+ *     against its own text would only inflate scores (self-pairing).
  *
  * Token discipline:
  *   - LLM is called ONLY when the human actually replied — that's the only
@@ -254,11 +261,25 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
   const startedAt = Date.now();
   const eligibleBefore = new Date(Date.now() - REPLY_WINDOW_HOURS * 3600 * 1000);
 
+  const { SUGGEST_WORKFLOW } = require('./sms-suggest-mode');
   const drafts = await db('message_drafts')
     .leftJoin('shadow_draft_judgments', 'message_drafts.id', 'shadow_draft_judgments.draft_id')
     .leftJoin('sms_log as inbound_sms', 'message_drafts.sms_log_id', 'inbound_sms.id')
+    // The draft's Agent Review decision (one per draft — idempotency-keyed):
+    // a CORRECTED resolution makes a status='suggested' draft judgeable too,
+    // because the human's edited send is independent ground truth.
+    .leftJoin('agent_decisions as ad', function joinDecision() {
+      this.on('ad.entity_id', 'message_drafts.id')
+        .andOnVal('ad.entity_type', 'message_draft')
+        .andOnVal('ad.workflow', SUGGEST_WORKFLOW);
+    })
     .whereNull('shadow_draft_judgments.id')
-    .where('message_drafts.status', 'shadow')
+    .where(function eligibleStatuses() {
+      this.where('message_drafts.status', 'shadow')
+        .orWhere(function correctedSuggestion() {
+          this.where('message_drafts.status', 'suggested').where('ad.status', 'corrected');
+        });
+    })
     .where('message_drafts.created_at', '<', eligibleBefore)
     .select(
       'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',

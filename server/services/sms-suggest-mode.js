@@ -22,10 +22,11 @@
  *   - scheduling_intent=true drafts never become suggestions in Phase D.
  *   - Fail closed: any lookup error resolves to 'shadow'.
  *
- * Suggested drafts get message_drafts status='suggested', which keeps them
- * out of the nightly judge (it queries status='shadow' only) — a suggestion
- * the human sends becomes the outbound itself, and judging a draft against
- * its own text would inflate scores.
+ * Suggested drafts get message_drafts status='suggested'. The nightly judge
+ * skips ACCEPTED ones — a suggestion sent verbatim becomes the outbound
+ * itself, and judging a draft against its own text would inflate scores.
+ * CORRECTED ones ARE judged (owner 2026-07-11, training throughput): the
+ * human's edited send is independent ground truth.
  *
  * PII: never log message bodies or full phone numbers from this module.
  */
