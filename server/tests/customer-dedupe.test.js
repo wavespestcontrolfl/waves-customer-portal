@@ -651,6 +651,11 @@ describe('executeMerge', () => {
       // Default: not enrolled in referrals (tests that need enrollment use
       // their own routers) — .first() must resolve a row or null, never [].
       if (table === 'referral_promoters' && q.called('first')) return null;
+      // Billing-artifact probes (legacy-vs-special guard): null unless a
+      // test plants rows via cfg-free state.
+      if ((table === 'scheduled_services' || table === 'invoices') && q.called('first')) {
+        return (state.billingArtifacts && state.billingArtifacts[table]) || null;
+      }
       if (table === 'scheduled_services' && q.called('update')) {
         state.serviceStamp = { whereNull: q.args('whereNull'), payload: q.args('update')[0] };
         return 2;
@@ -886,7 +891,12 @@ describe('executeMerge', () => {
           return null;
         }
         if (q.called('update')) {
-          state.promoterUpdates[q.args('where')[0].id] = q.args('update')[0];
+          const w = q.args('where')[0];
+          if (w.merged_into_promoter_id !== undefined) {
+            state.chainFlatten = [w, q.args('update')[0]];
+            return 1;
+          }
+          state.promoterUpdates[w.id] = q.args('update')[0];
           return 1;
         }
       }
@@ -936,6 +946,12 @@ describe('executeMerge', () => {
     // The loser row is NOT deleted — it survives as a code alias so /r/:code
     // links already in the wild keep attributing to the winner.
     expect(state.promoterDeleted).toBe(null);
+    // Older aliases chained onto the retiring promoter follow it to the
+    // survivor — the /r resolver stays single-hop.
+    expect(state.chainFlatten).toEqual([
+      { merged_into_promoter_id: 9 },
+      { merged_into_promoter_id: 7 },
+    ]);
     expect(state.promoterUpdates[9]).toEqual({
       customer_id: null,
       status: 'merged',
@@ -1288,6 +1304,31 @@ describe('executeMerge', () => {
     expect(result.repointed['data_hygiene_proposals.resource_id']).toBe(1);
   });
 
+  it('refuses legacy-vs-special billing merges when the flipping side has billing history', async () => {
+    // Special-mode winner absorbing a legacy loser WITH visits → refuse.
+    const a = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: 'per_application' },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', billing_mode: null },
+      fkRows: FK_ROWS,
+    });
+    a.state.billingArtifacts = { scheduled_services: { id: 'ss-1' } };
+    db.transaction.mockImplementation(async (fn) => fn(a.trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/legacy and special billing modes/);
+
+    // Null-mode winner adopting the loser's special mode with its OWN
+    // invoices → refuse (its history would flip cadence).
+    const b = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: null },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', billing_mode: 'annual_prepay' },
+      fkRows: FK_ROWS,
+    });
+    b.state.billingArtifacts = { invoices: { id: 'inv-1' } };
+    db.transaction.mockImplementation(async (fn) => fn(b.trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/legacy and special billing modes/);
+  });
+
   it('refuses matching per-application modes with different fees', async () => {
     const { trx } = buildTrx({
       winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: 'per_application', per_application_fee: '65.00' },
@@ -1406,6 +1447,23 @@ describe('mergeConversationRows', () => {
 });
 
 describe('runAutoMergeSweep', () => {
+  it('aborts (merges nothing) when the dismissals table is unreadable — fail closed for the writer', async () => {
+    installDb((table) => {
+      if (table === 'customers') {
+        return [
+          { id: 'cccccccc-0000-0000-0000-000000000001', first_name: 'D', last_name: 'B', phone: '+16124074763', pipeline_stage: 'new_lead', created_at: '2026-07-08' },
+          { id: 'cccccccc-0000-0000-0000-000000000002', first_name: 'D', last_name: null, phone: '6124074763', pipeline_stage: 'new_lead', created_at: '2026-07-09' },
+        ];
+      }
+      if (table === 'customer_duplicate_dismissals') throw new Error('relation unavailable');
+      return [];
+    });
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+    expect(results).toEqual({ merged: [], skipped: [], aborted: 'dismissals_unreadable' });
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   it('notifies with a routable Customer 360 deep link (?customerId=, not a path segment)', async () => {
     const winnerRow = {
       id: 'cccccccc-0000-0000-0000-000000000001',

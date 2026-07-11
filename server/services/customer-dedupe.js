@@ -264,7 +264,7 @@ function sanitizeCustomer(row) {
   return { ...rest, has_portal_login: !!passwordHash, has_stripe: !!stripeCustomerId };
 }
 
-async function findDuplicateGroups(database = db) {
+async function findDuplicateGroups(database = db, { failClosedOnDismissals = false } = {}) {
   // Live ROWS only (active + not deleted) — deliberately NOT restricted to
   // whereLiveCustomer's real-customer stages: the duplicates this tool exists
   // to clean up ARE lead-stage shells (intake guards refuse ambiguous
@@ -299,6 +299,11 @@ async function findDuplicateGroups(database = db) {
         .map((d) => `${d.customer_id_a}:${d.customer_id_b}`),
     );
   } catch (e) {
+    // Display fails OPEN (a dismissed pair reappearing in the queue is
+    // annoying, not dangerous). The auto-WRITER fails CLOSED: merging blind
+    // to operator "not a duplicate" verdicts is how a dismissed pair gets
+    // auto-merged anyway.
+    if (failClosedOnDismissals) throw e;
     logger.warn(`[customer-dedupe] dismissals read failed (continuing without): ${e.message}`);
   }
 
@@ -776,6 +781,27 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         throw new Error('executeMerge: customers have different per-application fees — reconcile billing first');
       }
     }
+    // Legacy NULL is a real cadence too — the monthly cron treats NULL as
+    // monthly membership, and completion billing reads the SURVIVOR's mode.
+    // Mixing a special-mode side with a legacy side is only safe when the
+    // side whose cadence would flip has no billing artifacts to flip: a
+    // null-mode winner adopting the loser's special mode flips its own
+    // history; a special-mode winner absorbs the loser's legacy visits into
+    // special billing.
+    const winnerMode = winner.billing_mode || null;
+    const loserMode = loser.billing_mode || null;
+    if (winnerMode !== loserMode && (winnerMode === null || loserMode === null)) {
+      const flippingSideId = winnerMode === null ? winnerId : loserId;
+      let hasArtifacts = false;
+      for (const table of ['scheduled_services', 'invoices']) {
+        // eslint-disable-next-line no-await-in-loop
+        const row = await trx(table).where({ customer_id: flippingSideId }).first('id');
+        if (row) { hasArtifacts = true; break; }
+      }
+      if (hasArtifacts) {
+        throw new Error('executeMerge: merging legacy and special billing modes with live billing history — reconcile billing first');
+      }
+    }
     // Multi-property account groups: retiring a loser whose account still
     // has OTHER live member profiles would strand them — the portal's
     // property switcher lists rows by the login's account_id, so the
@@ -950,6 +976,12 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
           await trx('referral_promoters').where({ id: winnerPromoter.id })
             .update({ ...sums, updated_at: trx.fn.now() });
         }
+        // Flatten alias chains: older aliases pointing at the promoter now
+        // being retired follow it to the survivor, so the /r/:code resolver
+        // stays single-hop.
+        await trx('referral_promoters')
+          .where({ merged_into_promoter_id: loserPromoter.id })
+          .update({ merged_into_promoter_id: winnerPromoter.id });
         // The loser row becomes a RETIRED ALIAS instead of deleting: its
         // /r/:code links are already in the wild (SMS/email invites), and
         // the public resolver attributes clicks/rewards only via a promoter
@@ -1153,7 +1185,13 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
 // ---------------------------------------------------------------------------
 
 async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
-  const groups = await findDuplicateGroups();
+  let groups;
+  try {
+    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] auto-merge sweep aborted — dismissals unreadable, refusing to merge blind: ${e.message}`);
+    return { merged: [], skipped: [], aborted: 'dismissals_unreadable' };
+  }
   const results = { merged: [], skipped: [] };
   for (const group of groups) {
     for (const candidate of group.candidates) {
