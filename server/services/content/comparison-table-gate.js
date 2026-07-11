@@ -156,22 +156,27 @@ const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorpor
 const OWN_BRAND_RE = /\bwaves\b/i;
 
 // ── HEADER-ONLY business-shape detectors (classifyOption) ──────────────────
-// A table option header is a short label, not prose, so the classifier can
-// afford looser matching than the body scans:
-//   - case-insensitive (a lowercase "acme pest control" column is the same
-//     business; prose keeps casing rules to avoid flagging ordinary copy);
-//   - the "Care" suffix ("Acme Lawn Care") — too education-heavy for prose;
-//   - season/month lead exclusions so "Spring lawn care" / "July lawn care"
-//     stay category options (these leads are NOT excluded in prose, where
-//     "May Pest Control is dishonest" must remain a detectable target);
-//   - legal-entity markers matched case-insensitively ("bob's bugs llc").
-//     Possessives stay case-sensitive even here — "season's" etc.
-const HEADER_LEAD_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|Spring|Summer|Fall|Autumn|Winter|Early|Late|January|February|March|April|May|June|July|August|September|October|November|December`;
-const HEADER_SUFFIX_SRC = `${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+Care`;
-// Lead token may start with a digit — "360 Pest Control" / "911 Pest
-// Control" are real provider-name shapes (Codex round-5).
-const HEADER_PROVIDER_NAME_RE = new RegExp(
-  `\\b((?!(?:${HEADER_LEAD_EXCLUSIONS})\\b)[A-Za-z0-9][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Za-z0-9][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:${HEADER_SUFFIX_SRC}))\\b`,
+// A table option header is a short label, not prose. Rule (Codex rounds 2–6
+// converged here): any header CONTAINING a provider-suffix phrase ("Pest
+// Control", "Lawn Care", "Mosquito Squad", "Exterminators", …) fails closed —
+// no lead-shape guessing, so punctuated ("A+ Pest Control"), digit-led
+// ("360 Pest Control"), bare-suffix ("Bug Busters"), and excluded-word-led
+// ("Spring Green Lawn Care") provider names are all caught, case-
+// insensitively — UNLESS the ENTIRE header is a strict category form:
+// zero or more category modifiers followed by a generic service phrase
+// ("DIY lawn care", "Professional pest control", "Spring lawn care",
+// "quarterly pest control"). Headers with no provider-suffix phrase at all
+// (species, attributes, methods) classify as category/educational.
+// Legal-entity markers are checked case-insensitively ("bob's bugs llc");
+// possessives stay case-sensitive (BUSINESS_MARKER_RE) — "season's" etc.
+const HEADER_BUSINESS_SUFFIX_RE = new RegExp(
+  `\\b(?:${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+Care)\\b`,
+  'i',
+);
+const HEADER_CATEGORY_MODS = '(?:diy|do[\\s-]it[\\s-]yourself|professional|pro|basic|standard|custom|premium|quality|affordable|budget|store[\\s-]bought|over[\\s-]the[\\s-]counter|national|local|regional|independent|corporate|franchise|big[\\s-]box|quarterly|monthly|annual|seasonal|recurring|one[\\s-]time|preventive|preventative|reactive|on[\\s-]demand|organic|natural|eco|traditional|conventional|residential|commercial|typical|average|weekly|bi[\\s-]weekly|year[\\s-]round|early|late|spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december)';
+const HEADER_GENERIC_SERVICE_PHRASE = '(?:(?:pest|lawn|mosquito|termite|bug|wildlife|rodent)\\s+(?:control|care|service|services|management|treatment|treatments|removal)(?:\\s+(?:service|services|plan|plans|program|programs))?|exterminators?|extermination)';
+const HEADER_CATEGORY_FORM_RE = new RegExp(
+  `^(?:${HEADER_CATEGORY_MODS}\\s+)*${HEADER_GENERIC_SERVICE_PHRASE}\\??$`,
   'i',
 );
 const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/i;
@@ -274,11 +279,12 @@ function classifyOption(header) {
   if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (OWN_BRAND_RE.test(h)) return 'own';
   // Business-shape check via the HEADER-ONLY detectors (see their comment
-  // block): NAME lead + industry/Care suffix, case-insensitive, with
-  // season/month leads excluded — so "Acme Lawn Care" / "acme pest control" /
-  // "bob's bugs llc" fail closed while "DIY lawn care" / "Spring lawn care"
-  // stay educational categories.
-  if (BUSINESS_MARKER_RE.test(h) || HEADER_LEGAL_MARKER_RE.test(h) || HEADER_PROVIDER_NAME_RE.test(h)) return 'unclassified';
+  // block): company markers, or a provider-suffix phrase anywhere in the
+  // header — fail closed unless the WHOLE header is a strict category form.
+  if (BUSINESS_MARKER_RE.test(h) || HEADER_LEGAL_MARKER_RE.test(h)) return 'unclassified';
+  if (HEADER_BUSINESS_SUFFIX_RE.test(h)) {
+    return HEADER_CATEGORY_FORM_RE.test(h) ? 'category' : 'unclassified';
+  }
   // Not business-SHAPED (no proper-name + industry suffix, no company
   // marker, no recognized competitor): a generic option header.
   // The writer legitimately uses <ComparisonTable> for educational content —

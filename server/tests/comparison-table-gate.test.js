@@ -156,6 +156,15 @@ describe('comparison-table-gate', () => {
     }
   });
 
+  test('punctuated, excluded-word-led, and bare-suffix provider headers fail closed (Codex round-6 P1s)', () => {
+    for (const header of ['A+ Pest Control', 'Acme-Pest Control', 'Spring Green Lawn Care', 'Mosquito Squad', 'Bug Busters', 'Termite Specialists']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
   test('lowercase business-shaped headers still fail closed (Codex round-3 P1)', () => {
     for (const header of ['acme pest control', 'acme lawn care']) {
       const t = CATEGORY_TABLE.replace('National chain', header);
