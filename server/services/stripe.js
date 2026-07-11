@@ -1550,6 +1550,10 @@ const StripeService = {
     // pending_refund_request, so fall back to it.
     const isReplay = !!(meta.pending_refund_key
       && (meta.pending_refund_base ?? meta.pending_refund_request) === enteredTag);
+    // The freshly-computed gross for the CURRENT balance — a stale replay
+    // whose original attempt provably never landed restarts from this, not
+    // from the dead attempt's frozen/legacy amount.
+    const freshGrossCents = grossCents;
     if (isReplay && grossCents !== null) {
       // Resend the ORIGINAL amount verbatim — Stripe rejects a reused key
       // whose parameters differ, and a definitive rejection would clear the
@@ -1560,7 +1564,7 @@ const StripeService = {
         ? Number(meta.pending_refund_gross)
         : requestCents;
     }
-    const requestTag = isReplay
+    let requestTag = isReplay
       ? meta.pending_refund_request
       : (grossCents === null ? 'rest' : String(grossCents));
     if (meta.pending_refund_key && !isReplay) {
@@ -1653,7 +1657,14 @@ const StripeService = {
           && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
         if (!adoptedRefund) {
           // The original attempt never landed at Stripe — start over as a
-          // validated fresh attempt against the CURRENT balance.
+          // validated fresh attempt against the CURRENT balance. The gross
+          // and tag were forced to the dead attempt's values above (a legacy
+          // marker would resend the UNGROSSED base, shorting the customer
+          // the prorated surcharge); recompute both — a fresh tag also
+          // derives a fresh idempotency key, so the new amount can't wedge
+          // on the stale key's parameter check.
+          grossCents = freshGrossCents;
+          requestTag = grossCents === null ? 'rest' : String(grossCents);
           assertNewAttemptRefundable();
           await persistPendingAttempt();
         }

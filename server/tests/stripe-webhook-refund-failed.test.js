@@ -41,10 +41,11 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https:
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 
 const db = require('../models/db');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
-const { _handleRefundFailed: handleRefundFailed } = require('../routes/stripe-webhook');
+const { _handleRefundFailed: handleRefundFailed, _handleChargeRefunded: handleChargeRefunded } = require('../routes/stripe-webhook');
 
 describe('handleRefundFailed', () => {
   let paymentRow;
@@ -119,6 +120,8 @@ describe('handleRefundFailed', () => {
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(trx));
+    // Pre-migration default: the stripe_failed_refunds fence table is absent.
+    db.schema = { hasTable: jest.fn(async () => false) };
   });
 
   test('full-refund bounce reverts the row to collected and notifies', async () => {
@@ -207,6 +210,33 @@ describe('handleRefundFailed', () => {
     expect(AnnualPrepay.syncTermForInvoicePayment).toHaveBeenCalledWith('inv-1');
   });
 
+  test('restore rides the conditional WHERE, not the stale pre-lock status read', async () => {
+    // Race: this handler reads the invoice while charge.refunded is still
+    // committing — the pre-lock read says 'paid', but by the time the
+    // payments lock is acquired the invoice IS 'refunded'. The conditional
+    // update must still restore it.
+    dbInvoices.first.mockResolvedValue({ id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'paid' });
+    await handleRefundFailed(failedRefund());
+
+    expect(trxInvoices.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1', status: 'refunded' }));
+    expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
+    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0001 was restored to paid');
+  });
+
+  test('reaches a charge-only linked invoice via invoices.stripe_charge_id', async () => {
+    // Legacy reconciled payments have no PI on the invoice — charge.refunded
+    // terminalizes through the charge-id fallback, so the bounce restore
+    // must resolve the invoice the same way.
+    dbInvoices.first
+      .mockResolvedValueOnce(null) // PI lookup misses
+      .mockResolvedValueOnce({ id: 'inv-2', invoice_number: 'WPC-2026-0002' });
+    await handleRefundFailed(failedRefund());
+
+    expect(dbInvoices.where).toHaveBeenCalledWith({ stripe_charge_id: 'ch_1' });
+    expect(trxInvoices.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-2', status: 'refunded' }));
+    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0002 was restored to paid');
+  });
+
   test('names a refund-cancelled prepay term in the alert (revival is dispute-marker-gated)', async () => {
     dbInvoices.first.mockResolvedValue({ id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'refunded' });
     dbPrepayTerms.first.mockResolvedValue({ id: 'term-9' });
@@ -233,6 +263,23 @@ describe('handleRefundFailed', () => {
     const meta = JSON.parse(args.metadata);
     expect(meta.failed_refund_ids).toEqual(['re_1']);
     expect(meta.stamped_refund_ids).toEqual(['re_2']);
+  });
+
+  test('bounce of the NEWEST partial repoints stripe_refund_id at the surviving stamp', async () => {
+    // re_old ($40) cleared, re_fail ($20) stamped last and then bounced.
+    // A remainder survives, so the id is not cleared — but it must stop
+    // naming money Stripe kept and point at the surviving stamp instead.
+    paymentRow.status = 'paid';
+    paymentRow.refund_amount = '60.00';
+    paymentRow.stripe_refund_id = 're_fail';
+    paymentRow.metadata = JSON.stringify({ stamped_refund_ids: ['re_old', 're_fail'] });
+    await handleRefundFailed(failedRefund({ amount: 2000 }));
+
+    const args = trxUpdate.mock.calls[0][0];
+    expect(args.refund_amount).toBe(40);
+    expect(args.refund_status).toBe('partial');
+    expect(args.stripe_refund_id).toBe('re_old');
+    expect(JSON.parse(args.metadata).stamped_refund_ids).toEqual(['re_old']);
   });
 
   test('falls back to the PI lookup for ACH rows with no charge/refund id yet', async () => {
@@ -347,6 +394,76 @@ describe('handleRefundFailed', () => {
     db.transaction.mockImplementation(async (cb) => cb(db));
 
     await expect(handleRefundFailed(failedRefund())).rejects.toThrow('insert failed');
+  });
+
+  test('no payments row and no deposit: the refund id is fenced in stripe_failed_refunds, atomically with the notification', async () => {
+    const fenceInsert = jest.fn().mockResolvedValue([1]);
+    const fenceRow = { current: null };
+    const fenceQuery = {
+      where: jest.fn(() => fenceQuery),
+      first: jest.fn(async () => fenceRow.current),
+      insert: fenceInsert,
+    };
+    const emptyQuery = {
+      where: jest.fn(() => emptyQuery),
+      first: jest.fn(async () => undefined),
+    };
+    db.mockImplementation((table) => {
+      if (table === 'payments') return emptyQuery;
+      if (table === 'stripe_failed_refunds') return fenceQuery;
+      if (table === 'notifications') return { insert: notificationInsert };
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+    db.schema = { hasTable: jest.fn(async () => true) };
+    db.transaction.mockImplementation(async (cb) => cb(db));
+
+    await handleRefundFailed(failedRefund());
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(fenceInsert).toHaveBeenCalledWith(expect.objectContaining({
+      stripe_refund_id: 're_fail',
+      stripe_charge_id: 'ch_1',
+      stripe_payment_intent_id: 'pi_1',
+    }));
+    expect(notificationInsert).toHaveBeenCalledTimes(1);
+    expect(notificationInsert.mock.calls[0][0].body).toContain('fenced');
+
+    // Replay: the fence row exists → no second insert, no re-notify.
+    fenceRow.current = { stripe_refund_id: 're_fail' };
+    fenceInsert.mockClear();
+    notificationInsert.mockClear();
+    db.transaction.mockClear();
+    await handleRefundFailed(failedRefund());
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(fenceInsert).not.toHaveBeenCalled();
+    expect(notificationInsert).not.toHaveBeenCalled();
+  });
+
+  test('charge.refunded for a pre-settlement-fenced refund is skipped entirely', async () => {
+    // The bounce arrived before any payments row existed and was fenced —
+    // the late creation event must not stamp, terminalize, or restore
+    // credit. Every table except the fence throws: reaching any other
+    // lookup means the guard failed.
+    const fenceQuery = {
+      where: jest.fn(() => fenceQuery),
+      first: jest.fn(async () => ({ stripe_refund_id: 're_fail' })),
+    };
+    db.mockImplementation((table) => {
+      if (table === 'stripe_failed_refunds') return fenceQuery;
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+    db.schema = { hasTable: jest.fn(async () => true) };
+
+    await handleChargeRefunded({
+      id: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 10290,
+      amount_refunded: 5145,
+      refunded: false,
+      refunds: { data: [{ id: 're_fail', amount: 5145, created: 1751000000 }] },
+    });
+    expect(fenceQuery.where).toHaveBeenCalledWith({ stripe_refund_id: 're_fail' });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(notificationInsert).not.toHaveBeenCalled();
   });
 
   test('no payments row (estimate-deposit refund) still notifies with the deposit hint', async () => {

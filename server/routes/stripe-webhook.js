@@ -1688,6 +1688,20 @@ async function handleChargeRefunded(charge) {
   // kept. Events for OTHER refunds on the same charge carry different ids
   // and proceed normally.
   if (refundId) {
+    // Pre-settlement fence: the bounce arrived before ANY payments row
+    // existed (invoice/statement cases — deposits fence on their own
+    // ledger). Table-probed for pre-migration tolerance.
+    try {
+      if (await db.schema.hasTable('stripe_failed_refunds')) {
+        const fenced = await db('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+        if (fenced) {
+          logger.warn(`[stripe-webhook] charge.refunded for ${refundId} arrived after its pre-settlement failure was fenced — skipping stamp + side effects`);
+          return;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[stripe-webhook] pre-settlement fence probe failed for ${refundId}: ${err.message}`);
+    }
     // Same lookup ladder as handleRefundFailed — a processing-stage ACH row
     // may be keyed by PI only, and the fence must cover every row that
     // handler can mark.
@@ -1996,6 +2010,37 @@ async function handleRefundFailed(refund) {
       });
       return;
     }
+    // No payments row and not a deposit — an invoice/statement refund whose
+    // bounce outran settlement. Fence the refund id in stripe_failed_refunds
+    // (PK = refund id) so the late charge.refunded can't stamp a refunded
+    // marker, terminalize the invoice, or restore credit for money Stripe
+    // kept. Same atomic fence+notification contract as the deposit branch;
+    // table-probed for pre-migration tolerance.
+    let fenceTableReady = false;
+    if (refundId) {
+      try {
+        fenceTableReady = await db.schema.hasTable('stripe_failed_refunds');
+        if (fenceTableReady) {
+          const fenced = await db('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+          if (fenced) return; // replay — already recorded + notified
+        }
+      } catch (err) {
+        logger.warn(`[stripe-webhook] refund-failed fence probe failed for ${refundId}: ${err.message}`);
+        fenceTableReady = false;
+      }
+    }
+    if (refundId && fenceTableReady) {
+      await db.transaction(async (trx) => {
+        await trx('stripe_failed_refunds').insert({
+          stripe_refund_id: refundId,
+          stripe_charge_id: chargeId,
+          stripe_payment_intent_id: piId,
+          context: 'refund.failed before settlement row',
+        });
+        await insertBounceNotification(trx, 'No payments row matched — the failed refund id was fenced, so its late charge.refunded creation event will be skipped. If an invoice or statement was already marked refunded, restore it manually.');
+      });
+      return;
+    }
     await insertBounceNotification(db, 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.');
     return;
   }
@@ -2011,9 +2056,20 @@ async function handleRefundFailed(refund) {
     try {
       pMeta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
     } catch { pMeta = {}; }
-    linkedInvoice = pMeta.invoice_id
-      ? await db('invoices').where({ id: pMeta.invoice_id }).first('id', 'invoice_number', 'status')
-      : (piId ? await db('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number', 'status') : null);
+    // Same resolution ladder as resolveRefundedInvoiceId — a legacy
+    // reconciled charge-only payment links its invoice via
+    // invoices.stripe_charge_id, and charge.refunded terminalizes through
+    // that fallback, so the bounce restore must reach it too.
+    if (pMeta.invoice_id) {
+      linkedInvoice = await db('invoices').where({ id: pMeta.invoice_id }).first('id', 'invoice_number');
+    }
+    if (!linkedInvoice && piId) {
+      linkedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number');
+    }
+    const linkChargeId = chargeId || payment.stripe_charge_id || null;
+    if (!linkedInvoice && linkChargeId) {
+      linkedInvoice = await db('invoices').where({ stripe_charge_id: linkChargeId }).first('id', 'invoice_number');
+    }
     if (linkedInvoice) {
       cancelledPrepayTermId = (await db('annual_prepay_terms')
         .where({ prepay_invoice_id: linkedInvoice.id, status: 'cancelled' })
@@ -2094,7 +2150,15 @@ async function handleRefundFailed(refund) {
       // with one), and a fully-bounced refund must leave the row refundable.
       // failed_refund_ids in metadata stays as the durable record.
       refund_status: nextRefundCents > 0 ? 'partial' : null,
-      ...(nextRefundCents === 0 ? { stripe_refund_id: null } : {}),
+      // The row's "current refund" pointer must never name money Stripe
+      // kept: cleared outright when the bounce erased the whole refund, and
+      // when an earlier partial survives, repointed at the newest surviving
+      // stamped id (or cleared for legacy rows with no stamped record).
+      ...(nextRefundCents === 0
+        ? { stripe_refund_id: null }
+        : (row.stripe_refund_id === refundId
+          ? { stripe_refund_id: stampedIds.filter((id) => id !== refundId).pop() || null }
+          : {})),
       // A row terminalized to 'refunded' by a refund that never fully
       // cleared is still (at least partly) collected money — anything
       // short of the full paid amount reverts to 'paid', matching the
@@ -2108,10 +2172,13 @@ async function handleRefundFailed(refund) {
     // 'refunded' (returnAppliedCreditOnRefund) — with the money kept by
     // Stripe that status is now false on every customer/admin surface.
     // Status-only and mechanical (collected money is a fact); the CREDIT
-    // side of that settle stays a human decision below. Conditional WHERE
-    // makes the pre-trx status read race-safe.
+    // side of that settle stays a human decision below. The decision rides
+    // the conditional WHERE alone — NOT a pre-trx status read: this trx can
+    // wait on the payments lock while the racing charge.refunded commits
+    // the very flip to 'refunded', and a stale pre-lock 'paid' would skip
+    // the restore entirely.
     let invoiceRestored = null;
-    if (linkedInvoice && String(linkedInvoice.status).toLowerCase() === 'refunded' && nextRefundCents < rowPaidCents) {
+    if (linkedInvoice && nextRefundCents < rowPaidCents) {
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
         .update({ status: 'paid', updated_at: new Date() });
@@ -2353,6 +2420,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // value — escalating twice or skipping a step. Same advisory-lock
     // pattern as the terminal handoff mint serialization.
     let recentFailures = 0;
+    let achReplay = false;
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -2379,6 +2447,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         const alreadyLogged = await trx('ach_failure_log')
           .where(eventId && hasEventCol ? { ...dedupe, stripe_event_id: eventId } : dedupe)
           .first('id');
+        if (alreadyLogged) achReplay = true;
         if (!alreadyLogged) {
           const insertRow = {
             customer_id: customer.id,
@@ -2439,6 +2508,16 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         throw dbErr;
       }
     });
+
+    // Replay (this failure was already counted): the status recompute above
+    // is idempotent, but the customer SMS and the dunning-hold counter below
+    // are NOT — a duplicate webhook delivery must not resend notices or
+    // advance/release held follow-up sequences for a failure that already
+    // did both.
+    if (achReplay) {
+      logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
+      return;
+    }
 
     // Send SMS outside the transaction so a slow provider call doesn't
     // hold the per-customer advisory lock against concurrent failures.
@@ -3421,3 +3500,4 @@ async function handleSetupIntentFailed(setupIntent) {
 module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
+module.exports._handleChargeRefunded = handleChargeRefunded;

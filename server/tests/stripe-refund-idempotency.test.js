@@ -366,6 +366,31 @@ describe('StripeService.refund', () => {
     expect(Date.parse(pendingMeta.pending_refund_at)).toBeGreaterThan(Date.now() - 60000);
   });
 
+  test('STALE LEGACY marker on a surcharged payment: the fresh attempt is re-grossed, not the legacy base', async () => {
+    // The replay path forces the legacy UNGROSSED amount (verbatim-key
+    // rule), but once Stripe's list proves that attempt never landed, the
+    // retry is a NEW attempt — it must send base + prorated surcharge and
+    // derive a fresh key, or the customer is shorted the surcharge share.
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => ({ data: [] }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    // base 10000¢, surcharge 290¢ → $40 base grosses to 4000+round(4000×290/10000)=4116¢.
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(4116);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4116_0');
+    const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+    expect(pendingMeta.pending_refund_base).toBe('4000');
+    expect(pendingMeta.pending_refund_gross).toBe(4116);
+  });
+
   test("STALE 'rest' marker: a later dashboard PARTIAL is NOT adopted as the full refund", async () => {
     // The original full-remaining attempt never reached Stripe; someone
     // later issued a $25 dashboard partial. Adopting it would clear the
