@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { CUSTOMER_STAGES } = require('../customer-stages');
 const MODELS = require('../../config/models');
 const { isEnabled } = require('../../config/feature-gates');
 let Anthropic;
@@ -23,6 +24,12 @@ class RetentionEngine {
 
     const customer = await db('customers').where('id', customerId).first();
     if (!customer) return null;
+    // Churn requires having BEEN a customer. Health scores cover leads too,
+    // so without this gate a never-paying new_lead can be churn-alerted as
+    // "critical" (Copeman, 2026-07-11, 3 AM cron → 🚨 SMS to Adam) and burn
+    // an AI outreach draft nobody can act on. Leads, prospects, and
+    // soft-deleted rows never get retention outreach or churn alerts.
+    if (!CUSTOMER_STAGES.includes(customer.pipeline_stage) || customer.deleted_at) return null;
 
     // Don't bombard — check for recent outreach
     const recent = await db('retention_outreach')
