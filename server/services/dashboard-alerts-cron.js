@@ -45,6 +45,20 @@ const ADVISORY_LOCK_KEY = 'dashboard-alerts-cron';
 // known overlap.
 let isRunning = false;
 
+// Slow-creep advisory alerts whose count grows by ones all day (every new
+// manual-billing customer, every churn-score tick). The generic
+// count-grew=escalated rule re-notified on EACH +1 — "Autopay covers X%"
+// fired 6× on 2026-07-07 alone. For these ids a count increase only
+// re-notifies after the cooldown; the state row still heartbeats every tick,
+// and count DROPS/resolution behavior is unchanged. Genuinely urgent alerts
+// (payments failed, AR overdue) are deliberately NOT listed.
+const COUNT_ESCALATION_COOLDOWN_MS = {
+  autopay_coverage_low: 7 * 24 * 60 * 60 * 1000,
+  churn_at_risk: 24 * 60 * 60 * 1000,
+  at_risk_mrr: 24 * 60 * 60 * 1000,
+  customer_duplicates_review: 24 * 60 * 60 * 1000,
+};
+
 // Single tick: acquire advisory lock, read+write state inside a
 // transaction, COMMIT, then fire notifications. Returns counts.
 async function runDashboardAlertsCheck() {
@@ -97,7 +111,10 @@ async function runDashboardAlertsCheckInner() {
       for (const alert of current) {
         const prev = stateById.get(alert.id);
         const isNew = !prev;
-        const escalated = prev && alert.count > (prev.last_pushed_count || 0);
+        const cooldownMs = COUNT_ESCALATION_COOLDOWN_MS[alert.id] || 0;
+        const cooledDown = !prev || !prev.last_pushed_at
+          || (now - new Date(prev.last_pushed_at).getTime()) >= cooldownMs;
+        const escalated = prev && alert.count > (prev.last_pushed_count || 0) && cooledDown;
 
         if (isNew || escalated) {
           // Upsert state FIRST. ON CONFLICT ensures a concurrent
@@ -189,4 +206,7 @@ async function runDashboardAlertsCheckInner() {
   return { fired, cleared, current: current.length };
 }
 
-module.exports = { runDashboardAlertsCheck };
+// COUNT_ESCALATION_COOLDOWN_MS is shared with the live bell overlay
+// (routes/admin-notifications.js) so a dismissed slow-creep alert doesn't
+// re-show on every +1 either — same policy on both surfaces.
+module.exports = { runDashboardAlertsCheck, COUNT_ESCALATION_COOLDOWN_MS };

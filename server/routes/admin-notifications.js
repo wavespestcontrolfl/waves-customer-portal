@@ -6,6 +6,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const NotificationService = require('../services/notification-service');
 const PushService = require('../services/push-notifications');
 const { computeDashboardAlerts, toNotifications } = require('../services/dashboard-alerts');
+const { COUNT_ESCALATION_COOLDOWN_MS } = require('../services/dashboard-alerts-cron');
 
 router.use(adminAuthenticate);
 
@@ -91,6 +92,7 @@ async function liveAlertNotifications(adminUserId) {
   const dismissedByAlert = new Map(
     dismissals.map((d) => [d.alert_id, {
       count: parseInt(d.dismissed_at_count || 0, 10),
+      at: d.dismissed_at ? new Date(d.dismissed_at).getTime() : 0,
       members: d.dismissed_members
         ? new Set(String(d.dismissed_members).split(',').filter(Boolean))
         : null,
@@ -100,7 +102,15 @@ async function liveAlertNotifications(adminUserId) {
   const visible = alerts.filter((a) => {
     const dismissed = dismissedByAlert.get(a.id);
     if (dismissed == null) return true; // never dismissed
-    if (a.count > dismissed.count) return true; // escalation re-shows
+    // Slow-creep advisory alerts share the cron's count-escalation cooldown:
+    // after a dismissal, a bare +1 must not re-show them until the cooldown
+    // elapses — otherwise the bell badge bounces back on every new
+    // manual-billing customer / churn-score tick despite the cron holding
+    // quiet. Membership-aware re-show below still applies (new WORK is not
+    // slow creep).
+    const cooldownMs = COUNT_ESCALATION_COOLDOWN_MS[a.id] || 0;
+    const cooledDown = !dismissed.at || (Date.now() - dismissed.at) >= cooldownMs;
+    if (a.count > dismissed.count && cooledDown) return true; // escalation re-shows
     // Membership-aware re-show for queue alerts: a member the dismissal did
     // NOT cover (a different lead crossing the SLA, a new expiring estimate)
     // is new work even at an unchanged or lower count — but a queue that
