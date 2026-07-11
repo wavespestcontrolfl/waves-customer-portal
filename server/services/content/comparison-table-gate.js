@@ -145,7 +145,6 @@ function legalEntityRe(flags) { return new RegExp(LEGAL_ENTITY_NAME_SRC, flags);
 
 const INDUSTRY_SUFFIX_RE = new RegExp(`\\b(${INDUSTRY_SUFFIX_SRC})\\b`, 'i');
 const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/;
-const CATEGORY_OPTION_RE = /\b(national|nationwide|chains?|franchises?|big[\s-]?box|corporate|regional|local(?:ly)?|independent|small(?:er)?|diy|do[\s-]it[\s-]yourself|self[\s-]?treat\w*|home(?:owner)?|store[\s-]bought|over[\s-]the[\s-]counter|professionals?|pros?|quarterly|monthly|annual|seasonal|one[\s-]?time|one[\s-]?off|recurring|reactive|preventive|preventative|on[\s-]demand|subscription|plans?|programs?|packages?|services?|options?|untreated|no treatment|ignoring it|what (?:to|you))\b/i;
 const OWN_BRAND_RE = /\bwaves\b/i;
 
 // Cell value affirms the row criterion → the CLAIM is the row label (so an
@@ -246,8 +245,18 @@ function classifyOption(header) {
   if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (OWN_BRAND_RE.test(h)) return 'own';
   if (INDUSTRY_SUFFIX_RE.test(h) || BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
-  if (CATEGORY_OPTION_RE.test(h)) return 'category';
-  return 'unclassified';
+  // Not business-SHAPED (no industry suffix, no company marker, no
+  // provider-name shape, no recognized competitor): a generic option header.
+  // The writer legitimately uses <ComparisonTable> for educational content —
+  // species lookalikes ("Real Brown Recluse"), attribute columns ("Type",
+  // "Kid-safe?"), DIY methods ("Bleach + Google") — and the old
+  // everything-fails-closed default routed 2–3 of those drafts to human
+  // review per day as phantom "businesses" (COMPARISON_UNCLASSIFIED_OPTION).
+  // Defamation needs a target; a header with no business shape has none, so
+  // it classifies as a category/educational option. Provider-category
+  // headers ("National chain", "DIY", "Local companies") land here too, as
+  // they always did.
+  return 'category';
 }
 
 // Negation markers — a NEGATED claim ("Not national", "No recurring plans")

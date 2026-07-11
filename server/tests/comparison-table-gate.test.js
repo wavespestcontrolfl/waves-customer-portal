@@ -68,6 +68,46 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
   });
 
+  test('educational species-comparison headers are NOT phantom businesses (prod 2026-07 false positives)', () => {
+    const t = `<ComparisonTable
+  columns={["Feature","Real Brown Recluse","Southern House Spider (common SWFL lookalike)"]}
+  rows={[
+    { label: "Violin marking", values: ["Distinct","Faint or absent"] },
+    { label: "Eye pattern", values: ["6 eyes in pairs","8 eyes"] }
+  ]}
+  caption="How to tell a brown recluse from its most common SWFL lookalike." />`;
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: false });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('generic attribute/question headers ("Type", "Typical protection", "Kid-safe?") are not businesses', () => {
+    const t = `<ComparisonTable
+  columns={["Bait station","Type","Typical protection","Kid-safe?"]}
+  rows={[
+    { label: "Placement", values: ["Indoor","Perimeter","Locked housing"] }
+  ]}
+  caption="Choosing a bait station." />`;
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: false });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('a DIY-method header ("Bleach + Google") is not a business; a business-shaped one in the same table still is', () => {
+    const clean = `<ComparisonTable
+  columns={["Approach","Bleach + Google","Professional treatment"]}
+  rows={[{ label: "Cost", values: ["Low upfront","Quote-based"] }]}
+  caption="DIY vs professional German-roach control." />`;
+    const r1 = gate.evaluate(wrap(clean), { namedCompetitorEnabled: false });
+    expect(r1.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r1.pass).toBe(true);
+
+    const withBiz = clean.replace('Professional treatment', 'Gulf Coast Bug Busters');
+    const r2 = gate.evaluate(wrap(withBiz), { namedCompetitorEnabled: false });
+    expect(r2.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    expect(r2.pass).toBe(false);
+  });
+
   test('a web-search-style business name (industry suffix, not allowlisted) used as a column fails closed', () => {
     const t = CATEGORY_TABLE.replace('National chain', 'Acme Pest Control');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
