@@ -11,7 +11,7 @@ function parseLooseJson(text) {
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === 'object') return parsed;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
     } catch {
       // try the next candidate
     }

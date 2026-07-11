@@ -29,4 +29,9 @@ describe('parseLooseJson', () => {
     expect(parseLooseJson('42')).toBeNull();
     expect(parseLooseJson('"a string"')).toBeNull();
   });
+
+  test('returns null for top-level arrays (object-only contract)', () => {
+    expect(parseLooseJson('[]')).toBeNull();
+    expect(parseLooseJson('[{"grade":"A"}]')).toBeNull();
+  });
 });
