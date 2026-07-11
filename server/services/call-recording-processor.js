@@ -731,17 +731,21 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
-    // Billing flag: the identity-conflict check above already returns v1
-    // unmerged when the two sides name different people (differing name/phone/
-    // email), so reaching here means the same/compatible contact — OR the flag
-    // so V2 can gap-fill a billing flag V1 missed for the SAME billed email. The
-    // one residual case the conflict check can't see is a V2 flag whose own
-    // email differs from the email we'll actually bill (v1.email || v2.email);
-    // suppress the V2 flag only then, so an "owner pays" flag never rides onto a
-    // different contact's inbox.
+    // Billing flag: V1's own flag always stands. A V2 flag is only inherited
+    // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
+    // full name. The identity-conflict check above can't see this gap: if V1
+    // extracted an email-only contact and V2 a name-only billing party, nothing
+    // conflicts, yet they may be different people — inheriting V2's flag would
+    // bill V1's inbox for V2's payer. Requiring a positive shared identifier
+    // keeps the legitimate gap-fill (same name, V2 adds the flag) while refusing
+    // to carry an "owner pays" flag onto an unrelated contact's email.
     is_billing_party: v1.is_billing_party === true
-      || (v2.is_billing_party === true
-        && (!v2.email || !v1.email || norm(v1.email) === norm(v2.email))),
+      || (v2.is_billing_party === true && (
+        (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
+        || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
+        || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
+          && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name))
+      )),
     notes: v1.notes || v2.notes,
   };
 }
@@ -814,10 +818,24 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
 // without a payer) rather than mint an unroutable Bill-To. Gated behind BOTH the
 // payer-linking gate AND secondary-contact capture (the payer IS a secondary
 // party). Never throws — a payer-lookup blip must not block the booking.
-async function resolveCallBillingPayer(secondaryContacts) {
+async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null) {
   if (!isEnabled('callPayerLinking') || process.env.GATE_CALL_SECONDARY_CONTACT !== 'true') return null;
-  const list = Array.isArray(secondaryContacts) ? secondaryContacts : [];
-  const party = list.find((c) => c && c.is_billing_party === true
+  const candidates = Array.isArray(secondaryContacts) ? [...secondaryContacts] : [];
+  // A V2-extracted billing party can be PRUNED from the merged list when its
+  // identity conflicts with V1's secondary contact (resolveCallSecondaryContacts
+  // drops the V2 mirror so notifications don't fan out to the rejected identity).
+  // But that party is the PAYER, billed at its OWN AP email — so also scan the
+  // raw V2 contacts here. Keying the payer on the party's own email keeps it the
+  // correct inbox regardless of the notification-routing decision.
+  if (v2Extraction) {
+    const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+    const v2Single = mapSecondaryContactToLegacy(v2Extraction.secondary_contact);
+    const v2Arr = mapSecondaryContactsToLegacy(v2Extraction.secondary_contacts);
+    for (const c of [v2Single, ...v2Arr]) if (c) candidates.push(c);
+  }
+  // Only a party flagged is_billing_party with its OWN usable email — the payer
+  // is billed at that inbox, so this never routes to a different contact.
+  const party = candidates.find((c) => c && c.is_billing_party === true
     && EMAIL_RE.test(String(c.email || '').trim().toLowerCase()));
   if (!party) return null;
   try {
@@ -5492,6 +5510,12 @@ const CallRecordingProcessor = {
                 parentWindowStart: windowStart || '09:00',
               });
               let reusedExistingSchedule = false;
+              // Resolve the Bill-To payer ONCE, before the insert-or-reuse
+              // transaction, so every path (fresh insert, findExisting reuse,
+              // idempotency-key reuse) can stamp/backfill it — a reprocess that
+              // reuses a pre-gate or transient-failure row must still get its
+              // extracted payer.
+              const callBookingPayerId = await resolveCallBillingPayer(callSecondaryContacts, v2CanonicalExtraction);
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
@@ -5712,13 +5736,9 @@ const CallRecordingProcessor = {
                     || v2CanonicalExtraction?.property?.service_address?.street_line_2
                     || null,
                 }, trx);
-                // Bill-To linkage: if the call named a distinct paying party,
-                // stamp payer_id (per-job) so the completion invoice routes to
-                // the payer. Resolved outside the booking's atomicity on purpose
-                // — a payer is a reusable account (find-or-create by AP email),
-                // so a rolled-back booking never needs to unwind it, and a payer
-                // blip never blocks the booking (helper returns null).
-                const callBookingPayerId = await resolveCallBillingPayer(callSecondaryContacts);
+                // Bill-To linkage (callBookingPayerId resolved above, before the
+                // transaction): stamp payer_id (per-job) so the completion
+                // invoice routes to the payer.
                 const insertData = {
                   customer_id: customerId,
                   payer_id: callBookingPayerId || null,
@@ -5889,6 +5909,15 @@ const CallRecordingProcessor = {
                 logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
               }
               scheduledServiceId = svc.id;
+              // Backfill the Bill-To on a REUSED row (findExisting / idempotency
+              // reuse, or a row created before the payer gate / during a transient
+              // payer-lookup failure) that has no payer yet — the fresh-insert
+              // path already carries it, so this is a no-op there.
+              if (callBookingPayerId && svc && !svc.payer_id) {
+                await db('scheduled_services').where({ id: svc.id }).update({ payer_id: callBookingPayerId });
+                svc.payer_id = callBookingPayerId;
+                logger.info(`[call-proc] Backfilled payer ${callBookingPayerId} on reused scheduled service ${maskSid(callSid)}`);
+              }
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
               if (!scheduleWasReused) {

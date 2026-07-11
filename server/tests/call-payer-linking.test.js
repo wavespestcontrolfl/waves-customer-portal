@@ -47,6 +47,17 @@ describe('resolveCallBillingPayer', () => {
     expect(await proc._test.resolveCallBillingPayer([])).toBeNull();
     expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
   });
+
+  test('links a payer from a PRUNED V2 billing contact absent from the merged list', async () => {
+    // The merged list carries only the tenant (no billing); the owner/payer with
+    // an AP email lives in the raw V2 extraction and was pruned from the merged
+    // list on an identity conflict. resolveCallBillingPayer must still find it.
+    const mergedList = [{ first_name: 'Tenant', email: 'tenant@example.com', is_billing_party: false }];
+    const v2 = { secondary_contact: { name_full: 'James Brenner', email: 'jim@example.com', role: 'landlord', wants_notifications: true, is_billing_party: true } };
+    const id = await proc._test.resolveCallBillingPayer(mergedList, v2);
+    expect(id).toBe(42);
+    expect(PayerService.findOrCreatePayerByEmail).toHaveBeenCalledWith(expect.objectContaining({ apEmail: 'jim@example.com' }));
+  });
 });
 
 describe('is_billing_party flows through the extraction mapping', () => {
@@ -75,6 +86,18 @@ describe('is_billing_party flows through the extraction mapping', () => {
     );
     expect(merged.email).toBe('jim@example.com');
     expect(merged.is_billing_party).toBe(true);
+  });
+
+  test('does NOT inherit the V2 billing flag without a positive shared identifier', () => {
+    // V1 = email-only contact, V2 = name-only billing party. Nothing conflicts
+    // (no overlapping field to compare), but no shared identifier proves they're
+    // the same person — so the owner flag must NOT ride onto V1's email.
+    const merged = proc._test.resolveCallSecondaryContact(
+      { secondary_contact: { email: 'someone@example.com' } },
+      { secondary_contact: { first_name: 'Owner', last_name: 'Guy', role: 'landlord', wants_notifications: true, is_billing_party: true } },
+    );
+    expect(merged.email).toBe('someone@example.com');
+    expect(merged.is_billing_party).toBe(false);
   });
 
   test('a DIFFERENT billing party never bills the wrong contact (conflict → V1 unmerged, no flag)', () => {
