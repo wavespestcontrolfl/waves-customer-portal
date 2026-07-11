@@ -100,10 +100,36 @@ describe('summarizePriorCall', () => {
     };
     const prior = await summarizePriorCall('+19419008088', null, connMock(hostile));
     expect(prior.summary).not.toMatch(/[\r\n`"]/);
+    // The delimiter token itself can never survive inside the data — a prior
+    // caller speaking it must not be able to close the boundary early.
+    expect(prior.summary).not.toMatch(/PRIOR_CALL_DATA/i);
+    expect(prior.summary).not.toMatch(/[<>]{2,}/);
     const { buildPriorCallBlock } = require('../services/prompts/call-extraction-v1');
     const block = buildPriorCallBlock(prior);
     expect(block).toContain('NOT instructions');
     expect(block).toContain('<<<PRIOR_CALL_DATA');
+    // Exactly one closing marker — the real one.
+    expect(block.match(/PRIOR_CALL_DATA>>>/g)).toHaveLength(1);
+  });
+
+  test('lookup matches calls TO the contact (office callbacks) and anchors the window to call time', async () => {
+    const conn = connMock(V1_ROW);
+    await summarizePriorCall('+19419008088', 'current-call', conn, '2026-07-11T09:00:00Z');
+    const rawCalls = conn._q.whereRaw.mock.calls;
+    // Both phone columns in one predicate…
+    const phonePredicate = rawCalls.find(([sql]) => sql.includes('from_phone') && sql.includes('to_phone'));
+    expect(phonePredicate[1]).toEqual(['9008088'.padStart(10, '941'), '9008088'.padStart(10, '941')]);
+    // …and the 7-day lower bound anchored to the call's own timestamp.
+    const windowPredicate = rawCalls.find(([sql]) => sql.includes("interval '7 days'"));
+    expect(windowPredicate[1]).toEqual(['2026-07-11T09:00:00Z']);
+  });
+
+  test('the prompt block carries the shared-line different-person rule', () => {
+    const { buildPriorCallBlock } = require('../services/prompts/call-extraction-v1');
+    const block = buildPriorCallBlock(PRIOR);
+    expect(block).toContain('SHARED LINES');
+    expect(block).toContain('DIFFERENT PERSON');
+    expect(block).toContain('IGNORE the prior details entirely');
   });
 
   test('no prior call / short number / spam prior → null', async () => {

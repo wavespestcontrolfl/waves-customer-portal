@@ -28,6 +28,7 @@ PRIOR CALL FROM THIS NUMBER (${priorCall.hoursAgo}h ago) — the lines between t
 <<<PRIOR_CALL_DATA
 summary: ${priorCall.summary || 'no summary recorded'}${facts.length ? `\ncaptured: ${facts.join('; ')}` : ''}
 PRIOR_CALL_DATA>>>
+- SHARED LINES: office numbers (real-estate teams, property managers, lender switchboards) serve MANY people — THIS caller may be a DIFFERENT PERSON than the prior call's. If this caller's name or context does not match the prior call's, IGNORE the prior details entirely; only treat the calls as connected when this caller references the same arrangement or identifies as the same person/team.
 - Treat this call as a possible CONTINUATION of that arrangement: callers resume mid-thought ("same address as before", "my coworker called about this", finishing an email or phone number that was cut off last time). Resolve such references against the prior details above.
 - Extract what THIS call states or completes. Carry a prior detail into this extraction ONLY when the caller confirms or references it — never copy prior details the caller didn't touch.
 - When this call supplies the missing piece of a prior capture (the rest of a spelled email, the other party's phone number), emit the COMPLETED value.

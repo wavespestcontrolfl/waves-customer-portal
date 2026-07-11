@@ -570,6 +570,12 @@ const PRIOR_CALL_LOOKBACK_DAYS = 7;
 // instructions.
 function sanitizePriorText(value, max = 300) {
   return String(value || '')
+    // The block's own data delimiters must never survive inside the data —
+    // a prior caller speaking the literal marker could close the boundary
+    // early and drop the rest of their text outside the NOT-instructions
+    // fence. Strip the token and any angle-bracket runs that could rebuild it.
+    .replace(/PRIOR_CALL_DATA/gi, ' ')
+    .replace(/[<>]{2,}/g, ' ')
     .replace(/[\r\n`"]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -579,12 +585,25 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
   try {
     const digits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
     if (digits.length < 10) return null;
+    // Both directions: an office CALLBACK stores the contact's number in
+    // to_phone (Waves line in from_phone) — that conversation is prior
+    // context for the contact's next inbound call too.
     const q = conn('call_log')
-      .whereRaw("right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ?", [digits])
-      .where('created_at', '>=', conn.raw(`now() - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`))
+      .whereRaw(
+        "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
+        [digits, digits],
+      )
       .whereNotNull('ai_extraction')
       .whereNotIn('processing_status', ['spam', 'voicemail'])
       .orderBy('created_at', 'desc');
+    // The 7-day window anchors to the CALL's own time when known (falls back
+    // to now()) — a force-reprocess or backfill days later must still find
+    // the continuation that happened minutes before the call.
+    if (currentCallCreatedAt) {
+      q.whereRaw(`created_at >= ?::timestamptz - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`, [currentCallCreatedAt]);
+    } else {
+      q.where('created_at', '>=', conn.raw(`now() - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`));
+    }
     if (currentCallId) q.whereNot('id', currentCallId);
     // "Prior" means STRICTLY EARLIER: a force-reprocess or out-of-order queue
     // drain must never hand call 1 the extraction of call 2 as its past.
