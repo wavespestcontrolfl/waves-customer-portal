@@ -2,7 +2,7 @@
  * SMS graduation readiness engine — pure-logic coverage (no DB, no LLM).
  * Guards the Phase E gate: an intent graduates only when the data earns it.
  */
-const { evaluateRung, THRESHOLDS, LADDER } = require('../services/sms-graduation');
+const { evaluateRung, resolveCohortVersions, THRESHOLDS, LADDER } = require('../services/sms-graduation');
 
 // Fixed thresholds so the tests don't drift with env overrides.
 const T = {
@@ -19,6 +19,32 @@ describe('ladder shape', () => {
     expect(THRESHOLDS.shadowToSuggest.maxUnsafeRate).toBeLessThanOrEqual(0.1);
     expect(THRESHOLDS.suggestToAutosend.minAcceptedRate).toBeGreaterThanOrEqual(0.8);
     expect(THRESHOLDS.suggestToAutosend.maxRecentUnsafe).toBe(0);
+  });
+});
+
+describe('judge-signal cohort (superseded prompt versions are not readiness evidence)', () => {
+  test('default cohort = the current drafter version only', () => {
+    expect(resolveCohortVersions({ raw: undefined, currentVersion: 'house_voice_v8' })).toEqual(['house_voice_v8']);
+    expect(resolveCohortVersions({ raw: '   ', currentVersion: 'house_voice_v8' })).toEqual(['house_voice_v8']);
+  });
+
+  test('default tracks the LIVE drafter PROMPT_VERSION (no drift between modules)', () => {
+    const { PROMPT_VERSION } = require('../services/sms-shadow-drafter');
+    expect(resolveCohortVersions({ raw: undefined })).toEqual([PROMPT_VERSION]);
+  });
+
+  test('GRAD_COHORT_VERSIONS widens the cohort (trimmed, empties dropped)', () => {
+    expect(resolveCohortVersions({ raw: ' house_voice_v7 , house_voice_v8 ,', currentVersion: 'x' }))
+      .toEqual(['house_voice_v7', 'house_voice_v8']);
+  });
+
+  test("'all_live' restores the pre-cohort behavior (null = no version filter)", () => {
+    expect(resolveCohortVersions({ raw: 'all_live', currentVersion: 'x' })).toBeNull();
+    expect(resolveCohortVersions({ raw: 'ALL_LIVE', currentVersion: 'x' })).toBeNull();
+  });
+
+  test('a degenerate override (only commas/spaces) falls back to the current version', () => {
+    expect(resolveCohortVersions({ raw: ' , ,  ', currentVersion: 'house_voice_v8' })).toEqual(['house_voice_v8']);
   });
 });
 

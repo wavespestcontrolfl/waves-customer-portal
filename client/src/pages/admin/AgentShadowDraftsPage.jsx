@@ -190,6 +190,7 @@ function GraduationNote({ g }) {
   const context = [];
   if (j.judged > 0) context.push(`${j.judged} live judged (${Math.round((j.unsafeRate || 0) * 100)}% unsafe)`);
   if (j.backfillJudged > 0) context.push(`${j.backfillJudged} backfill excluded`);
+  if (j.priorVersionJudged > 0) context.push(`${j.priorVersionJudged} prior-version excluded`);
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>

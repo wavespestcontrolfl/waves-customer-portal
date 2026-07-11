@@ -1519,8 +1519,9 @@ router.get('/intent-modes', async (req, res, next) => {
     }
 
     // Phase E readiness: per-intent eligibility for the next ladder rung,
-    // computed from the LIVE judge signal (backfill excluded) + the suggest
-    // outcomes above. Recommend-only — flips stay manual via PUT below.
+    // computed from the LIVE judge signal (backfill + superseded prompt
+    // versions excluded — see resolveCohortVersions) + the suggest outcomes
+    // above. Recommend-only — flips stay manual via PUT below.
     const graduation = require('../services/sms-graduation');
     const readiness = await graduation.computeReadiness({
       intents: [...byIntent.values()].map((b) => ({ intent: b.intent, mode: b.mode, locked: b.locked, suggest: b.suggest })),
@@ -1536,6 +1537,9 @@ router.get('/intent-modes', async (req, res, next) => {
       // surprised that nothing auto-sends yet.
       autoSendGateEnabled: require('../config/feature-gates').isEnabled('smsAutoSend'),
       thresholds: graduation.THRESHOLDS,
+      // Which drafter prompt version(s) the judge signals count — null means
+      // all live versions (GRAD_COHORT_VERSIONS=all_live).
+      judgeCohort: graduation.resolveCohortVersions(),
       intents: [...byIntent.values()].sort((a, b) => a.intent.localeCompare(b.intent)),
     });
   } catch (err) {

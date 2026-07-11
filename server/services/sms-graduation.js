@@ -10,10 +10,16 @@
  *
  * Two independent signals, one per rung:
  *   - shadow → suggest is JUDGE-driven. The nightly judge scores shadow
- *     drafts; draft_unsafe = fabrication. **LIVE drafts only** — backfill
- *     cohorts (prompt_version LIKE '%backfill') draft today's schedule/context
- *     onto months-old inbounds, so their unsafe rate is drift-inflated and
- *     would lie about readiness. Excluded here.
+ *     drafts; draft_unsafe = fabrication. **LIVE drafts on the CURRENT prompt
+ *     version only** — two exclusions, each fail-closed in a different way:
+ *       (a) backfill cohorts (prompt_version LIKE '%backfill') draft today's
+ *           schedule/context onto months-old inbounds, so their unsafe rate is
+ *           drift-inflated and would lie about readiness;
+ *       (b) SUPERSEDED live versions describe a drafter that no longer runs.
+ *           Left in the denominator they poison it forever: v7's 44% live
+ *           unsafe rate would demand ~300 clean current-version drafts before
+ *           an intent could clear the 8% cap, so a fixed drafter could never
+ *           graduate. See resolveCohortVersions for the override knob.
  *   - suggest → auto_send is OUTCOME-driven. Once an intent is suggesting, the
  *     human's accept-verbatim / edit / ignore choices ARE the ground truth: a
  *     high accepted rate with few corrections means the draft is send-ready.
@@ -60,6 +66,28 @@ const THRESHOLDS = {
 
 const rate = (n, d) => (d > 0 ? n / d : 0);
 const asPct = (x) => `${Math.round(x * 100)}%`;
+
+/**
+ * Judge-signal cohort: which drafter prompt version(s) count as readiness
+ * evidence. Default = the drafter's CURRENT PROMPT_VERSION only, so the rates
+ * measure the drafter that would actually be doing the suggesting/sending.
+ * Overrides via GRAD_COHORT_VERSIONS:
+ *   - comma-separated list (e.g. 'house_voice_v8,house_voice_v9') to keep a
+ *     prior version's evidence after a wording-only prompt bump;
+ *   - 'all_live' restores the pre-cohort all-time behavior (no version
+ *     filter; backfill stays excluded regardless).
+ * Returns an array of versions, or null meaning "no version filter".
+ */
+function resolveCohortVersions({ raw = process.env.GRAD_COHORT_VERSIONS, currentVersion } = {}) {
+  // Lazy require: sms-shadow-drafter reaches sms-auto-send which reaches this
+  // module — a top-level require would be circular.
+  const current = currentVersion || require('./sms-shadow-drafter').PROMPT_VERSION;
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return [current];
+  if (trimmed.toLowerCase() === 'all_live') return null;
+  const versions = trimmed.split(',').map((v) => v.trim()).filter(Boolean);
+  return versions.length ? versions : [current];
+}
 
 /**
  * Pure rung evaluation — no DB, fully testable. Given an intent's current mode
@@ -127,25 +155,31 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
 }
 
 /**
- * Per-intent LIVE judge signal. Returns a Map intent → { judged, unsafe,
- * avgSafety, recentUnsafe, backfillJudged }. recentUnsafe counts draft_unsafe
- * among the most recent `recentWindow` LIVE judgments — the backstop for the
- * suggest → auto_send rung.
+ * Per-intent LIVE judge signal for the CURRENT drafter cohort. Returns a Map
+ * intent → { judged, unsafe, avgSafety, recentUnsafe, backfillJudged,
+ * priorVersionJudged }. recentUnsafe counts draft_unsafe among the most recent
+ * `recentWindow` cohort judgments — the backstop for the suggest → auto_send
+ * rung (a superseded drafter's regressions aren't evidence about the one that
+ * would be sending, so the backstop is cohort-scoped too).
  *
- * CRITICAL: the backfill cohort lives on message_drafts.prompt_version, NOT on
+ * CRITICAL: the drafter cohort lives on message_drafts.prompt_version, NOT on
  * shadow_draft_judgments.prompt_version (that column carries the JUDGE's
- * version, 'shadow_judge_v1', for every row). So "live only" REQUIRES the join
- * to message_drafts. Backfill judgments draft today's schedule onto months-old
- * inbounds — drift-contaminated, and they must never gate autonomy.
- * backfillJudged is informational: it explains a 0/40 live count to the
- * operator ("you have N backfill samples, but graduation needs live ones").
+ * version, 'shadow_judge_v1', for every row). So both the backfill exclusion
+ * and the version filter REQUIRE the join to message_drafts. Backfill
+ * judgments draft today's schedule onto months-old inbounds —
+ * drift-contaminated, and they must never gate autonomy.
+ * backfillJudged / priorVersionJudged are informational: they explain a 0/40
+ * cohort count to the operator ("you have N backfill and M prior-version
+ * samples, but graduation needs current-version live ones").
  */
-async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.suggestToAutosend.recentWindow } = {}) {
+async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.suggestToAutosend.recentWindow, cohortVersions } = {}) {
+  const cohort = cohortVersions === undefined ? resolveCohortVersions() : cohortVersions;
   const liveOnly = function () {
     this.whereNotNull('j.intent').whereRaw("md.prompt_version NOT LIKE '%backfill'");
+    if (cohort) this.whereIn('md.prompt_version', cohort);
   };
 
-  const [totals, recent, backfill] = await Promise.all([
+  const [totals, recent, backfill, priorVersion] = await Promise.all([
     dbi({ j: 'shadow_draft_judgments' })
       .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
       .where(liveOnly)
@@ -181,11 +215,25 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
       .groupBy('j.intent')
       .select('j.intent')
       .select(dbi.raw('COUNT(*)::int as backfill_judged')),
+    // Informational: live SCORED judgments from superseded prompt versions —
+    // scored-only so the count matches the semantics of `judged`, which is
+    // the number the cohort filter visibly shrank.
+    cohort
+      ? dbi({ j: 'shadow_draft_judgments' })
+          .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
+          .whereNotNull('j.intent')
+          .whereNotNull('j.scores')
+          .whereRaw("md.prompt_version NOT LIKE '%backfill'")
+          .whereNotIn('md.prompt_version', cohort)
+          .groupBy('j.intent')
+          .select('j.intent')
+          .select(dbi.raw('COUNT(*)::int as prior_version_judged'))
+      : Promise.resolve([]),
   ]);
 
   const map = new Map();
   const ensure = (intent) => {
-    if (!map.has(intent)) map.set(intent, { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0 });
+    if (!map.has(intent)) map.set(intent, { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 });
     return map.get(intent);
   };
   for (const r of totals) {
@@ -199,6 +247,7 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
   }
   for (const r of recent) ensure(r.intent).recentUnsafe = r.recent_unsafe || 0;
   for (const r of backfill) ensure(r.intent).backfillJudged = r.backfill_judged || 0;
+  for (const r of priorVersion) ensure(r.intent).priorVersionJudged = r.prior_version_judged || 0;
   return map;
 }
 
@@ -224,7 +273,7 @@ async function computeReadiness({ intents, dbi = db } = {}) {
 
   const out = new Map();
   for (const { intent, mode, locked, suggest } of intents) {
-    const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0 };
+    const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
     const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
     out.set(intent, {
       ...verdict,
@@ -236,6 +285,7 @@ async function computeReadiness({ intents, dbi = db } = {}) {
         avgSafety: judge.avgSafety == null ? null : Number(Number(judge.avgSafety).toFixed(1)), // display only
         recentUnsafe: judge.recentUnsafe,
         backfillJudged: judge.backfillJudged || 0,
+        priorVersionJudged: judge.priorVersionJudged || 0,
       },
     });
   }
@@ -279,7 +329,7 @@ async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
   let suggest;
   try {
     const signals = await fetchLiveJudgeSignals(dbi);
-    judge = signals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0 };
+    judge = signals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
     suggest = await fetchSuggestOutcomes({ intent, dbi });
   } catch (err) {
     logger.warn(`[sms-graduation] auto-send eligibility fetch failed (${intent}): ${err.message}; blocking`);
@@ -296,6 +346,7 @@ async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
 module.exports = {
   LADDER,
   THRESHOLDS,
+  resolveCohortVersions,
   evaluateRung,
   fetchLiveJudgeSignals,
   fetchSuggestOutcomes,
