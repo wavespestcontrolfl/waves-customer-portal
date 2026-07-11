@@ -397,8 +397,16 @@ class GoogleBusinessService {
     const lastToken = tokens[tokens.length - 1];
     const matches = await db('customers')
       .whereNull('deleted_at')
-      .whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
-      .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken])
+      .where(function tokenOrFullNameMatch() {
+        // Token arm: middle-initial-tolerant, single-token surname.
+        this.where(function tokenArm() {
+          this.whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
+            .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken]);
+        })
+          // Full-string arm: preserves compound surnames ("Mary Van Dyke" →
+          // last_name "Van Dyke"), which the single last token would miss.
+          .orWhereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName]);
+      })
       .select('id')
       .limit(2);
     if (matches.length !== 1) {

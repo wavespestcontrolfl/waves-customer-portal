@@ -8,9 +8,14 @@ const NotificationService = {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
-      // noise. Central gate: emitters carry the customer id in metadata.
-      if (recipientType === 'admin'
-          && isInternalTestCustomerId(metadata?.customerId || metadata?.customer_id)) {
+      // noise. Central gate: emitters carry the customer id in metadata,
+      // either top-level or nested under a trigger payload (sms_reply uses
+      // threadId = customer id). Push dispatch for triggers is separately
+      // gated in notification-triggers.js.
+      const metaCid = metadata?.customerId || metadata?.customer_id
+        || metadata?.payload?.customerId || metadata?.payload?.customer_id
+        || metadata?.payload?.threadId;
+      if (recipientType === 'admin' && isInternalTestCustomerId(metaCid)) {
         logger.info(`[notifications] Suppressed admin notification for internal test customer (${category})`);
         return null;
       }

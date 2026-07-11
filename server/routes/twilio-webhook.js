@@ -414,7 +414,7 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
       }),
-    }).returning('id');
+    }).returning(['id', 'created_at']);
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
@@ -492,12 +492,19 @@ router.post('/sms', async (req, res) => {
     // single roof-repair thread, 2026-07). One alert per unknown sender per
     // 4h window — the full thread is still in /admin/communications and
     // sms_log. Known customers are unaffected. Fails open on query error.
+    //
+    // Only rows STRICTLY OLDER than this message's own sms_log row count:
+    // two near-simultaneous first texts must not each see the other and both
+    // suppress (leaving a new thread with no alert at all) — with a strict
+    // created_at ordering, at most the later one suppresses. An exact
+    // timestamp tie fails open to two alerts, the safe direction.
     let repeatUnknownSender = false;
-    if (!customer && (Body || inboundMedia.length)) {
+    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
       try {
         const prior = await db('sms_log')
           .where({ direction: 'inbound', from_phone: From })
           .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+          .where('created_at', '<', smsLogEntry.created_at)
           .whereNot('twilio_sid', MessageSid)
           .first('id');
         repeatUnknownSender = Boolean(prior);
