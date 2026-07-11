@@ -85,8 +85,8 @@ function ContactRow() {
       <a href={WAVES_SUPPORT_SMS_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Text us</a>
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
-        data-glass="chip"
-        style={{ ...PRIMARY_CTA, flex: 1, background: S.surface, color: COLORS.blueDeeper, border: `1px solid ${COLORS.blueDeeper}` }}
+        data-glass-accent=""
+        style={{ ...PRIMARY_CTA, flex: 1 }}
       >
         Call {WAVES_SUPPORT_PHONE_DISPLAY}
       </a>
