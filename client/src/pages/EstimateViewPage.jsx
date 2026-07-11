@@ -2900,7 +2900,13 @@ export function ServiceSection({
             // The card corner carries the badge now — PriceCard keeps the
             // tier only for its per-row service tags.
             showTierBadge={false}
-            preferPerApplicationPrice={['pest_control', 'mosquito', 'termite_bait'].includes(sectionSlug)}
+            // Every recurring service bills per application (owner directive
+            // 2026-07-11) — all service cards lead with the per-application
+            // price, not just pest/mosquito/termite. PriceCard still falls
+            // back to the cadence rate when no unambiguous per-application
+            // price exists (multi-row bundles, flat-monthly monitoring,
+            // ranged or quote-required pricing).
+            preferPerApplicationPrice
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor

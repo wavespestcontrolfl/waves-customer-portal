@@ -140,6 +140,53 @@ describe('ServiceSection', () => {
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
   });
 
+  it('leads with the per-application price on a lawn section (every service bills per application)', () => {
+    // Shaped like a server lawn-ladder entry: monthlyBase is the pre-discount
+    // anchor, perTreatment/displayPrice the net per-application price.
+    render(
+      <ServiceSection
+        section={{
+          key: 'lawn_care',
+          label: 'Lawn Care',
+          isRecurring: true,
+          isPest: false,
+          frequencies: [{
+            key: 'premium',
+            label: 'Monthly',
+            serviceCategory: 'lawn_care',
+            monthlyBase: 79,
+            monthly: 71.1,
+            annual: 853.2,
+            perTreatment: 71.1,
+            visitsPerYear: 12,
+            billingFrequencyKey: 'monthly',
+            included: [{ key: 'lawn_care_premium', label: 'Monthly lawn care program' }],
+            perServiceTreatments: [{
+              service: 'lawn_care',
+              label: 'Lawn Care',
+              perTreatment: 71.1,
+              displayPrice: 71.1,
+              visitsPerYear: 12,
+            }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="premium"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    // Net per-application headline with the struck pre-discount anchor —
+    // never a /mo rate. (The treatment row restates the price, hence AllBy.)
+    expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('$79 / application')).toBeInTheDocument();
+    expect(screen.queryByText('/mo')).not.toBeInTheDocument();
+    expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
+  });
+
   it('shows the selected quote-required frequency reason', () => {
     render(
       <ServiceSection
