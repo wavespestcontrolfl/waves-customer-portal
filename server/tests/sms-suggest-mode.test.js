@@ -67,10 +67,18 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('serían doscientos dólares')).toBe(true);
   });
 
-  test('detects whole-dollar amounts around strong price words, both directions (Codex P1 r3)', () => {
+  test('detects price grammar around price nouns, both directions and languages (Codex P1 r3+r4)', () => {
     expect(hasPriceQuote('The price is 415')).toBe(true);
     expect(hasPriceQuote('The estimate is 415.75')).toBe(true);
     expect(hasPriceQuote('415.75 is the total')).toBe(true);
+    expect(hasPriceQuote('The price is fifty')).toBe(true);
+    expect(hasPriceQuote('El precio es 45')).toBe(true);
+  });
+
+  test('dates, durations, and idioms near price nouns pass (connector required — Codex P1 r4)', () => {
+    expect(hasPriceQuote('Your estimate expires in 30 days')).toBe(false);
+    expect(hasPriceQuote('The quote you requested on the 15th is attached')).toBe(false);
+    expect(hasPriceQuote('the price is a bit high, I understand')).toBe(false);
   });
 
   test('price-free replies pass, including numbers that are not money', () => {

@@ -122,6 +122,10 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         .first('id');
       if (newerInbound) {
         logger.info(`[agent-review] decision ${decision.id} is stale (newer inbound on thread) — refusing send`);
+        // Retire it now, guardedly — otherwise a newer inbound whose own lane
+        // produced no replacement card (withheld draft, reaction, failure)
+        // leaves this card resurfacing after every "refresh" 409, forever.
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
         return null;
       }
     }

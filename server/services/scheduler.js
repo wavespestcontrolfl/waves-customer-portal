@@ -1628,6 +1628,35 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          // A decision-linked scheduled reply must still be anchored to the
+          // NEWEST inbound when it FIRES — the send-time staleness check ran
+          // at enqueue, potentially hours ago. Stale → block this queued row,
+          // retire the claimed decision, and reopen parked siblings (each one
+          // re-verifies at its own send).
+          if (claimMeta.agent_decision_id) {
+            const suggest = require('./sms-suggest-mode');
+            if (await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id })) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'blocked',
+                updated_at: new Date(),
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'stale_agent_decision')"),
+              });
+              await suggest.supersedeStaleDecision({
+                decisionId: claimMeta.agent_decision_id,
+                fromStatus: 'scheduled',
+                note: 'A newer customer message arrived before this scheduled reply fired — review the thread.',
+              });
+              if (Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length) {
+                await suggest.reopenScheduledSuggestions({
+                  decisionIds: claimMeta.parked_decision_ids,
+                  reason: 'The scheduled reply ahead of this suggestion went stale — review the thread.',
+                });
+              }
+              logger.warn(`[scheduled-sms] ${msg.id} blocked: linked agent decision anchored to a superseded inbound`);
+              continue;
+            }
+          }
+
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
           if (!toPhone) {
             // Refresh-required row whose current customer phone can't be

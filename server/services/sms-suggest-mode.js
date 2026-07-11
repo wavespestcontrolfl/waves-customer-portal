@@ -61,14 +61,21 @@ function hasRedactionPlaceholder(text) {
 // in singular/plural/hyphenated forms ("a 50-dollar credit", "four hundred
 // dollars", "a hundred bucks"), USD on either side ("USD 50", "45 USD"),
 // Spanish currency incl. hundreds ("doscientos dólares"), per-cadence rates
-// without a currency word ("45/mo", "forty five per visit"), and bare
-// cents-bearing amounts next to price-context words ("the total comes to
-// 415.75"). False positives are acceptable — they fail toward human review,
+// without a currency word ("45/mo", "forty five per visit"), and explicit
+// price grammar around price nouns in both directions and languages ("the
+// price is 415", "the price is fifty", "el precio es 45", "415.75 is the
+// total"). False positives are acceptable — they fail toward human review,
 // never toward a customer send.
 const PRICE_NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
 const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|\\w*cient[oa]s|quinient[oa]s|mil|pocos)';
 const PRICE_EN_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|a|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
 const PRICE_ES_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${PRICE_NUM_WORD_ES})*)`;
+// The context branches use a STRICT amount (no bare "a") — "the price is a
+// bit high" is not a quote; "a hundred bucks" still matches via the currency
+// branch, where "a" is load-bearing.
+const PRICE_EN_AMOUNT_STRICT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
+const PRICE_WORD_EN = '(?:total|price|cost|costs|fee|charge|charges|quote|estimate|balance)';
+const PRICE_WORD_ES = '(?:precio|costo|total|tarifa|saldo)';
 const PRICE_QUOTE_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 1,200.50
   + '|\\bUSD\\s*\\d' // USD 50
@@ -77,12 +84,15 @@ const PRICE_QUOTE_RE = new RegExp(
   + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, doscientos dólares
   + `|\\b${PRICE_EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per visit
   + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b` // 45 al mes
-  // Bare amount near a STRONG price word, either direction ("the price is
-  // 415", "415.75 is the total") — no cents required, these words are
-  // unambiguous. Weak words that double as identifiers or verbs (invoice,
-  // payment, pay) still require cents so "invoice #04395" stays clean.
-  + '|\\b(?:total|price|cost|costs|fee|charge|charges|quote|quoted|estimate|balance|owed?|owes)\\b[^\\n]{0,30}?\\b\\d[\\d,]*(?:\\.\\d{1,2})?\\b'
-  + '|\\b\\d[\\d,]*(?:\\.\\d{1,2})?\\s+(?:is|was|will be|es|ser[áa])\\s+(?:the\\s+|el\\s+|la\\s+)?(?:total|price|cost|fee|charge|balance|estimate|quote)\\b'
+  // Explicit price GRAMMAR around strong price nouns, both directions and
+  // both languages — a connector is required on purpose: "the price is 415" /
+  // "the price is fifty" / "el precio es 45" quote a price, while "your
+  // estimate expires in 30 days" (no connector) is a date and must pass.
+  + `|\\b${PRICE_WORD_EN}\\b\\s*(?:is|was|will be|would be|comes?\\s+to|runs?|of|at|:)\\s*\\$?${PRICE_EN_AMOUNT_STRICT}\\b` // the price is 415 / fifty
+  + `|\\b${PRICE_WORD_ES}\\b\\s*(?:es|ser[íi]a|ser[áa]|de|:)\\s*\\$?${PRICE_ES_AMOUNT}\\b` // el precio es 45
+  + `|\\b${PRICE_EN_AMOUNT_STRICT}\\s+(?:is|was|will be|es|ser[áa])\\s+(?:the\\s+|el\\s+|la\\s+)?(?:${PRICE_WORD_EN}|${PRICE_WORD_ES})\\b` // 415.75 is the total
+  // Weak words that double as identifiers (invoice, payment, pay) require
+  // CENTS so "invoice #04395" stays clean.
   + '|\\b(?:invoice|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
   'i',
 );
@@ -376,6 +386,60 @@ async function supersedeStaleSuggestions({ customerId, smsLogId } = {}) {
   } catch (err) {
     logger.warn(`[sms-suggest] stale-suggestion sweep failed: ${err.message}`);
     return 0;
+  }
+}
+
+/**
+ * True when a decision's anchoring inbound is no longer the newest customer
+ * message on its thread — the context it was drafted against has moved on.
+ * Anchor-less decisions (no sms_log link) return false: they can't be judged
+ * here, and the send path's ownership/claim guards still apply.
+ */
+async function suggestionAnchorIsStale({ decisionId, dbi = db } = {}) {
+  const row = await dbi('agent_decisions as ad')
+    .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+    .where('ad.id', decisionId)
+    .first('ad.sms_log_id', 's.created_at as inbound_at', 's.from_phone');
+  if (!row?.inbound_at) return false;
+  const last10 = String(row.from_phone || '').replace(/\D/g, '').slice(-10);
+  if (!last10) return false;
+  const newer = await dbi('sms_log')
+    .where({ direction: 'inbound' })
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .where('created_at', '>', row.inbound_at)
+    .whereNot('id', row.sms_log_id)
+    .first('id');
+  return Boolean(newer);
+}
+
+/**
+ * Guardedly retire ONE stale decision at the moment staleness is discovered
+ * (send-time 409, or a scheduled send's fire-time re-check): fromStatus →
+ * superseded, and a house-voice suggestion's draft returns to the judge
+ * pool. Without this, a stale card whose newer inbound produced no
+ * replacement (withheld draft, reaction, failure) would resurface after
+ * every "refresh the thread" 409, forever. Guarded + idempotent; fail-soft.
+ */
+async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review', note, dbi = db } = {}) {
+  try {
+    return await dbi.transaction(async (trx) => {
+      const [row] = await trx('agent_decisions')
+        .where({ id: decisionId, status: fromStatus })
+        .update({
+          status: 'superseded',
+          correction_note: note || 'A newer customer message arrived — review the thread before replying.',
+          updated_at: new Date(),
+        })
+        .returning(['id', 'entity_id', 'entity_type', 'workflow']);
+      if (!row) return false;
+      if (row.workflow === SUGGEST_WORKFLOW && row.entity_type === 'message_draft') {
+        await revertDraftsToShadow(trx, [row.entity_id]);
+      }
+      return true;
+    });
+  } catch (err) {
+    logger.warn(`[sms-suggest] stale-decision supersede failed (${decisionId}): ${err.message}`);
+    return false;
   }
 }
 
@@ -770,6 +834,8 @@ module.exports = {
   hasRedactionPlaceholder,
   hasPriceQuote,
   supersedeStaleSuggestions,
+  suggestionAnchorIsStale,
+  supersedeStaleDecision,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
