@@ -574,10 +574,11 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
   // auto-grant makes the estimate viewable again, which does exactly that).
   const [requestState, setRequestState] = useState('idle');
   const [newExpiresAt, setNewExpiresAt] = useState(null);
-  // The server reports whether the estimate_extended SMS actually went out
-  // (no phone / opt-out / Twilio gate / template inactive all block it) —
-  // only claim "we texted you" when it did.
+  // The server reports whether the estimate_extended SMS/email actually went
+  // out (no phone or email on file / opt-out / suppression / gates / template
+  // inactive all block them) — only claim channels that really fired.
   const [smsSent, setSmsSent] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
 
   const requestExtension = async () => {
     if (requestState !== 'idle' && requestState !== 'failed') return;
@@ -589,6 +590,7 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
       if (body.autoExtended === true) {
         setNewExpiresAt(body.expiresAt || null);
         setSmsSent(body.smsSent === true);
+        setEmailSent(body.emailSent === true);
         setRequestState('extended');
       } else {
         setRequestState('requested');
@@ -597,6 +599,14 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
       setRequestState('failed');
     }
   };
+
+  const freshLinkSentence = smsSent && emailSent
+    ? ' We also texted and emailed you a fresh link.'
+    : smsSent
+      ? ' We also texted you a fresh link.'
+      : emailSent
+        ? ' We also emailed you a fresh link.'
+        : '';
 
   // ET, matching the SMS and every other estimate-expiry surface — a
   // West-Coast browser must not show a "through" date a day earlier than
@@ -628,7 +638,7 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
           <>
             <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
               Your estimate has been extended{expiryLabel ? ` through ${expiryLabel}` : ' by 7 days'}.
-              {smsSent ? ' We also texted you a fresh link.' : ''}
+              {freshLinkSentence}
             </div>
             {onExtended ? (
               <button

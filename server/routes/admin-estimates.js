@@ -1793,7 +1793,7 @@ router.post('/:id/extend', async (req, res, next) => {
 
     const days = Number.parseInt(req.body?.days, 10);
     const { extendEstimate } = require('../services/estimate-extension');
-    const { newExpiry, status, smsResult } = await extendEstimate({
+    const { newExpiry, status, smsResult, emailResult } = await extendEstimate({
       estimate,
       days,
       silent: !!req.body?.silent,
@@ -1811,6 +1811,7 @@ router.post('/:id/extend', async (req, res, next) => {
       days_added: days,
       status,
       sms: { sent: !!smsResult.sent, reason: smsResult.reason || null },
+      email: { sent: !!emailResult?.sent, reason: emailResult?.reason || null },
     });
   } catch (err) {
     if (err.statusCode === 400 || err.statusCode === 409) {

@@ -226,8 +226,56 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     }
   }
 
-  logger.info(`[estimate-extension] Extended estimate ${estimate.id} by ${parsedDays}d to ${newExpiry.toISOString()} via ${entryPoint} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'})`);
-  return { newExpiry, status: revivedStatus || estimate.status, smsResult };
+  // Email leg (owner ask 2026-07-11: extension confirmations go by text AND
+  // email). Same POST-WRITE INVARIANT as the SMS above — never throws; the
+  // library's own suppression/dedupe surface as blocked/deduped and a missing
+  // template throws internally, all degrading to an unsent result here. The
+  // idempotency key is scoped per grant (id + new expiry) so a later, further
+  // extension emails again while accidental double-fires of THIS grant don't.
+  let emailResult = { sent: false, reason: 'silent' };
+  if (!silent) {
+    try {
+      if (!estimate.customer_email) {
+        emailResult = { sent: false, reason: 'no_email' };
+      } else {
+        const EmailTemplateLibrary = require('./email-template-library');
+        const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+        const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
+          month: 'long', day: 'numeric', timeZone: 'America/New_York',
+        });
+        const result = await EmailTemplateLibrary.sendTemplate({
+          templateKey: 'estimate.extended',
+          to: estimate.customer_email,
+          payload: {
+            first_name: firstName,
+            estimate_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+            new_expiry: newExpiryLabel,
+          },
+          recipientType: estimate.customer_id ? 'customer' : 'lead',
+          recipientId: estimate.customer_id || null,
+          triggerEventId: `estimate_extended:${estimate.id}:${newExpiry.toISOString()}`,
+          idempotencyKey: `estimate_extended:${estimate.id}:${newExpiry.toISOString()}`,
+          categories: ['estimate_extended'],
+          // Provider rejection bodies can echo the recipient address — keep
+          // them out of the provider log (mirrors estimate-follow-up.js).
+          suppressProviderErrorLog: true,
+        });
+        if (result?.sent) {
+          emailResult = { sent: true };
+        } else if (result?.deduped) {
+          emailResult = { sent: false, reason: 'deduped' };
+        } else {
+          emailResult = { sent: false, reason: result?.reason || 'blocked' };
+        }
+      }
+    } catch (err) {
+      logger.error(`[estimate-extension] post-write email step failed for estimate ${estimate.id}: ${require('./email-template-library').redactEmailAddresses(err.message)}`);
+      emailResult = { sent: false, reason: 'email_error' };
+    }
+  }
+
+  logger.info(`[estimate-extension] Extended estimate ${estimate.id} by ${parsedDays}d to ${newExpiry.toISOString()} via ${entryPoint} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'}, email=${emailResult.sent ? 'sent' : emailResult.reason || 'skipped'})`);
+  return { newExpiry, status: revivedStatus || estimate.status, smsResult, emailResult };
 }
 
 module.exports = {
