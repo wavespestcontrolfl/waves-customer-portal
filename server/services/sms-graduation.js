@@ -261,6 +261,42 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
 }
 
 /**
+ * Pure rollup of agent_decisions outcome rows ({ intent, status,
+ * prompt_version, count }) into the two views /intent-modes needs:
+ *   - display: all-time telemetry (suggested = every decision ever published
+ *     for the workflow — counting message_drafts status='suggested' instead
+ *     would shrink the denominator: unused suggestions revert their draft to
+ *     'shadow' for the judge);
+ *   - cohort: the readiness evidence — accepted/corrected/ignored counted
+ *     ONLY for rows whose prompt_version is in the active cohort. A NULL
+ *     prompt_version (legacy rows predating stamping) never matches an
+ *     active cohort — fail closed, it is evidence for no version. A null
+ *     cohort (all_live) counts everything.
+ */
+function rollupSuggestOutcomes(rows, cohort) {
+  const map = new Map();
+  const ensure = (intent) => {
+    const key = intent || 'GENERAL';
+    if (!map.has(key)) {
+      map.set(key, {
+        display: { suggested: 0, pending: 0, accepted: 0, corrected: 0, ignored: 0, superseded: 0, expired: 0 },
+        cohort: { accepted: 0, corrected: 0, ignored: 0 },
+      });
+    }
+    return map.get(key);
+  };
+  for (const row of rows || []) {
+    const e = ensure(row.intent);
+    const n = Number(row.count) || 0;
+    e.display.suggested += n;
+    const key = row.status === 'pending_review' ? 'pending' : row.status;
+    if (key in e.display) e.display[key] += n;
+    if ((!cohort || cohort.includes(row.prompt_version)) && key in e.cohort) e.cohort[key] += n;
+  }
+  return map;
+}
+
+/**
  * Active-health verdict for an intent already AT auto_send: re-runs the
  * suggest → auto_send rung the way the send-time gate
  * (evaluateAutoSendEligibility) does on every send. Without this, an intent
@@ -385,6 +421,7 @@ module.exports = {
   LADDER,
   THRESHOLDS,
   resolveCohortVersions,
+  rollupSuggestOutcomes,
   evaluateRung,
   evaluateAutoSendHealth,
   fetchLiveJudgeSignals,
