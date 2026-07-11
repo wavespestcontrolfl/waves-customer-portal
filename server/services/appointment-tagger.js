@@ -200,20 +200,45 @@ class AppointmentTagger {
   }
 
   // Pest prep — email prep guide (prep.cockroach / prep.bed_bug / prep.flea
-  // automations) plus the SMS companion (auto_bed_bug / auto_cockroach /
-  // auto_flea templates). First-time treatments only (owner directive
-  // 2026-07-06): a follow-up booking in the same infestation series must not
-  // re-send "let's get started" prep messaging.
+  // automations) plus a treatment-prep SMS. First-time treatments only (owner
+  // directive 2026-07-06): a follow-up booking in the same infestation series
+  // must not re-send "let's get started" prep messaging.
+  //
+  // Which SMS copy sends depends on whether the email queued:
+  //   • email queued → companion text pointing to the emailed guide
+  //     (auto_bed_bug / auto_cockroach / auto_flea).
+  //   • no email on file (phone-only customer, e.g. a manual-SMS booking)
+  //     with the visit still upcoming/open → self-contained prep text that
+  //     carries the steps inline (auto_*_no_email), so these customers still
+  //     get prep instead of nothing.
+  //   • any other non-queue reason (gate off, terminal/past visit, dedupe,
+  //     inactive automation, error) → no SMS, matching the email decision.
   async triggerPestPrep(service, pestType) {
     if (await this.hasPriorSameTypeBooking(service, pestType)) return;
 
-    // The SMS copy asserts "we emailed your treatment guide" — only send it
-    // when the guide email actually queued (gate on, upcoming open visit,
-    // valid recipient email). Codex review 2026-07-06.
-    const emailQueued = await this.triggerPrepEmailGuide(service, pestType);
-    if (!emailQueued) return;
+    // The companion SMS copy asserts "we emailed your treatment guide" — only
+    // send it when the guide email actually queued. When the email was skipped
+    // solely because there's no email on file, fall back to the self-contained
+    // prep text instead. Codex review 2026-07-06.
+    const emailResult = await this.triggerPrepEmailGuide(service, pestType);
+    let smsVariant;
+    if (emailResult.queued) {
+      smsVariant = 'companion';
+    } else if (emailResult.reason === 'no_email') {
+      smsVariant = 'standalone';
+    } else {
+      return;
+    }
 
-    const prepSMS = await this.getPrepSMS(pestType, service);
+    // Idempotency for the standalone path: onServiceScheduled can be replayed
+    // (e.g. regenerate-brief re-runs it), and unlike the companion — which the
+    // email automation dedupes on appointment_booked:<id> — the standalone SMS
+    // has no per-appointment guard. Skip if a prep SMS was already logged for
+    // this customer + pest. (The companion never reaches here on a replay: its
+    // email returns queued:false and we return above.)
+    if (smsVariant === 'standalone' && await this.hasSentPrepSms(service.customer_id, pestType)) return;
+
+    const prepSMS = await this.getPrepSMS(pestType, service, smsVariant);
     if (!prepSMS) return;
 
     const prepResult = await sendCustomerMessage({
@@ -225,7 +250,7 @@ class AppointmentTagger {
       customerId: service.customer_id,
       appointmentId: service.id,
       identityTrustLevel: 'phone_matches_customer',
-      metadata: { original_message_type: 'prep_info', pest_type: pestType },
+      metadata: { original_message_type: 'prep_info', pest_type: pestType, prep_variant: smsVariant },
     });
     if (!prepResult.sent) {
       logger.warn(`[appointment-tagger] Prep SMS blocked/failed for customer ${service.customer_id}: ${prepResult.code || prepResult.reason || 'unknown'}`);
@@ -249,7 +274,10 @@ class AppointmentTagger {
 
     await db('customer_interactions').insert({
       customer_id: service.customer_id, interaction_type: 'sms_outbound',
-      subject: `${pestType} prep info sent`, body: `Prep SMS sent for ${pestType} treatment.`,
+      subject: `${pestType} prep info sent`,
+      body: smsVariant === 'standalone'
+        ? `Prep SMS sent for ${pestType} treatment (self-contained; no email on file).`
+        : `Prep SMS sent for ${pestType} treatment.`,
     });
   }
 
@@ -261,12 +289,16 @@ class AppointmentTagger {
   // (appointment.cancelled, re-evaluated against the live row at send time)
   // still apply, and the once-per-appointment idempotency key makes re-runs
   // of onServiceScheduled (e.g. regenerate-brief) safe.
-  // Returns true only when the prep-guide email automation was queued — the
-  // SMS companion's copy depends on it.
+  // Returns { queued, reason }. queued is true only when the prep-guide email
+  // automation was queued — the companion SMS copy depends on it. reason lets
+  // triggerPestPrep tell the "no email on file" case (fall back to the
+  // self-contained prep SMS, since the visit is still upcoming/open by the
+  // time that check is reached) apart from the gate/terminal/past/dedupe cases
+  // (send nothing).
   async triggerPrepEmailGuide(service, pestType) {
     const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
-    if (!automationKey) return false;
-    if (!isEnabled('emailTemplateAutomations')) return false;
+    if (!automationKey) return { queued: false, reason: 'no_automation' };
+    if (!isEnabled('emailTemplateAutomations')) return { queued: false, reason: 'gate_off' };
 
     // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
     // for past/closed appointments too, and "prepare for your treatment"
@@ -274,9 +306,9 @@ class AppointmentTagger {
     // (appointment.closed / appointment.past) re-check this against the live
     // row at send time for queued runs.
     const status = String(service.status || '').toLowerCase();
-    if (PREP_TERMINAL_STATUSES.has(status)) return false;
+    if (PREP_TERMINAL_STATUSES.has(status)) return { queued: false, reason: 'terminal' };
     const serviceDateStr = dateOnlyString(service.scheduled_date);
-    if (!serviceDateStr || serviceDateStr < etDateString()) return false;
+    if (!serviceDateStr || serviceDateStr < etDateString()) return { queued: false, reason: 'past' };
 
     try {
       // Route like the other prep/project emails: service contact first (the
@@ -290,7 +322,14 @@ class AppointmentTagger {
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
-        return false;
+        // The no-email standalone-SMS fallback fires on reason:'no_email'. But
+        // this check runs BEFORE processTrigger, so a disabled/inactive
+        // automation is not yet observed — an email-capable customer would get
+        // zero executor results (no SMS), so a phone-only customer must be held
+        // to the same pause. Only advertise 'no_email' when the automation is
+        // actually active; otherwise report 'not_queued' so no standalone sends.
+        const active = await this.isPrepAutomationActive(automationKey);
+        return { queued: false, reason: active ? 'no_email' : 'not_queued' };
       }
       const firstName = String(recipient.name || '').trim().split(/\s+/)[0]
         || String(service.first_name || '').trim()
@@ -323,12 +362,34 @@ class AppointmentTagger {
       // "Queued" means a NEW run was created and not condition-skipped —
       // an inactive automation (zero results), an idempotency dedupe
       // (re-run of the same appointment), or a skipped run means no guide
-      // email is coming, so the SMS that references it must not send.
-      return (trigger?.results || []).some(
+      // email is coming, so the companion SMS that references it must not send.
+      // These are NOT the "no email on file" case, so no standalone fallback
+      // either — a disabled automation or a re-run should stay silent.
+      const queued = (trigger?.results || []).some(
         (r) => !r.deduped && String(r.run?.status || '') !== 'skipped',
       );
+      return { queued, reason: queued ? 'queued' : 'not_queued' };
     } catch (err) {
       logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
+      return { queued: false, reason: 'error' };
+    }
+  }
+
+  // True only when the prep automation for this key is live. Matches the
+  // executor's own selector (email_template_automations, trigger
+  // appointment.booked, status 'active') so the standalone-SMS fallback
+  // respects the same per-prep pause the email path already honors. Fails
+  // CLOSED — if we can't confirm the automation is active, don't send (the
+  // email path fails closed on the same lookup error too, so both channels
+  // stay silent together and the kill switch is never bypassed on a hiccup).
+  async isPrepAutomationActive(automationKey) {
+    try {
+      const row = await db('email_template_automations')
+        .where({ automation_key: automationKey, trigger_event_key: 'appointment.booked', status: 'active' })
+        .first('id');
+      return !!row;
+    } catch (err) {
+      logger.warn(`[appointment-tagger] prep automation active-check failed for ${automationKey}: ${err.message}`);
       return false;
     }
   }
@@ -364,18 +425,39 @@ class AppointmentTagger {
     }
   }
 
-  async getPrepSMS(pestType, service) {
+  // True when a prep SMS for this customer + pest was already logged — the
+  // standalone path's replay guard. Matches the interaction row written after a
+  // successful prep send below. Fails OPEN (a check hiccup must not drop a
+  // genuine first-time send); the realistic replay vector (regenerate-brief
+  // after a successful send) always has the marker, so the fail-open window is
+  // limited to the rare case where the marker write itself failed.
+  async hasSentPrepSms(customerId, pestType) {
+    if (!customerId) return false;
+    try {
+      const row = await db('customer_interactions')
+        .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
+        .first('id');
+      return !!row;
+    } catch (err) {
+      logger.warn(`[appointment-tagger] prep-SMS dedupe check failed for customer ${customerId}: ${err.message}`);
+      return false;
+    }
+  }
+
+  async getPrepSMS(pestType, service, variant = 'companion') {
     // Deliberately date-free: the pest_prep_* predecessors embedded the
     // visit date, which went stale whenever the appointment moved (the
-    // reason 20260602000002 removed them). The auto_* copy references the
-    // emailed treatment guide instead.
-    const templateKey = pestType === 'cockroach'
-      ? 'auto_cockroach'
-      : pestType === 'bed_bug'
-        ? 'auto_bed_bug'
-        : pestType === 'flea'
-          ? 'auto_flea'
-          : null;
+    // reason 20260602000002 removed them).
+    //   • companion  → auto_*     — references the emailed treatment guide.
+    //   • standalone → auto_*_no_email — carries the prep steps inline for a
+    //     phone-only customer with no email to reference.
+    const COMPANION_KEYS = { cockroach: 'auto_cockroach', bed_bug: 'auto_bed_bug', flea: 'auto_flea' };
+    const STANDALONE_KEYS = {
+      cockroach: 'auto_cockroach_no_email',
+      bed_bug: 'auto_bed_bug_no_email',
+      flea: 'auto_flea_no_email',
+    };
+    const templateKey = (variant === 'standalone' ? STANDALONE_KEYS : COMPANION_KEYS)[pestType] || null;
     if (!templateKey) return null;
     const body = await renderSmsTemplate(templateKey, {
       first_name: service.first_name || 'there',
