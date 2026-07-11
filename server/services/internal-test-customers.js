@@ -17,4 +17,19 @@ function isInternalTestCustomerId(id) {
   return !!id && INTERNAL_TEST_CUSTOMER_IDS.includes(String(id));
 }
 
-module.exports = { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS, isInternalTestCustomerId };
+// Demo-account EMAILS, for alert paths that never see a customer id (e.g. the
+// blocked-operational-send alert only has the recipient address in hand).
+const INTERNAL_TEST_EMAILS = ['appreview+demo@wavespestcontrol.com'];
+
+function isInternalTestEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  return !!normalized && INTERNAL_TEST_EMAILS.includes(normalized);
+}
+
+module.exports = {
+  INTERNAL_TEST_CUSTOMERS,
+  INTERNAL_TEST_CUSTOMER_IDS,
+  INTERNAL_TEST_EMAILS,
+  isInternalTestCustomerId,
+  isInternalTestEmail,
+};

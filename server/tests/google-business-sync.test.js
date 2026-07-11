@@ -579,6 +579,31 @@ describe('Google Business review sync', () => {
     expect(customer.has_left_google_review).toBe(true);
   });
 
+  test('an exact full-name row beats a looser token match instead of reading as ambiguous (Codex round-2)', async () => {
+    db.__state.rows.customers.push(
+      { id: 'cust-exact', first_name: 'Mary Ann', last_name: 'Smith', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+      // Token arm would ALSO match this row (first token "Mary", last "Smith")
+      { id: 'cust-loose', first_name: 'Mary', last_name: 'Smith', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+    );
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-exact',
+        reviewer: { displayName: 'Mary Ann Smith' },
+        starRating: 'FIVE',
+        comment: 'Lovely',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.customers.find(c => c.id === 'cust-exact').has_left_google_review).toBe(true);
+    expect(db.__state.rows.customers.find(c => c.id === 'cust-loose').has_left_google_review).toBe(false);
+  });
+
   test('a two-word first name still matches its exact display-name shape', async () => {
     db.__state.rows.customers.push({
       id: 'cust-maryann',

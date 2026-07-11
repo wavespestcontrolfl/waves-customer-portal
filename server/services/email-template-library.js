@@ -13,6 +13,7 @@ const {
 const { auditNotificationTemplateIssue } = require('./audit-log');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
+const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -479,6 +480,9 @@ async function alertBlockedOperationalSend({ template, suppressionGroupKey, to, 
     if (isMarketingSend(template, suppressionGroupKey)) return;
     const email = String(to || '').trim().toLowerCase();
     if (!email) return;
+    // Demo/App-review account: this path has no customer id for the central
+    // notification gate to check, so gate on the address itself.
+    if (isInternalTestEmail(email)) return;
     const dedupeKey = `email-send-blocked:${email}`;
     const existing = await db('notifications')
       .where({ recipient_type: 'admin' })

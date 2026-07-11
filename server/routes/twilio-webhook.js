@@ -476,8 +476,11 @@ router.post('/sms', async (req, res) => {
           message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
           threadId: customer.id,
         });
+        // suppressed counts as HANDLED: an internal-test/demo customer's
+        // inbound must not fall through to the legacy owner-SMS forward —
+        // that would re-create the exact alert the suppression removed.
         knownInboundNotified = Boolean(stats && !stats.error &&
-          (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+          (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
       } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
     }
 

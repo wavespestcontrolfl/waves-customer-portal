@@ -206,4 +206,7 @@ async function runDashboardAlertsCheckInner() {
   return { fired, cleared, current: current.length };
 }
 
-module.exports = { runDashboardAlertsCheck };
+// COUNT_ESCALATION_COOLDOWN_MS is shared with the live bell overlay
+// (routes/admin-notifications.js) so a dismissed slow-creep alert doesn't
+// re-show on every +1 either — same policy on both surfaces.
+module.exports = { runDashboardAlertsCheck, COUNT_ESCALATION_COOLDOWN_MS };

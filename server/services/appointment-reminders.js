@@ -203,13 +203,17 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     }
   };
 
+  // The no-channel alert copy states the ACTUAL email failure — carry it
+  // from whichever email result this path saw (suppressed vs missing).
+  const emailReasonOf = (res) => (res?.blocked ? 'suppressed' : 'missing');
+
   if (ch === 'email') {
     const res = await sendAppointmentNoticeEmail(emailArgs);
     if (res?.ok) return true;
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
     const smsOk = await runSms();
-    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(res) });
     return smsOk;
   }
 
@@ -219,7 +223,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     const emailOk = !!emailRes?.ok;
     // Neither channel reached the customer — raise the same human-follow-up
     // alert the SMS-only path uses.
-    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(emailRes) });
     return smsOk || emailOk;
   }
 

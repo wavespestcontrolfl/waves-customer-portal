@@ -389,24 +389,33 @@ class GoogleBusinessService {
       .split(/\s+/)
       .filter(Boolean);
     if (tokens.length < 2) return null;
+
+    // TIER 1 — exact full-name equality (the original rule). Checked FIRST
+    // and on its own: an exact "Mary Ann Smith" row must win even when the
+    // looser token arm would ALSO match a "Mary Smith" row and read as
+    // ambiguous (Codex round-2). Two exact rows are still ambiguous.
+    const exact = await db('customers')
+      .whereNull('deleted_at')
+      .whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName])
+      .select('id')
+      .limit(2);
+    if (exact.length === 1) return exact[0].id;
+    if (exact.length > 1) {
+      logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
+      return null;
+    }
+
+    // TIER 2 — token match, tolerating middle names/initials and punctuation
+    // ("Michael P. Fossier" → customer "Michael Fossier", prod miss
+    // 2026-07-10). The joined-leading-tokens arm keeps two-word first names
+    // matching. Same unambiguous-match guard.
     const firstToken = tokens[0];
-    // Multi-word first names ("Mary Ann" + "Smith") matched under the old
-    // full-string equality — accept the joined leading tokens too, so that
-    // shape keeps matching alongside the middle-initial-tolerant first token.
     const leadingTokens = tokens.slice(0, -1).join(' ');
     const lastToken = tokens[tokens.length - 1];
     const matches = await db('customers')
       .whereNull('deleted_at')
-      .where(function tokenOrFullNameMatch() {
-        // Token arm: middle-initial-tolerant, single-token surname.
-        this.where(function tokenArm() {
-          this.whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
-            .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken]);
-        })
-          // Full-string arm: preserves compound surnames ("Mary Van Dyke" →
-          // last_name "Van Dyke"), which the single last token would miss.
-          .orWhereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName]);
-      })
+      .whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
+      .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken])
       .select('id')
       .limit(2);
     if (matches.length !== 1) {
