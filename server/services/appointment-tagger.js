@@ -316,30 +316,56 @@ class AppointmentTagger {
 
   // Automations-tab sequence enrollment for first-time treatment bookings —
   // the event wiring the manual per-row Send button shares its plumbing with.
-  // First-time only (same hasPriorSameTypeBooking guard as prep: a follow-up
-  // in the same infestation series must not restart "welcome" messaging), and
-  // enrollCustomer itself is idempotent (an active enrollment is a no-op),
-  // honors template.enabled, and the runner applies ASM/suppression checks at
-  // send time. Email-only by design — sequences are SendGrid emails; the
-  // phone-only prep fallback above already covers no-email customers.
+  // Guards, in order:
+  //   • upcoming open visits only — regenerate-brief replays onServiceScheduled
+  //     for past/cancelled jobs too (same terminal/past rule as prep);
+  //   • first-time only (hasPriorSameTypeBooking): a follow-up in the same
+  //     infestation series must not restart "welcome" messaging;
+  //   • once EVER per customer+template from this hook: enrollCustomer alone
+  //     only no-ops while an enrollment is ACTIVE, so a replay after the
+  //     sequence completed would reactivate and re-send — skip when any prior
+  //     enrollment row exists. The manual Send button intentionally keeps
+  //     re-send ability (it calls the route, not this hook).
+  // Recipient routes like prep: service contact first (the on-site person),
+  // then primary. Email-only by design — sequences are SendGrid emails; the
+  // phone-only prep fallback above covers no-email customers. The runner
+  // applies template.enabled + ASM/suppression checks at send time.
   // Never throws: an enrollment hiccup must not break booking.
   async enrollTreatmentAutomation(service, pestType) {
     const templateKey = TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] || null;
     if (!templateKey) return;
     if (!isEnabled('treatmentAutomationEnroll')) return;
     if (!service.customer_id) return;
-    const email = String(service.email || '').trim();
-    if (!email) return;
+
+    const status = String(service.status || '').toLowerCase();
+    if (PREP_TERMINAL_STATUSES.has(status)) return;
+    const serviceDateStr = dateOnlyString(service.scheduled_date);
+    if (!serviceDateStr || serviceDateStr < etDateString()) return;
+
     try {
       if (await this.hasPriorSameTypeBooking(service, pestType)) return;
+
+      const priorEnrollment = await db('automation_enrollments')
+        .where({ template_key: templateKey, customer_id: service.customer_id })
+        .first('id');
+      if (priorEnrollment) return;
+
+      const { resolveProjectEmailRecipient } = require('./project-email');
+      const customer = await db('customers').where({ id: service.customer_id }).first();
+      const recipient = customer
+        ? resolveProjectEmailRecipient(customer)
+        : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
+      if (!recipient.email) return;
+
+      const nameParts = String(recipient.name || '').trim().split(/\s+/).filter(Boolean);
       const AutomationRunner = require('./automation-runner');
       const result = await AutomationRunner.enrollCustomer({
         templateKey,
         customer: {
           id: service.customer_id,
-          email,
-          first_name: service.first_name || null,
-          last_name: service.last_name || null,
+          email: recipient.email,
+          first_name: nameParts[0] || service.first_name || null,
+          last_name: nameParts.slice(1).join(' ') || service.last_name || null,
         },
       });
       if (result?.enrolled) {

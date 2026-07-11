@@ -475,11 +475,14 @@ const gates = {
   // Treatment Automation Enroll — first-time treatment bookings auto-enroll
   // into the matching Automations-tab sequence (bed_bug only for now; the
   // per-pest map in appointment-tagger.js controls which pests are wired, so
-  // flipping this gate never silently enables an unwired pest). Off by
-  // default in prod: enabling it emails customers, and the bed_bug automation
-  // step-0 copy currently overlaps the transactional prep guide — reconcile
-  // the two before flipping. Kill = unset.
-  treatmentAutomationEnroll: isProd ? process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true' : true,
+  // flipping this gate never silently enables an unwired pest). Explicit
+  // opt-in in EVERY environment (like universalLinks): it emails customers,
+  // and non-prod environments run the same every-minute automation scheduler,
+  // so a dev/staging booking replay must never enroll anyone by default.
+  // Kill: unset stops NEW enrollments; toggling the automation off in the
+  // Automations tab holds in-flight enrollments (the runner only picks
+  // enabled templates), so the pair is the full stop.
+  treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
 
   // Field Content Module — master gate for the tech capture → review →
   // publish pipeline (content_prompts, dispatches, media_uploads,

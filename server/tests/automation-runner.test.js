@@ -271,3 +271,27 @@ describe('automation runner enrollment reactivation', () => {
     }));
   });
 });
+
+describe('automation runner scheduler tick', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('processDueSteps only picks enrollments on ENABLED templates (tab toggle = in-flight hold)', async () => {
+    const { processDueSteps } = require('../services/automation-runner');
+    sendgrid.isConfigured.mockReturnValue(true);
+    const dueChain = chain({ result: [] });
+    dueChain.join = jest.fn(() => dueChain);
+    dueChain.select = jest.fn(() => Promise.resolve([]));
+    setDbQueues({ 'automation_enrollments as e': [dueChain] });
+
+    const result = await processDueSteps();
+
+    expect(result).toEqual({ processed: 0 });
+    // Disabled templates are excluded at pick time, so toggling an automation
+    // off in the Automations tab immediately holds its in-flight enrollments.
+    expect(dueChain.join).toHaveBeenCalledWith('automation_templates as t', 't.key', 'e.template_key');
+    expect(dueChain.where).toHaveBeenCalledWith('t.enabled', true);
+  });
+});
