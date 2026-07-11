@@ -20,7 +20,7 @@
 | WaveGuard Member Discount | `waveguard_member` | percentage | 15% | Any WaveGuard tier (Bronze+) | No | tier |
 | WaveGuard Member Discount (Termite Inspection) | `waveguard_member_wdo` | percentage | 100% | Any WaveGuard tier + WDO service | Yes | — |
 | WaveGuard Platinum Discount | `waveguard_platinum` | percentage | 20% | Platinum tier | Yes | tier |
-| WaveGuard Referral | `referral` | fixed_amount | $50.00 | Referral flag | No | — |
+| WaveGuard Referral | `referral` | fixed_amount | $25.00 | Referral flag | No | — |
 | WaveGuard Silver Discount | `waveguard_silver` | percentage | 10% | Silver tier | Yes | tier |
 
 ### Also in DB (no Square equivalent)
@@ -43,7 +43,7 @@ Discounts in the same `stack_group` compete — only the highest-priority one wi
 
 **promo group** — New Customer Special. Non-stackable within its group.
 
-**Stackable discounts** (combine with tier): Military (5%), Multi-Home (10%), Prepayment (5%), Senior (5%), Referral ($50), WaveGuard Member WDO (100% on WDO only), Custom % and Custom $.
+**Stackable discounts** (combine with tier): Military (5%), Multi-Home (10%), Prepayment (5%), Senior (5%), Referral ($25 — aligned to the $25/$25 referral program 2026-07-11), WaveGuard Member WDO (100% on WDO only), Custom % and Custom $.
 
 ### When to Use `waveguard_member` vs Tier Discounts
 

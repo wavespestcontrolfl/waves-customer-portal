@@ -60,7 +60,7 @@ describe('discount catalog classification', () => {
     ['family_friends', 'Family & Friends', 'percentage', 15],
     ['military', 'Military Discount', 'percentage', 5],
     ['multi_home', 'Multi-Home Discount', 'percentage', 10],
-    ['referral', 'Referral Credit', 'fixed_amount', 50],
+    ['referral', 'Referral Credit', 'fixed_amount', 25],
     ['senior', 'Senior Discount', 'percentage', 5],
   ])('%s is an estimator manual recurring discount', (discountKey, name, type, amount) => {
     const result = classifyDiscountCatalogEntry(row({
@@ -84,7 +84,7 @@ describe('discount catalog classification', () => {
       discount_key: discountKey,
       name,
       discount_type: discountKey === 'referral' ? 'fixed_amount' : 'percentage',
-      amount: discountKey === 'referral' ? 50 : 5,
+      amount: discountKey === 'referral' ? 25 : 5,
     }));
 
     expect(result.warnings).toContain(warning);

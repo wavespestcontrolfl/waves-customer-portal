@@ -418,14 +418,15 @@ export function glassDayLinesFor(sectionServiceKey) {
 }
 
 // ── Tier display ────────────────────────────────────────────────────────────
-// On a single-plan estimate there is no tier ladder to compare against, so
-// "Bronze" (0% discount) reads as bottom-shelf for no reason — it displays as
-// "Home Protection". Silver/Gold/Platinum connote an earned discount and keep
-// their names. Comparison surfaces keep Bronze; the estimate page never
-// renders a ladder.
+// Every tier shows its real name. Recurring pest control (quarterly /
+// bi-monthly / monthly) IS the WaveGuard Bronze plan — that's the product's
+// name, so the badge says "WaveGuard Bronze" (owner directive 2026-07-11;
+// reverses the earlier "Home Protection" softening, which read as a different
+// product). Callers render "WaveGuard {result}", so a label that already
+// carries the prefix is normalized to the bare tier name.
 export function glassTierDisplay(tierLabel) {
   const raw = String(tierLabel || '').replace(/^WaveGuard\s+/i, '');
-  return raw.toLowerCase() === 'bronze' ? 'Home Protection' : tierLabel;
+  return raw.toLowerCase() === 'bronze' ? 'Bronze' : tierLabel;
 }
 
 // ── Scheduler header qualifier ──────────────────────────────────────────────

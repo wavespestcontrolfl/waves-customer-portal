@@ -167,9 +167,9 @@ describe('glassServiceSlug', () => {
 });
 
 describe('glassTierDisplay', () => {
-  it('renames only Bronze — no ladder on a single-plan estimate', () => {
-    expect(glassTierDisplay('Bronze')).toBe('Home Protection');
-    expect(glassTierDisplay('WaveGuard Bronze')).toBe('Home Protection');
+  it('shows the real tier name — recurring pest is the WaveGuard Bronze plan', () => {
+    expect(glassTierDisplay('Bronze')).toBe('Bronze');
+    expect(glassTierDisplay('WaveGuard Bronze')).toBe('Bronze');
     expect(glassTierDisplay('Silver')).toBe('Silver');
     expect(glassTierDisplay('Gold')).toBe('Gold');
     expect(glassTierDisplay(null)).toBe(null);
