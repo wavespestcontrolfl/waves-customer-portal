@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { isEnabled } = require('../../config/feature-gates');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -113,8 +114,9 @@ ${recentSMS || 'None'}`
       status: 'pending_approval',
     }).returning('*');
 
-    // Alert Adam for critical customers
-    if (health.churn_risk === 'critical' && TwilioService && process.env.ADAM_PHONE) {
+    // Alert Adam for critical customers — gated: owner paused health
+    // notifications 2026-07-11 (GATE_CHURN_ALERT_SMS, fails closed)
+    if (isEnabled('churnAlertSms') && health.churn_risk === 'critical' && TwilioService && process.env.ADAM_PHONE) {
       try {
         // Null-safe header: leads/one-time customers have no tier or monthly
         // rate — the old interpolation rendered "Sam null (null $null/mo)".
