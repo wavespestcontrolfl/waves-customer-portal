@@ -52,6 +52,7 @@ export default function EmailAutomationsPanelV2() {
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedKey, setSelectedKey] = useState(null);
+  const [sendTemplate, setSendTemplate] = useState(null);
   const [toast, setToast] = useState("");
 
   const load = useCallback(() => {
@@ -174,8 +175,23 @@ export default function EmailAutomationsPanelV2() {
                         onChange={() => toggleEnabled(t)}
                       />{" "}
                     </td>{" "}
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
                       {" "}
+                      <Button
+                        variant="secondary"
+                        className="mr-2"
+                        disabled={!t.enabled || t.step_count === 0}
+                        title={
+                          !t.enabled
+                            ? "Enable this automation first"
+                            : t.step_count === 0
+                              ? "Add a step first — there is nothing to send"
+                              : undefined
+                        }
+                        onClick={() => setSendTemplate(t)}
+                      >
+                        Send
+                      </Button>{" "}
                       <Button
                         variant="secondary"
                         onClick={() => setSelectedKey(t.key)}
@@ -197,6 +213,214 @@ export default function EmailAutomationsPanelV2() {
           onSaved={load}
         />
       )}
+      {sendTemplate && (
+        <SendAutomationModal
+          template={sendTemplate}
+          onClose={() => setSendTemplate(null)}
+          onSent={load}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Manual send modal — search a customer by name, enroll them in this
+//    automation's sequence. The server responds with exactly what happened
+//    (enrolled / no email / already enrolled / disabled / no steps).
+function SendAutomationModal({ template, onClose, onSent }) {
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    if (selected) return undefined;
+    const q = search.trim();
+    if (q.length < 2) {
+      // Clearing back below 2 chars cancels any in-flight debounce; reset the
+      // spinner too, or it stays stuck on "Searching…" with an empty input.
+      setResults([]);
+      setSearching(false);
+      return undefined;
+    }
+    let cancelled = false;
+    // Drop results from the previous query so a stale row can't be clicked
+    // and enrolled under the new search text during the debounce window.
+    setResults([]);
+    setSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const data = await adminFetch(
+          `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setResults(data?.customers || []);
+      } catch {
+        if (!cancelled) setResults([]);
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [search, selected]);
+
+  const customerName = (c) =>
+    [c.first_name, c.last_name].filter(Boolean).join(" ") ||
+    c.email ||
+    "Unnamed customer";
+
+  const send = async () => {
+    if (!selected || sending) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const data = await adminFetch(
+        `/admin/automations/templates/${template.key}/trigger`,
+        {
+          method: "POST",
+          body: JSON.stringify({ customerId: selected.id }),
+        },
+      );
+      setResult({
+        ok: !!data.enrolled,
+        text: data.message || (data.enrolled ? "Enrolled." : "Not enrolled."),
+      });
+      if (data.enrolled) onSent?.();
+    } catch (e) {
+      setResult({ ok: false, text: "Send failed: " + e.message });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-4"
+      onClick={onClose}
+    >
+      {" "}
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg my-8"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {" "}
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
+          {" "}
+          <div>
+            {" "}
+            <h3 className="text-16 font-medium text-zinc-900">
+              Send "{template.name}"
+            </h3>{" "}
+            <p className="text-12 text-ink-secondary mt-0.5">
+              Enrolls the customer in this sequence — step 1 sends on its
+              configured delay. Customers need an email on file.
+            </p>{" "}
+          </div>{" "}
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-ink-tertiary hover:text-zinc-900 text-14"
+          >
+            ×
+          </button>{" "}
+        </div>{" "}
+        <div className="p-5 space-y-3">
+          {selected ? (
+            <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
+              <div className="min-w-0">
+                <div className="text-14 font-medium text-zinc-900 truncate">
+                  {customerName(selected)}
+                </div>
+                <div className="text-12 text-ink-secondary truncate">
+                  {selected.email || "No email on file"}
+                </div>
+              </div>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setSelected(null);
+                  setResult(null);
+                }}
+              >
+                Change
+              </Button>
+            </div>
+          ) : (
+            <>
+              <input
+                type="text"
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search customer by name…"
+                className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+              />
+              {searching && (
+                <div className="text-12 text-ink-secondary">Searching…</div>
+              )}
+              {!searching &&
+                search.trim().length >= 2 &&
+                results.length === 0 && (
+                  <div className="text-12 text-ink-secondary">
+                    No customers found.
+                  </div>
+                )}
+              {results.length > 0 && (
+                <div className="border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
+                  {results.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => {
+                        setSelected(c);
+                        setResults([]);
+                      }}
+                      className="w-full text-left px-3 py-2 hover:bg-zinc-50"
+                    >
+                      <div className="text-13 font-medium text-zinc-900">
+                        {customerName(c)}
+                      </div>
+                      <div className="text-12 text-ink-secondary">
+                        {c.email || "No email"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+          {result && (
+            <div
+              className={cn(
+                "text-12",
+                result.ok ? "text-zinc-900" : "text-alert-fg",
+              )}
+            >
+              {result.text}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2 pt-2 border-t border-hairline border-zinc-200">
+            <Button variant="secondary" onClick={onClose}>
+              Close
+            </Button>
+            <Button
+              onClick={send}
+              disabled={!selected || !selected.email || sending}
+              title={
+                selected && !selected.email
+                  ? "This customer has no email on file"
+                  : undefined
+              }
+            >
+              {sending ? "Sending…" : "Send"}
+            </Button>
+          </div>
+        </div>{" "}
+      </div>{" "}
     </div>
   );
 }

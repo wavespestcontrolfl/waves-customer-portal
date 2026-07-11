@@ -289,16 +289,52 @@ router.post('/templates/:key/test', async (req, res) => {
   }
 });
 
-// POST /api/admin/automations/templates/:key/trigger — enroll a specific customer
+// POST /api/admin/automations/templates/:key/trigger — manually enroll a
+// specific customer in this automation's sequence (the per-row "Send" button).
+// Enrollment is idempotent (an active enrollment is a no-op) and the runner
+// sends step 1 per its delay. Responds with an operator-facing message so the
+// UI can say exactly what happened instead of a bare success flag.
+function manualEnrollMessage(templateName, result) {
+  if (result.enrolled) return `${templateName} — enrolled. Step 1 sends on its configured delay.`;
+  switch (result.reason) {
+    case 'no email': return 'This customer has no email on file, so they can\'t receive this automation.';
+    case 'already enrolled': return 'This customer already has an active enrollment on this automation — nothing was re-sent.';
+    case 'template disabled': return 'This automation is disabled. Enable it first, then send.';
+    case 'no steps': return 'This automation has no enabled steps yet, so there is nothing to send.';
+    default: return `Couldn't enroll: ${result.reason || 'unknown reason'}.`;
+  }
+}
+
 router.post('/templates/:key/trigger', async (req, res) => {
   try {
     const { customerId } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'customer not found' });
 
+    const template = await db('automation_templates').where({ key: req.params.key }).first();
+    if (!template) return res.status(404).json({ error: 'template not found' });
+
     const result = await AutomationRunner.enrollCustomer({ templateKey: req.params.key, customer });
-    res.json({ success: true, ...result });
+    const message = manualEnrollMessage(template.name, result);
+
+    if (result.enrolled) {
+      // Audit trail on the customer timeline, attributed to the operator who
+      // clicked Send (best-effort — an audit hiccup must not fail the send).
+      try {
+        await db('customer_interactions').insert({
+          customer_id: customer.id,
+          interaction_type: 'email_outbound',
+          admin_user_id: req.technicianId || null,
+          subject: `${template.name} automation sent (manual)`,
+          body: `Enrolled manually from the Automations page — sequence emails go to ${customer.email}.`,
+        });
+      } catch (auditErr) {
+        logger.warn(`[automations/trigger] audit log failed for customer ${customer.id}: ${auditErr.message}`);
+      }
+    }
+
+    res.json({ success: true, message, ...result });
   } catch (err) {
     logger.error(`[automations/trigger] failed: ${err.message}`);
     res.status(500).json({ error: err.message });

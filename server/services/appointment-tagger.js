@@ -230,14 +230,35 @@ class AppointmentTagger {
       return;
     }
 
-    // Idempotency for the standalone path: onServiceScheduled can be replayed
-    // (e.g. regenerate-brief re-runs it), and unlike the companion — which the
-    // email automation dedupes on appointment_booked:<id> — the standalone SMS
-    // has no per-appointment guard. Skip if a prep SMS was already logged for
-    // this customer + pest. (The companion never reaches here on a replay: its
-    // email returns queued:false and we return above.)
-    if (smsVariant === 'standalone' && await this.hasSentPrepSms(service.customer_id, pestType)) return;
+    // Idempotency: onServiceScheduled can be replayed (e.g. regenerate-brief
+    // re-runs it). The email leg dedupes itself on appointment_booked:<id>,
+    // but the SMS leg's only guard is the prep-SMS marker interaction. A prior
+    // marker suppresses BOTH variants: the standalone (no per-appointment
+    // guard at all) and the companion (a customer who already got the
+    // self-contained steps — automated or via the manual Communications button
+    // — must not get a second prep text when an email lands later; the queued
+    // guide email alone is the right follow-up).
+    if (smsVariant === 'companion') {
+      if (await this.hasSentPrepSms(service.customer_id, pestType)) return;
+      await this.sendPrepSmsAndLog(service, pestType, smsVariant);
+      return;
+    }
 
+    // Standalone path: serialize concurrent runs for the same customer + pest
+    // (booking hook racing a near-simultaneous regenerate-brief) so both can't
+    // pass the marker check before either writes it. The advisory lock is
+    // released when the transaction that inserted the marker commits.
+    await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`prep_sms:${service.customer_id}:${pestType}`]);
+      if (await this.hasSentPrepSms(service.customer_id, pestType, trx)) return;
+      await this.sendPrepSmsAndLog(service, pestType, smsVariant, trx);
+    });
+  }
+
+  // Renders + sends the prep SMS and writes the prep-SMS marker interaction.
+  // `dbh` lets the standalone path write the marker inside its dedupe
+  // transaction; the companion path uses the default connection.
+  async sendPrepSmsAndLog(service, pestType, smsVariant, dbh = db) {
     const prepSMS = await this.getPrepSMS(pestType, service, smsVariant);
     if (!prepSMS) return;
 
@@ -272,7 +293,7 @@ class AppointmentTagger {
       } catch (e) { logger.error(`Beehiiv tag failed: ${e.message}`); }
     }
 
-    await db('customer_interactions').insert({
+    await dbh('customer_interactions').insert({
       customer_id: service.customer_id, interaction_type: 'sms_outbound',
       subject: `${pestType} prep info sent`,
       body: smsVariant === 'standalone'
@@ -426,15 +447,18 @@ class AppointmentTagger {
   }
 
   // True when a prep SMS for this customer + pest was already logged — the
-  // standalone path's replay guard. Matches the interaction row written after a
-  // successful prep send below. Fails OPEN (a check hiccup must not drop a
-  // genuine first-time send); the realistic replay vector (regenerate-brief
-  // after a successful send) always has the marker, so the fail-open window is
-  // limited to the rare case where the marker write itself failed.
-  async hasSentPrepSms(customerId, pestType) {
+  // SMS leg's replay guard. Matches the marker interaction written by
+  // sendPrepSmsAndLog above AND by the manual Communications send
+  // (prep-guide-sender writes the same subject when its SMS goes out, so a
+  // manual send suppresses a later automated replay too). Fails OPEN (a check
+  // hiccup must not drop a genuine first-time send); the realistic replay
+  // vector (regenerate-brief after a successful send) always has the marker,
+  // so the fail-open window is limited to the rare case where the marker
+  // write itself failed.
+  async hasSentPrepSms(customerId, pestType, dbh = db) {
     if (!customerId) return false;
     try {
-      const row = await db('customer_interactions')
+      const row = await dbh('customer_interactions')
         .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
         .first('id');
       return !!row;

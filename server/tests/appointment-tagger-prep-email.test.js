@@ -62,6 +62,7 @@ let customerRow;
 let priorBookingRow;
 let automationActiveRow;
 let priorPrepInteraction;
+let trxRaw;
 
 // isPrepAutomationActive lookup (email_template_automations) — a row = active.
 function automationsQuery() {
@@ -123,6 +124,12 @@ describe('appointment tagger prep email automation', () => {
       if (table === 'email_template_automations') return automationsQuery();
       return customersQuery();
     });
+    // Standalone sends run inside db.transaction with a pg advisory lock; the
+    // trx handle dispatches to the same per-table query mocks.
+    const trx = (table) => db(table);
+    trxRaw = jest.fn(async () => ({}));
+    trx.raw = trxRaw;
+    db.transaction = jest.fn(async (fn) => fn(trx));
   });
 
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
@@ -333,6 +340,41 @@ describe('appointment tagger prep email automation', () => {
 
     await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
 
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('standalone dedupe check + marker run inside an advisory-lock transaction', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    customerRow = { ...customerRow, email: '' };
+    renderSmsTemplate.mockResolvedValueOnce('Bed bug prep steps...');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+
+    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
+
+    // Concurrent replays (booking hook vs regenerate-brief) serialize on the
+    // customer+pest advisory lock so both can't pass the marker check.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(trxRaw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?))',
+      ['prep_sms:cust-1:bed_bug'],
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('companion SMS is suppressed when standalone prep was already texted (email added later)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    // Customer got the self-contained prep text while phone-only; staff later
+    // added an email and onServiceScheduled replayed. The guide email queues
+    // (first run for this appointment) — that alone is the right follow-up;
+    // a second prep text would be a duplicate.
+    priorPrepInteraction = { id: 'int-1' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'bed_bug');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1); // email still queues
     expect(renderSmsTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });

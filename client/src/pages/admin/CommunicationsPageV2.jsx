@@ -2293,10 +2293,18 @@ function SmsTab() {
 
 // ── Page ──────────────────────────────────────────────────────
 
-// Search a customer by name and send them the flea prep guide. Smart channel:
-// the server emails the formatted guide when the customer has an email on file,
-// otherwise it texts the self-contained prep. Flea only for now.
-function FleaPrepDialog({ open, onClose }) {
+// Search a customer by name and send them a treatment prep guide. Smart
+// channel: the server emails the formatted guide when the customer has an
+// email on file, otherwise it texts the self-contained prep. Mirrors the
+// server's PREP_CONFIG allow-list (prep-guide-sender.js).
+const PREP_TYPES = [
+  { value: "flea", label: "Flea treatment" },
+  { value: "bed_bug", label: "Bed bug treatment" },
+  { value: "cockroach", label: "Cockroach treatment" },
+];
+
+function PrepSendDialog({ open, onClose }) {
+  const [pestType, setPestType] = useState("flea");
   const [search, setSearch] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -2306,6 +2314,7 @@ function FleaPrepDialog({ open, onClose }) {
 
   useEffect(() => {
     if (!open) {
+      setPestType("flea");
       setSearch("");
       setResults([]);
       setSelected(null);
@@ -2354,9 +2363,9 @@ function FleaPrepDialog({ open, onClose }) {
     try {
       const data = await adminFetch("/admin/communications/send-prep", {
         method: "POST",
-        body: JSON.stringify({ customerId: selected.id, pestType: "flea" }),
+        body: JSON.stringify({ customerId: selected.id, pestType }),
       });
-      setResult({ ok: true, text: data?.message || "Flea prep sent." });
+      setResult({ ok: true, text: data?.message || "Prep sent." });
     } catch (e) {
       setResult({ ok: false, text: e.message || "Couldn't send the prep." });
     } finally {
@@ -2367,13 +2376,30 @@ function FleaPrepDialog({ open, onClose }) {
   return (
     <Dialog open={open} onClose={onClose} size="md">
       <DialogHeader>
-        <DialogTitle>Send flea prep</DialogTitle>
+        <DialogTitle>Send prep guide</DialogTitle>
       </DialogHeader>
       <DialogBody>
         <p className="text-13 text-zinc-600 mb-3">
-          Search a customer by name. We'll email the flea prep guide if they
-          have an email on file, otherwise we'll text it.
+          Search a customer by name. We'll email the prep guide if they have an
+          email on file, otherwise we'll text it.
         </p>
+        <label className="block text-11 uppercase tracking-label text-zinc-500 mb-1">
+          Treatment
+        </label>
+        <select
+          value={pestType}
+          onChange={(e) => {
+            setPestType(e.target.value);
+            setResult(null);
+          }}
+          className="w-full h-10 px-3 mb-3 rounded-sm border-hairline border-zinc-200 text-14 text-zinc-900 bg-white u-focus-ring"
+        >
+          {PREP_TYPES.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
         {selected ? (
           <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
             <div className="min-w-0">
@@ -2457,7 +2483,7 @@ function FleaPrepDialog({ open, onClose }) {
           Close
         </Button>
         <Button onClick={handleSend} disabled={!selected || sending}>
-          {sending ? "Sending…" : "Send flea prep"}
+          {sending ? "Sending…" : "Send prep guide"}
         </Button>
       </DialogFooter>
     </Dialog>
@@ -2468,7 +2494,7 @@ export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
   // SMS / Email are sub-views of the single Message Templates tab.
   const [templateKind, setTemplateKind] = useState("sms");
-  const [fleaPrepOpen, setFleaPrepOpen] = useState(false);
+  const [prepSendOpen, setPrepSendOpen] = useState(false);
   const tabs = TABS;
 
   useEffect(() => {
@@ -2501,11 +2527,11 @@ export default function CommunicationsPageV2() {
         icon={MessageSquare}
         actions={[
           {
-            key: "flea-prep",
-            label: "Send flea prep",
+            key: "send-prep",
+            label: "Send prep guide",
             icon: BookOpen,
             variant: "secondary",
-            onClick: () => setFleaPrepOpen(true),
+            onClick: () => setPrepSendOpen(true),
           },
         ]}
         sections={tabs}
@@ -2514,9 +2540,9 @@ export default function CommunicationsPageV2() {
         ariaLabel="Communications section"
         navGridClassName="grid-cols-2 md:grid-cols-7"
       />
-      <FleaPrepDialog
-        open={fleaPrepOpen}
-        onClose={() => setFleaPrepOpen(false)}
+      <PrepSendDialog
+        open={prepSendOpen}
+        onClose={() => setPrepSendOpen(false)}
       />
       {tab === "events" && <NotificationEventsTabV2 />}
       {tab === "sms" && <SmsTab />}
