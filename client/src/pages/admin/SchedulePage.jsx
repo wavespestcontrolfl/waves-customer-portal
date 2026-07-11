@@ -8659,13 +8659,23 @@ export function CompletionPanel({
       product.rateUnit ||
       product.rate_unit ||
       "oz";
+    const catalogRate =
+      product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "";
+    // General-pest perimeter sprays: when the catalog carries no rate, start
+    // at the house default of 4 oz (rate + unit move together so a catalog
+    // unit like "oz/1000sf" can't pair with the fallback value). Editable as
+    // before; catalog rates still win when present.
+    const usePestSprayDefault =
+      catalogRate === "" &&
+      applicationMethod === "perimeter_spray" &&
+      serviceLineFromType(serviceTypeForArea) === "pest";
     setSelectedProducts((prev) => [
       ...prev,
       {
         productId: product.id,
         name: product.name,
-        rate: product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "",
-        rateUnit: defaultUnit,
+        rate: usePestSprayDefault ? 4 : catalogRate,
+        rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
