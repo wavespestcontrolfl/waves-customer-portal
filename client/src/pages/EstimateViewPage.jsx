@@ -3948,9 +3948,10 @@ export default function EstimateViewPage() {
                 // Multi-service plans embed each service's one-time work in
                 // its own box; single-service keeps the afterPrice breakdown.
                 oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}
-                // Details-packet request buttons (dark gate). Live estimates
-                // only — the read-only accepted recap and staff draft preview
-                // must not offer customer sends.
+                // Details-packet request buttons (GATE_SERVICE_DETAILS_PDF
+                // kill switch, on by default). Live estimates only — the
+                // read-only accepted recap and staff draft preview must not
+                // offer customer sends.
                 serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly && !adminDraftPreview
                   ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled }
                   : null}

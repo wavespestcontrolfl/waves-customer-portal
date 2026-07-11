@@ -13662,9 +13662,10 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
     showWaveGuardSetupFee: hasRecurringPest || hasWaivableSetupFee,
     showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
     showOneTimePestAddOns: false && hasPestOneTime,
-    // Per-service "email/text me the full details PDF" buttons (dark until
-    // the owner approves the packet copy — GATE_SERVICE_DETAILS_PDF).
-    showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF === 'true',
+    // Per-service "email/text me the full details PDF" buttons (live by
+    // default — owner approved the packet copy 2026-07-11;
+    // GATE_SERVICE_DETAILS_PDF=false is the kill switch).
+    showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF !== 'false',
   };
 }
 
@@ -14766,14 +14767,14 @@ router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── Per-service "full details" packet (GATE_SERVICE_DETAILS_PDF, dark) ──────
+// ── Per-service "full details" packet (live; kill switch GATE_SERVICE_DETAILS_PDF=false) ──────
 // GET streams the packet PDF; POST sends it to the contact info ALREADY ON
 // the estimate (email attachment or SMS link) — the destination is never
 // caller-supplied, so the token can't be used to spray documents at
 // arbitrary addresses. Both 404 unless the estimate is customer-viewable
 // (drafts stay dark even for staff: a send from a draft would be a
 // premature customer communication).
-const serviceDetailsGateOn = () => process.env.GATE_SERVICE_DETAILS_PDF === 'true';
+const serviceDetailsGateOn = () => process.env.GATE_SERVICE_DETAILS_PDF !== 'false';
 
 // Estimate token format gate (same pattern as estimate-slots-public.js):
 // legacy admin slug tokens (nameSlug-8hex) OR the 64-hex format. Rejecting
