@@ -9205,14 +9205,23 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
           smsMetadata: { original_message_type: 'estimate_extended_auto' },
         });
       } catch (err) {
-        // Release both stamps we just set so a later retry isn't locked out
-        // by a grant that never happened. If the release itself fails we stay
-        // burned — fail closed.
-        await db('estimates').where({ id: estimate.id }).update({
-          estimate_data: db.raw(
-            "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN (estimate_data - 'extensionRequestedAt') - 'extensionAutoGrantedAt' ELSE estimate_data END",
-          ),
-        }).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
+        // Release both stamps ONLY for errors known to be pre-write —
+        // validation 400s and the guarded write's 409, both thrown before or
+        // instead of any mutation (post-write SMS plumbing inside
+        // extendEstimate never throws; see its POST-WRITE INVARIANT). Any
+        // other error is ambiguous — the expiry write may have committed —
+        // and un-burning the lifetime cap over a granted extension would let
+        // this token self-serve another "first" grant once it lapses. Stay
+        // burned: fail closed (codex P2, 2026-07-11).
+        if (err.statusCode === 400 || err.statusCode === 409) {
+          await db('estimates').where({ id: estimate.id }).update({
+            estimate_data: db.raw(
+              "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN (estimate_data - 'extensionRequestedAt') - 'extensionAutoGrantedAt' ELSE estimate_data END",
+            ),
+          }).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
+        } else {
+          logger.error(`[estimate-extension-request] ambiguous auto-grant failure for estimate ${estimate.id} — keeping burn (fail closed)`);
+        }
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }

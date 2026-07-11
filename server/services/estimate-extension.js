@@ -138,50 +138,64 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // Customer notification — Waves voice. Skipped if no phone or the caller
   // asked for silence; consent/opt-out/gate enforcement lives inside
   // sendCustomerMessage.
+  //
+  // POST-WRITE INVARIANT: nothing after the guarded UPDATE above may throw
+  // out of this function. The extension is already persisted, and callers
+  // treat a service throw as "nothing happened" — the public route releases
+  // its lifetime auto-grant burn on that signal, which would let the same
+  // token self-serve another "first" grant after this one lapses (codex P2,
+  // 2026-07-11). Plumbing failures (URL shortener, lead lookup, provider)
+  // degrade to an unsent-SMS result instead; the admin notification/response
+  // carry the reason.
   let smsResult = { sent: false, reason: 'silent' };
   if (!silent) {
-    if (!estimate.customer_phone) {
-      smsResult = { sent: false, reason: 'no_phone' };
-    } else {
-      const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-      const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
-      const viewUrl = await shortenOrPassthrough(longUrl, {
-        kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
-        leadId: await leadIdForEstimate(estimate),
-        channel: 'sms', purpose: 'estimate_extended',
-      });
-      const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
-        month: 'long', day: 'numeric', timeZone: 'America/New_York',
-      });
-      const body = await smsTemplatesRouter.getTemplate(
-        'estimate_extended',
-        { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(parsedDays) },
-        { workflow, entity_type: 'estimate', entity_id: estimate.id },
-      ).catch((err) => {
-        logger.warn(`[estimate-extension] SMS template estimate_extended lookup failed: ${err.message}`);
-        return null;
-      });
-      if (!body) {
-        smsResult = { sent: false, reason: 'template_missing' };
+    try {
+      if (!estimate.customer_phone) {
+        smsResult = { sent: false, reason: 'no_phone' };
       } else {
-        smsResult = await sendCustomerMessage({
-          to: estimate.customer_phone,
-          body,
-          channel: 'sms',
-          audience: estimate.customer_id ? 'customer' : 'lead',
-          purpose: 'estimate_followup',
-          customerId: estimate.customer_id || undefined,
-          estimateId: estimate.id,
-          identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-          consentBasis: estimate.customer_id ? undefined : {
-            status: 'transactional_allowed',
-            source: entryPoint,
-            capturedAt: estimate.created_at || new Date().toISOString(),
-          },
-          entryPoint,
-          metadata: { days_added: parsedDays, ...smsMetadata },
+        const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+        const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+        const viewUrl = await shortenOrPassthrough(longUrl, {
+          kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+          leadId: await leadIdForEstimate(estimate),
+          channel: 'sms', purpose: 'estimate_extended',
         });
+        const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
+          month: 'long', day: 'numeric', timeZone: 'America/New_York',
+        });
+        const body = await smsTemplatesRouter.getTemplate(
+          'estimate_extended',
+          { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(parsedDays) },
+          { workflow, entity_type: 'estimate', entity_id: estimate.id },
+        ).catch((err) => {
+          logger.warn(`[estimate-extension] SMS template estimate_extended lookup failed: ${err.message}`);
+          return null;
+        });
+        if (!body) {
+          smsResult = { sent: false, reason: 'template_missing' };
+        } else {
+          smsResult = await sendCustomerMessage({
+            to: estimate.customer_phone,
+            body,
+            channel: 'sms',
+            audience: estimate.customer_id ? 'customer' : 'lead',
+            purpose: 'estimate_followup',
+            customerId: estimate.customer_id || undefined,
+            estimateId: estimate.id,
+            identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+            consentBasis: estimate.customer_id ? undefined : {
+              status: 'transactional_allowed',
+              source: entryPoint,
+              capturedAt: estimate.created_at || new Date().toISOString(),
+            },
+            entryPoint,
+            metadata: { days_added: parsedDays, ...smsMetadata },
+          });
+        }
       }
+    } catch (err) {
+      logger.error(`[estimate-extension] post-write SMS step failed for estimate ${estimate.id}: ${err.message}`);
+      smsResult = { sent: false, reason: 'sms_error' };
     }
   }
 
