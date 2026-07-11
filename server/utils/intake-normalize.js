@@ -27,6 +27,13 @@ function cleanEmail(value) {
   return email || '';
 }
 
+// Strict by design — NO domain repair here. A repaired address must pass the
+// call processor's ownership gate (correctedAddressOwnedByOther, fails closed)
+// before it may be adopted, and that gate only sees corrections proposed by
+// deriveEmailReview from the RAW value. Repairing inline would hand the
+// customer/lead upserts a corrected address that could belong to a different
+// customer. Invalid captures demote to email_raw below, where the (now
+// missing_tld-aware) correction fires inside the gated review path.
 function cleanValidEmailOrNull(value) {
   const email = cleanEmail(value);
   return EMAIL_RE.test(email) ? email : null;

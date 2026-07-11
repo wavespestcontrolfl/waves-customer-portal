@@ -154,6 +154,13 @@
           ],
           "format": "email"
         },
+        "email_raw": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Server-derived by normalizeCaller (never model-written; the model-output schema rejects it): the as-heard email when validation rejected it, preserved so the gated repair / read-back path can act on it."
+        },
         "relationship_to_property": {
           "type": "string",
           "enum": [

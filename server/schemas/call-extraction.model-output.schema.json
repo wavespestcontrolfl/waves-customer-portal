@@ -129,7 +129,7 @@
             "string",
             "null"
           ],
-          "format": "email"
+          "description": "Email address as heard, even if the domain sounds incomplete (e.g. 'brandon@gmail'). Server re-validates and repairs known domain typos; an invalid capture must not be dropped here."
         },
         "relationship_to_property": {
           "type": "string",

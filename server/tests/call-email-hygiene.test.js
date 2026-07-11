@@ -73,6 +73,16 @@ describe('deriveCallReviewBridge — email', () => {
     expect(fixed.normalizedEmail).toBe('jane@gmail.com');
   });
 
+  test('a dropped TLD ("…@gmail") is reconstructed via email_raw and PROPOSED, never pre-adopted', () => {
+    // The intake normalizers stay strict, so the bare-SLD capture arrives here
+    // as email_raw; the missing_tld rule proposes the repair as normalizedEmail,
+    // which the processor only adopts after the correctedAddressOwnedByOther
+    // ownership gate clears. extracted.email must NOT already hold the repair.
+    const out = deriveCallReviewBridge({ extracted: { email: null, email_raw: 'brandon.post00@gmail' } });
+    expect(out.normalizedEmail).toBe('brandon.post00@gmail.com');
+    expect(out.needsConfirmation).toContain('email_unverified');
+  });
+
   test('no email captured → no email reasons', () => {
     const out = deriveCallReviewBridge({ extracted: { first_name: 'Karen' } });
     expect(out.needsConfirmation).not.toContain('email_unverified');

@@ -3987,6 +3987,19 @@ const CallRecordingProcessor = {
     // Plus two identity signals on real prospects: caller-arranging-for-someone-
     // else and a missing surname. When DRIVES_ROUTING is later promoted the full
     // gate above owns all of this, so this bridge is guarded off then.
+    // V2 can capture an as-heard malformed email ("brandon@gmail") that the
+    // V1 extractor returned null for; normalizeCaller demotes it to the V2
+    // caller.email_raw. The email review below (repair + ownership gate +
+    // read-back triage, in BOTH the shadow-bridge and enforce branches) only
+    // reads the legacy extracted.email/email_raw — carry the V2 capture into
+    // that channel so the only captured address isn't silently lost.
+    try {
+      const v2CallerRawEmail = v2Result?.extraction?.caller?.email_raw || null;
+      if (v2CallerRawEmail && !extracted.email && !extracted.email_raw) {
+        extracted.email_raw = v2CallerRawEmail;
+      }
+    } catch (_e) { /* best-effort — V1's own capture still flows */ }
+
     if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
       try {
         const v2Ext = v2Result?.extraction || null;
