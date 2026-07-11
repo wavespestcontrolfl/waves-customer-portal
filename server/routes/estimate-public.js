@@ -13590,14 +13590,16 @@ function normalizeBreakdownItemLabel(item = {}) {
 // alignment: estimate-converter's shouldIncludeWaveGuardSetupFeeForRecurring
 // already refuses to charge the fee for these mixes.
 // Recurring services list from estimate data (shared by the stale-fee strip
-// below and the missing-fee snapshot guard in buildPricingBundle).
+// below and the missing-fee snapshot guard in buildPricingBundle). Uses
+// recurringServicesWithSupplements — the SAME view of the recurring mix the
+// accept path and readV1Shape use — so estimates whose services live only in
+// result.lineItems / engineResult.lineItems don't read as an empty mix here
+// (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
-  return Array.isArray(result?.recurring?.services)
-    ? result.recurring.services
-    : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
+  return recurringServicesWithSupplements(result || {});
 }
 
 function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
@@ -14539,52 +14541,72 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       return res.status(400).json({ error: 'channel must be email or sms' });
     }
     const { serviceDetailsAvailable, buildServiceDetailsContent, SERVICE_DETAILS_COPY } = require('../services/estimate-service-details');
+    // Generic 404, matching the GET route and the public-route contract — a
+    // distinct error here would make the send endpoint a service-membership
+    // oracle for bearer-token links.
     if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
-      return res.status(400).json({ error: 'Unknown service for this estimate' });
+      return res.status(404).json({ error: 'Not found' });
     }
 
-    const firstName = String(estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
+    // The estimate page's buttons render off /data's RESOLVED contact fields
+    // (linked customer/lead fallbacks) — gate the send on the same resolution
+    // so an estimate whose email/phone lives on the linked record doesn't
+    // show buttons that 400.
+    const contact = await resolveEstimateContactFields(estimate);
+    const firstName = String(contact.customerName || estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
     const serviceTitle = SERVICE_DETAILS_COPY[serviceKey].title.replace(/ — Service Details$/, '');
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
     const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
 
     if (channel === 'email') {
-      if (!estimate.customer_email) return res.status(400).json({ error: 'No email on this estimate' });
+      if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
       const content = await buildServiceDetailsContent(serviceKey, estimate);
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       const EmailTemplateLibrary = require('../services/email-template-library');
-      const result = await EmailTemplateLibrary.sendTemplate({
-        templateKey: 'estimate.service_details',
-        to: estimate.customer_email,
-        payload: {
-          first_name: firstName,
-          service_name: serviceTitle,
-          estimate_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
-        },
-        recipientType: estimate.customer_id ? 'customer' : 'lead',
-        recipientId: estimate.customer_id || null,
-        triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
-        // One send per estimate+service+day — the button is customer-initiated
-        // but a retap shouldn't stack identical emails.
-        idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
-        categories: ['estimate_service_details'],
-        attachments: [{
-          filename: `Waves_${serviceTitle.replace(/[^A-Za-z0-9]+/g, '_')}_Details.pdf`,
-          content: buffer.toString('base64'),
-          type: 'application/pdf',
-        }],
-      });
+      let result;
+      try {
+        result = await EmailTemplateLibrary.sendTemplate({
+          templateKey: 'estimate.service_details',
+          to: contact.customerEmail,
+          payload: {
+            first_name: firstName,
+            service_name: serviceTitle,
+            estimate_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+          },
+          recipientType: estimate.customer_id ? 'customer' : 'lead',
+          recipientId: estimate.customer_id || null,
+          triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
+          // One send per estimate+service+day — the button is customer-initiated
+          // but a retap shouldn't stack identical emails.
+          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+          categories: ['estimate_service_details'],
+          attachments: [{
+            filename: `Waves_${serviceTitle.replace(/[^A-Za-z0-9]+/g, '_')}_Details.pdf`,
+            content: buffer.toString('base64'),
+            type: 'application/pdf',
+          }],
+          // SendGrid 4xx bodies can echo the recipient address — keep provider
+          // errors out of the logs and log a redacted reason below.
+          suppressProviderErrorLog: true,
+        });
+      } catch (err) {
+        const reason = err.status
+          ? `SendGrid ${err.status}`
+          : require('../services/email-template-library').redactEmailAddresses(err.message);
+        logger.error(`[estimate-public] service-details email failed for estimate ${estimate.id}: ${reason}`);
+        return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
+      }
       if (result.blocked) return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
       if (!result.sent) return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
       return res.json({ ok: true, channel: 'email' });
     }
 
-    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on this estimate' });
+    if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
     const TwilioService = require('../services/twilio');
     const smsResult = await TwilioService.sendSMS(
-      estimate.customer_phone,
+      contact.customerPhone,
       `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
       { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
     );

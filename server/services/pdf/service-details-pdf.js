@@ -41,6 +41,12 @@ const W = PAGE_W - 80;
 const FOOTER_TOP = 742;
 const CONTENT_BOTTOM = FOOTER_TOP - 24;
 
+// Guides are GLOBAL customer documents, so they carry the headquarters
+// contact (Town Center Pkwy + main line) per the 2026-07-11 publishing rule;
+// the Luxe Ave WAVES_ADDRESS_LINE stays on formal/corporate documents
+// (invoices, notices) and Bradenton-specific surfaces.
+const GUIDE_ADDRESS_LINE = '9040 Town Center Pkwy, Lakewood Ranch, FL 34202';
+
 // App screenshots (same PNG assets the app-intro email uses) — optional,
 // cached; the guide renders fine without them.
 const shotCache = new Map();
@@ -54,6 +60,54 @@ function getAppShot(name) {
   return buf;
 }
 
+// Product imagery (client/public/product-images) — stylized studio renders
+// of the program's flagship products, generated in-house (no manufacturer
+// photography). Optional and cached like the app shots.
+function getProductShot(name) {
+  const key = `product-images/${name}`;
+  if (shotCache.has(key)) return shotCache.get(key) || null;
+  let buf = null;
+  try {
+    buf = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'client', 'public', 'product-images', name));
+  } catch { /* asset optional */ }
+  shotCache.set(key, buf);
+  return buf;
+}
+
+// A row of product images with captions — square renders, up to 4 across.
+function productImageRow(doc, block) {
+  const images = (block?.images || [])
+    .map((img) => ({ ...img, buf: getProductShot(img.file) }))
+    .filter((img) => img.buf);
+  if (!images.length) return;
+  const shotW = images.length >= 4 ? 116 : 128;
+  const gap = 16;
+  const rowW = images.length * shotW + (images.length - 1) * gap;
+  const captionH = 30;
+  ensureRoom(doc, shotW + captionH + 56);
+  if (block.heading) sectionHeading(doc, block.heading);
+  doc.moveDown(0.3);
+  const top = doc.y;
+  let x = L + (W - rowW) / 2;
+  for (const img of images) {
+    try {
+      doc.image(img.buf, x, top, { width: shotW, height: shotW });
+      doc.save();
+      doc.roundedRect(x, top, shotW, shotW, 8).lineWidth(0.75).strokeColor(RULE).stroke();
+      doc.restore();
+    } catch { /* asset optional */ }
+    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED)
+      .text(img.caption || '', x - 4, top + shotW + 5, { width: shotW + 8, align: 'center', lineGap: 0.5 });
+    x += shotW + gap;
+  }
+  doc.y = top + shotW + captionH + 4;
+  if (block.note) {
+    doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED)
+      .text(block.note, L, doc.y, { width: W, align: 'center', lineGap: 1 });
+    doc.moveDown(0.5);
+  }
+}
+
 function footer(doc) {
   // Zero the bottom margin while drawing in the footer band — pdfkit
   // auto-paginates any text below (pageHeight − bottomMargin), which turned
@@ -64,7 +118,7 @@ function footer(doc) {
   doc.page.margins.bottom = 0;
   doc.moveTo(L, FOOTER_TOP).lineTo(L + W, FOOTER_TOP).lineWidth(0.5).strokeColor(RULE).stroke();
   doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
-  doc.text(`Waves Pest Control, LLC · ${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`, L, FOOTER_TOP + 6, { width: W, align: 'center' });
+  doc.text(`Waves Pest Control, LLC · ${GUIDE_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`, L, FOOTER_TOP + 6, { width: W, align: 'center' });
   doc.text(WAVES_FL_LICENSE_LINE, L, FOOTER_TOP + 17, { width: W, align: 'center' });
   doc.page.margins.bottom = previousBottomMargin;
   doc.restore();
@@ -95,8 +149,8 @@ function headerBar(doc, title) {
 
   doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(WHITE).text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
   doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
-  doc.text('13649 Luxe Ave #110', 430, 52, { width: 142, align: 'right' });
-  doc.text('Bradenton, FL 34211', 430, 64, { width: 142, align: 'right' });
+  doc.text('9040 Town Center Pkwy', 430, 52, { width: 142, align: 'right' });
+  doc.text('Lakewood Ranch, FL 34202', 430, 64, { width: 142, align: 'right' });
   doc.restore();
 
   doc.save();
@@ -442,6 +496,8 @@ function renderServiceDetailsPdf(content) {
       sectionHeading(doc, content.compliance.heading || 'Compliance & licensing');
       bullets(doc, content.compliance.bullets);
     }
+
+    if (content.productImages) productImageRow(doc, content.productImages);
 
     sectionHeading(doc, 'Products we may use');
     if (Array.isArray(content.products) && content.products.length) {

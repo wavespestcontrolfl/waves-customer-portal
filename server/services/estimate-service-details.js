@@ -364,14 +364,15 @@ const SERVICE_DETAILS_COPY = {
     systemBox: {
       heading: 'Your program at a glance',
       rows: [
+        ['Visits', 'Full lawn programs include 7–8 visits per year, scheduled around turf growth, seasonal pest pressure, weather, and local fertilizer rules — not a rigid monthly calendar'],
         ['Built for your grass', 'St. Augustine, Bermuda, Zoysia & Bahia run dedicated program tracks — a product or rate that helps one grass can injure another, so the turf is identified before anything is applied'],
         ['Every visit', 'Inspection first — then turf-specific fertilization, weed & sedge management, and insect/disease work as season, conditions, and labels warrant'],
-        ['Covered turf insects', 'Chinch bugs, grubs, sod webworms & armyworms — monitored every visit, treated when the evidence supports it (your program terms list exact coverage)'],
-        ['Disease', 'Evaluated before treatment — a brown patch is a symptom, not a diagnosis, and fungicide is used when evidence supports it, never by default'],
-        ['Summer fertilizer rules', 'Manatee County, Bradenton & Sarasota County restrict nitrogen/phosphorus fertilizer Jun 1 – Sep 30 — your address sets the rules, and restricted-season visits shift to lawful work, never skipped'],
+        ['Covered turf insects', 'Chinch bugs, sod webworms, armyworms, white grubs & mole crickets — monitored every visit, treated on evidence. Fire-ant control is included only when your proposal specifically includes it; billbugs and unusual turf pests are inspected and quoted from diagnosis'],
+        ['Disease', 'Scouted every visit — a brown patch is a symptom, not a diagnosis. Condition-based fungicide is part of comprehensive lawn plans; fertilization-only and weed-only plans quote it separately'],
+        ['Summer fertilizer rules', 'Manatee County, Bradenton & Sarasota County restrict nitrogen/phosphorus fertilizer Jun 1 – Sep 30 — summer visits shift to iron & micronutrients, weed control, and lawn insect control, never skipped'],
         ['Documentation', 'Digital report every visit: findings, photos, exact products, watering & mowing instructions, and your lawn-health trend in the app'],
-        ['Re-service', 'Covered issues between visits are re-serviced under your program terms'],
-        ['Separate services', 'Mowing, edging, irrigation diagnosis/repair, sod, aeration, dethatching, flowerbed weed control, tree & shrub care'],
+        ['Re-service', 'No-charge re-services for covered issues while your plan is active — report a concern any time; some treatments need their normal response window (about 7–10 days) before another application'],
+        ['Separate services', 'Mowing, edging, irrigation diagnosis/repair, sod installation, flowerbed weed control, tree & shrub care — core aeration and lawn plugging are available as separately quoted services'],
       ],
       note: 'Your estimate and service agreement control the exact scope, covered pests, and guarantee terms. Where a lawn problem needs something a treatment cannot fix — shade, a broken sprinkler head, compacted soil — we say so instead of selling you product.',
     },
@@ -412,7 +413,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Do you apply fungicide whenever you see a brown patch?',
-        a: 'No. A brown patch does not automatically mean fungus, and an unnecessary fungicide will not correct insects, drought, sprinkler gaps, mowing injury, or pet damage — misidentification is a leading reason lawn treatments fail. When the evidence supports disease, we select a product labeled for your turf and that disease, with the watering and mowing instructions that fungicide requires.',
+        a: 'No. A brown patch does not automatically mean fungus, and an unnecessary fungicide will not correct insects, drought, sprinkler gaps, mowing injury, or pet damage — misidentification is a leading reason lawn treatments fail. Every comprehensive visit includes disease scouting; fungicide is applied when disease is present, when conditions create a documented high risk, or when your lawn’s disease history justifies a preventive application. When we do treat, the product is labeled for your turf and that disease, with the watering and mowing instructions that fungicide requires. Fertilization-only and weed-only plans quote fungicide separately.',
       },
       {
         q: 'Do you apply insecticide at every visit automatically?',
@@ -443,16 +444,20 @@ const SERVICE_DETAILS_COPY = {
         a: 'New sod gets an establishment plan, not the standard program pass. Tell us the installation date, the grass type if you know it, what the installer applied, your watering schedule, and any sod warranty terms. Some fertilizers and herbicides must be delayed or modified during rooting — treating fresh sod like established turf is how new lawns get hurt.',
       },
       {
+        q: 'Do you offer aeration or lawn plugging?',
+        a: 'Yes — both, as separately quoted specialty services rather than part of the standard visit rotation. Core aeration relieves soil compaction and opens the root zone; plugging installs live sod plugs at 6-, 12-, or 18-inch spacing to regrow thin or bare areas. We recommend them from what the inspection actually shows — compaction, thatch, bare ground, your grass type — and whether the site can support the recovery.',
+      },
+      {
         q: 'Can treatments fix thin grass under my trees?',
         a: 'They can address a covered pest or a nutrient issue — they cannot manufacture sunlight. No common Florida lawn grass performs well in dense shade, and tree-root competition and mowing difficulty pile on. In genuinely unsuitable areas, pruning by a qualified professional, a shade-tolerant groundcover, or mulch is more realistic than repeatedly treating grass that cannot win there — and we will tell you that rather than billing you to fight physics.',
       },
       {
         q: 'Does service continue during the summer fertilizer restriction?',
-        a: 'Yes. Manatee County, Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn fertilizers from June 1 through September 30, and your property address — not a company calendar — determines which ordinance applies. A restricted period does not mean your lawn is ignored: visits shift to lawful, appropriate work for the season, and your report documents exactly what was used.',
+        a: 'Yes. Manatee County, Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn fertilizers from June 1 through September 30, and your property address — not a company calendar — determines which ordinance applies. A restricted period does not mean your lawn is ignored: summer visits still carry the full inspection and pest scouting, covered turf-insect treatment, selective weed control, iron and approved zero-nitrogen/zero-phosphorus micronutrients to hold color lawfully, disease monitoring with condition-based treatment, and the usual checks on drought stress, mowing, and irrigation — and your report documents exactly what was used.',
       },
       {
         q: 'What happens when I request a re-service?',
-        a: 'It starts with inspection, not an automatic second application. We review the previous report and photos, ask when the concern began, and determine whether it is the same covered condition, a different pest, normal treatment response time, or an excluded cause like irrigation or mowing. We re-treat when it is appropriate and label-permitted — and explain the non-treatment correction when that is what the lawn actually needs. "More product" is not a diagnosis.',
+        a: 'Report a concern any time — there is no waiting period to call, and if damage is actively spreading we inspect promptly. The re-service itself starts with inspection, not an automatic second application: we review the previous report and photos, ask when the concern began, and determine whether it is the same covered condition, a different pest, normal treatment response time (many treatments need about 7–10 days to show their work before re-applying makes sense), or an excluded cause like irrigation or mowing. We re-treat when it is appropriate and label-permitted — and explain the non-treatment correction when that is what the lawn actually needs. "More product" is not a diagnosis.',
       },
       {
         q: 'Do you guarantee a perfect green lawn?',
@@ -460,7 +465,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What if you are not sure what is causing the problem?',
-        a: 'We say so. We will not invent a confident-sounding diagnosis to make a visit feel complete. You get what we observed, what has been ruled out, what remains possible, and the next step — monitoring, an irrigation check, a root or thatch exam, an insect or turf sample, soil testing, or UF/IFAS laboratory analysis. An honest "not yet confirmed" beats a guess with a product bill attached.',
+        a: 'We say so. We will not invent a confident-sounding diagnosis to make a visit feel complete. You get what we observed, what has been ruled out, what remains possible, and the next step — monitoring, an irrigation check, a root or thatch exam, an insect or turf sample, or soil testing (recommended or arranged when needed; your proposal states whether sampling and laboratory fees are included), up to UF/IFAS laboratory analysis. An honest "not yet confirmed" beats a guess with a product bill attached.',
       },
     ],
     // Lawn-specific safety copy replaces the shared structural-pest section
@@ -482,6 +487,22 @@ const SERVICE_DETAILS_COPY = {
         'Waves Pest Control, LLC operates under Florida pest-control business license JB351547 and is insured, and every applied product is documented in your service report with its own re-entry guidance.',
       ],
       closing: 'We will never tell you a lawn treatment is “100% safe” — no honest company can, and the EPA does not permit that claim for any product. What we can show you is the product-by-product paper trail and the label-driven precautions behind every visit — the same rules our technicians follow on their own lawns.',
+    },
+    // Stylized in-house product renders (client/public/product-images) — the
+    // program's flagship products, generated 2026-07-11 (gemini-3-pro-image;
+    // no manufacturer photography, no copied trade dress). Products chosen
+    // from the lawn protocols: Arena 50 WDG (insecticide rotation), LESCO
+    // granular fert + Chelated AM+Micros (summer iron/micros), Celsius WG
+    // (primary post-emergent, unified St. Augustine protocol).
+    productImages: {
+      heading: 'A few of the products doing the work',
+      images: [
+        { file: 'product-lesco-fertilizer-bag.png', caption: 'LESCO® professional turf fertilizer' },
+        { file: 'product-celsius-wg.png', caption: 'Celsius® WG — post-emergent herbicide' },
+        { file: 'product-arena-50-wdg.png', caption: 'Arena® 50 WDG — turf insecticide' },
+        { file: 'product-lesco-am-micros.png', caption: 'LESCO® Chelated AM + Micros — summer iron & micronutrients' },
+      ],
+      note: 'Stylized product illustrations — product selection follows your turf, the season, and the label, and your service report names the exact products applied at your home.',
     },
     complianceExtras: [
       'Florida law requires a conspicuous treatment notice when pesticides are applied to lawns or exterior foliage — we post it at every qualifying visit, and your digital report carries the full details behind the sign.',
@@ -515,10 +536,10 @@ const SERVICE_DETAILS_COPY = {
         ['Watch list', 'Scale, whiteflies, aphids, mealybugs, mites, lace bugs, caterpillars, thrips & other covered ornamental pests'],
         ['Every visit', 'Plant-by-plant inspection first — treatment only where the evidence and the label support it'],
         ['Disease', 'Symptoms evaluated before fungicide — some problems need a sample or lab work, and some are cultural, not chemical'],
-        ['Plant nutrition', 'Plant-specific nutrient support when included in your program — palms get palm-specific analysis, never lawn fertilizer pointed at a palm'],
+        ['Plant nutrition', 'A combination of foliar feeding and root-zone feeding (soil drenches / deep-root applications), selected per plant species, soil, and diagnosis — palms get palm-specific care, never lawn fertilizer pointed at a palm'],
         ['Pollinators & edibles', 'Blooms, foraging bees, and food plants are checked before treatment — tell us about hives, butterfly gardens, and edibles'],
         ['Documentation', 'Digital report every visit: plants inspected, findings, exact products, photos, watering & re-entry instructions'],
-        ['Separate services', 'Pruning, hedge shaping, tree removal, structural tree-risk assessment, irrigation repair, bed weed control, plant replacement'],
+        ['Separate services', 'Pruning, hedge shaping, tree removal, structural tree-risk assessment, irrigation repair, bed weed control, palm trunk injections (own program), plant replacement'],
       ],
       note: 'Your estimate and service agreement control the exact plants and scope. Pesticide service is not an arborist’s structural inspection — leaning trunks, cavities, and storm damage get documented and referred, not sprayed.',
     },
@@ -556,7 +577,11 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Which plants are included?',
-        a: 'The plants and areas covered by your written estimate — that is the honest boundary. Ask us specifically about palms, mature canopy trees, newly installed plants, container plants, and anything edible: each has its own coverage answer, and plants beyond safe equipment reach or outside the plan get documented and referred rather than half-treated.',
+        a: 'The plants and areas covered by your written estimate — that is the honest boundary. Ask us specifically about palms, mature canopy trees, newly installed plants, container plants, and anything edible: each has its own coverage answer. On tree size: there is no fixed height limit for root-zone and systemic treatment — a mature oak can be treated through its root system — but foliar and contact applications are limited to canopy we can reach safely and effectively from the ground. We do not climb, spray from bucket trucks, prune, or remove trees; large trees are inspected before treatment is accepted, and anything beyond the program gets documented and referred rather than half-treated.',
+      },
+      {
+        q: 'How do you feed plants — through the leaves or the roots?',
+        a: 'Both, chosen per plant. Foliar feeding delivers targeted nutrients directly through the leaves; soil drenches and deep-root applications deliver nutrients and systemic protection through the root system. The method follows the plant species, soil conditions, pest pressure, and the diagnosed deficiency — not a one-method routine. And feeding follows diagnosis: we do not fertilize a yellow plant until we know why it is yellow.',
       },
       {
         q: 'Do you spray every plant at every visit?',
@@ -572,7 +597,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What about my palms specifically?',
-        a: 'Palms get palm care, not shrub care. Their most common problems in our area are nutritional — potassium, magnesium, manganese, boron — and those deficiencies can mimic disease, which is why palm discoloration should never automatically trigger fungicide. When supplemental nutrition is warranted, we use palm-specific controlled-release analyses in line with UF/IFAS guidance, not lawn fertilizer. And we are straight about the hard cases: some palm diseases, like Ganoderma butt rot, have no effective treatment — a suspected lethal disease or trunk decay gets documented and referred promptly instead of being dressed up as a treatable condition.',
+        a: 'Palms get palm care, not shrub care. Their most common problems in our area are nutritional — potassium, magnesium, manganese, boron — and those deficiencies can mimic disease, which is why palm discoloration should never automatically trigger fungicide. When supplemental nutrition is warranted, we use palm-specific controlled-release analyses in line with UF/IFAS guidance, not lawn fertilizer. Palms are inspected and coordinated with this program, but trunk injections are their own program: diagnosed first, then quoted by palm species, condition, the treatment needed, and the number of palms — never automatically included. And we are straight about the hard cases: some palm diseases, like Ganoderma butt rot, have no effective treatment — a suspected lethal disease or trunk decay gets documented and referred promptly instead of being dressed up as a treatable condition.',
       },
       {
         q: 'Can you save a dying plant?',
@@ -584,7 +609,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Is it safe for pollinators, pets, kids — and my vegetable garden?',
-        a: 'We will not call any pesticide risk-free, for pollinators or anyone else — what we do is engineer exposure down, and the full section below covers it. Blooms and actively foraging bees are checked before treatment and label restrictions are followed, including delaying or modifying treatment. Edible plants are the strictest boundary: a product labeled only for ornamentals is never applied to food plants, so tell us about citrus, mango, avocado, herbs, and vegetable beds before service — unless your estimate expressly covers them, they are marked no-treatment areas. Keep kids and pets clear during service and follow the report’s product-specific re-entry instructions after.',
+        a: 'We will not call any pesticide risk-free, for pollinators or anyone else — what we do is engineer exposure down, and the full section below covers it. Blooms and actively foraging bees are checked before treatment and label restrictions are followed, including delaying or modifying treatment. Edible plants are the strictest boundary: the standard program covers ornamentals only, and herbs, vegetables, and plants grown for the table are excluded — tell us about citrus, mango, avocado, herbs, and vegetable beds before service so they are marked no-treatment areas. Fruit trees can be evaluated separately, and are treated only when we have a product labeled for that exact crop and can give you the required re-entry and harvest instructions. Keep kids and pets clear during service and follow the report’s product-specific re-entry instructions after.',
       },
       {
         q: 'Can you tell me if my big tree is safe?',
@@ -728,6 +753,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
       heading: COMPLIANCE_SECTION.heading,
       bullets: [...COMPLIANCE_SECTION.bullets, ...(copy.complianceExtras || [])],
     },
+    productImages: copy.productImages || null,
     systemBox: copy.systemBox || null,
     responsibilities: copy.responsibilities || null,
     // One CTA, after the full picture — every external guide review
