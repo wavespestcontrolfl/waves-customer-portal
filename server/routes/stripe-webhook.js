@@ -1657,19 +1657,6 @@ async function handleChargeRefunded(charge) {
   const chargeId = charge.id;
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
 
-  // Estimate deposits have no payments row — a dashboard refund (or the
-  // webhook echo of our own refunds: stale deposit, exempt-path sweep,
-  // unapplied remainder) must flip the deposit ledger so reversed money can
-  // never satisfy acceptance or be credited, then skip the payments path
-  // entirely. The cumulative refunded amount lets the handler recognize the
-  // echo of a refund it already stamped (a partial remainder refund must not
-  // flip a legitimately credited row).
-  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
-  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
-    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
-  });
-  if (depositReversal.handled) return;
-
   const latestRefund = Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null;
   const refundId = latestRefund?.id || charge.latest_refund || null;
   const refundDate = latestRefund?.created ? new Date(latestRefund.created * 1000) : new Date();
@@ -1678,6 +1665,21 @@ async function handleChargeRefunded(charge) {
   const refundAmountDollars = refundAmountCents / 100;
   const cumulativeRefundAmountDollars = (charge.amount_refunded || refundAmountCents) / 100;
   const isFullRefund = charge.refunded === true;
+
+  // Estimate deposits have no payments row — a dashboard refund (or the
+  // webhook echo of our own refunds: stale deposit, exempt-path sweep,
+  // unapplied remainder) must flip the deposit ledger so reversed money can
+  // never satisfy acceptance or be credited, then skip the payments path
+  // entirely. The cumulative refunded amount lets the handler recognize the
+  // echo of a refund it already stamped (a partial remainder refund must not
+  // flip a legitimately credited row); refundId lets it refuse a refund
+  // whose failure was already recorded (bounce-before-creation).
+  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
+  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
+    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
+    refundId,
+  });
+  if (depositReversal.handled) return;
 
   // Out-of-order bounce guard: Stripe can deliver refund.failed BEFORE this
   // creation event. handleRefundFailed records the bounced id in the
@@ -1958,6 +1960,42 @@ async function handleRefundFailed(refund) {
   };
 
   if (!payment) {
+    // Estimate-deposit refunds have no payments row — record the failed id
+    // ON THE DEPOSIT so a late charge.refunded can't run the reversal for
+    // money Stripe kept (handleDepositChargeReversed consults this fence).
+    // Column-probed for pre-migration tolerance; the deposit-row lookup
+    // doubles as the replay fence (both bounce events must notify once).
+    let dep = null;
+    if (piId && refundId) {
+      try {
+        const depCols = await db('estimate_deposits').columnInfo();
+        if (depCols.failed_refund_ids) {
+          dep = await db('estimate_deposits')
+            .where({ stripe_payment_intent_id: piId })
+            .first('id', 'failed_refund_ids', 'status');
+        }
+      } catch (err) {
+        logger.warn(`[stripe-webhook] deposit bounce-fence probe failed for PI ${piId}: ${err.message}`);
+      }
+    }
+    if (dep) {
+      const failed = Array.isArray(dep.failed_refund_ids)
+        ? dep.failed_refund_ids
+        : (typeof dep.failed_refund_ids === 'string' ? JSON.parse(dep.failed_refund_ids || '[]') : []);
+      if (failed.includes(refundId)) return; // replay — already recorded + notified
+      // Fence + notification commit ATOMICALLY (same invariant as the
+      // payments-backed revert below): a notify failure must roll the fence
+      // back and throw so Stripe retries — a committed fence with a lost
+      // notification would send the retry into the replay check above and
+      // ack silently, erasing the only operator signal.
+      await db.transaction(async (trx) => {
+        await trx('estimate_deposits')
+          .where({ id: dep.id })
+          .update({ failed_refund_ids: JSON.stringify([...failed, refundId]), updated_at: new Date() });
+        await insertBounceNotification(trx, `Deposit ${dep.id} (status ${dep.status}): the failed refund id was recorded — the deposit reversal will refuse this refund's late creation event. If the deposit was already flipped to refunded, restore its ledger manually.`);
+      });
+      return;
+    }
     await insertBounceNotification(db, 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.');
     return;
   }

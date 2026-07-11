@@ -276,6 +276,79 @@ describe('handleRefundFailed', () => {
     expect(notificationInsert).not.toHaveBeenCalled();
   });
 
+  test('deposit bounce records a durable fence on estimate_deposits and notifies once', async () => {
+    // No payments row, but a deposit row matches the PI: the failed id is
+    // written to failed_refund_ids so handleDepositChargeReversed refuses the
+    // late creation event; the replay (second bounce event) does not
+    // re-notify.
+    const depositRow = { id: 'dep-1', status: 'received', failed_refund_ids: [] };
+    const depUpdate = jest.fn().mockResolvedValue(1);
+    const depQuery = {
+      where: jest.fn(() => depQuery),
+      first: jest.fn(async () => depositRow),
+      update: depUpdate,
+      columnInfo: jest.fn(async () => ({ failed_refund_ids: {} })),
+    };
+    const emptyQuery = {
+      where: jest.fn(() => emptyQuery),
+      first: jest.fn(async () => undefined),
+    };
+    db.mockImplementation((table) => {
+      if (table === 'payments') return emptyQuery;
+      if (table === 'estimate_deposits') return depQuery;
+      if (table === 'notifications') return { insert: notificationInsert };
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+    // Fence + notification commit in ONE transaction — the trx routes
+    // tables the same way as db.
+    db.transaction.mockImplementation(async (cb) => cb(db));
+
+    await handleRefundFailed(failedRefund());
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(depUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      failed_refund_ids: JSON.stringify(['re_fail']),
+    }));
+    expect(notificationInsert).toHaveBeenCalledTimes(1);
+    expect(notificationInsert.mock.calls[0][0].body).toContain('Deposit dep-1');
+
+    // Replay: fence already contains the id → no transaction, no re-notify.
+    depositRow.failed_refund_ids = ['re_fail'];
+    depUpdate.mockClear();
+    notificationInsert.mockClear();
+    db.transaction.mockClear();
+    await handleRefundFailed(failedRefund());
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(depUpdate).not.toHaveBeenCalled();
+    expect(notificationInsert).not.toHaveBeenCalled();
+  });
+
+  test('a notify failure inside the deposit-fence transaction propagates (Stripe retries the whole event)', async () => {
+    // The fence must never commit without its notification — a committed
+    // fence with a lost notify would make the retry hit the replay check
+    // and ack silently, erasing the only operator signal.
+    const depositRow = { id: 'dep-1', status: 'received', failed_refund_ids: [] };
+    const depQuery = {
+      where: jest.fn(() => depQuery),
+      first: jest.fn(async () => depositRow),
+      update: jest.fn().mockResolvedValue(1),
+      columnInfo: jest.fn(async () => ({ failed_refund_ids: {} })),
+    };
+    const emptyQuery = {
+      where: jest.fn(() => emptyQuery),
+      first: jest.fn(async () => undefined),
+    };
+    notificationInsert.mockRejectedValue(new Error('insert failed'));
+    db.mockImplementation((table) => {
+      if (table === 'payments') return emptyQuery;
+      if (table === 'estimate_deposits') return depQuery;
+      if (table === 'notifications') return { insert: notificationInsert };
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+    db.transaction.mockImplementation(async (cb) => cb(db));
+
+    await expect(handleRefundFailed(failedRefund())).rejects.toThrow('insert failed');
+  });
+
   test('no payments row (estimate-deposit refund) still notifies with the deposit hint', async () => {
     const emptyQuery = {
       where: jest.fn(() => emptyQuery),

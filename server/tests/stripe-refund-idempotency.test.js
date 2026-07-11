@@ -113,7 +113,11 @@ describe('StripeService.refund', () => {
       refund_amount: 40,
       stripe_refund_id: 're_1',
     }));
-    expect(JSON.parse(finalArgs.metadata).pending_refund_key).toBeUndefined();
+    const finalMeta = JSON.parse(finalArgs.metadata);
+    expect(finalMeta.pending_refund_key).toBeUndefined();
+    // The refund is recorded as STAMPED so a later bounce stays attributable
+    // even after a newer partial overwrites stripe_refund_id.
+    expect(finalMeta.stamped_refund_ids).toEqual(['re_1']);
   });
 
   test('retry after a webhook repair replays the ORIGINAL attempt key (no second refund)', async () => {

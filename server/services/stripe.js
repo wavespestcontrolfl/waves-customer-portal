@@ -1729,6 +1729,29 @@ const StripeService = {
     }
     const isFullRefund = totalRefundedCents >= paidCents;
 
+    // Record this refund as STAMPED (metadata.stamped_refund_ids) so a later
+    // bounce stays attributable after newer stamps overwrite stripe_refund_id.
+    // Merge against LIVE metadata — the charge.refunded webhook may have
+    // stamped concurrently, and clearedMeta is a pre-call snapshot that would
+    // otherwise erase that stamp.
+    try {
+      const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
+      let liveMeta = {};
+      try {
+        liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
+      } catch { liveMeta = {}; }
+      const mergedStamps = new Set([
+        ...(Array.isArray(liveMeta.stamped_refund_ids) ? liveMeta.stamped_refund_ids : []),
+        ...(Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : []),
+        ...(refund?.id ? [refund.id] : []),
+      ]);
+      if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
+    } catch (mergeErr) {
+      logger.warn(`[stripe] stamped-refund merge read failed for payment ${paymentId}: ${mergeErr.message}`);
+      const prior = Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : [];
+      if (refund?.id && !prior.includes(refund.id)) clearedMeta.stamped_refund_ids = [...prior, refund.id];
+    }
+
     try {
       await db('payments')
         .where({ id: paymentId })

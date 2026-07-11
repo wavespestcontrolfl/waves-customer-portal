@@ -1219,8 +1219,31 @@ async function handleDepositIntentSucceeded(paymentIntent) {
 // caller must NOT run its payments logic. amountRefundedCents (the charge's
 // cumulative refund total, when the caller has it) distinguishes the echo of
 // our own recorded refund from a genuinely larger dashboard reversal.
-async function handleDepositChargeReversed(paymentIntentId, context, { amountRefundedCents = null } = {}) {
+async function handleDepositChargeReversed(paymentIntentId, context, { amountRefundedCents = null, refundId = null } = {}) {
   if (!paymentIntentId) return { handled: false };
+  // Bounce fence: a refund that already FAILED (refund.failed can outrun
+  // charge.refunded) must not run the reversal — the money never left
+  // Stripe, and a stale creation event's cumulative amount still includes
+  // the bounced refund. Column-probed for pre-migration tolerance.
+  if (refundId) {
+    try {
+      const cols = await db('estimate_deposits').columnInfo();
+      if (cols.failed_refund_ids) {
+        const fenceRow = await db('estimate_deposits')
+          .where({ stripe_payment_intent_id: paymentIntentId })
+          .first('failed_refund_ids');
+        const failed = Array.isArray(fenceRow?.failed_refund_ids)
+          ? fenceRow.failed_refund_ids
+          : (typeof fenceRow?.failed_refund_ids === 'string' ? JSON.parse(fenceRow.failed_refund_ids || '[]') : []);
+        if (failed.includes(refundId)) {
+          logger.warn(`[estimate-deposits] ${context} for refund ${refundId} arrived after its failure was recorded — skipping deposit reversal`);
+          return { handled: true, bounced: true };
+        }
+      }
+    } catch (err) {
+      logger.warn(`[estimate-deposits] bounce-fence check failed for PI ${paymentIntentId}: ${err.message}`);
+    }
+  }
   // CONDITIONAL flip with bounded re-read: an accept can credit the row
   // between our read and write. The update applies only to the exact state
   // the alert decision was based on; a lost transition re-reads and
