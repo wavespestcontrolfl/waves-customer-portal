@@ -791,6 +791,21 @@ async function handleRecoveryBounce(recoveryMessage, ev) {
         customerId: rec.customer_id,
         status: 'redelivered_bounced',
       });
+      // Audio re-verification also applies here: the domain corrector
+      // succeeded but the RESEND bounced too — the local part was also wrong
+      // (apitz@gmial.com → apitz@gmail.com → still bounces; the recording
+      // says apitts). Locate the call by the ORIGINAL capture and exclude
+      // BOTH known-bad variants from the candidates. Fire-and-forget, same
+      // as the original-skip branch.
+      try {
+        const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
+        reverifyBouncedEmailFromCall({
+          bouncedEmail: String(recoveryMessage.recipient_email_snapshot || '').trim().toLowerCase(),
+          customerId: rec.customer_id || null,
+          sourceEmail: rec.bounced_email || null,
+          alsoExclude: [rec.bounced_email].filter(Boolean),
+        }).catch((e) => logger.warn(`[bounce-recovery] rebounce reverify failed open: ${e.message}`));
+      } catch (e) { logger.warn(`[bounce-recovery] rebounce reverify unavailable: ${e.message}`); }
     }
   } catch (err) {
     logger.error(`[bounce-recovery] handleRecoveryBounce failed: ${err.message}`);

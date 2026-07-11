@@ -107,6 +107,15 @@ describe('filterDecoderCandidatesToBounced', () => {
   });
 });
 
+describe('filterDecoderCandidatesToBounced — short local parts', () => {
+  test('the distance budget scales down: bob@ cannot compete when a@ bounced', () => {
+    const kept = filterDecoderCandidatesToBounced([
+      { value: 'bob@gmail.com', confidence: 0.9 },
+    ], 'a@gmail.com');
+    expect(kept).toHaveLength(0);
+  });
+});
+
 describe('escapeLike', () => {
   test('underscores and percents are escaped (first_last@… must not match firstXlast@…)', () => {
     expect(escapeLike('first_last@example.com')).toBe('first\\_last@example.com');

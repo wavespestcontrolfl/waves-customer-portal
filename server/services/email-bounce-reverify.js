@@ -102,12 +102,15 @@ function filterDecoderCandidatesToBounced(decoderCandidates, bouncedEmail) {
   if (at <= 0) return [];
   const bLocal = bounced.slice(0, at);
   const bDomain = bounced.slice(at + 1);
+  // Distance budget scales with the local part: an absolute 3 would let
+  // "bob@" compete when "a@" bounced. clamp(floor(len/2), 1, 3).
+  const maxDist = Math.max(1, Math.min(3, Math.floor(bLocal.length / 2)));
   return (decoderCandidates || []).filter((c) => {
     const v = String(c?.value || '').trim().toLowerCase();
     const vAt = v.indexOf('@');
     if (vAt <= 0) return false;
     if (v.slice(vAt + 1) !== bDomain) return false;
-    return levenshtein(v.slice(0, vAt), bLocal) <= 3;
+    return levenshtein(v.slice(0, vAt), bLocal) <= maxDist;
   });
 }
 
@@ -182,14 +185,23 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
   return (await q)[0] || null;
 }
 
-async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null }) {
+/**
+ * @param {string} bouncedEmail   the address that just hard-bounced
+ * @param {string} [sourceEmail]  the address to LOCATE the call by (the
+ *                                original capture) — differs from bouncedEmail
+ *                                when a domain-corrected RESEND re-bounced
+ * @param {string[]} [alsoExclude] additional known-bad variants that must
+ *                                never resurface as candidates
+ */
+async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, sourceEmail = null, alsoExclude = [] }) {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('callBounceReverify')) return { skipped: 'gated_off' };
     const bounced = String(bouncedEmail || '').trim().toLowerCase();
     if (!EMAIL_RE.test(bounced)) return { skipped: 'no_email' };
 
-    const call = await findSourceCall({ bouncedEmail: bounced, customerId });
+    const matchEmail = String(sourceEmail || bounced).trim().toLowerCase();
+    const call = await findSourceCall({ bouncedEmail: matchEmail, customerId });
     if (!call) return { skipped: 'no_source_call' };
 
     // CLAIM FIRST, transcribe second: bounces of the report + invoice +
@@ -275,7 +287,9 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
       lastName: v1.last_name,
     });
 
-    const candidates = mergeCandidates({ bouncedEmail: bounced, decoderCandidates, nameCandidates });
+    const excluded = new Set([bounced, matchEmail, ...alsoExclude.map((e) => String(e || '').trim().toLowerCase())]);
+    const candidates = mergeCandidates({ bouncedEmail: bounced, decoderCandidates, nameCandidates })
+      .filter((c) => !excluded.has(c.value));
     if (!candidates.length) {
       // The claim row was only the mutex — an empty card would ask the office
       // to confirm nothing.
@@ -287,6 +301,13 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
     // (ConfirmEvidence): email_as_heard → "Heard", email_candidates →
     // value+(NN%), confirmation_question → the read-back script. NEVER
     // 'candidates' — that key renders as shared-phone customer matches.
+    // Re-read before the final write: a SECOND bounced address can have been
+    // annotated onto the claim row while transcription ran — a fresh payload
+    // object must not clobber additional_bounced_emails.
+    const currentRow = await db('triage_items').where({ id: cardId }).first('payload').catch(() => null);
+    const currentPayload = typeof currentRow?.payload === 'string'
+      ? (() => { try { return JSON.parse(currentRow.payload); } catch { return {}; } })()
+      : (currentRow?.payload || {});
     await db('triage_items')
       .where({ id: cardId })
       .update({
@@ -299,6 +320,9 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
           confirmation_question: buildReadbackQuestion(candidates[0].value),
           transcriber: { provider: result.provider || null, contact_pass: !!result.contactPassTranscript },
           customer_id: customerId || call.customer_id || null,
+          ...(Array.isArray(currentPayload.additional_bounced_emails) && currentPayload.additional_bounced_emails.length
+            ? { additional_bounced_emails: currentPayload.additional_bounced_emails }
+            : {}),
         }),
         updated_at: new Date(),
       });
