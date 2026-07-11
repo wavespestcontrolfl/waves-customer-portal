@@ -61,8 +61,19 @@ describe('normalizeCallExtraction — secondary_contact', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      is_billing_party: false,
       notes: 'relocating from out of area',
     });
+  });
+
+  test('preserves is_billing_party through V1 normalization (payer linkage input)', () => {
+    const out = normalizeCallExtraction({
+      secondary_contact: {
+        first_name: 'James', last_name: 'Brenner', email: 'jim@example.com',
+        role: 'landlord', wants_notifications: true, is_billing_party: 'true',
+      },
+    });
+    expect(out.secondary_contact.is_billing_party).toBe(true);
   });
 
   test('nulls a garbled email and an unusable phone; junk role becomes unknown', () => {
@@ -113,6 +124,7 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      is_billing_party: false,
       notes: null,
     });
     expect(mapSecondaryContactToLegacy(null)).toBeNull();
@@ -148,6 +160,7 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      is_billing_party: false,
       notes: null,
     });
     expect(resolveCallSecondaryContact({}, { secondary_contact: v2Contact }).first_name).toBe('Joseph');
@@ -243,8 +256,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.5.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.5.0');
+  test('current SCHEMA_VERSION is 1.6.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.6.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {

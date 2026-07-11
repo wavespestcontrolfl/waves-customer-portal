@@ -23,7 +23,10 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // (zero-triage disposition layer), spam_verdict object (content-signal input
 // to the layered spam classifier; never a discard decision alone), language.
 // All optional/nullable: 1.0.0–1.4.0 payloads still validate.
-const SCHEMA_VERSION = '1.5.0';
+// 1.6.0: additive — secondary_contact(.s[]).is_billing_party boolean (the
+// paying third party for call→payer Bill-To linkage). Optional; older payloads
+// (which lack it) still validate.
+const SCHEMA_VERSION = '1.6.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -731,6 +731,21 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    // Billing flag: V1's own flag always stands. A V2 flag is only inherited
+    // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
+    // full name. The identity-conflict check above can't see this gap: if V1
+    // extracted an email-only contact and V2 a name-only billing party, nothing
+    // conflicts, yet they may be different people — inheriting V2's flag would
+    // bill V1's inbox for V2's payer. Requiring a positive shared identifier
+    // keeps the legitimate gap-fill (same name, V2 adds the flag) while refusing
+    // to carry an "owner pays" flag onto an unrelated contact's email.
+    is_billing_party: v1.is_billing_party === true
+      || (v2.is_billing_party === true && (
+        (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
+        || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
+        || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
+          && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name))
+      )),
     notes: v1.notes || v2.notes,
   };
 }
@@ -791,6 +806,79 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
     if (out.length >= 3) break;
   }
   return out;
+}
+
+// Third-party payer (Bill-To) linkage from a call (GATE_CALL_PAYER_LINKING):
+// when the caller named a DISTINCT paying party (is_billing_party) with a usable
+// AP email, find-or-create a `payers` Bill-To and return its id so it can be
+// stamped on the booking — the existing PayerService.resolveForInvoice()
+// precedence (scheduled_service.payer_id ?? customer.payer_id) then routes the
+// completion invoice to the payer's AP inbox with zero further changes. An AP
+// email is REQUIRED: a payer with no inbox can't be invoiced, so we skip (book
+// without a payer) rather than mint an unroutable Bill-To. Gated behind BOTH the
+// payer-linking gate AND secondary-contact capture (the payer IS a secondary
+// party). Never throws — a payer-lookup blip must not block the booking.
+async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, caller = null) {
+  if (!isEnabled('callPayerLinking') || process.env.GATE_CALL_SECONDARY_CONTACT !== 'true') return null;
+  const candidates = Array.isArray(secondaryContacts) ? [...secondaryContacts] : [];
+  // A V2-extracted billing party can be PRUNED from the merged list when its
+  // identity conflicts with V1's secondary contact (resolveCallSecondaryContacts
+  // drops the V2 mirror so notifications don't fan out to the rejected identity).
+  // But that party is the PAYER, billed at its OWN AP email — so also scan the
+  // raw V2 contacts here. Keying the payer on the party's own email keeps it the
+  // correct inbox regardless of the notification-routing decision.
+  if (v2Extraction) {
+    const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+    const v2Single = mapSecondaryContactToLegacy(v2Extraction.secondary_contact);
+    const v2Arr = mapSecondaryContactsToLegacy(v2Extraction.secondary_contacts);
+    for (const c of [v2Single, ...v2Arr]) if (c) candidates.push(c);
+  }
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  // Match against EVERY caller identifier — from BOTH extractors, since the
+  // helper scans raw V2 contacts and V2 may be the only side that captured the
+  // caller's email/alternate phone. The caller may be duplicated into a slot
+  // carrying only a callback number or a V2-only email.
+  const callerEmails = new Set(
+    [caller?.email, ...(Array.isArray(caller?.emails) ? caller.emails : [])]
+      .map((e) => norm(e)).filter(Boolean),
+  );
+  const callerPhone10s = new Set(
+    [caller?.phone, ...(Array.isArray(caller?.phones) ? caller.phones : [])]
+      .map((p) => last10(p)).filter((p) => p.length === 10),
+  );
+  // A billing party must be flagged, have its OWN usable email, AND be a DISTINCT
+  // third party — never the CALLER duplicated into a slot for a self-pay "I'll
+  // pay" call (that would turn a self-pay booking into a payer-billed invoice).
+  const flagged = candidates.filter((c) => c && c.is_billing_party === true
+    && EMAIL_RE.test(norm(c.email))
+    && !callerEmails.has(norm(c.email))
+    && !(last10(c.phone).length === 10 && callerPhone10s.has(last10(c.phone))));
+  // Fail closed on ambiguity: a call naming multiple DISTINCT billing parties
+  // (tenant+owner+manager, or a model duplicate) must NOT silently pick one —
+  // leave the booking unlinked (self-pay) for office review. (The same party can
+  // legitimately appear twice — merged list + raw V2 — so dedupe by email.)
+  const distinctEmails = [...new Set(flagged.map((c) => norm(c.email)))];
+  if (distinctEmails.length !== 1) {
+    if (distinctEmails.length > 1) {
+      logger.warn(`[call-proc] payer linkage: ${distinctEmails.length} distinct billing parties flagged — leaving booking unlinked for review`);
+    }
+    return null;
+  }
+  const party = flagged.find((c) => norm(c.email) === distinctEmails[0]);
+  if (!party) return null;
+  try {
+    const PayerService = require('./payer');
+    const { payer } = await PayerService.findOrCreatePayerByEmail({
+      apEmail: party.email,
+      displayName: [party.first_name, party.last_name].filter(Boolean).join(' ').trim() || null,
+      apPhone: party.phone || null,
+    });
+    return payer ? payer.id : null;
+  } catch (err) {
+    logger.warn(`[call-proc] payer linkage failed: ${err.message}`);
+    return null;
+  }
 }
 
 // Persist a call's secondary contact into the customer's first EMPTY
@@ -2527,7 +2615,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "state": "FL",
   "zip": "string or null",
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
-  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "notes": "string or null"} or null,
+  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -4137,6 +4225,11 @@ const CallRecordingProcessor = {
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
     const callSecondaryContact = callSecondaryContacts[0] || null;
+    // Capture the caller's email BEFORE the secondary-contact scrub below clears
+    // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
+    // party that is really the caller duplicated into a slot (self-pay "I'll
+    // pay"). After the scrub extracted.email can be null, defeating that guard.
+    const callerEmailPreScrub = extracted.email || null;
 
     // Deterministic backstop for the exact chimera this feature exists to
     // prevent: when the model leaves the SECOND person's email/phone in the
@@ -5451,6 +5544,18 @@ const CallRecordingProcessor = {
                 parentWindowStart: windowStart || '09:00',
               });
               let reusedExistingSchedule = false;
+              // Resolve the Bill-To payer once, before the transaction (it's a
+              // reusable find-or-create keyed on AP email, independent of the
+              // booking's atomicity), for the fresh insert + fresh follow-up
+              // child to stamp. Reused rows are left as-is (see the note below).
+              const v2CallerForPayer = v2CanonicalExtraction?.caller || {};
+              const callBookingPayerId = await resolveCallBillingPayer(
+                callSecondaryContacts, v2CanonicalExtraction,
+                {
+                  emails: [callerEmailPreScrub, extracted.email, v2CallerForPayer.email],
+                  phones: [contactPhone, extracted.phone, v2CallerForPayer.phone_e164, v2CallerForPayer.phone_raw_spoken],
+                },
+              );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
@@ -5513,6 +5618,14 @@ const CallRecordingProcessor = {
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
+                          // Mirror the primary's Bill-To onto the follow-up: an
+                          // unpriced follow-up is billed at completion, and
+                          // without this PayerService.resolveForInvoice would
+                          // fall back to customer.payer_id/self-pay and send the
+                          // second visit's invoice to the homeowner instead of
+                          // the named payer. Always matches the parent (a fresh
+                          // primary already carries callBookingPayerId here).
+                          payer_id: primaryRow.payer_id || null,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
                           // Visit 2 treats the same property as visit 1 —
                           // coordinates included, or the stamped child would
@@ -5664,8 +5777,12 @@ const CallRecordingProcessor = {
                     || v2CanonicalExtraction?.property?.service_address?.street_line_2
                     || null,
                 }, trx);
+                // Bill-To linkage (callBookingPayerId resolved above, before the
+                // transaction): stamp payer_id (per-job) so the completion
+                // invoice routes to the payer.
                 const insertData = {
                   customer_id: customerId,
+                  payer_id: callBookingPayerId || null,
                   technician_id: defaultTechnicianId,
                   property_id: propertyLinkage.propertyId,
                   ...(propertyLinkage.lat != null && propertyLinkage.lng != null
@@ -5833,6 +5950,13 @@ const CallRecordingProcessor = {
                 logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
               }
               scheduledServiceId = svc.id;
+              // NOTE: payer_id is stamped only on FRESH bookings (insert +
+              // fresh follow-up child). Retroactively backfilling the Bill-To on
+              // a REUSED/pre-gate row is intentionally out of scope here — it
+              // entangles invoice consistency (Charge-Now pre-completion invoices,
+              // completed-visit self-pay invoices, existing follow-up children)
+              // that a booking-time stamp can't safely reconcile. Those one-off
+              // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
               if (!scheduleWasReused) {
@@ -6652,6 +6776,7 @@ CallRecordingProcessor._test = {
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
+  resolveCallBillingPayer,
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
