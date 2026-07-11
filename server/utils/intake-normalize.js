@@ -226,6 +226,7 @@ function normalizeSecondaryContact(value) {
     email: usableEmail,
     role: SECONDARY_CONTACT_ROLES.has(role) ? role : 'unknown',
     wants_notifications: normalizeStrictBoolean(value.wants_notifications),
+    is_billing_party: normalizeStrictBoolean(value.is_billing_party),
     notes: cleanNullableText(value.notes),
   };
   if (!contact.first_name && !contact.last_name && !contact.phone && !contact.email) return null;

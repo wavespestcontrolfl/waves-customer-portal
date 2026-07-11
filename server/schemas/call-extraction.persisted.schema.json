@@ -256,6 +256,10 @@
         "wants_notifications": {
           "type": "boolean"
         },
+        "is_billing_party": {
+          "type": "boolean",
+          "description": "The paying third party for call→payer Bill-To linkage. 1.6.0 additive; absent in older payloads."
+        },
         "notes": {
           "type": [
             "string",
@@ -335,6 +339,10 @@
           "wants_notifications": {
             "type": "boolean",
             "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person."
+          },
+          "is_billing_party": {
+            "type": "boolean",
+            "description": "The paying third party for call→payer Bill-To linkage. 1.6.0 additive; absent in older payloads."
           },
           "notes": {
             "type": [

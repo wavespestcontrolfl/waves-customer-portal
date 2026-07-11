@@ -5892,7 +5892,15 @@ const CallRecordingProcessor = {
               scheduledServiceId = svc.id;
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused) {
+              if (!scheduleWasReused && outboundReviewBooking) {
+                // A pending outbound-callback booking must NOT arm reminder side
+                // effects: registerAppointment marks confirmation_sent and the
+                // 72h/24h reminder cron doesn't skip 'pending', so this would
+                // auto-text the customer before the office confirms — breaking
+                // the no-auto-SMS contract. The outbound_booking_review triage
+                // already surfaces it for the office.
+                logger.info(`[call-proc] Outbound review booking ${svc.id} created PENDING — no reminders armed until office confirms`);
+              } else if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -5967,9 +5975,12 @@ const CallRecordingProcessor = {
           // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
           if (scheduledServiceId && outboundReviewBooking) {
             // Outbound-callback booking is PENDING office confirmation — never
-            // auto-text a "confirmed" appointment the customer wasn't re-confirmed on.
+            // auto-text a "confirmed" appointment the customer wasn't re-confirmed
+            // on. Keep scheduledServiceId on the result so the downstream audit
+            // block doesn't mistake this for a skipped-after-approval booking and
+            // open a phantom reconcile card.
             logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
-            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'outbound_booking_review' };
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
           } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
