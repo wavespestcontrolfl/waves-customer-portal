@@ -877,17 +877,30 @@ async function listCallPartners(input = {}) {
   }
 
   const WDO_RE = /\b(wdo|wood[- ]destroying|termite (letter|inspection))\b/i;
-  const partners = new Map();
-  for (const r of rows) {
+  // Pass 1: identify ARRANGER phone keys. A partner is identified by ANY of
+  // their calls carrying the signal; pass 2 then aggregates EVERY call from
+  // those keys — a follow-up whose individual summary never repeats
+  // "realtor" still belongs to the partner's totals.
+  const parsed = rows.map((r) => {
     const en = safeJson(r.ai_extraction_enriched) || {};
+    return { r, en, key: String(r.from_phone || '').replace(/\D/g, '').slice(-10), summary: String(r.call_summary || '') };
+  });
+  const arrangerKeys = new Set();
+  for (const { en, key, summary } of parsed) {
+    const caller = en.caller || {};
+    const isArranger = ARRANGER_RELATIONSHIPS.includes(caller.relationship_to_property)
+      || !!String(caller.organization_name || '').trim()
+      || ARRANGER_PHRASE_RE.test(summary);
+    if (isArranger) arrangerKeys.add(key);
+  }
+
+  const partners = new Map();
+  for (const { r, en, key, summary } of parsed) {
+    if (!arrangerKeys.has(key)) continue;
     const caller = en.caller || {};
     const rel = ARRANGER_RELATIONSHIPS.includes(caller.relationship_to_property)
       ? caller.relationship_to_property : null;
     const org = String(caller.organization_name || '').trim() || null;
-    const summary = String(r.call_summary || '');
-    const isArranger = !!rel || !!org || ARRANGER_PHRASE_RE.test(summary);
-    if (!isArranger) continue;
-    const key = String(r.from_phone || '').replace(/\D/g, '').slice(-10);
     let p = partners.get(key);
     if (!p) {
       p = {
@@ -904,14 +917,21 @@ async function listCallPartners(input = {}) {
       partners.set(key, p);
     }
     p.calls += 1;
-    // WDO detection reads the STRUCTURED extraction first (category / specific
-    // service), then the prose summary — "inspection for the closing" prose
-    // with a wdo category must still count.
+    // WDO detection reads the STRUCTURED extraction first, then the prose.
+    // Real WDO calls usually persist as category 'termite' with a WDO
+    // specific service name — and an arranger's termite call with
+    // inspection-only intent IS the real-estate WDO pattern even when
+    // neither name nor prose says "WDO".
     const svc = en.service_request || {};
-    const wdoStructured = String(svc.primary_service_category || '') === 'wdo'
-      || WDO_RE.test(String(svc.specific_service_name || ''));
+    const category = String(svc.primary_service_category || '');
+    const wdoStructured = category === 'wdo'
+      || WDO_RE.test(String(svc.specific_service_name || ''))
+      || (category === 'termite' && String(svc.service_intent || '') === 'inspection_only');
     if (wdoStructured || WDO_RE.test(summary)) p.wdo_calls += 1;
+    // Order-independent bounds (keyset batches preserve DESC, but nothing
+    // downstream should depend on it).
     if (r.created_at < p.first_call) p.first_call = r.created_at;
+    if (r.created_at > p.last_call) p.last_call = r.created_at;
     // Rows arrive newest-first: keep the first non-null identity fields.
     // name_full may be absent while first/last survive (persisted schema
     // allows it) — an identified partner must not list as unnamed.
@@ -987,8 +1007,10 @@ async function getPartnerCallHistory(input = {}) {
         direction: r.direction,
         duration_seconds: r.duration_seconds,
         summary: String(r.call_summary || '').slice(0, 300) || null,
-        requested_service: v1.requested_service
-          || v2.service_request?.specific_service_name
+        // Most specific first: V1 requested_service is often the flattened
+        // COARSE category copy, so the V2 specific service name must win.
+        requested_service: v2.service_request?.specific_service_name
+          || v1.requested_service
           || v2.service_request?.primary_service_category
           || null,
         other_party: parties.length ? parties.join('; ') : null,

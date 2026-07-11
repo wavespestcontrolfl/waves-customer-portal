@@ -110,9 +110,38 @@ describe('list_call_partners aggregation', () => {
           service_request: { primary_service_category: 'wdo' },
         }),
       }),
+      // Real WDO calls usually persist as category 'termite' — inspection-only
+      // intent on an arranger call is the real-estate WDO pattern.
+      mkRow({
+        created_at: '2026-07-07T10:00:00.000Z',
+        call_summary: 'Agent needs an inspection before the sale closes.',
+        ai_extraction_enriched: JSON.stringify({
+          caller: { name_full: 'Melissa', relationship_to_property: 'real_estate_agent' },
+          service_request: { primary_service_category: 'termite', service_intent: 'inspection_only' },
+        }),
+      }),
     ]));
     const res = await executeCommsTool('list_call_partners', {});
-    expect(res.partners[0].wdo_calls).toBe(1);
+    expect(res.partners[0].wdo_calls).toBe(2);
+  });
+
+  test("a partner's follow-up calls WITHOUT the arranger signal still count in their totals", async () => {
+    db.mockImplementation(() => rowsChain([
+      // Bare follow-up first (as prod DESC order would): no relationship, no
+      // org, no arranger phrasing — must still aggregate into the partner.
+      mkRow({
+        created_at: '2026-07-09T09:00:00.000Z',
+        call_summary: 'Caller asked when the report would be ready.',
+        ai_extraction_enriched: JSON.stringify({ caller: {} }),
+      }),
+      // The signal-bearing call.
+      mkRow({ created_at: '2026-07-08T21:38:00.000Z' }),
+    ]));
+    const res = await executeCommsTool('list_call_partners', {});
+    expect(res.partner_count).toBe(1);
+    expect(res.partners[0].calls).toBe(2);
+    expect(res.partners[0].first_call).toBe('2026-07-08T21:38:00.000Z');
+    expect(res.partners[0].last_call).toBe('2026-07-09T09:00:00.000Z');
   });
 
   test('legacy rows: malformed JSON never throws, full arranger phrases match, relationship is inferred', async () => {
@@ -151,6 +180,13 @@ describe('get_partner_call_history', () => {
         },
         // Staff called the partner back — outbound leg must appear too.
         { id: 'c2', created_at: '2026-07-09T10:00:00.000Z', direction: 'outbound', duration_seconds: 60, call_summary: 'Callback about scheduling', disposition: null, ai_extraction: '{broken' },
+        // Both generations present: V1 carries the flattened COARSE category,
+        // V2 the specific service — specific must win.
+        {
+          id: 'c4', created_at: '2026-07-10T12:00:00.000Z', direction: 'inbound', duration_seconds: 90, call_summary: 'Booked', disposition: null,
+          ai_extraction: JSON.stringify({ requested_service: 'termite' }),
+          ai_extraction_enriched: JSON.stringify({ service_request: { specific_service_name: 'WDO Inspection Service' } }),
+        },
         // Post-1.7.0 call: parties + service exist ONLY in the V2 payload.
         {
           id: 'c3', created_at: '2026-07-10T10:00:00.000Z', direction: 'inbound', duration_seconds: 200, call_summary: 'WDO for a closing', disposition: null,
@@ -168,7 +204,9 @@ describe('get_partner_call_history', () => {
       return q;
     });
     const res = await executeCommsTool('get_partner_call_history', { phone: '+1 (407) 493-3469' });
-    expect(res.call_count).toBe(3);
+    expect(res.call_count).toBe(4);
+    // Specific V2 service beats the flattened V1 category.
+    expect(res.calls.find((c) => c.id === 'c4').requested_service).toBe('WDO Inspection Service');
     // V2-only multi-party context surfaces in the drilldown.
     const v2only = res.calls.find((c) => c.id === 'c3');
     expect(v2only.requested_service).toBe('WDO Inspection Service');
