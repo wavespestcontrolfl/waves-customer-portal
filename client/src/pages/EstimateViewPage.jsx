@@ -1535,17 +1535,20 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
-// Stable identity for a one-time breakdown row. Older rows (e.g. termite
-// "Advance Installation") carry no `service` key — they normalize into their
-// service section by LABEL — so the exclusion handshake between the embedded
-// per-service rows and the standalone card below must be able to key on
-// label+amount, never on a truthy `service` alone (a serviceless row that
-// renders embedded would otherwise total again in this card).
+// Stable identity for a one-time breakdown row — the exclusion handshake
+// between the embedded per-service rows and the standalone card below.
+// The identity is the FULL row (service + label + amount + quote state),
+// never `service` alone: two rows can share a service (a priced embedded
+// install and a quote-required sibling), and a service-only key would drop
+// the unembedded sibling from the standalone card so its Quote Required row
+// never renders. Serviceless legacy rows (termite "Advance Installation")
+// still key on label+amount. Contribution items are the same row objects as
+// the breakdown items server-side, so fields match on both sides.
 export function oneTimeRowIdentityKey(item = {}) {
-  if (item?.service) return `svc:${item.service}`;
   const label = String(item?.label || item?.name || item?.displayName || '').trim().toLowerCase();
   const amount = Number(item?.amount ?? item?.price);
-  return `row:${label}|${Number.isFinite(amount) ? amount : ''}`;
+  const quoteState = item?.quoteRequired === true || item?.kind === 'quote_required' ? 'qr' : '';
+  return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
 export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {

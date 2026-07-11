@@ -13596,9 +13596,12 @@ function normalizeBreakdownItemLabel(item = {}) {
 // result.lineItems / engineResult.lineItems don't read as an empty mix here
 // (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
+  // Fall back to estData ITSELF like estimateRecurringKeysForDetails and the
+  // accept/read paths — some estimates store `recurring.services` at the
+  // top level of estimate_data rather than under result/engineResult.
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
-    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : estData);
   return recurringServicesWithSupplements(result || {});
 }
 
@@ -14059,7 +14062,13 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
   // Quote-required snapshots never self-serve accept (the acceptance
   // contract routes them to "Call Waves", so no setup invoice can fire) and
   // a recompute would wipe the manually-quoted rows — leave them alone.
-  const bundleFrequencies = Array.isArray(bundle.frequencies) ? bundle.frequencies : [];
+  // Quote state can live on the bundle itself, on top-level frequencies, or
+  // on nested per-service frequencies — check all three.
+  if (bundle.quoteRequired === true) return false;
+  const bundleFrequencies = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  for (const s of (Array.isArray(bundle.services) ? bundle.services : [])) {
+    if (Array.isArray(s?.frequencies)) bundleFrequencies.push(...s.frequencies);
+  }
   if (bundleFrequencies.some((f) => f?.quoteRequired === true || f?.kind === 'quote_required')) return false;
   const isSetupRow = (row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {});
   if (Array.isArray(bundle.firstVisitFees)

@@ -246,6 +246,35 @@ describe('stale-snapshot bypass guards', () => {
     expect(pricingBundleMissingRequiredSetupFee(withBreakdownRow, soloMosquitoEstData())).toBe(false);
   });
 
+  test('pricingBundleMissingRequiredSetupFee: root-level recurring shapes are read too', () => {
+    // Some estimates store recurring.services at the TOP level of
+    // estimate_data (no result/engineResult wrapper) — the guard must see
+    // that mix or a stale fee-less snapshot fast-paths while accept bills.
+    const rootLevel = {
+      recurring: {
+        services: [{ name: 'Mosquito', service: 'mosquito', mo: 66, monthly: 66, perTreatment: 66, visitsPerYear: 12 }],
+      },
+    };
+    const feeLess = { frequencies: [{ key: 'monthly12', monthly: 66 }] };
+    expect(pricingBundleMissingRequiredSetupFee(feeLess, rootLevel)).toBe(true);
+  });
+
+  test('pricingBundleMissingRequiredSetupFee: quote state anywhere keeps the fast path', () => {
+    // Bundle-level flag.
+    expect(pricingBundleMissingRequiredSetupFee(
+      { quoteRequired: true, frequencies: [{ key: 'monthly12', monthly: 66 }] },
+      soloMosquitoEstData(),
+    )).toBe(false);
+    // Nested per-service frequency flag.
+    expect(pricingBundleMissingRequiredSetupFee(
+      {
+        frequencies: [{ key: 'monthly12', monthly: 66 }],
+        services: [{ key: 'mosquito', frequencies: [{ key: 'manual', kind: 'quote_required', monthly: null }] }],
+      },
+      soloMosquitoEstData(),
+    )).toBe(false);
+  });
+
   test('pricingBundleMissingRequiredSetupFee: existing-customer waiver and bundles never trip it', () => {
     const feeLess = { frequencies: [{ key: 'monthly12', monthly: 66 }] };
     const existingCustomer = {

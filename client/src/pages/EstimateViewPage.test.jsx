@@ -265,6 +265,24 @@ describe('OneTimeBreakdownCard', () => {
     );
     expect(container).toBeEmptyDOMElement();
   });
+
+  it('keeps a quote-required sibling that shares a service with an embedded priced row', () => {
+    // Same `service` on both rows: the priced one renders embedded (and is
+    // excluded here); the quote-required one never embeds and MUST stay in
+    // this card with its Quote Required row — a service-only identity would
+    // drop both.
+    const pricedEmbedded = { service: 'flea_package', label: 'Flea Treatment', amount: 250 };
+    const quoteSibling = { service: 'flea_package', label: 'Flea Treatment — Detached Guest House', amount: null, kind: 'quote_required', quoteRequired: true };
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 250, items: [pricedEmbedded, quoteSibling] }}
+        excludeServices={[oneTimeRowIdentityKey(pricedEmbedded)]}
+      />,
+    );
+    expect(screen.getByText('Flea Treatment — Detached Guest House')).toBeInTheDocument();
+    expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
+    expect(screen.queryByText((_, el) => el?.textContent === '$250' && el?.children.length === 0)).not.toBeInTheDocument();
+  });
 });
 
 describe('oneTimePriceCopy', () => {
