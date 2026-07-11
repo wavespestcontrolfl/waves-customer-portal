@@ -132,12 +132,16 @@ async function findOrCreatePayerByEmail(body = {}) {
       // on the normalized email serializes same-email creators (different emails
       // never contend); the lock releases on commit/rollback.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [apEmail]);
-      const existing = await trx('payers')
+      const matches = await trx('payers')
         .whereRaw('LOWER(ap_email) = ?', [apEmail])
-        .andWhere('active', true)
-        .orderBy('id', 'asc')
-        .first();
-      if (existing) return { payer: existing };
+        .orderBy('id', 'asc');
+      const active = matches.find((p) => p.active !== false);
+      if (active) return { payer: active };
+      // An INACTIVE payer with this email means an operator deliberately
+      // disabled that Bill-To — do NOT silently recreate it (that would defeat
+      // the fail-closed deactivation and route a new invoice to a disabled AP
+      // inbox). Leave it unlinked for review.
+      if (matches.length > 0) return { payer: null, inactive: true };
       // buildPayerWrite validates/normalizes (same as createPayer); it requires
       // display_name, so fall back to the email local-part when the caller
       // couldn't name the payer.

@@ -241,14 +241,14 @@ describe('PayerService.findOrCreatePayerByEmail', () => {
   const db = require('../models/db');
   afterEach(() => { db.mockReset(); delete db.transaction; });
 
-  // A chain that satisfies BOTH the lookup (whereRaw→andWhere→orderBy→first)
-  // and the insert (insert→returning).
-  function chain({ existing = null, inserted = null }) {
+  // The lookup awaits `trx('payers').whereRaw(...).orderBy(...)` → an ARRAY of
+  // matches (no .first()), then the insert path uses insert→returning. `c` is a
+  // thenable resolving to `matches` that also carries insert/returning.
+  function chain({ matches = [], inserted = null }) {
     const c = {
       whereRaw() { return c; },
-      andWhere() { return c; },
       orderBy() { return c; },
-      first: () => Promise.resolve(existing),
+      then(res, rej) { return Promise.resolve(matches).then(res, rej); },
       insert() { return c; },
       returning: () => Promise.resolve(inserted ? [inserted] : []),
     };
@@ -274,21 +274,34 @@ describe('PayerService.findOrCreatePayerByEmail', () => {
 
   test('reuses an existing ACTIVE payer by case-insensitive email (no insert)', async () => {
     const existing = { id: 7, ap_email: 'jim@example.com', active: true };
-    withTx({ existing });
+    withTx({ matches: [existing] });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'JIM@Example.com' });
     expect(out).toEqual({ payer: existing });
   });
 
+  test('prefers the ACTIVE row when both active and inactive share the email', async () => {
+    const active = { id: 8, ap_email: 'jim@example.com', active: true };
+    withTx({ matches: [{ id: 3, ap_email: 'jim@example.com', active: false }, active] });
+    const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'jim@example.com' });
+    expect(out).toEqual({ payer: active });
+  });
+
+  test('does NOT recreate a DEACTIVATED payer for the same email (fail closed)', async () => {
+    withTx({ matches: [{ id: 3, ap_email: 'jim@example.com', active: false }] });
+    const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'jim@example.com' });
+    expect(out).toEqual({ payer: null, inactive: true });
+  });
+
   test('creates a payer when none exists, defaulting display_name to the email local-part', async () => {
     const inserted = { id: 9, ap_email: 'owner@example.com', display_name: 'owner' };
-    withTx({ existing: null, inserted });
+    withTx({ matches: [], inserted });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'owner@example.com' });
     expect(out.payer).toEqual(inserted);
   });
 
   test('uses the provided display name when given', async () => {
     const inserted = { id: 11, ap_email: 'jim@example.com', display_name: 'James Brenner' };
-    withTx({ existing: null, inserted });
+    withTx({ matches: [], inserted });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'jim@example.com', displayName: 'James Brenner' });
     expect(out.payer.display_name).toBe('James Brenner');
   });

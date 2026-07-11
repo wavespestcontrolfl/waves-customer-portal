@@ -818,7 +818,7 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
 // without a payer) rather than mint an unroutable Bill-To. Gated behind BOTH the
 // payer-linking gate AND secondary-contact capture (the payer IS a secondary
 // party). Never throws — a payer-lookup blip must not block the booking.
-async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null) {
+async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, caller = null) {
   if (!isEnabled('callPayerLinking') || process.env.GATE_CALL_SECONDARY_CONTACT !== 'true') return null;
   const candidates = Array.isArray(secondaryContacts) ? [...secondaryContacts] : [];
   // A V2-extracted billing party can be PRUNED from the merged list when its
@@ -833,10 +833,29 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null) {
     const v2Arr = mapSecondaryContactsToLegacy(v2Extraction.secondary_contacts);
     for (const c of [v2Single, ...v2Arr]) if (c) candidates.push(c);
   }
-  // Only a party flagged is_billing_party with its OWN usable email — the payer
-  // is billed at that inbox, so this never routes to a different contact.
-  const party = candidates.find((c) => c && c.is_billing_party === true
-    && EMAIL_RE.test(String(c.email || '').trim().toLowerCase()));
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const callerEmail = norm(caller?.email);
+  const callerPhone10 = last10(caller?.phone);
+  // A billing party must be flagged, have its OWN usable email, AND be a DISTINCT
+  // third party — never the CALLER duplicated into a slot for a self-pay "I'll
+  // pay" call (that would turn a self-pay booking into a payer-billed invoice).
+  const flagged = candidates.filter((c) => c && c.is_billing_party === true
+    && EMAIL_RE.test(norm(c.email))
+    && !(callerEmail && norm(c.email) === callerEmail)
+    && !(callerPhone10.length === 10 && last10(c.phone) === callerPhone10));
+  // Fail closed on ambiguity: a call naming multiple DISTINCT billing parties
+  // (tenant+owner+manager, or a model duplicate) must NOT silently pick one —
+  // leave the booking unlinked (self-pay) for office review. (The same party can
+  // legitimately appear twice — merged list + raw V2 — so dedupe by email.)
+  const distinctEmails = [...new Set(flagged.map((c) => norm(c.email)))];
+  if (distinctEmails.length !== 1) {
+    if (distinctEmails.length > 1) {
+      logger.warn(`[call-proc] payer linkage: ${distinctEmails.length} distinct billing parties flagged — leaving booking unlinked for review`);
+    }
+    return null;
+  }
+  const party = flagged.find((c) => norm(c.email) === distinctEmails[0]);
   if (!party) return null;
   try {
     const PayerService = require('./payer');
@@ -5515,7 +5534,10 @@ const CallRecordingProcessor = {
               // idempotency-key reuse) can stamp/backfill it — a reprocess that
               // reuses a pre-gate or transient-failure row must still get its
               // extracted payer.
-              const callBookingPayerId = await resolveCallBillingPayer(callSecondaryContacts, v2CanonicalExtraction);
+              const callBookingPayerId = await resolveCallBillingPayer(
+                callSecondaryContacts, v2CanonicalExtraction,
+                { email: extracted.email, phone: contactPhone },
+              );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
@@ -5583,8 +5605,11 @@ const CallRecordingProcessor = {
                           // without this PayerService.resolveForInvoice would
                           // fall back to customer.payer_id/self-pay and send the
                           // second visit's invoice to the homeowner instead of
-                          // the named payer.
-                          payer_id: primaryRow.payer_id || null,
+                          // the named payer. Fall back to callBookingPayerId: on
+                          // a REUSED primary the outer payer backfill runs AFTER
+                          // this child insert, so primaryRow.payer_id is still
+                          // null here — use the resolved id directly.
+                          payer_id: primaryRow.payer_id || callBookingPayerId || null,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
                           // Visit 2 treats the same property as visit 1 —
                           // coordinates included, or the stamped child would

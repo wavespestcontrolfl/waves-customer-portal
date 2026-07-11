@@ -58,6 +58,28 @@ describe('resolveCallBillingPayer', () => {
     expect(id).toBe(42);
     expect(PayerService.findOrCreatePayerByEmail).toHaveBeenCalledWith(expect.objectContaining({ apEmail: 'jim@example.com' }));
   });
+
+  test('fails closed when MULTIPLE distinct billing parties are flagged', async () => {
+    const contacts = [
+      { first_name: 'Owner', email: 'owner@example.com', is_billing_party: true },
+      { first_name: 'Manager', email: 'mgr@example.com', is_billing_party: true },
+    ];
+    expect(await proc._test.resolveCallBillingPayer(contacts)).toBeNull();
+    expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
+  });
+
+  test('the same billing party in BOTH the merged list and V2 is not ambiguous (dedup by email)', async () => {
+    const merged = [{ first_name: 'Jim', email: 'jim@example.com', is_billing_party: true }];
+    const v2 = { secondary_contact: { name_full: 'Jim Brenner', email: 'jim@example.com', is_billing_party: true } };
+    expect(await proc._test.resolveCallBillingPayer(merged, v2)).toBe(42);
+  });
+
+  test('does NOT create a payer when the billing party IS the caller (self-pay "I will pay")', async () => {
+    const contacts = [{ first_name: 'Jim', email: 'jim@example.com', phone: '+19410001111', is_billing_party: true }];
+    expect(await proc._test.resolveCallBillingPayer(contacts, null, { email: 'JIM@example.com' })).toBeNull();
+    expect(await proc._test.resolveCallBillingPayer(contacts, null, { phone: '(941) 000-1111' })).toBeNull();
+    expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
+  });
 });
 
 describe('is_billing_party flows through the extraction mapping', () => {
