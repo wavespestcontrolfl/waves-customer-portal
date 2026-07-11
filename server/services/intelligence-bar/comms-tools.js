@@ -845,25 +845,42 @@ async function listCallPartners(input = {}) {
   const relationship = ARRANGER_RELATIONSHIPS.includes(input.relationship) ? input.relationship : null;
 
   // Cheap SQL predicates only — no ::jsonb casts (legacy malformed rows would
-  // throw the whole query). Arranger detection + JSON parsing happen in JS.
-  const rows = await db('call_log')
-    .whereRaw("created_at >= now() - (?::int * interval '1 day')", [daysBack])
-    .where('direction', 'inbound')
-    .whereRaw(`${phoneKeyExpr('from_phone')} <> ''`)
-    // Legacy rows (pre-V2, or a failed V2 run) have NO enriched payload but a
-    // usable summary — they must reach the ARRANGER_PHRASE_RE fallback, not be
-    // filtered out here. safeJson fails open on the null enriched.
-    .where(function () {
-      this.whereNotNull('ai_extraction_enriched').orWhereRaw("COALESCE(call_summary, '') <> ''");
-    })
-    .select('from_phone', 'created_at', 'call_summary', 'ai_extraction_enriched')
-    .orderBy('created_at', 'desc')
-    .limit(2000);
+  // throw the whole query). Arranger detection + JSON parsing happen in JS,
+  // so the fetch pages the ENTIRE window in keyset batches — a flat LIMIT
+  // before the JS filter would silently drop partners on busy windows.
+  const BATCH = 2000;
+  const MAX_BATCHES = 10; // 20k calls ≫ any realistic window; log if hit
+  const rows = [];
+  let cursor = null;
+  for (let i = 0; i < MAX_BATCHES; i += 1) {
+    const q = db('call_log')
+      .whereRaw("created_at >= now() - (?::int * interval '1 day')", [daysBack])
+      .where('direction', 'inbound')
+      .whereRaw(`${phoneKeyExpr('from_phone')} <> ''`)
+      // Legacy rows (pre-V2, or a failed V2 run) have NO enriched payload but
+      // a usable summary — they must reach the ARRANGER_PHRASE_RE fallback.
+      // safeJson fails open on the null enriched.
+      .where(function () {
+        this.whereNotNull('ai_extraction_enriched').orWhereRaw("COALESCE(call_summary, '') <> ''");
+      })
+      .select('from_phone', 'created_at', 'call_summary', 'ai_extraction_enriched')
+      .orderBy('created_at', 'desc')
+      .limit(BATCH);
+    if (cursor) q.where('created_at', '<', cursor);
+    const batch = await q;
+    rows.push(...batch);
+    if (batch.length < BATCH) break;
+    cursor = batch[batch.length - 1].created_at;
+    if (i === MAX_BATCHES - 1) {
+      logger.warn(`[intelligence-bar:comms] list_call_partners hit the ${MAX_BATCHES * BATCH}-row scan cap for days_back=${daysBack}; oldest calls not aggregated`);
+    }
+  }
 
   const WDO_RE = /\b(wdo|wood[- ]destroying|termite (letter|inspection))\b/i;
   const partners = new Map();
   for (const r of rows) {
-    const caller = safeJson(r.ai_extraction_enriched)?.caller || {};
+    const en = safeJson(r.ai_extraction_enriched) || {};
+    const caller = en.caller || {};
     const rel = ARRANGER_RELATIONSHIPS.includes(caller.relationship_to_property)
       ? caller.relationship_to_property : null;
     const org = String(caller.organization_name || '').trim() || null;
@@ -887,7 +904,13 @@ async function listCallPartners(input = {}) {
       partners.set(key, p);
     }
     p.calls += 1;
-    if (WDO_RE.test(summary)) p.wdo_calls += 1;
+    // WDO detection reads the STRUCTURED extraction first (category / specific
+    // service), then the prose summary — "inspection for the closing" prose
+    // with a wdo category must still count.
+    const svc = en.service_request || {};
+    const wdoStructured = String(svc.primary_service_category || '') === 'wdo'
+      || WDO_RE.test(String(svc.specific_service_name || ''));
+    if (wdoStructured || WDO_RE.test(summary)) p.wdo_calls += 1;
     if (r.created_at < p.first_call) p.first_call = r.created_at;
     // Rows arrive newest-first: keep the first non-null identity fields.
     // name_full may be absent while first/last survive (persisted schema
@@ -931,7 +954,15 @@ async function getPartnerCallHistory(input = {}) {
 
   const contactLabel = (c) => {
     if (!c || typeof c !== 'object') return null;
-    const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.name_full || null;
+    // A party captured with only contact info (the extraction contract allows
+    // name OR contact detail) still belongs in the drilldown — label by email
+    // or phone when the name is absent.
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ')
+      || c.name_full
+      || c.email
+      || c.phone_e164
+      || c.phone
+      || null;
     return name ? `${name}${c.role ? ` (${c.role})` : ''}` : null;
   };
 

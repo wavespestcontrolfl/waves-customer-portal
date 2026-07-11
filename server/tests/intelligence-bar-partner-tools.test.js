@@ -15,7 +15,16 @@ const { UI_GATED_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/writ
 function rowsChain(rows) {
   const q = {};
   ['where', 'whereRaw', 'whereNotNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
-  q.limit = jest.fn(async () => rows);
+  // list_call_partners awaits the builder directly (keyset batching); the
+  // history tool awaits .limit(). Support both: limit stays chainable and the
+  // object is thenable, resolving the rows once (subsequent batches empty).
+  let served = false;
+  q.limit = jest.fn(() => q);
+  q.then = (resolve, reject) => {
+    const out = served ? [] : rows;
+    served = true;
+    return Promise.resolve(out).then(resolve, reject);
+  };
   return q;
 }
 
@@ -92,6 +101,20 @@ describe('list_call_partners aggregation', () => {
     expect(res.partners[0].name).toBe('Kathy Callahan');
   });
 
+  test('WDO counts from the STRUCTURED extraction even when the prose summary never says WDO', async () => {
+    db.mockImplementation(() => rowsChain([
+      mkRow({
+        call_summary: 'Realtor called about an inspection for a closing next week.',
+        ai_extraction_enriched: JSON.stringify({
+          caller: { name_full: 'Melissa', relationship_to_property: 'real_estate_agent' },
+          service_request: { primary_service_category: 'wdo' },
+        }),
+      }),
+    ]));
+    const res = await executeCommsTool('list_call_partners', {});
+    expect(res.partners[0].wdo_calls).toBe(1);
+  });
+
   test('legacy rows: malformed JSON never throws, full arranger phrases match, relationship is inferred', async () => {
     db.mockImplementation(() => rowsChain([
       // Malformed legacy extraction — must be skipped gracefully, not throw.
@@ -137,6 +160,7 @@ describe('get_partner_call_history', () => {
             secondary_contacts: [
               { first_name: 'Leslie', last_name: 'Ferraro', role: 'home_buyer' },
               { first_name: 'Rigo', last_name: 'Rivera', role: 'home_seller' },
+              { email: 'tenant.contact@example.com', role: 'tenant' },
             ],
           }),
         },
@@ -148,13 +172,16 @@ describe('get_partner_call_history', () => {
     // V2-only multi-party context surfaces in the drilldown.
     const v2only = res.calls.find((c) => c.id === 'c3');
     expect(v2only.requested_service).toBe('WDO Inspection Service');
-    expect(v2only.other_party).toBe('Leslie Ferraro (home_buyer); Rigo Rivera (home_seller)');
+    expect(v2only.other_party).toBe('Leslie Ferraro (home_buyer); Rigo Rivera (home_seller); tenant.contact@example.com (tenant)');
     const inbound = res.calls.find((c) => c.id === 'c1');
     expect(inbound.other_party).toBe('Joseph Haught (home_buyer)');
     expect(inbound.requested_service).toBe('WDO inspection');
     // Malformed legacy extraction fails open per-row, not per-tool.
     const outbound = res.calls.find((c) => c.id === 'c2');
     expect(outbound.requested_service).toBeNull();
+    // Contact-only party (no name captured) still labels by email.
+    const c3check = res.calls.find((c) => c.id === 'c3');
+    expect(c3check).toBeTruthy();
     // Both phone columns are matched.
     expect(capturedWhereRaw.sql).toContain('from_phone');
     expect(capturedWhereRaw.sql).toContain('to_phone');
