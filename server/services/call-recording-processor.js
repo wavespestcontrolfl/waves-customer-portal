@@ -836,14 +836,19 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
   const norm = (v) => String(v || '').trim().toLowerCase();
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const callerEmail = norm(caller?.email);
-  const callerPhone10 = last10(caller?.phone);
+  // Match against EVERY caller number — the ANI AND any stated callback — since
+  // the caller may be duplicated into a slot carrying only the callback number.
+  const callerPhone10s = new Set(
+    [caller?.phone, ...(Array.isArray(caller?.phones) ? caller.phones : [])]
+      .map((p) => last10(p)).filter((p) => p.length === 10),
+  );
   // A billing party must be flagged, have its OWN usable email, AND be a DISTINCT
   // third party — never the CALLER duplicated into a slot for a self-pay "I'll
   // pay" call (that would turn a self-pay booking into a payer-billed invoice).
   const flagged = candidates.filter((c) => c && c.is_billing_party === true
     && EMAIL_RE.test(norm(c.email))
     && !(callerEmail && norm(c.email) === callerEmail)
-    && !(callerPhone10.length === 10 && last10(c.phone) === callerPhone10));
+    && !(last10(c.phone).length === 10 && callerPhone10s.has(last10(c.phone))));
   // Fail closed on ambiguity: a call naming multiple DISTINCT billing parties
   // (tenant+owner+manager, or a model duplicate) must NOT silently pick one —
   // leave the booking unlinked (self-pay) for office review. (The same party can
@@ -5534,14 +5539,13 @@ const CallRecordingProcessor = {
                 parentWindowStart: windowStart || '09:00',
               });
               let reusedExistingSchedule = false;
-              // Resolve the Bill-To payer ONCE, before the insert-or-reuse
-              // transaction, so every path (fresh insert, findExisting reuse,
-              // idempotency-key reuse) can stamp/backfill it — a reprocess that
-              // reuses a pre-gate or transient-failure row must still get its
-              // extracted payer.
+              // Resolve the Bill-To payer once, before the transaction (it's a
+              // reusable find-or-create keyed on AP email, independent of the
+              // booking's atomicity), for the fresh insert + fresh follow-up
+              // child to stamp. Reused rows are left as-is (see the note below).
               const callBookingPayerId = await resolveCallBillingPayer(
                 callSecondaryContacts, v2CanonicalExtraction,
-                { email: callerEmailPreScrub || extracted.email, phone: contactPhone },
+                { email: callerEmailPreScrub || extracted.email, phones: [contactPhone, extracted.phone] },
               );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
@@ -5605,16 +5609,14 @@ const CallRecordingProcessor = {
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
-                          // Carry the primary's Bill-To to the follow-up: an
+                          // Mirror the primary's Bill-To onto the follow-up: an
                           // unpriced follow-up is billed at completion, and
                           // without this PayerService.resolveForInvoice would
                           // fall back to customer.payer_id/self-pay and send the
                           // second visit's invoice to the homeowner instead of
-                          // the named payer. Fall back to callBookingPayerId: on
-                          // a REUSED primary the outer payer backfill runs AFTER
-                          // this child insert, so primaryRow.payer_id is still
-                          // null here — use the resolved id directly.
-                          payer_id: primaryRow.payer_id || callBookingPayerId || null,
+                          // the named payer. Always matches the parent (a fresh
+                          // primary already carries callBookingPayerId here).
+                          payer_id: primaryRow.payer_id || null,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
                           // Visit 2 treats the same property as visit 1 —
                           // coordinates included, or the stamped child would
@@ -5939,38 +5941,13 @@ const CallRecordingProcessor = {
                 logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
               }
               scheduledServiceId = svc.id;
-              // Backfill the Bill-To on a REUSED row (findExisting / idempotency
-              // reuse, or a row created before the payer gate / during a transient
-              // payer-lookup failure) that has no payer yet — the fresh-insert
-              // path already carries it, so this is a no-op there. Guards:
-              // - whereNull('payer_id'): don't clobber a payer an operator/another
-              //   process assigned between the pre-tx read and this update.
-              // - whereNotIn status completed/cancelled: a completed visit may
-              //   already have a self-pay invoice minted; flipping only the visit
-              //   would desync it from that invoice. Skip it (office migrates).
-              if (callBookingPayerId && svc && !svc.payer_id
-                && !['completed', 'cancelled'].includes(svc.status)) {
-                const updated = await db('scheduled_services')
-                  .where({ id: svc.id })
-                  .whereNull('payer_id')
-                  .whereNotIn('status', ['completed', 'cancelled'])
-                  .update({ payer_id: callBookingPayerId });
-                if (updated) {
-                  svc.payer_id = callBookingPayerId;
-                  logger.info(`[call-proc] Backfilled payer on reused scheduled service ${maskSid(callSid)}`);
-                }
-                // Also backfill an EXISTING follow-up child (from a pre-gate run)
-                // that ensureCallFollowUpVisit returned early on — otherwise
-                // visit 2 completes self-pay while visit 1 is payer-billed.
-                await db('scheduled_services')
-                  .where((qb) => qb
-                    .where({ parent_service_id: svc.id, source_action: 'ai_call_pipeline_followup' })
-                    .orWhere({ followup_source_service_id: svc.id }))
-                  .whereNull('payer_id')
-                  .whereNotIn('status', ['completed', 'cancelled'])
-                  .update({ payer_id: callBookingPayerId })
-                  .catch((e) => logger.warn(`[call-proc] follow-up payer backfill failed for ${maskSid(callSid)}: ${e.message}`));
-              }
+              // NOTE: payer_id is stamped only on FRESH bookings (insert +
+              // fresh follow-up child). Retroactively backfilling the Bill-To on
+              // a REUSED/pre-gate row is intentionally out of scope here — it
+              // entangles invoice consistency (Charge-Now pre-completion invoices,
+              // completed-visit self-pay invoices, existing follow-up children)
+              // that a booking-time stamp can't safely reconcile. Those one-off
+              // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
               if (!scheduleWasReused) {

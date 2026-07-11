@@ -80,6 +80,15 @@ describe('resolveCallBillingPayer', () => {
     expect(await proc._test.resolveCallBillingPayer(contacts, null, { phone: '(941) 000-1111' })).toBeNull();
     expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
   });
+
+  test('rejects the caller by their CALLBACK number (differs from the ANI)', async () => {
+    // Self-pay caller duplicated into a slot carrying only the callback number,
+    // which differs from the ANI. Both caller numbers must be checked.
+    const contacts = [{ first_name: 'Jim', email: 'jim@example.com', phone: '+19412223333', is_billing_party: true }];
+    const caller = { email: null, phones: ['+19419990000' /* ANI */, '+19412223333' /* callback */] };
+    expect(await proc._test.resolveCallBillingPayer(contacts, null, caller)).toBeNull();
+    expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
+  });
 });
 
 describe('is_billing_party flows through the extraction mapping', () => {
