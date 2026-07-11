@@ -160,7 +160,10 @@ const PROFILE_SCHEDULE_CLAIM_RE = new RegExp(
   + `|\\b${AVAIL_WORDS}\\b[^.\\n]{0,40}\\b${DAY_WORDS}\\b`
   + '|\\b(?:open|close[sd]?)\\s+(?:at|until|from|by)\\b' // "open until 5pm"
   + '|\\b\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b[^.\\n]{0,20}\\b(?:to|until|through)\\b[^.\\n]{0,20}\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b' // "9am to 5pm"
-  + '|\\bwe\\s+(?:use|spray|apply|treat\\s+with)\\s+\\w+', // "we spray Termidor"
+  // Product/treatment claims in ANY voice the distiller plausibly writes in:
+  // first person ("we spray Termidor"), third person ("They use Termidor"),
+  // or company subject ("Waves applies Talstar", "the team treats with…").
+  + '|\\b(?:we|they|adam|waves|the\\s+(?:team|tech(?:nician)?s?|company|crew))\\s+(?:uses?|sprays?|appl(?:y|ies)|treats?\\s+with)\\s+\\w+',
   'i',
 );
 
@@ -324,16 +327,19 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     }
   }
 
-  if (pending) {
-    // status:'pending' guard: if a human already resolved this row mid-run,
-    // their decision stands and this is a no-op (the watermark check above
-    // has already parked the replacement in that case).
+  // The old pending exception is superseded AFTER the auto-approval attempt:
+  // that stamp is self-authored, and writing it first would poison the
+  // in-transaction watermark re-check below exactly like the pre-check above.
+  // status:'pending' guard: if a human already resolved that row mid-run,
+  // their decision stands and the supersede is a no-op.
+  const supersedeOldPending = async () => {
+    if (!pending) return;
     await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
       status: 'superseded',
       reviewed_by: 'auto:distiller',
       reviewed_at: dbi.fn.now(),
     });
-  }
+  };
   if (verdict.approve) {
     const applied = await reviewVoiceProfile({
       id: row.id,
@@ -341,13 +347,20 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
       reviewedBy: 'auto:distiller',
       audit: { adminUserId: null, source: 'auto_distiller' },
       dbi,
+      // Closes the snapshot→commit race: reviewVoiceProfile re-checks this
+      // watermark INSIDE its transaction, serialized against human reviews.
+      expectedWatermark: runStartWatermark,
     });
     if (applied.ok) {
+      await supersedeOldPending();
       logger.info(`[voice-profile] v${row.version} distilled + AUTO-APPROVED (green: ${stats.transcripts} transcripts, ${stats.smsPairs} sms pairs) — live for the phone agent`);
       return { id: row.id, version: row.version, autoApproved: true, flags, ...stats };
     }
+    verdict.approve = false;
+    verdict.reasons.push(`auto-approval did not apply (${applied.error})`);
     logger.warn(`[voice-profile] v${row.version} auto-approval did not apply (${applied.error}) — left pending`);
   }
+  await supersedeOldPending();
 
   try {
     const NotificationService = require('./notification-service');
@@ -386,17 +399,40 @@ async function getApprovedVoiceProfile({ dbi = db } = {}) {
  * The activity_log audit row commits IN THE SAME TRANSACTION as the status
  * flip: a profile must never go live with the audit insert failed behind it
  * (pass `audit: { adminUserId, source? }` — the caller owns actor identity).
+ *
+ * `expectedWatermark` (auto-distiller only): the review watermark the caller
+ * snapshotted at run start. When passed, the approval aborts 409 unless the
+ * watermark — recomputed INSIDE this transaction, behind the advisory lock
+ * every review takes — still matches, so a human approve/revoke committing
+ * between the caller's snapshot and this commit can never be silently
+ * overridden. Human calls omit it and are unaffected.
  */
-async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = {}) {
+const REVIEW_LOCK_KEY = 20260711; // voice_profiles review domain, one lock for all decisions
+async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db, expectedWatermark } = {}) {
   if (!['approve', 'reject', 'revoke'].includes(action)) {
     return { ok: false, status: 400, error: 'action must be approve, reject, or revoke' };
   }
   return dbi.transaction(async (trx) => {
+    // Serialize ALL review decisions (transaction-scoped, auto-released):
+    // without this, the watermark re-check below could pass while a human
+    // decision sits uncommitted in a parallel transaction.
+    await trx.raw('SELECT pg_advisory_xact_lock(?)', [REVIEW_LOCK_KEY]);
     const row = await trx('voice_profiles').where({ id }).forUpdate().first('id', 'status', 'version');
     if (!row) return { ok: false, status: 404, error: 'profile not found' };
     const requiredStatus = action === 'revoke' ? 'approved' : 'pending';
     if (row.status !== requiredStatus) {
       return { ok: false, status: 409, error: `profile is ${row.status}, not ${requiredStatus}` };
+    }
+    if (expectedWatermark !== undefined) {
+      const wm = await trx('voice_profiles')
+        .select(trx.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
+        .whereNot('id', id)
+        .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
+        .first();
+      const wmStr = wm?.watermark ? String(wm.watermark) : null;
+      if (wmStr !== expectedWatermark) {
+        return { ok: false, status: 409, error: 'a review decision landed during distillation' };
+      }
     }
     if (action === 'approve') {
       await trx('voice_profiles').where({ status: 'approved' }).update({ status: 'superseded' });

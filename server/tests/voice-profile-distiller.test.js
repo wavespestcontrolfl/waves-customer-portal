@@ -131,6 +131,27 @@ describe('evaluateAutoApproval — exception-based review (green auto, exception
     expect(style.approve).toBe(true);
   });
 
+  test('THIRD-PERSON/company product claims are exceptions too (Codex r5 P1)', () => {
+    for (const claim of [
+      'They use Termidor on ant jobs',
+      'Waves applies Talstar around the perimeter',
+      'The team sprays bifenthrin at the foundation',
+      'Adam treats with Dominion when termites come up',
+      'The technicians use Trelona stations',
+    ]) {
+      const v = evaluateAutoApproval({ profileText: `${CLEAN}\n${claim}`, stats: GOOD_STATS, flags: [] });
+      expect(v.approve).toBe(false);
+      expect(v.reasons.join(' ')).toMatch(/claim line/);
+    }
+    // Third-person STYLE lines assert no product fact and stay green.
+    const style = evaluateAutoApproval({
+      profileText: `${CLEAN}\nThey treat every caller with patience and explain the plan before booking.`,
+      stats: GOOD_STATS,
+      flags: [],
+    });
+    expect(style.approve).toBe(true);
+  });
+
   test('POLICY claims are exceptions too (Codex r3): contracts, cancel-anytime, free services', () => {
     for (const claim of [
       'They tell callers there are no contracts required',
@@ -148,9 +169,10 @@ describe('reviewVoiceProfile — the human gate state machine', () => {
   // Minimal fake knex: dbi.transaction(cb) hands cb a callable trx whose
   // builder supports where().forUpdate().first(), where().update(), and
   // insert() — recording every write (with its table) for assertions.
-  function makeFakeDbi(row) {
+  function makeFakeDbi(row, { watermarkNow } = {}) {
     const updates = [];
     const inserts = [];
+    const raws = [];
     const trx = (table) => ({
       where: (filter) => ({
         forUpdate: () => ({ first: async () => row }),
@@ -158,10 +180,13 @@ describe('reviewVoiceProfile — the human gate state machine', () => {
         update: async (patch) => { updates.push({ table, filter, patch }); return 1; },
       }),
       insert: async (rec) => { inserts.push({ table, rec }); return [1]; },
+      // the in-transaction watermark recompute (expectedWatermark guard)
+      select: () => ({ whereNot: () => ({ orderByRaw: () => ({ first: async () => ({ watermark: watermarkNow }) }) }) }),
     });
+    trx.raw = (sql) => { raws.push(sql); return sql; };
     trx.fn = { now: () => 'NOW' };
     const dbi = { transaction: async (cb) => cb(trx) };
-    return { dbi, updates, inserts };
+    return { dbi, updates, inserts, raws };
   }
 
   test('approving a pending profile supersedes the prior approved one', async () => {
@@ -217,6 +242,26 @@ describe('reviewVoiceProfile — the human gate state machine', () => {
     expect(updates[0].patch.status).toBe('rejected');
     expect(invalidate).toHaveBeenCalled();
     invalidate.mockRestore();
+  });
+
+  test('every review takes the advisory lock that serializes decisions (Codex r5 P2)', async () => {
+    const { dbi, raws } = makeFakeDbi({ id: 'p1', status: 'pending', version: 3 });
+    await reviewVoiceProfile({ id: 'p1', action: 'approve', dbi });
+    expect(raws.some((s) => String(s).includes('pg_advisory_xact_lock'))).toBe(true);
+  });
+
+  test('expectedWatermark still matching → auto-approve proceeds (Codex r5 P2)', async () => {
+    const { dbi, updates } = makeFakeDbi({ id: 'p1', status: 'pending', version: 3 }, { watermarkNow: '2026-07-11 01:00:00' });
+    const result = await reviewVoiceProfile({ id: 'p1', action: 'approve', dbi, expectedWatermark: '2026-07-11 01:00:00' });
+    expect(result).toMatchObject({ ok: true, status: 'approved' });
+    expect(updates.some((u) => u.patch.status === 'approved')).toBe(true);
+  });
+
+  test('a decision landing between snapshot and commit → 409, nothing flipped (Codex r5 P2)', async () => {
+    const { dbi, updates } = makeFakeDbi({ id: 'p1', status: 'pending', version: 3 }, { watermarkNow: '2026-07-11 02:30:00' });
+    const result = await reviewVoiceProfile({ id: 'p1', action: 'approve', dbi, expectedWatermark: '2026-07-11 01:00:00' });
+    expect(result).toMatchObject({ ok: false, status: 409 });
+    expect(updates).toHaveLength(0);
   });
 
   test('revoke on a non-approved profile 409s; approve/reject on approved still 409', async () => {
