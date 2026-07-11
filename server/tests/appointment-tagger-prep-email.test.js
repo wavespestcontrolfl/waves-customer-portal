@@ -93,9 +93,11 @@ describe('appointment tagger prep email automation', () => {
       email: 'taylor@example.com',
     };
     priorBookingRow = null;
-    db.mockImplementation((table) => (
-      table === 'scheduled_services' ? priorBookingQuery() : customersQuery()
-    ));
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return priorBookingQuery();
+      if (table === 'customer_interactions') return { insert: jest.fn(async () => [1]) };
+      return customersQuery();
+    });
   });
 
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
@@ -260,16 +262,66 @@ describe('appointment tagger prep email automation', () => {
     expect(executor.processTrigger.mock.calls[0][0].recipient.email).toBe('onsite@example.com');
   });
 
-  test('skips when the customer has no valid email on any contact', async () => {
+  test('no email on file falls back to the self-contained prep SMS', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     customerRow = { ...customerRow, email: '' };
+    renderSmsTemplate.mockResolvedValueOnce('Bed bug prep steps...');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
 
     await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
 
+    // No email means no guide email — but the phone-only customer still gets
+    // the self-contained prep text (auto_bed_bug_no_email), not the companion.
     expect(executor.processTrigger).not.toHaveBeenCalled();
-    // The SMS asserts "we emailed your guide" — no queued email, no SMS.
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_bed_bug_no_email',
+      { first_name: 'Taylor' },
+      { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
+      body: 'Bed bug prep steps...',
+      metadata: expect.objectContaining({ prep_variant: 'standalone', pest_type: 'bed_bug' }),
+    });
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('prep.bed_bug'));
+  });
+
+  test('flea with no email on file renders the auto_flea_no_email variant', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    customerRow = { ...customerRow, email: '' };
+
+    await AppointmentTagger.triggerPestPrep(
+      service({ email: null, service_type: 'Flea Treatment - Interior & Exterior' }),
+      'flea',
+    );
+
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_flea_no_email',
+      { first_name: 'Taylor' },
+      { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
+    );
+  });
+
+  test('no standalone fallback when the email skip reason is not "no email"', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+
+    // gate off, terminal, past, and dedupe all skip the email for reasons
+    // other than a missing address — none should trigger the standalone SMS.
+    isEnabled.mockReturnValueOnce(false);
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled' }), 'cockroach');
+    await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE }), 'cockroach');
+
+    executor.processTrigger.mockResolvedValueOnce({
+      automation_count: 1,
+      results: [{ automation_key: 'prep.cockroach', run: { id: 'run-1', status: 'queued' }, deduped: true }],
+    });
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 
   test('executor failure is logged and does not throw', async () => {
