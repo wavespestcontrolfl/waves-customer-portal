@@ -67,6 +67,12 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('serían doscientos dólares')).toBe(true);
   });
 
+  test('detects whole-dollar amounts around strong price words, both directions (Codex P1 r3)', () => {
+    expect(hasPriceQuote('The price is 415')).toBe(true);
+    expect(hasPriceQuote('The estimate is 415.75')).toBe(true);
+    expect(hasPriceQuote('415.75 is the total')).toBe(true);
+  });
+
   test('price-free replies pass, including numbers that are not money', () => {
     expect(hasPriceQuote('Your next service is Tuesday between 1:00 PM and 3:00 PM.')).toBe(false);
     expect(hasPriceQuote('We treated 2 ant mounds near the lanai.')).toBe(false);

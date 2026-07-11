@@ -90,7 +90,9 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       .select(
         'ad.id',
         'ad.customer_id',
+        'ad.sms_log_id',
         'ad.suggested_message',
+        's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
         'c.phone as customer_phone'
@@ -102,7 +104,28 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       decision?.customer_phone,
     ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
     const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
-    if (decision?.id && customerMatches && decisionPhoneMatches) return decision;
+    if (!(decision?.id && customerMatches && decisionPhoneMatches)) return null;
+
+    // STALENESS: a card is only sendable while its anchoring inbound is
+    // still the newest customer message on the thread. Drafting lanes that
+    // never publish (scheduling, escalation, withheld/priced drafts, LLM
+    // latency, failures) leave older cards pending — this send-time check is
+    // the one gate that covers every lane. Verification failure 409s with a
+    // "refresh the thread" message, which is exactly right here.
+    if (decision.inbound_created_at) {
+      const threadLast10 = normalizePhoneLast10(decision.sms_from_phone) || sentPhoneLast10;
+      const newerInbound = await db('sms_log')
+        .where({ direction: 'inbound' })
+        .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+        .where('created_at', '>', decision.inbound_created_at)
+        .whereNot('id', decision.sms_log_id)
+        .first('id');
+      if (newerInbound) {
+        logger.info(`[agent-review] decision ${decision.id} is stale (newer inbound on thread) — refusing send`);
+        return null;
+      }
+    }
+    return decision;
   } catch (verifyErr) {
     logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
   }

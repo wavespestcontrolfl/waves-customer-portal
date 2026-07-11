@@ -77,10 +77,13 @@ const PRICE_QUOTE_RE = new RegExp(
   + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, doscientos dólares
   + `|\\b${PRICE_EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per visit
   + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b` // 45 al mes
-  // Bare amount WITH CENTS near a price-context word ("total comes to
-  // 415.75"). Cents are required on purpose: without them, invoice numbers
-  // ("invoice #04395") and quantities ("total of 3 visits") false-positive.
-  + '|\\b(?:total|price|cost|costs|fee|charge|charges|quote|quoted|balance|owed?|owes|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
+  // Bare amount near a STRONG price word, either direction ("the price is
+  // 415", "415.75 is the total") — no cents required, these words are
+  // unambiguous. Weak words that double as identifiers or verbs (invoice,
+  // payment, pay) still require cents so "invoice #04395" stays clean.
+  + '|\\b(?:total|price|cost|costs|fee|charge|charges|quote|quoted|estimate|balance|owed?|owes)\\b[^\\n]{0,30}?\\b\\d[\\d,]*(?:\\.\\d{1,2})?\\b'
+  + '|\\b\\d[\\d,]*(?:\\.\\d{1,2})?\\s+(?:is|was|will be|es|ser[áa])\\s+(?:the\\s+|el\\s+|la\\s+)?(?:total|price|cost|fee|charge|balance|estimate|quote)\\b'
+  + '|\\b(?:invoice|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
   'i',
 );
 function hasPriceQuote(text) {
@@ -341,10 +344,22 @@ async function supersedeStaleSuggestions({ customerId, smsLogId } = {}) {
             this.where('ad.customer_id', customerId);
           }
         })
-        .select('ad.id', 'ad.entity_id', 's.created_at as inbound_at');
+        .select('ad.id', 'ad.entity_id', 'ad.sms_log_id', 's.created_at as inbound_at');
 
-      const { newerExists, supersede } = splitPendingSuggestions(pending, inbound.created_at);
-      if (newerExists || !supersede.length) return 0;
+      // STRICTLY older only — deliberately NOT splitPendingSuggestions. The
+      // publish path replaces an equal-timestamp card with a fresh insert; a
+      // withhold has no replacement, so sweeping the SAME inbound's card
+      // (e.g. this inbound drafted twice and the retry was withheld) would
+      // delete a perfectly valid suggestion. Same-sms_log rows are excluded
+      // outright, equal-or-newer timestamps survive.
+      const anchor = new Date(inbound.created_at).getTime();
+      if (!Number.isFinite(anchor)) return 0;
+      const supersede = pending.filter((r) => {
+        if (r.sms_log_id === smsLogId) return false;
+        const t = new Date(r.inbound_at || 0).getTime();
+        return Number.isFinite(t) && t < anchor;
+      });
+      if (!supersede.length) return 0;
 
       const changed = await trx('agent_decisions')
         .whereIn('id', supersede.map((r) => r.id))
