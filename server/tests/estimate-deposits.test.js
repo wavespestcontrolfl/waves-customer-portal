@@ -1171,22 +1171,50 @@ describe('webhook + invoice credit', () => {
     // est-old's deposit is fully consumed; est-new still has an open $49 —
     // the helper must skip past est-old (oldest first) and return est-new's
     // credit with the estimateId the caller needs for consumption.
-    mockDbHandler = (table) => ({
-      join() { return this; },
-      where() { return this; },
-      orderBy() { return this; },
-      select: async () => (table === 'estimate_deposits as d'
-        ? [
-          { estimate_id: 'est-old', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' },
-          { estimate_id: 'est-new', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' },
-        ]
-        : [{ id: 'd2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }]),
-    });
+    const ledger = {
+      'est-old': [{ id: 'd1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' }],
+      'est-new': [{ id: 'd2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }],
+    };
+    mockDbHandler = (table) => {
+      const b = {
+        join() { return this; },
+        where(arg) {
+          if (arg && typeof arg === 'object' && arg.estimate_id) b._estimateId = arg.estimate_id;
+          return this;
+        },
+        orderBy() { return this; },
+        select: async () => (table === 'estimate_deposits as d'
+          ? [{ estimate_id: 'est-old' }, { estimate_id: 'est-new' }]
+          : (ledger[b._estimateId] || [])),
+      };
+      return b;
+    };
     const credit = await pendingDepositCreditForCustomer('cust-1');
     expect(credit.estimateId).toBe('est-new');
     expect(credit.amount).toBe(49);
     expect(credit.lineItem.unit_price).toBe(-49);
     expect(credit.lineItem.category).toBe('deposit_credit');
+  });
+
+  it('an exhausted older row must not hide a later open row on the SAME estimate (Codex P2)', async () => {
+    // d1 was split between credit and refund (nothing left); d2 is fully
+    // open. The estimate-level aggregate is $99 — a per-row gate on d1 would
+    // have skipped the whole estimate and stranded d2.
+    mockDbHandler = (table) => ({
+      join() { return this; },
+      where() { return this; },
+      orderBy() { return this; },
+      select: async () => (table === 'estimate_deposits as d'
+        ? [{ estimate_id: 'est-1' }, { estimate_id: 'est-1' }]
+        : [
+          { id: 'd1', amount: '49.00', credited_amount: '24.00', refunded_amount: '25.00' },
+          { id: 'd2', amount: '99.00', credited_amount: '0.00', refunded_amount: '0.00' },
+        ]),
+    });
+    const credit = await pendingDepositCreditForCustomer('cust-1');
+    expect(credit.estimateId).toBe('est-1');
+    expect(credit.amount).toBe(99);
+    expect(credit.lineItem.unit_price).toBe(-99);
   });
 
   it('pendingDepositCreditForCustomer returns null when every row is consumed or refunded (or none exist)', async () => {

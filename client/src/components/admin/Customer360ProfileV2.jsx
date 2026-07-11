@@ -3569,7 +3569,10 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
-          applyDepositCredit: applyCredit,
+          // Only apply when the banner actually RENDERED (preview loaded, not
+          // payer-billed): a slow/failed preview must not silently subtract a
+          // credit the operator never saw — they may have hand-netted it.
+          applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
         }),
       });
       if (result?.delivery && result.delivery.ok === false) {
@@ -3605,10 +3608,18 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
-          applyDepositCredit: applyCredit,
+          // Same visible-banner gate as the send path — never apply a credit
+          // the operator didn't see.
+          applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
           chargeInPerson: true,
         }),
       });
+      // Credit covered the whole invoice — it's already settled server-side,
+      // so there's nothing for the payment sheet to collect.
+      if (result?.settledByDepositCredit) {
+        await onSaved?.(result);
+        return;
+      }
       onChargeInPerson?.(result.invoice);
     } catch (err) {
       setError(err.message || "Couldn't start the charge");
@@ -3644,7 +3655,14 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
-          {depositCredit && (
+          {depositCredit && depositCredit.payerBilled && (
+            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+              ${Number(depositCredit.amount).toFixed(2)} deposit credit on file — NOT applied
+              here: this customer's invoices bill to a third party, and the homeowner's
+              deposit never credits a payer's bill. The credit stays on the ledger.
+            </div>
+          )}
+          {depositCredit && !depositCredit.payerBilled && (
             <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               <label className="flex items-start gap-2 cursor-pointer">
                 <input

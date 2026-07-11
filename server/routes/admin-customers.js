@@ -2647,7 +2647,26 @@ router.get('/:id/deposit-credit', requireAdmin, async (req, res, next) => {
   try {
     const { pendingDepositCreditForCustomer } = require('../services/estimate-deposits');
     const credit = await pendingDepositCreditForCustomer(req.params.id);
-    res.json({ credit: credit ? { amount: credit.amount, estimateId: credit.estimateId } : null });
+    // InvoiceService.create deliberately skips deposit credit on payer-billed
+    // invoices (wrong-party credit), so the preview must say so instead of
+    // promising an application the mint will intentionally not perform
+    // (Codex P2). resolveForInvoice never throws (falls back to self-pay);
+    // keep the same fail-open shape here.
+    let payerBilled = false;
+    if (credit) {
+      try {
+        const PayerService = require('../services/payer');
+        const resolvedPayer = await PayerService.resolveForInvoice({ customerId: req.params.id });
+        payerBilled = !!resolvedPayer?.payerId;
+      } catch (err) {
+        logger.warn(`[customers:deposit-credit] payer resolve failed for ${req.params.id}: ${err.message}`);
+      }
+    }
+    res.json({
+      credit: credit
+        ? { amount: credit.amount, estimateId: credit.estimateId, payerBilled }
+        : null,
+    });
   } catch (err) { next(err); }
 });
 
@@ -2741,6 +2760,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     let term = null;
     let appliedDepositCredit = 0;
     let depositCreditEstimateId = null;
+    let settledByDepositCredit = false;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
@@ -2784,6 +2804,28 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         if (Math.round(allocated * 100) !== Math.round(appliedDepositCredit * 100)) {
           throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedDepositCredit}, allocated ${allocated})`);
         }
+      }
+      // Credit >= the after-tax total settles the invoice outright: create()
+      // capped the credit to the total, so nothing is left for Stripe /
+      // Tap-to-Pay to collect and no payment webhook will EVER fire — an
+      // unpaid $0 invoice would strand the term in payment_pending while
+      // blocking later prepay coverage (Codex P2). Flip it paid here (the
+      // deposit dollars were already collected and recorded when the deposit
+      // was paid) and run the payment sync after commit, mirroring the
+      // dispatch prepaid-credit path.
+      settledByDepositCredit = appliedDepositCredit > 0 && !(Number(invoice.total) > 0);
+      if (settledByDepositCredit) {
+        const [settled] = await trx('invoices')
+          .where({ id: invoice.id })
+          .update({
+            status: 'paid',
+            paid_at: trx.fn.now(),
+            payment_method: 'deposit_credit',
+            payment_recorded_at: trx.fn.now(),
+            updated_at: trx.fn.now(),
+          })
+          .returning('*');
+        if (settled) invoice = { ...invoice, ...settled };
       }
 
       // Payer-billed customers can't be charged in person: NET third-party invoices
@@ -2854,8 +2896,22 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       }).catch((err) => logger.warn(`[customers:annual-prepay-invoice] activity_log insert failed: ${err.message}`));
     });
 
+    // A credit-settled invoice has no webhook behind it — run the payment
+    // sync directly so the term activates and coverage stamps. Best-effort:
+    // the daily covered-term sweep is the recovery net (same contract as the
+    // dispatch prepaid-credit path).
+    if (settledByDepositCredit) {
+      try {
+        await AnnualPrepayRenewals.syncTermForInvoicePayment(invoice);
+      } catch (err) {
+        logger.warn(`[customers:annual-prepay-invoice] term sync after deposit-credit settle failed for ${invoice.id}: ${err.message}`);
+      }
+    }
+
     let delivery = null;
-    if (!chargeInPerson) {
+    // Nothing to collect on a credit-settled invoice — never send a pay link
+    // for $0 due.
+    if (!chargeInPerson && !settledByDepositCredit) {
       try {
         delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
       } catch (err) {
@@ -2895,6 +2951,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         payUrl,
       },
       appliedDepositCredit,
+      settledByDepositCredit,
       annualPrepayTerm: term ? mapAnnualPrepayTerm(term) : null,
       delivery,
     });
