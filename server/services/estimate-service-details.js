@@ -364,7 +364,7 @@ const SERVICE_DETAILS_COPY = {
     systemBox: {
       heading: 'Your program at a glance',
       rows: [
-        ['Visits', 'Full lawn programs include 7–8 visits per year, scheduled around turf growth, seasonal pest pressure, weather, and local fertilizer rules — not a rigid monthly calendar'],
+        ['Visits', 'Full lawn programs typically run 9–12 visits per year (your estimate states your plan’s count), scheduled around turf growth, seasonal pest pressure, weather, and local fertilizer rules — not a rigid monthly calendar'],
         ['Built for your grass', 'St. Augustine, Bermuda, Zoysia & Bahia run dedicated program tracks — a product or rate that helps one grass can injure another, so the turf is identified before anything is applied'],
         ['Every visit', 'Inspection first — then turf-specific fertilization, weed & sedge management, and insect/disease work as season, conditions, and labels warrant'],
         ['Covered turf insects', 'Chinch bugs, sod webworms, armyworms, white grubs & mole crickets — monitored every visit, treated on evidence. Fire-ant control is included only when your proposal specifically includes it; billbugs and unusual turf pests are inspected and quoted from diagnosis'],
