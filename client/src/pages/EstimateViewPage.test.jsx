@@ -797,15 +797,39 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(render(<PlanTotalSummary combined={capped} />).container).toBeEmptyDOMElement();
   });
 
-  it('renders nothing for a ranged low-confidence plan (no exact net)', () => {
+  it('on a ranged low-confidence plan keeps the credit visible but no exact net', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
-    const { container } = render(<PlanTotalSummary combined={ranged} />);
-    expect(container).toBeEmptyDOMElement();
-    // Also suppressed when the range rides on the selected frequency.
-    const { container: c2 } = render(
+    const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
+    expect(text).toContain('Referral Credit'); // credit stays visible…
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Your price'); // …but no exact subtotal/net
+    expect(text).not.toContain('Plan subtotal');
+    // Same when the range rides on the selected frequency.
+    const text2 = render(
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }} />,
+    ).container.textContent;
+    expect(text2).toContain('Referral Credit');
+    expect(text2).not.toContain('Your price');
+  });
+
+  it('suppresses when the SELECTED cadence caps/suppresses the credit', () => {
+    // The credit amount here is the default (uncapped) one, but the selected
+    // combo caps or drops it — net (post-cap) and this credit would disagree.
+    const capped = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 60 }} selectedCombo={{ manualDiscount: { capped: true } }} />,
     );
-    expect(c2).toBeEmptyDOMElement();
+    expect(capped.container).toBeEmptyDOMElement();
+    const suppressed = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 60 }} selectedCombo={{ manualDiscountSuppressed: true }} />,
+    );
+    expect(suppressed.container).toBeEmptyDOMElement();
+  });
+
+  it('suppresses for a quote-required selection (page hides exact dollars)', () => {
+    const { container } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', quoteRequired: true }} />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

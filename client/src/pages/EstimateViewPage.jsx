@@ -1917,60 +1917,78 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // the net they actually pay. Renders ONLY when there's a credit to itemize: the
 // standalone "Recurring total" card was removed (owner directive 2026-07-07), so
 // a no-credit multi-service plan stays summary-free and unchanged.
-export function PlanTotalSummary({ combined, selectedFrequency = null }) {
+export function PlanTotalSummary({ combined, selectedFrequency = null, selectedCombo = null }) {
   if (!combined) return null;
-  // Ranged low-confidence commercial plans quote a confirmed-on-site range, not
-  // one exact number — the rest of the estimate deliberately avoids an exact
-  // price here, so don't itemize an exact net. Suppress (the ranged per-service
-  // cards + sticky bar still carry the plan).
-  const lowConfidencePct = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
-  if (lowConfidencePct > 0) return null;
   const manual = combined.manualDiscount && Number(combined.manualDiscount.amount) > 0
     ? combined.manualDiscount
     : null;
   if (!manual) return null;
-  // The net follows the selected cadence, but the credit is read from the
-  // default combined payload — so only itemize when the credit is
-  // cadence-invariant: an uncapped fixed-dollar credit (e.g. the Referral
-  // Credit) is the same $/mo at every cadence, so net + credit stays exact when
-  // the customer changes a pest/lawn cadence. A percentage or floor-capped
-  // credit changes with cadence and would show a stale amount here — suppress it
-  // (the per-service cards + sticky bar still carry the plan).
-  if (!(manual.type === 'FIXED' && manual.capped !== true)) return null;
-  // Track the SELECTED cadence/combo — changing a pest/lawn cadence updates the
-  // combined frequency (and the sticky bar + accept payload), so the net here
-  // must follow it, not the frozen default-cadence subtotal. Falls back to the
-  // default combined subtotal when no live frequency is passed.
-  const netMonthly = Number(selectedFrequency?.monthly ?? combined.monthlySubtotal);
   const creditMonthly = manualDiscountMonthlyAmount(manual);
-  if (!Number.isFinite(netMonthly) || netMonthly <= 0 || !(creditMonthly > 0)) return null;
+  if (!(creditMonthly > 0)) return null;
+  // The net here follows the SELECTED cadence/combo (matching the sticky bar +
+  // accept payload), but this credit amount is read from the default combined
+  // payload — so only itemize a credit that is cadence-INVARIANT: an uncapped
+  // fixed-dollar credit (e.g. the Referral Credit) is the same $/mo at every
+  // cadence. Suppress a percentage credit, a default-capped credit, OR a credit
+  // the SELECTED cadence caps/suppresses (e.g. the lawn-program floor path) —
+  // there the net follows the selection while this amount would not.
+  const creditVariesByCadence = manual.type !== 'FIXED'
+    || manual.capped === true
+    || selectedCombo?.manualDiscountSuppressed === true
+    || selectedCombo?.manualDiscount?.capped === true;
+  if (creditVariesByCadence) return null;
+  // Quote-required selection: the rest of the estimate hides exact dollars for a
+  // quote-required row, so there's no exact subtotal/net to itemize here either.
+  if (selectedFrequency?.quoteRequired === true) return null;
+
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
+  const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
+  const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
+  const creditRow = (
+    <div style={{
+      ...row,
+      padding: '12px 14px',
+      borderRadius: 10,
+      border: `1px solid ${W.greenLight}`,
+      background: W.successWash,
+      color: W.green,
+      fontWeight: 800,
+      fontSize: 16,
+    }}>
+      <span>{manual.label || 'Discount'}</span>
+      <strong style={num}>{fmtMoneySigned(-creditMonthly)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
+    </div>
+  );
+
+  // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
+  // range, not one exact number — but the fixed credit itself is exact and
+  // cadence-invariant and the accept payload applies it, so keep it visible as a
+  // credit-only line rather than printing an exact subtotal/net the page avoids.
+  const lowConfidencePct = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
+  if (lowConfidencePct > 0) {
+    return (
+      <section style={estimateCard()}>
+        {creditRow}
+        <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          Applied to your plan — we confirm your exact price with a quick site visit.
+        </div>
+      </section>
+    );
+  }
+
+  const netMonthly = Number(selectedFrequency?.monthly ?? combined.monthlySubtotal);
+  if (!Number.isFinite(netMonthly) || netMonthly <= 0) return null;
   const round2 = (n) => Math.round(Number(n) * 100) / 100;
   const subtotalMonthly = round2(netMonthly + creditMonthly);
   const selectedAnnual = Number(selectedFrequency?.annual ?? combined.annualSubtotal);
   const netAnnual = selectedAnnual > 0 ? selectedAnnual : round2(netMonthly * 12);
-  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
-  const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
-  const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
   return (
     <section style={estimateCard()}>
       <div style={{ ...row, fontSize: 16, color: ESTIMATE_BODY }}>
         <span>Plan subtotal</span>
         <span style={num}>{fmtMoney(subtotalMonthly)}{per('/mo')}</span>
       </div>
-      <div style={{
-        ...row,
-        marginTop: 12,
-        padding: '12px 14px',
-        borderRadius: 10,
-        border: `1px solid ${W.greenLight}`,
-        background: W.successWash,
-        color: W.green,
-        fontWeight: 800,
-        fontSize: 16,
-      }}>
-        <span>{manual.label || 'Discount'}</span>
-        <strong style={num}>{fmtMoneySigned(-creditMonthly)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
-      </div>
+      <div style={{ marginTop: 12 }}>{creditRow}</div>
       <div style={{ ...row, marginTop: 14, paddingTop: 16, borderTop: `1px solid ${W.borderCool}` }}>
         <span style={{ fontSize: 18, fontWeight: 800, color: ESTIMATE_TEXT }}>Your price</span>
         <span style={{ ...num, fontSize: 28, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1 }}>
@@ -4062,7 +4080,7 @@ export default function EstimateViewPage() {
               cards are pre-credit, so without this the credit + final price
               would never appear on a split multi-service plan. Renders nothing
               when there's no credit, so no-credit bundles stay unchanged. */}
-          {services.length > 1 ? <PlanTotalSummary combined={pricing.combinedRecurring} selectedFrequency={combinedFrequency} /> : null}
+          {services.length > 1 ? <PlanTotalSummary combined={pricing.combinedRecurring} selectedFrequency={combinedFrequency} selectedCombo={selectedCombo} /> : null}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
