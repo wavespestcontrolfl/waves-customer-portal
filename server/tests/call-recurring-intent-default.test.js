@@ -218,6 +218,44 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Bi-Monthly Pest Control Service');
   });
 
+  test('curly apostrophes: "don’t want a recurring plan" still declines', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I don’t want a recurring plan, just the nest.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('raw "Speaker N:" diarization fails CLOSED — an agent upsell there cannot trigger the override', () => {
+    const raw = [
+      'Speaker 1: we could put you on our quarterly package.',
+      'Speaker 2: I just have the one wasp nest.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), raw).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('"definitely not" after a plan offer is a rejection, not acceptance', () => {
+    const t = [
+      'Caller: I have a wasp nest.',
+      'Agent: we could put you on our quarterly service.',
+      'Caller: definitely not, just the nest.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('program names resolve from the live catalog when provided (seeded-DB naming)', () => {
+    const seededCatalog = [
+      'One-Time Pest Control Service',
+      'General Pest Control Service (Bi-Monthly)',
+      'General Pest Control Service (Semiannual)',
+      'Quarterly Pest Control Service',
+    ];
+    expect(applyRecurringIntentDefault(lead(), 'Caller: could you come every other month?', seededCatalog).matched_service)
+      .toBe('General Pest Control Service (Bi-Monthly)');
+    // Prod-shaped catalog resolves the prod names; no catalog falls back to them.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: could you come every other month?', ['Bi-Monthly Pest Control Service']).matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: could you come every other month?').matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');

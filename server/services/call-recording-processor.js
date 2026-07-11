@@ -2776,14 +2776,20 @@ function serviceCadenceMatch(re, text) {
   return false;
 }
 
+// Transcribers emit curly apostrophes; every guard regex here uses ASCII
+// ones — normalize before matching or "don’t want a recurring plan" slips
+// past the decline guard.
+const normalizeApostrophes = (s) => String(s || '').replace(/[‘’]/g, "'");
+
 // Speaker turns from a labelled transcript: a turn starts at a
-// "Speaker:" label and absorbs unlabelled continuation lines (a diarized
-// turn can wrap), so continuations inherit their speaker.
+// "Speaker:" label (incl. raw diarized "Speaker 1:") and absorbs unlabelled
+// continuation lines (a diarized turn can wrap), so continuations inherit
+// their speaker.
 function speakerTurns(transcription) {
   const lines = String(transcription || '').split('\n');
   const turns = [];
   for (const line of lines) {
-    const label = line.match(/^\s*([A-Za-z][A-Za-z ]{0,20}?)\s*:/);
+    const label = line.match(/^\s*([A-Za-z][A-Za-z0-9 ]{0,20}?)\s*:/);
     if (label) {
       turns.push({ speaker: /^(caller|customer)$/i.test(label[1].trim()) ? 'caller' : 'other', text: line });
     } else if (turns.length) {
@@ -2793,12 +2799,17 @@ function speakerTurns(transcription) {
   return turns;
 }
 
-// The caller's own turns when the transcript is speaker-labelled; the whole
-// transcript otherwise (fail-open — better a rare agent-word trigger than
-// silently losing the rule on unlabelled transcripts).
+// The caller's own turns when the transcript is caller-labelled. Two
+// distinct fallbacks: NO labels at all → whole transcript (fail-open —
+// better a rare agent-word trigger than losing the rule); labels present
+// but none identifiable as the caller (raw "Speaker 1:"/"Speaker 2:"
+// diarization) → EMPTY (fail-closed — scanning the whole text there would
+// let an agent's ignored upsell trigger the override).
 function callerOnlyText(transcription) {
-  const callerTurns = speakerTurns(transcription).filter((t) => t.speaker === 'caller');
-  return callerTurns.length ? callerTurns.map((t) => t.text).join('\n') : String(transcription || '');
+  const turns = speakerTurns(transcription);
+  if (!turns.length) return String(transcription || '');
+  const callerTurns = turns.filter((t) => t.speaker === 'caller');
+  return callerTurns.map((t) => t.text).join('\n');
 }
 
 // An agent plan offer the caller ACCEPTS is caller intent too ("we can put
@@ -2806,10 +2817,11 @@ function callerOnlyText(transcription) {
 // text (it carries the cadence) or null. The ignored-upsell guard survives:
 // an offer with no affirmative reply returns nothing.
 // Bare "ok(ay)" is deliberately absent — it's conversational acknowledgment
-// ("okay." while the agent pitches), not acceptance.
-const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b/i;
+// ("okay." while the agent pitches), not acceptance. A negation right after
+// the affirmation word ("definitely not", "yeah, no") is a REJECTION.
+const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b(?!\s*,?\s*(?:not|no|never|don'?t)\b)/i;
 function acceptedPlanOfferText(transcription) {
-  const turns = speakerTurns(transcription);
+  const turns = speakerTurns(normalizeApostrophes(transcription));
   for (let i = 0; i + 1 < turns.length; i++) {
     if (turns[i].speaker !== 'other' || turns[i + 1].speaker !== 'caller') continue;
     const offer = turns[i].text;
@@ -2821,7 +2833,24 @@ function acceptedPlanOfferText(transcription) {
   return null;
 }
 
-function applyRecurringIntentDefault(extracted, transcription) {
+// The program name for a cadence, resolved from the LIVE bookable catalog
+// when it's available (booking exact-matches catalog names, and seeded
+// environments carry different row names than prod's, e.g. "General Pest
+// Control Service (Bi-Monthly)") — hardcoded prod names as fallback.
+function resolveProgramName(cadenceKey, fallback, catalogNames) {
+  const finders = {
+    monthly: (n) => /\bmonthly\b/i.test(n) && !/\bbi[- ]?monthly\b/i.test(n),
+    bimonthly: (n) => /\bbi[- ]?monthly\b/i.test(n),
+    semiannual: (n) => /semi[- ]?annual/i.test(n),
+    quarterly: (n) => /\bquarterly\b/i.test(n),
+  };
+  const fits = finders[cadenceKey];
+  const hit = (Array.isArray(catalogNames) ? catalogNames : [])
+    .find((n) => /pest control/i.test(n) && fits(String(n)));
+  return hit || fallback;
+}
+
+function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
   if (!extracted || extracted.is_lead !== true) return extracted;
   // specific_service_name outranks matched_service in catalog booking
   // resolution (call-booking-catalog.js), so a singular value THERE would
@@ -2835,7 +2864,7 @@ function applyRecurringIntentDefault(extracted, transcription) {
   const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
   if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
 
-  const callerText = callerOnlyText(transcription);
+  const callerText = callerOnlyText(normalizeApostrophes(transcription));
   // A decline only vetoes when nothing recurring FOLLOWS it — "I don't want
   // the monthly plan; can we do quarterly instead?" rejects one option and
   // chooses another, which is a recurring request, not a decline.
@@ -2857,19 +2886,21 @@ function applyRecurringIntentDefault(extracted, transcription) {
   // guard as intent detection.
   const cadenceText = acceptedOffer || callerText;
   const families = [
-    { name: 'Monthly Pest Control Service', re: /\bmonthly\b|\bevery (?:single )?month\b/gi, veto: /\bbi[- ]?monthly\b|\bevery other month\b/i },
-    { name: 'Bi-Monthly Pest Control Service', re: /\bbi[- ]?monthly\b|\bevery other month\b|\bevery (?:two|2) months\b/gi },
-    { name: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/gi },
-    { name: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/gi },
+    { key: 'monthly', fallback: 'Monthly Pest Control Service', re: /\bmonthly\b|\bevery (?:single )?month\b/gi, veto: /\bbi[- ]?monthly\b|\bevery other month\b/i },
+    { key: 'bimonthly', fallback: 'Bi-Monthly Pest Control Service', re: /\bbi[- ]?monthly\b|\bevery other month\b|\bevery (?:two|2) months\b/gi },
+    { key: 'semiannual', fallback: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/gi },
+    { key: 'quarterly', fallback: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/gi },
   ];
   const hits = families.filter((f) => serviceCadenceMatch(f.re, cadenceText) && !(f.veto && f.veto.test(cadenceText)));
+  const chosen = hits.length === 1 ? hits[0] : families.find((f) => f.key === 'quarterly');
+  const programName = (family) => resolveProgramName(family.key, family.fallback, bookableServiceNames);
 
   const retarget = (isSingular, isRecurring, current) => {
-    if (isSingular) return hits.length === 1 ? hits[0].name : 'Quarterly Pest Control Service';
+    if (isSingular) return programName(chosen);
     // Already a recurring program: retarget ONLY on one unambiguous caller
     // cadence (the model can default to quarterly over an explicit
     // bi-monthly ask); ambiguity keeps the model's pick.
-    if (isRecurring && hits.length === 1) return hits[0].name;
+    if (isRecurring && hits.length === 1) return programName(hits[0]);
     return current;
   };
   const out = { ...extracted };
@@ -3769,7 +3800,7 @@ const CallRecordingProcessor = {
 
     // Owner rule: recurring interest beats the single presenting pest — a
     // deterministic backstop on top of the same instruction in the prompt.
-    extracted = applyRecurringIntentDefault(extracted, transcription);
+    extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -3882,7 +3913,7 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      extracted = applyRecurringIntentDefault(extracted, transcription);
+      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
     }
 
     // Skip spam and non-workable voicemail
@@ -5634,7 +5665,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      extracted = applyRecurringIntentDefault(extracted, transcription);
+      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
@@ -5647,7 +5678,16 @@ const CallRecordingProcessor = {
             updated_at: new Date(),
           });
           if (leadId) {
-            await db('leads').where({ id: leadId }).update({ service_interest: extracted.matched_service });
+            // Mirror the enrichment path's fill-if-empty convention, plus the
+            // one value this run is known to have written (the pre-reassert
+            // AI pick) — never clobber an office-edited service_interest.
+            await db('leads')
+              .where({ id: leadId })
+              .where((qb) => {
+                qb.whereNull('service_interest').orWhere({ service_interest: '' });
+                if (preReassertMatched) qb.orWhere({ service_interest: preReassertMatched });
+              })
+              .update({ service_interest: extracted.matched_service });
           }
         } catch (bfErr) {
           logger.warn(`[call-proc] recurring-default backfill failed open: ${bfErr.message}`);
