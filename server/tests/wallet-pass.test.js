@@ -39,9 +39,16 @@ describe('wallet-pass buildPassJson', () => {
       message: 'https://portal.wavespestcontrol.com/l/g4mty',
     })]);
     expect(p.generic.primaryFields[0].value).toBe('Adam Benetti');
-    expect(p.generic.headerFields[0].value).toBe('2026');
+    expect(p.generic.headerFields[0]).toEqual(expect.objectContaining({ label: 'CUSTOMER SINCE', value: '2026' }));
     const next = p.generic.secondaryFields.find((f) => f.key === 'next_visit');
     expect(next.value).toBe('Sep 9');
+    // Messages preview stacks description above organizationName — the
+    // description must not repeat the company name.
+    expect(p.description).toBe('Digital business card');
+    expect(p.generic.auxiliaryFields[0]).toEqual(expect.objectContaining({
+      label: 'TEXT OR CALL ADAM',
+      value: '(941) 297-2606',
+    }));
   });
 
   test('omits next-visit field and locations when data is missing', () => {

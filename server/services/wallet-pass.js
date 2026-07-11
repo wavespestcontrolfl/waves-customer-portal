@@ -95,7 +95,10 @@ function buildPassJson({
     teamIdentifier: process.env.PASS_TEAM_ID || TEAM_ID_DEFAULT,
     serialNumber: String(card.id),
     organizationName: 'Waves Pest Control',
-    description: 'Waves Pest Control business card',
+    // Not "Waves … business card": Messages' pkpass preview stacks the
+    // description above organizationName, so the company name would read
+    // twice in the bubble (owner feedback 07-11).
+    description: 'Digital business card',
     backgroundColor: 'rgb(4,57,94)',
     foregroundColor: 'rgb(255,255,255)',
     labelColor: 'rgb(155,212,234)',
@@ -107,12 +110,19 @@ function buildPassJson({
     }],
     generic: {
       headerFields: memberSinceYear
-        ? [{ key: 'since', label: 'SINCE', value: String(memberSinceYear) }]
+        ? [{ key: 'since', label: 'CUSTOMER SINCE', value: String(memberSinceYear) }]
         : [],
       primaryFields: [
         { key: 'technician', label: 'YOUR TECHNICIAN', value: techName || 'Waves Pest Control' },
       ],
       secondaryFields,
+      // Front-of-pass contact line — a business card should show how to
+      // reach us without flipping to the back (owner feedback 07-11).
+      auxiliaryFields: [{
+        key: 'contact',
+        label: techFirst ? `TEXT OR CALL ${techFirst.toUpperCase()}` : 'TEXT OR CALL',
+        value: location.phone,
+      }],
       backFields: [
         {
           key: 'text',
@@ -187,9 +197,16 @@ async function generateForToken(token) {
   if (!customer || customer.deleted_at) return null;
 
   let techName = null;
+  let techPhotoUrl = null;
   if (card.technician_id) {
-    const tech = await db('technicians').where({ id: card.technician_id }).first('name');
+    const tech = await db('technicians')
+      .where({ id: card.technician_id })
+      .first('name', 'photo_url', 'photo_s3_key');
     techName = tech?.name || null;
+    if (tech) {
+      const { resolveTechPhotoUrl } = require('./tech-photo');
+      techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
+    }
   }
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
@@ -248,6 +265,28 @@ async function generateForToken(token) {
       // icon.png is REQUIRED by Wallet; the rest degrade gracefully.
       if (name === 'icon.png') throw err;
       logger.warn(`[wallet-pass] asset missing: ${name}`);
+    }
+  }
+
+  // Tech headshot as the pass thumbnail (renders beside the primary field and
+  // fills the generic layout's empty middle — owner feedback 07-11). Wallet
+  // requires PNG, so any JPEG source is converted; best-effort with a short
+  // timeout so a slow photo host can never stall a pass download.
+  if (techPhotoUrl) {
+    try {
+      const resp = await fetch(techPhotoUrl, { signal: AbortSignal.timeout(4000) });
+      if (resp.ok) {
+        const raw = Buffer.from(await resp.arrayBuffer());
+        const sharp = require('sharp');
+        for (const [name, px] of [['thumbnail.png', 90], ['thumbnail@2x.png', 180], ['thumbnail@3x.png', 270]]) {
+          files[name] = await sharp(raw)
+            .resize(px, px, { fit: 'cover', position: 'attention' })
+            .png()
+            .toBuffer();
+        }
+      }
+    } catch (err) {
+      logger.warn(`[wallet-pass] thumbnail skipped (errType=${err?.name || 'Error'})`);
     }
   }
 
