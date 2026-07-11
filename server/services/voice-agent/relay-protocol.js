@@ -74,6 +74,16 @@ const DEFAULT_WELCOME_GREETING =
 const DEFAULT_TTS_PROVIDER = 'ElevenLabs'; // matches the existing Waves voice-agent stack
 const DEFAULT_LANGUAGE = 'en-US';
 
+// Provider-specific voice id for the agent's TTS. Unset → the provider's
+// default voice. Set VOICE_RELAY_TTS_VOICE to the ElevenLabs voice id of the
+// Waves brand voice ("Veda Sky" — the same voice as the greeting/voicemail
+// assets) so the agent sounds identical to the rest of the call flow. Read at
+// call time (not module load) so an env change takes effect on restart even
+// if this module was required before the var existed in the environment.
+function defaultTtsVoice() {
+  return String(process.env.VOICE_RELAY_TTS_VOICE || '').trim() || undefined;
+}
+
 /** Pull the caller's transcribed text out of an inbound `prompt` frame, tolerant of field-name drift. */
 function parsePrompt(msg) {
   if (!msg || typeof msg !== 'object') return '';
@@ -118,7 +128,7 @@ function buildRelayTwiML({
   welcomeGreeting = DEFAULT_WELCOME_GREETING,
   ttsProvider = DEFAULT_TTS_PROVIDER,
   language = DEFAULT_LANGUAGE,
-  voice, // optional provider-specific voice id
+  voice = defaultTtsVoice(), // provider-specific voice id (env VOICE_RELAY_TTS_VOICE)
   action, // optional <Connect action> URL — Twilio POSTs here when the session ends/fails
   wsSecret = process.env.VOICE_RELAY_WS_SECRET,
 } = {}) {
@@ -156,6 +166,7 @@ module.exports = {
   DEFAULT_WELCOME_GREETING,
   DEFAULT_TTS_PROVIDER,
   DEFAULT_LANGUAGE,
+  defaultTtsVoice,
   isRelayEnabled,
   maskPhone,
   appendWsKey,
