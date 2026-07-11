@@ -406,6 +406,16 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Bounce-triggered call-audio email re-verification: a hard bounce on a
+  // call-captured address re-runs the source RECORDING through transcription
+  // (letter-fidelity contact pass) + a deterministic name-anchored candidate
+  // generator, and cards the ranked corrections for the owner's read-back
+  // confirm. Writes nothing to the customer, sends nothing. LIVE BY DEFAULT
+  // (owner call 2026-07-11: bounces are rare, the card is pure upside) —
+  // GATE_CALL_BOUNCE_REVERIFY=false is the kill switch (stops the
+  // transcription spend; bounces then behave as before: domain-corrector
+  // recovery + admin alert only).
+  callBounceReverify: process.env.GATE_CALL_BOUNCE_REVERIFY !== 'false',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
