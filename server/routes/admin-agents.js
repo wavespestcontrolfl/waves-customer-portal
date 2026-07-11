@@ -1473,12 +1473,14 @@ router.get('/shadow-scores', async (req, res, next) => {
 router.get('/intent-modes', async (req, res, next) => {
   try {
     const suggestMode = require('../services/sms-suggest-mode');
+    const graduation = require('../services/sms-graduation');
+    const judgeCohort = graduation.resolveCohortVersions();
     const [rows, seenIntents, outcomes] = await Promise.all([
       suggestMode.listIntentModes(),
       db('message_drafts').whereNotNull('intent').distinct('intent').pluck('intent'),
       db('agent_decisions').where('workflow', suggestMode.SUGGEST_WORKFLOW)
-        .select('detected_intent as intent', 'status').count('* as count')
-        .groupBy('detected_intent', 'status'),
+        .select('detected_intent as intent', 'status', 'prompt_version').count('* as count')
+        .groupBy('detected_intent', 'status', 'prompt_version'),
     ]);
 
     const byIntent = new Map();
@@ -1506,6 +1508,15 @@ router.get('/intent-modes', async (req, res, next) => {
       b.reason = row.reason || null;
     }
     for (const intent of seenIntents) bucket(intent);
+    // Readiness counts only the current drafter cohort's outcomes — a human
+    // accepting a superseded version's drafts says nothing about the drafter
+    // that would be auto-sending. Display keeps the all-time telemetry.
+    const cohortSuggest = new Map();
+    const cohortBucket = (intent) => {
+      const key = intent || 'GENERAL';
+      if (!cohortSuggest.has(key)) cohortSuggest.set(key, { accepted: 0, corrected: 0, ignored: 0 });
+      return cohortSuggest.get(key);
+    };
     for (const row of outcomes) {
       const b = bucket(row.intent);
       const n = asNumber(row.count);
@@ -1515,16 +1526,20 @@ router.get('/intent-modes', async (req, res, next) => {
       // their draft to 'shadow' for the judge.
       b.suggest.suggested += n;
       const key = row.status === 'pending_review' ? 'pending' : row.status;
-      if (key in b.suggest) b.suggest[key] = n;
+      if (key in b.suggest) b.suggest[key] += n;
+      if (!judgeCohort || judgeCohort.includes(row.prompt_version)) {
+        const cb = cohortBucket(row.intent);
+        if (key in cb) cb[key] += n;
+      }
     }
 
     // Phase E readiness: per-intent eligibility for the next ladder rung,
     // computed from the LIVE judge signal (backfill + superseded prompt
-    // versions excluded — see resolveCohortVersions) + the suggest outcomes
-    // above. Recommend-only — flips stay manual via PUT below.
-    const graduation = require('../services/sms-graduation');
+    // versions excluded — see resolveCohortVersions) + the cohort-scoped
+    // suggest outcomes above. Recommend-only — flips stay manual via PUT
+    // below.
     const readiness = await graduation.computeReadiness({
-      intents: [...byIntent.values()].map((b) => ({ intent: b.intent, mode: b.mode, locked: b.locked, suggest: b.suggest })),
+      intents: [...byIntent.values()].map((b) => ({ intent: b.intent, mode: b.mode, locked: b.locked, suggest: cohortSuggest.get(b.intent) || { accepted: 0, corrected: 0, ignored: 0 } })),
     });
     for (const b of byIntent.values()) b.graduation = readiness.get(b.intent) || null;
 
@@ -1537,9 +1552,9 @@ router.get('/intent-modes', async (req, res, next) => {
       // surprised that nothing auto-sends yet.
       autoSendGateEnabled: require('../config/feature-gates').isEnabled('smsAutoSend'),
       thresholds: graduation.THRESHOLDS,
-      // Which drafter prompt version(s) the judge signals count — null means
-      // all live versions (GRAD_COHORT_VERSIONS=all_live).
-      judgeCohort: graduation.resolveCohortVersions(),
+      // Which drafter prompt version(s) the readiness signals count — null
+      // means all live versions (GRAD_COHORT_VERSIONS=all_live).
+      judgeCohort,
       intents: [...byIntent.values()].sort((a, b) => a.intent.localeCompare(b.intent)),
     });
   } catch (err) {

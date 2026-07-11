@@ -72,21 +72,22 @@ const asPct = (x) => `${Math.round(x * 100)}%`;
  * evidence. Default = the drafter's CURRENT PROMPT_VERSION only, so the rates
  * measure the drafter that would actually be doing the suggesting/sending.
  * Overrides via GRAD_COHORT_VERSIONS:
- *   - comma-separated list (e.g. 'house_voice_v8,house_voice_v9') to keep a
- *     prior version's evidence after a wording-only prompt bump;
+ *   - comma-separated list (e.g. 'house_voice_v7') UNIONS with the current
+ *     version — it widens, never replaces, so a stale env value left over
+ *     from before a prompt bump can never exclude the running drafter's own
+ *     evidence and gate promotion purely on superseded data;
  *   - 'all_live' restores the pre-cohort all-time behavior (no version
  *     filter; backfill stays excluded regardless).
  * Returns an array of versions, or null meaning "no version filter".
  */
 function resolveCohortVersions({ raw = process.env.GRAD_COHORT_VERSIONS, currentVersion } = {}) {
+  const trimmed = (raw || '').trim();
+  if (trimmed.toLowerCase() === 'all_live') return null;
   // Lazy require: sms-shadow-drafter reaches sms-auto-send which reaches this
   // module — a top-level require would be circular.
   const current = currentVersion || require('./sms-shadow-drafter').PROMPT_VERSION;
-  const trimmed = (raw || '').trim();
   if (!trimmed) return [current];
-  if (trimmed.toLowerCase() === 'all_live') return null;
-  const versions = trimmed.split(',').map((v) => v.trim()).filter(Boolean);
-  return versions.length ? versions : [current];
+  return [...new Set([current, ...trimmed.split(',').map((v) => v.trim()).filter(Boolean)])];
 }
 
 /**
@@ -295,17 +296,26 @@ async function computeReadiness({ intents, dbi = db } = {}) {
 /**
  * Per-intent suggest-mode outcome buckets for the suggest → auto_send rung:
  * the accepted / corrected / ignored counts that ARE the human ground truth
- * once an intent is suggesting. Mirrors the rollup in GET /intent-modes but
- * scoped to one intent, so the executor's send-time gate doesn't aggregate
- * every intent on every inbound.
+ * once an intent is suggesting. Mirrors the readiness rollup in GET
+ * /intent-modes but scoped to one intent, so the executor's send-time gate
+ * doesn't aggregate every intent on every inbound.
+ *
+ * Cohort-scoped like the judge signals: a human accepting a SUPERSEDED
+ * version's drafts is not evidence that the current drafter is send-ready.
+ * agent_decisions.prompt_version is stamped by suggest-mode at publish;
+ * legacy rows with a NULL version drop out when a cohort is active —
+ * fail-closed, they count for no version.
  */
-async function fetchSuggestOutcomes({ intent, dbi = db } = {}) {
+async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions } = {}) {
   const { SUGGEST_WORKFLOW } = require('./sms-suggest-mode');
-  const rows = await dbi('agent_decisions')
+  const cohort = cohortVersions === undefined ? resolveCohortVersions() : cohortVersions;
+  const query = dbi('agent_decisions')
     .where({ workflow: SUGGEST_WORKFLOW, detected_intent: intent })
     .select('status')
     .count('* as count')
     .groupBy('status');
+  if (cohort) query.whereIn('prompt_version', cohort);
+  const rows = await query;
   const out = { accepted: 0, corrected: 0, ignored: 0 };
   for (const r of rows) {
     if (Object.prototype.hasOwnProperty.call(out, r.status)) out[r.status] = Number(r.count) || 0;

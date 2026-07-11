@@ -33,9 +33,14 @@ describe('judge-signal cohort (superseded prompt versions are not readiness evid
     expect(resolveCohortVersions({ raw: undefined })).toEqual([PROMPT_VERSION]);
   });
 
-  test('GRAD_COHORT_VERSIONS widens the cohort (trimmed, empties dropped)', () => {
-    expect(resolveCohortVersions({ raw: ' house_voice_v7 , house_voice_v8 ,', currentVersion: 'x' }))
-      .toEqual(['house_voice_v7', 'house_voice_v8']);
+  test('GRAD_COHORT_VERSIONS widens the cohort (trimmed, empties dropped, deduped)', () => {
+    expect(resolveCohortVersions({ raw: ' house_voice_v7 , house_voice_v8 ,', currentVersion: 'house_voice_v8' }))
+      .toEqual(['house_voice_v8', 'house_voice_v7']);
+  });
+
+  test('an explicit list UNIONS with the current version — a stale override can never exclude the running drafter (Codex P1)', () => {
+    expect(resolveCohortVersions({ raw: 'house_voice_v7', currentVersion: 'house_voice_v8' }))
+      .toEqual(['house_voice_v8', 'house_voice_v7']);
   });
 
   test("'all_live' restores the pre-cohort behavior (null = no version filter)", () => {
