@@ -472,6 +472,47 @@ describe('persistCallSecondaryContact', () => {
     expect(validatePhoneCallAppointmentCustomer(withSlot, {}, '+14074933469').missing).not.toContain('email');
   });
 
+  test('with slot persistence gated OFF, the EXTRACTED secondary email keeps the booking valid (kill-switch path)', () => {
+    // The attribution prompt keeps the buyer's email out of extracted.email
+    // by design; when GATE_CALL_SECONDARY_CONTACT is unset no slot write
+    // happens either. The extracted secondary contact itself must satisfy
+    // the email requirement or the exact realtor/lender-books-for-buyer call
+    // skips as missing_required_customer_fields in the kill-switch config.
+    const base = {
+      first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
+      email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
+    };
+    const extracted = {
+      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer' },
+    };
+    const res = validatePhoneCallAppointmentCustomer(base, extracted, '+14074933469');
+    expect(res.missing).not.toContain('email');
+    // Validation-only: the buyer's email is used as the deliverable channel,
+    // and merged.email surfacing it must not imply a customer write —
+    // backfillCustomerFromAppointmentContact reads extracted.email (null here).
+    expect(extracted.email).toBeUndefined();
+
+    // Array form (1.4.0 secondary_contacts) works too.
+    const resArr = validatePhoneCallAppointmentCustomer(base, {
+      secondary_contacts: [{ first_name: 'Leslie', email: 'lferraro@hotmail.com', role: 'home_buyer' }],
+    }, '+14074933469');
+    expect(resArr.missing).not.toContain('email');
+  });
+
+  test('lender is an agent-type slot role: a slot-phone hit alone never auto-links (serves many buyers)', () => {
+    const { slotOnlyLinkAllowed } = require('../services/call-recording-processor')._test;
+    const customer = {
+      service_contact_phone: '+18777175476', service_contact_name: 'Robert Cozzano',
+      service_contact_role: 'lender',
+    };
+    // Same number, same first name — still blocked: the lender's next call is
+    // usually a DIFFERENT buyer's inspection.
+    expect(slotOnlyLinkAllowed(customer, '+18777175476', { first_name: 'Robert' })).toBe(false);
+    // Household-type role on the same shape still links (control).
+    const householdCustomer = { ...customer, service_contact_role: 'tenant' };
+    expect(slotOnlyLinkAllowed(householdCustomer, '+18777175476', { first_name: 'Robert' })).toBe(true);
+  });
+
   test('a name-only placeholder slot never carried notifications: prefs are still set, and the placeholder is not overwritten', async () => {
     const writes = makeDb({ customer: { ...bareCustomer, service_contact_name: 'Gate guard (placeholder)' } });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');

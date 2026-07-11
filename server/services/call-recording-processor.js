@@ -1072,9 +1072,12 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
 // duplicate customer the next time that person called (audit #7/F1).
 const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
 // Slot roles that identify the HOUSEHOLD/account vs people who serve many
-// accounts and must never auto-link on a slot-phone hit alone.
+// accounts and must never auto-link on a slot-phone hit alone. lender is
+// agent-type (schema 1.7.0): a loan officer/title coordinator arranges
+// inspections for MANY buyers — their next call is usually a different
+// customer, so a slot-phone hit alone must go to review, not auto-link.
 const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
-const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager']);
+const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 'lender']);
 // Slot-only match gating: the number belongs to a person STORED ON this
 // account (tenant/spouse/buyer/agent). Household-type roles identify the
 // account; agent-type people (realtor, property manager) serve MANY accounts
@@ -2091,11 +2094,22 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
     || customer.service_contact2_email
     || customer.service_contact3_email
     || null;
+  // Kill-switch leg of the same rule: with GATE_CALL_SECONDARY_CONTACT off,
+  // the slot write above never happens, but the attribution prompt still
+  // (correctly) keeps a relayed buyer/tenant email out of extracted.email —
+  // the EXTRACTED secondary contact's email is the deliverable channel then.
+  // Validation-only: nothing here writes it onto the customer
+  // (backfillCustomerFromAppointmentContact reads extracted.email, which
+  // stays clean), so the misattribution this prompt rule fixes can't recur.
+  const secondaryCandidates = [extracted.secondary_contact, ...(Array.isArray(extracted.secondary_contacts) ? extracted.secondary_contacts : [])];
+  const extractedSecondaryEmail = secondaryCandidates
+    .map((c) => (c && typeof c === 'object' ? String(c.email || '').trim().toLowerCase() : ''))
+    .find((e) => EMAIL_RE.test(e)) || null;
   const merged = {
     firstName: customer.first_name || extracted.first_name || null,
     lastName: customer.last_name || extracted.last_name || null,
     phone: customer.phone || extracted.phone || callerPhone || null,
-    email: customer.email || extracted.email || slotEmail || null,
+    email: customer.email || extracted.email || slotEmail || extractedSecondaryEmail || null,
     streetAddress: customer.address_line1 || extracted.address_line1 || null,
     city: customer.city || extracted.city || null,
     state: customer.state || extracted.state || null,
@@ -6847,6 +6861,7 @@ CallRecordingProcessor._test = {
   resolveSchedulableCallService,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
+  slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   normalizeCallExtraction,
