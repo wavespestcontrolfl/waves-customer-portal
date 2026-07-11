@@ -101,9 +101,11 @@ describe('reverifyBouncedEmailFromCall — gate', () => {
     else process.env.GATE_CALL_BOUNCE_REVERIFY = OLD;
   });
 
-  test('gated off (default) → no-op, no DB or provider work', async () => {
-    delete process.env.GATE_CALL_BOUNCE_REVERIFY;
-    const res = await reverifyBouncedEmailFromCall({ bouncedEmail: 'apitz6958@yahoo.com' });
+  test('kill switch: GATE_CALL_BOUNCE_REVERIFY=false → no-op, no DB or provider work', async () => {
+    process.env.GATE_CALL_BOUNCE_REVERIFY = 'false';
+    jest.resetModules();
+    const { reverifyBouncedEmailFromCall: gated } = require('../services/email-bounce-reverify');
+    const res = await gated({ bouncedEmail: 'apitz6958@yahoo.com' });
     expect(res).toEqual({ skipped: 'gated_off' });
   });
 });
