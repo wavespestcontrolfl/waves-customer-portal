@@ -2,7 +2,7 @@
  * SMS graduation readiness engine — pure-logic coverage (no DB, no LLM).
  * Guards the Phase E gate: an intent graduates only when the data earns it.
  */
-const { evaluateRung, resolveCohortVersions, THRESHOLDS, LADDER } = require('../services/sms-graduation');
+const { evaluateRung, evaluateAutoSendHealth, resolveCohortVersions, THRESHOLDS, LADDER } = require('../services/sms-graduation');
 
 // Fixed thresholds so the tests don't drift with env overrides.
 const T = {
@@ -165,5 +165,28 @@ describe('top of ladder', () => {
     const r = evalR({ mode: 'auto_send' });
     expect(r.nextRung).toBeNull();
     expect(r.eligible).toBe(true);
+  });
+});
+
+describe('active auto-send health (Codex P1: UI must mirror the send-time gate)', () => {
+  const good = { accepted: 90, corrected: 6, ignored: 4 };
+
+  test('an intent whose data still clears the rung reads send-ready', () => {
+    const h = evaluateAutoSendHealth({ suggest: good, judge: { recentUnsafe: 0, judged: 40 } });
+    expect(h.sendReady).toBe(true);
+    expect(h.blockers).toEqual([]);
+  });
+
+  test('a prompt bump that reset the cohort evidence reads gated, with the executor blockers', () => {
+    // Fresh version: zero cohort judged, zero cohort decided — exactly what
+    // the send-time gate sees, so the UI must show gated, not top-of-ladder.
+    const h = evaluateAutoSendHealth({ suggest: { accepted: 0, corrected: 0, ignored: 0 }, judge: { recentUnsafe: 0, judged: 0 } });
+    expect(h.sendReady).toBe(false);
+    expect(h.blockers.join(' ')).toMatch(/safety backstop/);
+  });
+
+  test('judge signal unavailable is not send-ready (fail closed)', () => {
+    const h = evaluateAutoSendHealth({ suggest: good, judge: {}, judgeAvailable: false });
+    expect(h.sendReady).toBe(false);
   });
 });

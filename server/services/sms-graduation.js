@@ -261,6 +261,20 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
 }
 
 /**
+ * Active-health verdict for an intent already AT auto_send: re-runs the
+ * suggest → auto_send rung the way the send-time gate
+ * (evaluateAutoSendEligibility) does on every send. Without this, an intent
+ * sitting at auto_send reads as top-of-ladder/no-blockers in /intent-modes
+ * while — e.g. right after a prompt bump reset the cohort evidence — the
+ * executor is silently blocking every send. sendReady mirrors what the
+ * executor will actually decide.
+ */
+function evaluateAutoSendHealth({ judge = {}, suggest = {}, judgeAvailable = true } = {}) {
+  const rung = evaluateRung({ mode: 'suggest', locked: false, judge, suggest, judgeAvailable });
+  return { sendReady: rung.eligible && rung.nextRung === 'auto_send', blockers: rung.blockers };
+}
+
+/**
  * Per-intent readiness, ready to attach to the /intent-modes payload. Takes
  * the suggest-outcome buckets the endpoint already computed (accepted /
  * corrected / ignored from agent_decisions) so there's one rollup, not two.
@@ -284,8 +298,14 @@ async function computeReadiness({ intents, dbi = db } = {}) {
   for (const { intent, mode, locked, suggest } of intents) {
     const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
     const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
+    // Intents ALREADY at auto_send get the send-time gate's view too, so the
+    // UI can't show a no-blocker Auto-send chip while sends are blocked.
+    const autoSendHealth = !locked && verdict.currentMode === 'auto_send'
+      ? evaluateAutoSendHealth({ judge, suggest, judgeAvailable })
+      : null;
     out.set(intent, {
       ...verdict,
+      autoSendHealth,
       eligibleFor: verdict.eligible ? verdict.nextRung : null,
       judge: {
         judged: judge.judged,
@@ -366,6 +386,7 @@ module.exports = {
   THRESHOLDS,
   resolveCohortVersions,
   evaluateRung,
+  evaluateAutoSendHealth,
   fetchLiveJudgeSignals,
   fetchSuggestOutcomes,
   evaluateAutoSendEligibility,
