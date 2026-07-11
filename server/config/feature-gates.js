@@ -46,6 +46,15 @@ const gates = {
   // — i.e. everyone today — are unaffected at any setting.
   payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
 
+  // Customer duplicate auto-merge (customer-dedupe.js green tier). An
+  // auto-WRITER — merges shell duplicate rows into their real customer on the
+  // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
+  // environment; dev/staging pointed at prod snapshots must never merge rows
+  // silently. Detection + the /admin/customers/duplicates review queue are
+  // read-only and NOT behind this gate. Kill switch: unset or set to any
+  // non-'true' value; every merge is journaled and hand-reversible.
+  customerDedupeAutoMerge: process.env.GATE_CUSTOMER_DEDUPE_AUTO_MERGE === 'true',
+
   // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
   // /pest-identifier). Public, unauthenticated, and every accepted upload is a
   // paid dual-model vision call — explicit opt-in in EVERY environment, and the
